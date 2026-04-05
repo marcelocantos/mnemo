@@ -54,17 +54,17 @@ func main() {
 	}
 	defer mem.Close()
 
-	// Initial ingest.
-	slog.Info("ingesting transcripts", "dir", projectDir)
-	if err := mem.IngestAll(); err != nil {
-		slog.Error("initial ingest failed", "err", err)
-	}
-	if stats, err := mem.Stats(); err == nil {
-		slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
-	}
-
-	// Start watching for new transcripts in the background.
+	// Ingest and watch in the background so the MCP server is
+	// immediately responsive.
 	go func() {
+		slog.Info("ingesting transcripts", "dir", projectDir)
+		if err := mem.IngestAll(); err != nil {
+			slog.Error("initial ingest failed", "err", err)
+		}
+		if stats, err := mem.Stats(); err == nil {
+			slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
+		}
+
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}
