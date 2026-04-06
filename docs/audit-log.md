@@ -32,3 +32,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `69ba833`
 - **Outcome**: Released v0.6.0 (darwin-arm64, linux-amd64, linux-arm64). Fixed search query deadlocking daemon for 3+ minutes (two-phase FTS search, 5ms). Silenced deleted-file log spam in watcher.
+
+## 2026-04-07 — /release v0.7.0
+
+- **Commit**: `e8b5f65`
+- **Outcome**: Released v0.7.0 (darwin-arm64, linux-amd64, linux-arm64). Added mnemo_repos tool for repo discovery. Dumb proxy architecture via mcpbridge — tool definitions and handling moved to daemon. Auto-reconnect on daemon restart. Protocol versioning replaces binary hash.
