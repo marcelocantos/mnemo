@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
 // Proxy implements the store query interface over an RPC connection.
@@ -19,6 +21,26 @@ type Proxy struct {
 // NewProxy creates a proxy that forwards store calls over RPC.
 func NewProxy(c *Client) *Proxy {
 	return &Proxy{client: c}
+}
+
+// ListTools fetches MCP tool definitions from the daemon.
+func (p *Proxy) ListTools() ([]mcp.Tool, error) {
+	raw, err := p.client.Call("ListTools", nil)
+	if err != nil {
+		return nil, err
+	}
+	var defs []mcp.Tool
+	return defs, json.Unmarshal(raw, &defs)
+}
+
+// CallTool executes a tool on the daemon and returns the result.
+func (p *Proxy) CallTool(name string, args map[string]any) (tools.CallResult, error) {
+	raw, err := p.client.Call("CallTool", CallToolParams{Name: name, Args: args})
+	if err != nil {
+		return tools.CallResult{}, err
+	}
+	var result tools.CallResult
+	return result, json.Unmarshal(raw, &result)
 }
 
 func (p *Proxy) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]store.SearchResult, error) {

@@ -21,11 +21,11 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/rpc"
 	"github.com/marcelocantos/mnemo/internal/store"
-	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
 //go:embed agents-guide.md
@@ -117,7 +117,9 @@ func runServe() {
 }
 
 // runStdio runs the stdio MCP server: connects to the serve process
-// over UDS and proxies MCP tool calls.
+// over UDS and proxies MCP tool calls. The proxy is intentionally
+// dumb — all tool definitions and handling logic live on the daemon.
+// This means the proxy binary rarely needs updating.
 func runStdio() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
@@ -133,13 +135,33 @@ func runStdio() {
 
 	proxy := rpc.NewProxy(client)
 
+	// Fetch tool definitions from the daemon.
+	toolDefs, err := proxy.ListTools()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mnemo: failed to fetch tools: %v\n", err)
+		os.Exit(1)
+	}
+
 	s := mcpserver.NewMCPServer(
 		"mnemo",
 		version,
 		mcpserver.WithToolCapabilities(true),
 	)
 
-	tools.Register(s, proxy)
+	// Register each tool with a generic handler that forwards to the daemon.
+	for _, tool := range toolDefs {
+		name := tool.Name
+		s.AddTool(tool, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			result, err := proxy.CallTool(name, req.GetArguments())
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
+			}
+			if result.IsError {
+				return mcp.NewToolResultError(result.Text), nil
+			}
+			return mcp.NewToolResultText(result.Text), nil
+		})
+	}
 
 	stdio := mcpserver.NewStdioServer(s)
 	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {

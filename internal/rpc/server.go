@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
 // Server listens on a Unix domain socket and dispatches RPC calls to the store.
 type Server struct {
 	store    *store.Store
+	tools    *tools.Handler
 	listener net.Listener
 }
 
@@ -37,7 +39,7 @@ func NewServerAt(s *store.Store, sockPath string) (*Server, error) {
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
 
-	return &Server{store: s, listener: listener}, nil
+	return &Server{store: s, tools: tools.NewHandler(s), listener: listener}, nil
 }
 
 // Serve accepts connections and handles them. Blocks until the listener is closed.
@@ -72,9 +74,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		enc.Encode(Response{Error: fmt.Sprintf("invalid handshake: %v", err)})
 		return
 	}
-	serverHash := BinaryHash()
-	if serverHash != "" && hs.BinaryHash != "" && hs.BinaryHash != serverHash {
-		enc.Encode(Response{Error: "binary mismatch: the mnemo proxy and serve processes are different binaries — restart the service with 'brew services restart mnemo'"})
+	if hs.ProtocolVersion != ProtocolVersion {
+		enc.Encode(Response{Error: fmt.Sprintf(
+			"protocol version mismatch: proxy=%d, daemon=%d — restart the service with 'brew services restart mnemo'",
+			hs.ProtocolVersion, ProtocolVersion)})
 		return
 	}
 	enc.Encode(Response{Result: []byte(`"ok"`)})
@@ -153,6 +156,12 @@ type ListReposParams struct {
 	Filter string `json:"filter"`
 }
 
+// CallToolParams holds the parameters for the CallTool RPC method.
+type CallToolParams struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args"`
+}
+
 // ResolveNonceParams matches the ResolveNonce method signature.
 type ResolveNonceParams struct {
 	Nonce string `json:"nonce"`
@@ -190,6 +199,20 @@ func (s *Server) dispatch(req Request) (any, error) {
 
 	case "Stats":
 		return s.store.Stats()
+
+	case "ListTools":
+		return tools.Definitions(), nil
+
+	case "CallTool":
+		var p CallToolParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		text, isErr, err := s.tools.Call(p.Name, p.Args)
+		if err != nil {
+			return nil, err
+		}
+		return tools.CallResult{Text: text, IsError: isErr}, nil
 
 	case "ListRepos":
 		var p ListReposParams

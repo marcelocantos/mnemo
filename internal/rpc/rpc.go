@@ -7,15 +7,20 @@ package rpc
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 )
+
+// ProtocolVersion is bumped only when the RPC wire format between the
+// proxy and daemon changes (new/renamed methods, changed param types).
+// It is independent of the MCP protocol and the application version.
+const ProtocolVersion = 1
 
 // SocketPath returns the default Unix domain socket path.
 func SocketPath() string {
@@ -23,32 +28,9 @@ func SocketPath() string {
 	return filepath.Join(home, ".mnemo", "mnemo.sock")
 }
 
-// BinaryHash returns the SHA-256 hash of the running executable.
-// Cached after first call.
-func BinaryHash() string {
-	binaryHashOnce.Do(func() {
-		exe, err := os.Executable()
-		if err != nil {
-			return
-		}
-		data, err := os.ReadFile(exe)
-		if err != nil {
-			return
-		}
-		h := sha256.Sum256(data)
-		binaryHashValue = hex.EncodeToString(h[:])
-	})
-	return binaryHashValue
-}
-
-var (
-	binaryHashOnce  sync.Once
-	binaryHashValue string
-)
-
 // Handshake is the first message sent by the client after connecting.
 type Handshake struct {
-	BinaryHash string `json:"binary_hash"`
+	ProtocolVersion int `json:"protocol_version"`
 }
 
 // Request is a JSON-RPC-like request sent over the UDS.
@@ -64,10 +46,13 @@ type Response struct {
 }
 
 // Client connects to the mnemo serve process over UDS.
+// It automatically reconnects on broken pipe errors.
 type Client struct {
-	conn    net.Conn
-	enc     *json.Encoder
-	scanner *bufio.Scanner
+	mu       sync.Mutex
+	sockPath string
+	conn     net.Conn
+	enc      *json.Encoder
+	scanner  *bufio.Scanner
 }
 
 // Dial connects to the mnemo serve process at the default socket path.
@@ -77,52 +62,98 @@ func Dial() (*Client, error) {
 
 // DialAt connects to the mnemo serve process at the given socket path.
 func DialAt(sockPath string) (*Client, error) {
-	conn, err := net.Dial("unix", sockPath)
+	c := &Client{sockPath: sockPath}
+	if err := c.connect(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Client) connect() error {
+	conn, err := net.Dial("unix", c.sockPath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to mnemo serve (is it running?): %w", err)
+		return fmt.Errorf("cannot connect to mnemo serve (is it running?): %w", err)
 	}
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20) // 4MB line buffer
 	enc := json.NewEncoder(conn)
 
-	// Send handshake with binary hash.
-	if err := enc.Encode(Handshake{BinaryHash: BinaryHash()}); err != nil {
+	// Send handshake with protocol version.
+	if err := enc.Encode(Handshake{ProtocolVersion: ProtocolVersion}); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("handshake send: %w", err)
+		return fmt.Errorf("handshake send: %w", err)
 	}
 
 	// Read handshake response.
 	if !scanner.Scan() {
 		conn.Close()
 		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("handshake recv: %w", err)
+			return fmt.Errorf("handshake recv: %w", err)
 		}
-		return nil, fmt.Errorf("connection closed during handshake")
+		return fmt.Errorf("connection closed during handshake")
 	}
 	var resp Response
 	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("handshake decode: %w", err)
+		return fmt.Errorf("handshake decode: %w", err)
 	}
 	if resp.Error != "" {
 		conn.Close()
-		return nil, fmt.Errorf("%s", resp.Error)
+		return fmt.Errorf("%s", resp.Error)
 	}
 
-	return &Client{
-		conn:    conn,
-		enc:     enc,
-		scanner: scanner,
-	}, nil
+	c.conn = conn
+	c.enc = enc
+	c.scanner = scanner
+	return nil
 }
 
 // Close closes the connection.
 func (c *Client) Close() error {
-	return c.conn.Close()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
+}
+
+// isBrokenPipe returns true if the error indicates a broken connection.
+func isBrokenPipe(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	// Also check for "connection closed" from scanner failures.
+	msg := err.Error()
+	return msg == "connection closed" ||
+		// net.OpError wraps these
+		errors.Is(err, net.ErrClosed)
 }
 
 // Call sends a request and waits for the response.
+// On broken pipe, it reconnects once and retries.
 func (c *Client) Call(method string, params any) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	result, err := c.callLocked(method, params)
+	if err != nil && isBrokenPipe(err) {
+		// Connection lost — try to reconnect once.
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		if reconnErr := c.connect(); reconnErr != nil {
+			return nil, fmt.Errorf("reconnect failed after %w: %v", err, reconnErr)
+		}
+		return c.callLocked(method, params)
+	}
+	return result, err
+}
+
+func (c *Client) callLocked(method string, params any) (json.RawMessage, error) {
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
