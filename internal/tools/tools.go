@@ -25,6 +25,8 @@ func Register(s *server.MCPServer, mem *store.Store) {
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
+			mcp.WithNumber("context_before", mcp.Description("Number of messages before each hit to include (default 3)")),
+			mcp.WithNumber("context_after", mcp.Description("Number of messages after each hit to include (default 3)")),
 		),
 		handleSearch(mem),
 	)
@@ -102,12 +104,20 @@ func handleSearch(mem *store.Store) server.ToolHandlerFunc {
 		}
 		sessionType, _ := args["session_type"].(string)
 		repoFilter, _ := args["repo"].(string)
+		contextBefore := 3
+		if cb, ok := args["context_before"].(float64); ok && cb >= 0 {
+			contextBefore = int(cb)
+		}
+		contextAfter := 3
+		if ca, ok := args["context_after"].(float64); ok && ca >= 0 {
+			contextAfter = int(ca)
+		}
 
 		if query == "" {
 			return mcp.NewToolResultError("query is required"), nil
 		}
 
-		results, err := mem.Search(query, limit, sessionType, repoFilter)
+		results, err := mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
@@ -122,8 +132,18 @@ func handleSearch(mem *store.Store) server.ToolHandlerFunc {
 			if len(sid) > 8 {
 				sid = sid[:8]
 			}
-			fmt.Fprintf(&b, "[%s] %s | %s | %s\n%s\n\n",
-				r.Role, r.Project, sid, r.Timestamp, r.Text)
+			// Context before.
+			for _, cm := range r.Before {
+				fmt.Fprintf(&b, "  [%s] %s\n", cm.Role, cm.Text)
+			}
+			// The hit itself.
+			fmt.Fprintf(&b, ">> [%s] %s | %s | %s | msg:%d\n>> %s\n",
+				r.Role, r.Project, sid, r.Timestamp, r.MessageID, r.Text)
+			// Context after.
+			for _, cm := range r.After {
+				fmt.Fprintf(&b, "  [%s] %s\n", cm.Role, cm.Text)
+			}
+			b.WriteByte('\n')
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}

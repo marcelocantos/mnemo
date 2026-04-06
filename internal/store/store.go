@@ -34,14 +34,25 @@ type Store struct {
 	rwmu sync.RWMutex // protects db access: writers (ingest), readers (queries)
 }
 
-// SearchResult is a single search hit.
+// ContextMessage is a message surrounding a search hit.
+type ContextMessage struct {
+	ID        int    `json:"id"`
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"`
+}
+
+// SearchResult is a single search hit with optional surrounding context.
 type SearchResult struct {
-	SessionID string  `json:"session_id"`
-	Project   string  `json:"project"`
-	Role      string  `json:"role"`
-	Text      string  `json:"text"`
-	Timestamp string  `json:"timestamp"`
-	Rank      float64 `json:"rank"`
+	MessageID int              `json:"message_id"`
+	SessionID string           `json:"session_id"`
+	Project   string           `json:"project"`
+	Role      string           `json:"role"`
+	Text      string           `json:"text"`
+	Timestamp string           `json:"timestamp"`
+	Rank      float64          `json:"rank"`
+	Before    []ContextMessage `json:"before,omitempty"`
+	After     []ContextMessage `json:"after,omitempty"`
 }
 
 // SessionInfo is a summary of a transcript session.
@@ -403,8 +414,9 @@ func (s *Store) Watch() error {
 	}
 }
 
-// Search performs a full-text search and returns matching messages.
-func (s *Store) Search(query string, limit int, sessionType, repoFilter string) ([]SearchResult, error) {
+// Search performs a full-text search and returns matching messages
+// with optional surrounding context messages.
+func (s *Store) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int) ([]SearchResult, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
@@ -438,7 +450,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string) 
 	args = append(args, limit)
 
 	sqlQuery := `
-		SELECT m.session_id, m.project, m.role, m.text, m.timestamp, rank
+		SELECT m.id, m.session_id, m.project, m.role, m.text, m.timestamp, rank
 		FROM messages_fts f
 		` + joins + `
 		WHERE ` + strings.Join(where, " AND ") + `
@@ -455,7 +467,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string) 
 	var results []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.SessionID, &r.Project, &r.Role, &r.Text, &r.Timestamp, &r.Rank); err != nil {
+		if err := rows.Scan(&r.MessageID, &r.SessionID, &r.Project, &r.Role, &r.Text, &r.Timestamp, &r.Rank); err != nil {
 			continue
 		}
 		if len(r.Text) > 500 {
@@ -463,7 +475,59 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string) 
 		}
 		results = append(results, r)
 	}
+
+	// Fetch context messages for each hit.
+	if (contextBefore > 0 || contextAfter > 0) && len(results) > 0 {
+		for i := range results {
+			r := &results[i]
+			if contextBefore > 0 {
+				r.Before = s.fetchContext(r.SessionID, r.MessageID, contextBefore, true)
+			}
+			if contextAfter > 0 {
+				r.After = s.fetchContext(r.SessionID, r.MessageID, contextAfter, false)
+			}
+		}
+	}
+
 	return results, nil
+}
+
+// fetchContext retrieves messages before or after a given message ID within the same session.
+func (s *Store) fetchContext(sessionID string, messageID int, count int, before bool) []ContextMessage {
+	var q string
+	if before {
+		q = `SELECT id, role, text, timestamp FROM messages
+			WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+	} else {
+		q = `SELECT id, role, text, timestamp FROM messages
+			WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+	}
+
+	rows, err := s.db.Query(q, sessionID, messageID, count)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var msgs []ContextMessage
+	for rows.Next() {
+		var m ContextMessage
+		if err := rows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp); err != nil {
+			continue
+		}
+		if len(m.Text) > 500 {
+			m.Text = m.Text[:497] + "..."
+		}
+		msgs = append(msgs, m)
+	}
+
+	// Reverse "before" results so they're in chronological order.
+	if before {
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
+	}
+	return msgs
 }
 
 // ListSessions returns session summaries, filtered and sorted.
