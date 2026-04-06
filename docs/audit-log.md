@@ -22,3 +22,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `1539d1e`
 - **Outcome**: Released v0.4.0 (darwin-arm64, linux-amd64, linux-arm64). Binary hash handshake for version mismatch detection. Parallel ingest pipeline (42% faster). 15 virtual computed columns for all tool_input fields. 20 tests.
+
+## 2026-04-06 — /release v0.5.0
+
+- **Commit**: `7ae6d5b`
+- **Outcome**: Released v0.5.0 (darwin-arm64, linux-amd64, linux-arm64). Fixed FTS5 optimize causing 100% CPU for 10+ minutes. Defer-safe writer cleanup. RPC performance logging with adaptive severity. Performance test assertions (200ms max per operation). Schema version rebuild approach.
