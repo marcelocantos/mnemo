@@ -23,6 +23,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// NoncePrefix is the prefix for self-identification nonces.
+const NoncePrefix = "mnemo:self:"
+
 // Store is a searchable index of Claude Code transcripts.
 type Store struct {
 	db         *sql.DB
@@ -143,6 +146,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 			work_type TEXT NOT NULL DEFAULT '',
 			topic TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS session_nonces (
+			nonce TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_session_nonces_session ON session_nonces(session_id);
 		CREATE TABLE IF NOT EXISTS session_summary (
 			session_id TEXT PRIMARY KEY,
 			project TEXT NOT NULL,
@@ -416,7 +424,7 @@ func (s *Store) Watch() error {
 
 // Search performs a full-text search and returns matching messages
 // with optional surrounding context messages.
-func (s *Store) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int) ([]SearchResult, error) {
+func (s *Store) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]SearchResult, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
@@ -481,10 +489,10 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		for i := range results {
 			r := &results[i]
 			if contextBefore > 0 {
-				r.Before = s.fetchContext(r.SessionID, r.MessageID, contextBefore, true)
+				r.Before = s.fetchContext(r.SessionID, r.MessageID, contextBefore, true, substantiveOnly)
 			}
 			if contextAfter > 0 {
-				r.After = s.fetchContext(r.SessionID, r.MessageID, contextAfter, false)
+				r.After = s.fetchContext(r.SessionID, r.MessageID, contextAfter, false, substantiveOnly)
 			}
 		}
 	}
@@ -493,14 +501,19 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 }
 
 // fetchContext retrieves messages before or after a given message ID within the same session.
-func (s *Store) fetchContext(sessionID string, messageID int, count int, before bool) []ContextMessage {
+// If substantiveOnly is true, only non-noise user/assistant messages are included.
+func (s *Store) fetchContext(sessionID string, messageID int, count int, before, substantiveOnly bool) []ContextMessage {
+	filter := ""
+	if substantiveOnly {
+		filter = " AND is_noise = 0 AND role IN ('user', 'assistant')"
+	}
 	var q string
 	if before {
 		q = `SELECT id, role, text, timestamp FROM messages
-			WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+			WHERE session_id = ? AND id < ?` + filter + ` ORDER BY id DESC LIMIT ?`
 	} else {
 		q = `SELECT id, role, text, timestamp FROM messages
-			WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+			WHERE session_id = ? AND id > ?` + filter + ` ORDER BY id ASC LIMIT ?`
 	}
 
 	rows, err := s.db.Query(q, sessionID, messageID, count)
@@ -722,19 +735,17 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 	}
 }
 
-// FindSessionByContent searches for a session containing the given text
-// in any message. Returns the session ID or an error if not found.
-func (s *Store) FindSessionByContent(text string) (string, error) {
+// ResolveNonce looks up the session ID associated with a self-identification nonce.
+func (s *Store) ResolveNonce(nonce string) (string, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
 	var sessionID string
 	err := s.db.QueryRow(
-		"SELECT session_id FROM messages WHERE text LIKE ? LIMIT 1",
-		"%"+text+"%",
+		"SELECT session_id FROM session_nonces WHERE nonce = ?", nonce,
 	).Scan(&sessionID)
 	if err != nil {
-		return "", fmt.Errorf("no session found containing %q", text)
+		return "", fmt.Errorf("nonce not found — transcript may not be ingested yet")
 	}
 	return sessionID, nil
 }
@@ -1119,6 +1130,12 @@ func (s *Store) ingestFile(path string) error {
 			}
 			stmt.Exec(sessionID, project, entry.Type, text, ts, entry.Type, noise)
 			count++
+
+			// Detect self-identification nonces.
+			if strings.HasPrefix(text, NoncePrefix) {
+				nonce := strings.TrimSpace(text)
+				tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
+			}
 		}
 
 		// Periodically yield the write lock so readers aren't starved.

@@ -27,6 +27,7 @@ func Register(s *server.MCPServer, mem *store.Store) {
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
 			mcp.WithNumber("context_before", mcp.Description("Number of messages before each hit to include (default 3)")),
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after each hit to include (default 3)")),
+			mcp.WithString("context_filter", mcp.Description(`Filter for context messages. "substantive" (default): only non-noise user/assistant messages. "all": include everything (tool calls, system messages, noise).`)),
 		),
 		handleSearch(mem),
 	)
@@ -113,11 +114,16 @@ func handleSearch(mem *store.Store) server.ToolHandlerFunc {
 			contextAfter = int(ca)
 		}
 
+		substantiveOnly := true
+		if cf, ok := args["context_filter"].(string); ok && cf == "all" {
+			substantiveOnly = false
+		}
+
 		if query == "" {
 			return mcp.NewToolResultError("query is required"), nil
 		}
 
-		results, err := mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter)
+		results, err := mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
@@ -288,8 +294,6 @@ func handleStats(mem *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-const noncePrefix = "mnemo:self:"
-
 func handleSelf(mem *store.Store) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
@@ -297,19 +301,19 @@ func handleSelf(mem *store.Store) server.ToolHandlerFunc {
 
 		if nonce == "" {
 			// Phase 1: generate and return a nonce.
-			nonce = noncePrefix + uuid.NewString()
+			nonce = store.NoncePrefix + uuid.NewString()
 			return mcp.NewToolResultText(nonce), nil
 		}
 
-		// Phase 2: find the session containing this nonce.
-		if !strings.HasPrefix(nonce, noncePrefix) {
+		// Phase 2: resolve the nonce to a session ID.
+		if !strings.HasPrefix(nonce, store.NoncePrefix) {
 			return mcp.NewToolResultError("invalid nonce — must be a value returned by a previous mnemo_self call"), nil
 		}
 
-		sessionID, err := mem.FindSessionByContent(nonce)
+		sessionID, err := mem.ResolveNonce(nonce)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf(
-				"Could not find session containing nonce. The transcript may not be ingested yet — wait a moment and retry. Error: %v", err)), nil
+				"Nonce not found. The transcript may not be ingested yet — wait a moment and retry. Error: %v", err)), nil
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("session_id: %s", sessionID)), nil

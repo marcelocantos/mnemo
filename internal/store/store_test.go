@@ -92,7 +92,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// Search for "authentication" should find the first session.
-	results, err := s.Search("authentication", 10, "all", "", 0, 0)
+	results, err := s.Search("authentication", 10, "all", "", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// Search for "database" should find the second session.
-	results, err = s.Search("database", 10, "all", "", 0, 0)
+	results, err = s.Search("database", 10, "all", "", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// "Tool loaded." is noise — should not appear in search.
-	results, err = s.Search(`"Tool loaded"`, 10, "all", "", 0, 0)
+	results, err = s.Search(`"Tool loaded"`, 10, "all", "", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// Search with repo filter — bare name.
-	results, err = s.Search("authentication", 10, "all", "webapp", 0, 0)
+	results, err = s.Search("authentication", 10, "all", "webapp", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// Search with repo filter — org/repo.
-	results, err = s.Search("authentication", 10, "all", "acme/webapp", 0, 0)
+	results, err = s.Search("authentication", 10, "all", "acme/webapp", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// Search with repo filter — no match.
-	results, err = s.Search("authentication", 10, "all", "nonexistent", 0, 0)
+	results, err = s.Search("authentication", 10, "all", "nonexistent", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 
 	// Search with context.
-	results, err = s.Search("authentication", 10, "all", "", 1, 1)
+	results, err = s.Search("authentication", 10, "all", "", 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestSessionTypeFiltering(t *testing.T) {
 	}
 
 	// Search defaults to interactive.
-	results, err := s.Search("subagent", 10, "", "", 0, 0)
+	results, err := s.Search("subagent", 10, "", "", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestSessionTypeFiltering(t *testing.T) {
 	}
 
 	// Search with "all" should find it.
-	results, err = s.Search("subagent", 10, "all", "", 0, 0)
+	results, err = s.Search("subagent", 10, "all", "", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
