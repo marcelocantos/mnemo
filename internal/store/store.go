@@ -93,6 +93,21 @@ func New(dbPath, projectDir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 
+	// Tuning: WAL for concurrent reads, relaxed sync (safe with WAL),
+	// larger cache, memory-mapped I/O, and retry on contention.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA cache_size = -64000",
+		"PRAGMA mmap_size = 268435456",
+		"PRAGMA busy_timeout = 5000",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("%s: %w", pragma, err)
+		}
+	}
+
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,6 +132,14 @@ func New(dbPath, projectDir string) (*Store, error) {
 			work_type TEXT NOT NULL DEFAULT '',
 			topic TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS session_summary (
+			session_id TEXT PRIMARY KEY,
+			project TEXT NOT NULL,
+			total_msgs INTEGER NOT NULL DEFAULT 0,
+			substantive_msgs INTEGER NOT NULL DEFAULT 0,
+			first_msg TEXT NOT NULL DEFAULT '',
+			last_msg TEXT NOT NULL DEFAULT ''
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -128,6 +151,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
+	if err := migrateSessionSummary(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate session_summary: %w", err)
+	}
+
 	_, err = db.Exec(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 			text, role, project, session_id,
@@ -136,10 +164,20 @@ func New(dbPath, projectDir string) (*Store, error) {
 		);
 		DROP TRIGGER IF EXISTS messages_ai;
 		CREATE TRIGGER messages_ai AFTER INSERT ON messages
-		WHEN new.is_noise = 0
 		BEGIN
 			INSERT INTO messages_fts(rowid, text, role, project, session_id)
-			VALUES (new.id, new.text, new.role, new.project, new.session_id);
+			SELECT new.id, new.text, new.role, new.project, new.session_id
+			WHERE new.is_noise = 0;
+
+			INSERT INTO session_summary (session_id, project, total_msgs, substantive_msgs, first_msg, last_msg)
+			VALUES (new.session_id, new.project, 1,
+				CASE WHEN new.is_noise = 0 THEN 1 ELSE 0 END,
+				new.timestamp, new.timestamp)
+			ON CONFLICT(session_id) DO UPDATE SET
+				total_msgs = total_msgs + 1,
+				substantive_msgs = substantive_msgs + CASE WHEN new.is_noise = 0 THEN 1 ELSE 0 END,
+				first_msg = MIN(first_msg, new.timestamp),
+				last_msg = MAX(last_msg, new.timestamp);
 		END;
 	`)
 	if err != nil {
@@ -151,20 +189,19 @@ func New(dbPath, projectDir string) (*Store, error) {
 		DROP VIEW IF EXISTS sessions;
 		CREATE VIEW sessions AS
 		SELECT
-			m.session_id,
-			m.project,
-			` + sessionTypeSQL("m.project") + ` AS session_type,
+			ss.session_id,
+			ss.project,
+			` + sessionTypeSQL("ss.project") + ` AS session_type,
 			COALESCE(sm.repo, '') AS repo,
 			COALESCE(sm.git_branch, '') AS git_branch,
 			COALESCE(sm.work_type, '') AS work_type,
 			COALESCE(sm.topic, '') AS topic,
-			COUNT(*) AS total_msgs,
-			SUM(CASE WHEN m.is_noise = 0 THEN 1 ELSE 0 END) AS substantive_msgs,
-			MIN(m.timestamp) AS first_msg,
-			MAX(m.timestamp) AS last_msg
-		FROM messages m
-		LEFT JOIN session_meta sm ON sm.session_id = m.session_id
-		GROUP BY m.session_id;
+			ss.total_msgs,
+			ss.substantive_msgs,
+			ss.first_msg,
+			ss.last_msg
+		FROM session_summary ss
+		LEFT JOIN session_meta sm ON sm.session_id = ss.session_id;
 	`)
 	if err != nil {
 		db.Close()
@@ -245,6 +282,45 @@ func migrate(db *sql.DB) error {
 	db.QueryRow(`SELECT COUNT(*) FROM messages WHERE is_noise = 1`).Scan(&noiseCount)
 	slog.Info("migration complete", "noise_rows_flagged", noiseCount)
 
+	return nil
+}
+
+// migrateSessionSummary backfills the session_summary table from existing
+// messages. Runs once — skips if the table is already populated.
+func migrateSessionSummary(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM session_summary").Scan(&count); err != nil {
+		return nil // table doesn't exist yet, will be created later
+	}
+	if count > 0 {
+		return nil // already populated
+	}
+
+	// Check if there are messages to backfill from.
+	var msgCount int
+	db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&msgCount)
+	if msgCount == 0 {
+		return nil
+	}
+
+	slog.Info("backfilling session_summary from existing messages", "messages", msgCount)
+
+	_, err := db.Exec(`
+		INSERT INTO session_summary (session_id, project, total_msgs, substantive_msgs, first_msg, last_msg)
+		SELECT
+			session_id, project,
+			COUNT(*),
+			SUM(CASE WHEN is_noise = 0 THEN 1 ELSE 0 END),
+			MIN(timestamp),
+			MAX(timestamp)
+		FROM messages
+		GROUP BY session_id
+	`)
+	if err != nil {
+		return fmt.Errorf("backfill session_summary: %w", err)
+	}
+
+	slog.Info("session_summary backfill complete")
 	return nil
 }
 
@@ -829,6 +905,9 @@ func (s *Store) ingestFile(path string) error {
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
 
+	const yieldInterval = 200 * time.Millisecond
+	const lineCheckInterval = 50
+
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
@@ -836,13 +915,16 @@ func (s *Store) ingestFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO messages (session_id, project, role, text, timestamp, type, is_noise) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { stmt.Close() }()
+
+	lockAcquired := time.Now()
+	linesSinceLockCheck := 0
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -911,6 +993,41 @@ func (s *Store) ingestFile(path string) error {
 				}
 			}
 		}
+
+		// Periodically yield the write lock so readers aren't starved.
+		linesSinceLockCheck++
+		if linesSinceLockCheck >= lineCheckInterval {
+			linesSinceLockCheck = 0
+			if time.Since(lockAcquired) >= yieldInterval {
+				// Commit current transaction with offset update.
+				curOffset, _ := f.Seek(0, 1)
+				tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, curOffset)
+
+				stmt.Close()
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+
+				s.mu.Lock()
+				s.offsets[path] = curOffset
+				s.mu.Unlock()
+
+				// Yield write lock to let readers through.
+				s.rwmu.Unlock()
+				s.rwmu.Lock()
+				lockAcquired = time.Now()
+
+				// Start a new transaction.
+				tx, err = s.db.Begin()
+				if err != nil {
+					return err
+				}
+				stmt, err = tx.Prepare(`INSERT INTO messages (session_id, project, role, text, timestamp, type, is_noise) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+				if err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	// Upsert session metadata.
@@ -928,16 +1045,16 @@ func (s *Store) ingestFile(path string) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic)
 	}
 
+	newOffset, _ := f.Seek(0, 1)
+	tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, newOffset)
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	newOffset, _ := f.Seek(0, 1)
 	s.mu.Lock()
 	s.offsets[path] = newOffset
 	s.mu.Unlock()
-
-	s.db.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, newOffset)
 
 	if count > 0 {
 		slog.Debug("ingested", "file", filepath.Base(path), "messages", count)
