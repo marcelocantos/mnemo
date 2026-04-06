@@ -5,11 +5,13 @@ package rpc
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -84,11 +86,24 @@ func (s *Server) handleConn(conn net.Conn) {
 			continue
 		}
 
+		start := time.Now()
 		result, err := s.dispatch(req)
+		dur := time.Since(start)
+
 		if err != nil {
+			slog.Warn("rpc", "method", req.Method, "dur", dur, "err", err)
 			enc.Encode(Response{Error: err.Error()})
 			continue
 		}
+
+		logLevel := slog.LevelDebug
+		if dur >= 100*time.Millisecond {
+			logLevel = slog.LevelInfo
+		}
+		if dur >= time.Second {
+			logLevel = slog.LevelWarn
+		}
+		slog.Log(context.Background(), logLevel, "rpc", "method", req.Method, "dur", dur)
 
 		resultJSON, err := json.Marshal(result)
 		if err != nil {
