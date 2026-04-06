@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
 // maxLatency is the maximum acceptable time for any single RPC call
@@ -502,6 +504,14 @@ func TestRPCPerformance(t *testing.T) {
 			_, err := proxy.ListRepos("acme/*")
 			return err
 		}},
+		{"ListTools", func() error {
+			_, err := proxy.ListTools()
+			return err
+		}},
+		{"CallTool", func() error {
+			_, err := proxy.CallTool("mnemo_stats", nil)
+			return err
+		}},
 	}
 
 	for _, op := range ops {
@@ -514,5 +524,101 @@ func TestRPCPerformance(t *testing.T) {
 				t.Fatalf("%s failed: %v", op.name, err)
 			}
 		})
+	}
+}
+
+func TestUpgradeReconnect(t *testing.T) {
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "myproject", "sess-upgrade", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+		msg("assistant", "hi", "2026-04-01T10:00:05Z"),
+	})
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	mem, err := store.New(dbPath, projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(t.TempDir(), "mnemo.sock")
+
+	// Start server v1 with default tools.
+	srv1, err := NewServerAt(mem, sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv1.Serve()
+
+	client, err := DialAt(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	proxy := NewProxy(client)
+
+	// Verify v1 tools and a call work.
+	toolsV1, err := proxy.ListTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := proxy.CallTool("mnemo_stats", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("stats returned error: %s", result.Text)
+	}
+
+	// Stop server v1 and wait for socket cleanup.
+	srv1.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	// Start server v2 with an extra tool.
+	extraTool := mcp.NewTool("mnemo_extra",
+		mcp.WithDescription("A test tool added in v2"),
+		mcp.WithString("x", mcp.Description("test param")),
+	)
+	v2Defs := append(tools.Definitions(), extraTool)
+	srv2, err := NewServerAt(mem, sockPath, WithToolDefs(v2Defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv2.Serve()
+	defer func() {
+		srv2.Close()
+		mem.Close()
+	}()
+
+	// Call via same client — should auto-reconnect.
+	result, err = proxy.CallTool("mnemo_stats", nil)
+	if err != nil {
+		t.Fatalf("call after reconnect failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("stats after reconnect returned error: %s", result.Text)
+	}
+
+	// Verify v2 has the extra tool.
+	toolsV2, err := proxy.ListTools()
+	if err != nil {
+		t.Fatalf("ListTools after reconnect failed: %v", err)
+	}
+	if len(toolsV2) != len(toolsV1)+1 {
+		t.Fatalf("expected %d tools after upgrade, got %d", len(toolsV1)+1, len(toolsV2))
+	}
+
+	// Verify the extra tool is present.
+	found := false
+	for _, tool := range toolsV2 {
+		if tool.Name == "mnemo_extra" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("mnemo_extra tool not found after upgrade")
 	}
 }

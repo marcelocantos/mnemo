@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
@@ -21,16 +23,29 @@ import (
 type Server struct {
 	store    *store.Store
 	tools    *tools.Handler
+	toolDefs []mcp.Tool
 	listener net.Listener
+
+	mu    sync.Mutex
+	conns []net.Conn
+}
+
+// ServerOption configures a Server.
+type ServerOption func(*Server)
+
+// WithToolDefs overrides the default tool definitions (from tools.Definitions()).
+// Useful for testing tool list changes across daemon restarts.
+func WithToolDefs(defs []mcp.Tool) ServerOption {
+	return func(s *Server) { s.toolDefs = defs }
 }
 
 // NewServer creates an RPC server bound to the default socket path.
-func NewServer(s *store.Store) (*Server, error) {
-	return NewServerAt(s, SocketPath())
+func NewServer(s *store.Store, opts ...ServerOption) (*Server, error) {
+	return NewServerAt(s, SocketPath(), opts...)
 }
 
 // NewServerAt creates an RPC server bound to the given socket path.
-func NewServerAt(s *store.Store, sockPath string) (*Server, error) {
+func NewServerAt(s *store.Store, sockPath string, opts ...ServerOption) (*Server, error) {
 	// Remove stale socket file.
 	os.Remove(sockPath)
 
@@ -39,7 +54,16 @@ func NewServerAt(s *store.Store, sockPath string) (*Server, error) {
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
 
-	return &Server{store: s, tools: tools.NewHandler(s), listener: listener}, nil
+	srv := &Server{
+		store:    s,
+		tools:    tools.NewHandler(s),
+		toolDefs: tools.Definitions(),
+		listener: listener,
+	}
+	for _, opt := range opts {
+		opt(srv)
+	}
+	return srv, nil
 }
 
 // Serve accepts connections and handles them. Blocks until the listener is closed.
@@ -54,12 +78,26 @@ func (s *Server) Serve() error {
 	}
 }
 
-// Close shuts down the listener.
+// Close shuts down the listener and all active connections.
 func (s *Server) Close() error {
-	return s.listener.Close()
+	err := s.listener.Close()
+	s.mu.Lock()
+	for _, c := range s.conns {
+		c.Close()
+	}
+	s.conns = nil
+	s.mu.Unlock()
+	return err
+}
+
+func (s *Server) trackConn(conn net.Conn) {
+	s.mu.Lock()
+	s.conns = append(s.conns, conn)
+	s.mu.Unlock()
 }
 
 func (s *Server) handleConn(conn net.Conn) {
+	s.trackConn(conn)
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
@@ -201,7 +239,7 @@ func (s *Server) dispatch(req Request) (any, error) {
 		return s.store.Stats()
 
 	case "ListTools":
-		return tools.Definitions(), nil
+		return s.toolDefs, nil
 
 	case "CallTool":
 		var p CallToolParams
