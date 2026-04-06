@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.4.0.
+Snapshot as of v0.5.0.
 
 ### CLI flags
 
@@ -83,7 +83,7 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | Table/View | Columns | Stability |
 |---|---|---|
 | `messages` | id, session_id, project, role, text, timestamp, type, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error | Needs review |
-| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill | Needs review |
+| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill, tool_old_string, tool_new_string, tool_content, tool_query, tool_url, tool_name_param, tool_prompt, tool_subject, tool_status, tool_task_id | Needs review |
 | `messages_fts` | FTS5 virtual table matching `messages` (excludes noise) | Stable |
 | `sessions` | View joining session_summary + session_meta: session_id, project, session_type, repo, git_branch, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
 | `session_summary` | Trigger-maintained materialised table: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
