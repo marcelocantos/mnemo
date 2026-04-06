@@ -103,6 +103,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 			timestamp TEXT,
 			type TEXT
 		);
+		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+		CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
 		CREATE TABLE IF NOT EXISTS ingest_state (
 			path TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL
