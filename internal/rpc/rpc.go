@@ -39,9 +39,14 @@ type Client struct {
 	scanner *bufio.Scanner
 }
 
-// Dial connects to the mnemo serve process.
+// Dial connects to the mnemo serve process at the default socket path.
 func Dial() (*Client, error) {
-	conn, err := net.Dial("unix", SocketPath())
+	return DialAt(SocketPath())
+}
+
+// DialAt connects to the mnemo serve process at the given socket path.
+func DialAt(sockPath string) (*Client, error) {
+	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot connect to mnemo serve (is it running?): %w", err)
 	}

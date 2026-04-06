@@ -22,8 +22,11 @@ type Server struct {
 
 // NewServer creates an RPC server bound to the default socket path.
 func NewServer(s *store.Store) (*Server, error) {
-	sockPath := SocketPath()
+	return NewServerAt(s, SocketPath())
+}
 
+// NewServerAt creates an RPC server bound to the given socket path.
+func NewServerAt(s *store.Store, sockPath string) (*Server, error) {
 	// Remove stale socket file.
 	os.Remove(sockPath)
 
