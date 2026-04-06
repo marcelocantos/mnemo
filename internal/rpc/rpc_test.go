@@ -370,6 +370,53 @@ func TestRPCToolUseQueries(t *testing.T) {
 	}
 }
 
+func TestRPCListRepos(t *testing.T) {
+	client := setupTestServer(t)
+	proxy := NewProxy(client)
+
+	// List all repos.
+	repos, err := proxy.ListRepos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) == 0 {
+		t.Fatal("expected at least one repo")
+	}
+
+	// Filter by exact org/repo.
+	repos, err = proxy.ListRepos("acme/webapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repo for 'acme/webapp', got %d", len(repos))
+	}
+	if repos[0].Repo != "acme/webapp" {
+		t.Fatalf("expected repo 'acme/webapp', got %q", repos[0].Repo)
+	}
+	if repos[0].Sessions != 1 {
+		t.Fatalf("expected 1 session, got %d", repos[0].Sessions)
+	}
+
+	// Glob filter.
+	repos, err = proxy.ListRepos("acme/*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repo for 'acme/*', got %d", len(repos))
+	}
+
+	// No match.
+	repos, err = proxy.ListRepos("nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 0 {
+		t.Fatalf("expected 0 repos for 'nonexistent', got %d", len(repos))
+	}
+}
+
 func TestRPCResolveNonceNotFound(t *testing.T) {
 	client := setupTestServer(t)
 	proxy := NewProxy(client)
@@ -445,6 +492,14 @@ func TestRPCPerformance(t *testing.T) {
 		}},
 		{"Stats", func() error {
 			_, err := proxy.Stats()
+			return err
+		}},
+		{"ListRepos", func() error {
+			_, err := proxy.ListRepos("")
+			return err
+		}},
+		{"ListRepos+filter", func() error {
+			_, err := proxy.ListRepos("acme/*")
 			return err
 		}},
 	}

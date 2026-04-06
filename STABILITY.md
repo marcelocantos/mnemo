@@ -65,6 +65,15 @@ values are heuristically extracted and the set may evolve.
 **Note**: Only SELECT and WITH queries are accepted. The SQL schema is
 an implicit part of this surface. See database schema below.
 
+#### mnemo_repos
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `filter` | string | no | Bare name, org/repo, path fragment, or glob (e.g. `marcelocantos/sql*`) | Needs review |
+
+**Notes**: Returns repo name, filesystem path, session count, and last
+activity. Filter matching uses SQL LIKE with `*` mapped to `%`.
+
 #### mnemo_stats
 
 No parameters. Returns session/message counts by type. **Stability**: Stable.

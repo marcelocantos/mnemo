@@ -76,6 +76,14 @@ type SessionInfo struct {
 	LastMsg         string `json:"last_msg"`
 }
 
+// RepoInfo holds summary information about a repository.
+type RepoInfo struct {
+	Repo         string `json:"repo"`
+	Path         string `json:"path"`
+	Sessions     int    `json:"sessions"`
+	LastActivity string `json:"last_activity"`
+}
+
 // TypeStats holds per-session-type statistics.
 type TypeStats struct {
 	SessionType     string `json:"session_type"`
@@ -937,6 +945,60 @@ func (s *Store) Stats() (*StatsResult, error) {
 		result.ByType = append(result.ByType, ts)
 	}
 	return &result, nil
+}
+
+// ListRepos returns a list of repositories with session counts and last activity.
+// The optional filter supports bare names ("mnemo"), org/repo paths
+// ("marcelocantos/mnemo"), and globs ("marcelocantos/sql*").
+func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	// Convert glob-style filter to SQL LIKE pattern.
+	var where string
+	var args []any
+	if filter != "" {
+		pattern := strings.ReplaceAll(filter, "*", "%")
+		if !strings.ContainsAny(pattern, "/%") {
+			// Bare name: match anywhere in repo or cwd.
+			pattern = "%" + pattern + "%"
+		} else if !strings.Contains(pattern, "%") {
+			// Exact org/repo or path fragment: substring match.
+			pattern = "%" + pattern + "%"
+		}
+		where = "WHERE (sm.repo LIKE ? OR sm.cwd LIKE ?)"
+		args = []any{pattern, pattern}
+	}
+
+	q := `
+		SELECT
+			CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
+			MAX(sm.cwd) AS path,
+			COUNT(DISTINCT sm.session_id) AS sessions,
+			MAX(ss.last_msg) AS last_activity
+		FROM session_meta sm
+		JOIN session_summary ss ON ss.session_id = sm.session_id
+		` + where + `
+		GROUP BY display_repo
+		HAVING display_repo != ''
+		ORDER BY last_activity DESC
+	`
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []RepoInfo
+	for rows.Next() {
+		var r RepoInfo
+		if err := rows.Scan(&r.Repo, &r.Path, &r.Sessions, &r.LastActivity); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, nil
 }
 
 // SessionMessage is a single message from a session transcript.

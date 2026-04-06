@@ -90,6 +90,7 @@ mid-session are not picked up.
 | `mnemo_sessions` | List sessions by recency; filter by project, repo, or work type |
 | `mnemo_read_session` | Read messages from a specific session (supports prefix IDs) |
 | `mnemo_query` | Raw SQL SELECT against the transcript database |
+| `mnemo_repos` | List repos with paths, session counts, last activity. Supports globs (`marcelocantos/sql*`). |
 | `mnemo_stats` | Index statistics — sessions and messages by type |
 | `mnemo_self` | Discover the calling session's ID via nonce protocol |
 

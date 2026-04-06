@@ -170,6 +170,20 @@ WHERE tu.content_type = 'tool_use' AND tu.tool_name = 'Bash'
 
 Results capped at 100 rows.
 
+### mnemo_repos
+
+List repositories that have been worked on in Claude Code sessions.
+Returns repo name, filesystem path, session count, and last activity.
+
+Use this to discover repo locations on disk, find related projects, or
+get an overview of recent work across all repos.
+
+The optional `filter` parameter supports:
+- Bare name: `"mnemo"` — matches anywhere in repo name or path
+- Org/repo: `"marcelocantos/mnemo"` — substring match
+- Glob: `"marcelocantos/sql*"` — wildcard matching
+- Path fragment: `"/work/github"` — matches against working directory
+
 ### mnemo_stats
 
 Index statistics — total sessions and messages broken down by session
@@ -188,6 +202,8 @@ transcript.
 
 ## Common Patterns
 
+- **Find a repo on disk**: `mnemo_repos` with `filter: "mnemo"` — returns the filesystem path
+- **Find related repos**: `mnemo_repos` with `filter: "marcelocantos/sql*"` — glob matching
 - **Find past decisions**: `mnemo_search` with query `"decided to" OR "went with" OR "chose"`
 - **Recent work on a repo**: `mnemo_sessions` with `repo: "org/repo"` and `limit: 5`
 - **Read a specific session**: `mnemo_sessions` to find the ID, then `mnemo_read_session`

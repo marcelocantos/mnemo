@@ -82,6 +82,14 @@ Results capped at 100 rows.`),
 	)
 
 	s.AddTool(
+		mcp.NewTool("mnemo_repos",
+			mcp.WithDescription(`List repositories that have been worked on in Claude Code sessions. Returns repo name, filesystem path, session count, and last activity. Use this to discover repo locations, find related projects, or get an overview of recent work.`),
+			mcp.WithString("filter", mcp.Description(`Optional filter. Supports: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), path fragment ("/work/github"), or glob ("marcelocantos/sql*"). Omit to list all repos.`)),
+		),
+		handleRepos(mem),
+	)
+
+	s.AddTool(
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -289,6 +297,33 @@ func handleStats(mem store.Backend) server.ToolHandlerFunc {
 		for _, ts := range stats.ByType {
 			fmt.Fprintf(&b, "%-12s %8d %10d %12d %8d\n",
 				ts.SessionType, ts.Sessions, ts.TotalMsgs, ts.SubstantiveMsgs, ts.NoiseMsgs)
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+}
+
+func handleRepos(mem store.Backend) server.ToolHandlerFunc {
+	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		filter, _ := args["filter"].(string)
+
+		repos, err := mem.ListRepos(filter)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("list repos failed: %v", err)), nil
+		}
+
+		if len(repos) == 0 {
+			return mcp.NewToolResultText("No repos found."), nil
+		}
+
+		var b strings.Builder
+		for _, r := range repos {
+			lastActivity := r.LastActivity
+			if len(lastActivity) > 19 {
+				lastActivity = lastActivity[:19]
+			}
+			fmt.Fprintf(&b, "%-45s  %4d sessions  %s  %s\n",
+				r.Repo, r.Sessions, lastActivity, r.Path)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}

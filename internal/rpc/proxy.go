@@ -86,6 +86,15 @@ func (p *Proxy) Stats() (*store.StatsResult, error) {
 	return &result, json.Unmarshal(raw, &result)
 }
 
+func (p *Proxy) ListRepos(filter string) ([]store.RepoInfo, error) {
+	raw, err := p.client.Call("ListRepos", ListReposParams{Filter: filter})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.RepoInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

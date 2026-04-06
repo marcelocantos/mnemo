@@ -148,6 +148,11 @@ type QueryParams struct {
 	Query string `json:"query"`
 }
 
+// ListReposParams matches the ListRepos method signature.
+type ListReposParams struct {
+	Filter string `json:"filter"`
+}
+
 // ResolveNonceParams matches the ResolveNonce method signature.
 type ResolveNonceParams struct {
 	Nonce string `json:"nonce"`
@@ -185,6 +190,13 @@ func (s *Server) dispatch(req Request) (any, error) {
 
 	case "Stats":
 		return s.store.Stats()
+
+	case "ListRepos":
+		var p ListReposParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return s.store.ListRepos(p.Filter)
 
 	case "ResolveNonce":
 		var p ResolveNonceParams
