@@ -160,6 +160,73 @@ reinvented each session.
 - `mnemo_query` nudges agents to define templates when query complexity
   exceeds a threshold (e.g., multiple joins/subqueries).
 
+### 🎯T9 Full-fidelity ingest and observability tools
+
+- **Value**: 9
+- **Cost**: 8
+- **Weight**: 1.1 (value 9 / cost 8)
+- **Status**: identified
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T5 (pattern discovery), 🎯T3 (dashboard data)
+- **Census**: `/tmp/field-census.txt` (1.3M entries, 10,766 paths, 3.4 GB)
+
+**Desired state:** mnemo ingests all JSONL fields (not just
+user/assistant message content) and exposes observability tools built
+on the full data.
+
+**Context:** A field census (scripts/field-census.py) revealed that
+mnemo discards ~70% of JSONL data: token usage (366k assistant
+entries), progress events (623k entries — bash output, hook events,
+agent progress), tool results with structured patches, model info,
+stop reasons, Claude Code version, agent IDs, and more.
+
+**Sub-targets:**
+
+#### 🎯T9.1 Full-fidelity ingest
+
+Ingest all top-level JSONL fields and message sub-fields. Key
+additions: `usage` (token counts per response), `model`, `stop_reason`,
+`version`, `slug`, `agentId`, `data.*` (progress events),
+`toolUseResult.*` (structured tool results). Store the full entry as
+JSONB where practical; add virtual columns for high-query fields.
+Requires schema version bump (full re-index).
+
+#### 🎯T9.2 Token usage analytics (`mnemo_usage`)
+
+Report token consumption by day, repo, session, model — with cost
+estimates at current pricing. Data comes from `message.usage` fields
+(input_tokens, output_tokens, cache_read, cache_creation). Should
+support: daily totals, per-repo breakdown, per-model breakdown,
+hourly rate detection ("am I spending too fast?").
+
+#### 🎯T9.3 Permission prompt analysis (`mnemo_permissions`)
+
+Identify most-used tools and frequent approval patterns from
+tool_use/tool_result message pairs. Suggest `allowedTools` rules
+for settings.json. "You approved Bash 90k times — consider adding
+`Bash(~/work/**)` to your allowed list."
+
+#### 🎯T9.4 Process attribution (`mnemo_who_ran`)
+
+Given a command pattern (e.g., "make", "clang", "python"), find which
+session(s) ran it recently. Answers "which session is hogging CPU?"
+by matching against `tool_command` in recent Bash tool_use entries.
+
+#### 🎯T9.5 System correlation (`mnemo_whatsup`)
+
+Correlate current system state (high CPU, fan spinning, disk I/O)
+with active mnemo sessions. Runs `top`/`ps` to find heavy processes,
+cross-references PIDs and command patterns against recent session
+activity. Answers "what's eating CPU?" with "session X in repo Y
+has been running a make build for 3 minutes."
+
+**Acceptance criteria:**
+- Field census shows 0 unindexed high-frequency fields (> 1% of entries).
+- `mnemo_usage` returns daily token breakdown with cost estimates.
+- `mnemo_permissions` suggests concrete allowedTools rules.
+- `mnemo_who_ran "make"` returns session + repo + timestamp.
+- `mnemo_whatsup` correlates system load with session activity.
+
 ### 🎯T8 sqldeep integration
 
 - **Value**: 6
