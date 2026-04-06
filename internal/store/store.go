@@ -133,7 +133,28 @@ func New(dbPath, projectDir string) (*Store, error) {
 			role TEXT NOT NULL,
 			text TEXT NOT NULL,
 			timestamp TEXT,
-			type TEXT
+			type TEXT,
+			content_type TEXT NOT NULL DEFAULT 'text',
+			tool_name TEXT,
+			tool_use_id TEXT,
+			tool_input BLOB,
+			is_error INTEGER NOT NULL DEFAULT 0,
+			-- Computed columns: commonly queried fields from tool_input.
+			tool_file_path TEXT GENERATED ALWAYS AS (tool_input->>'file_path'),
+			tool_command TEXT GENERATED ALWAYS AS (tool_input->>'command'),
+			tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern'),
+			tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description'),
+			tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill'),
+			tool_old_string TEXT GENERATED ALWAYS AS (tool_input->>'old_string'),
+			tool_new_string TEXT GENERATED ALWAYS AS (tool_input->>'new_string'),
+			tool_content TEXT GENERATED ALWAYS AS (tool_input->>'content'),
+			tool_query TEXT GENERATED ALWAYS AS (tool_input->>'query'),
+			tool_url TEXT GENERATED ALWAYS AS (tool_input->>'url'),
+			tool_name_param TEXT GENERATED ALWAYS AS (tool_input->>'name'),
+			tool_prompt TEXT GENERATED ALWAYS AS (tool_input->>'prompt'),
+			tool_subject TEXT GENERATED ALWAYS AS (tool_input->>'subject'),
+			tool_status TEXT GENERATED ALWAYS AS (tool_input->>'status'),
+			tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId'))
 		);
 		CREATE TABLE IF NOT EXISTS ingest_state (
 			path TEXT PRIMARY KEY,
@@ -195,6 +216,10 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_pattern ON messages(tool_pattern) WHERE tool_pattern IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_description ON messages(tool_description) WHERE tool_description IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_skill ON messages(tool_skill) WHERE tool_skill IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_old_string ON messages(tool_old_string) WHERE tool_old_string IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_new_string ON messages(tool_new_string) WHERE tool_new_string IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_url ON messages(tool_url) WHERE tool_url IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_task_id ON messages(tool_task_id) WHERE tool_task_id IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
 	`)
 	if err != nil {
@@ -361,6 +386,16 @@ func migrateContentTypes(db *sql.DB) error {
 		`ALTER TABLE messages ADD COLUMN tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern')`,
 		`ALTER TABLE messages ADD COLUMN tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description')`,
 		`ALTER TABLE messages ADD COLUMN tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill')`,
+		`ALTER TABLE messages ADD COLUMN tool_old_string TEXT GENERATED ALWAYS AS (tool_input->>'old_string')`,
+		`ALTER TABLE messages ADD COLUMN tool_new_string TEXT GENERATED ALWAYS AS (tool_input->>'new_string')`,
+		`ALTER TABLE messages ADD COLUMN tool_content TEXT GENERATED ALWAYS AS (tool_input->>'content')`,
+		`ALTER TABLE messages ADD COLUMN tool_query TEXT GENERATED ALWAYS AS (tool_input->>'query')`,
+		`ALTER TABLE messages ADD COLUMN tool_url TEXT GENERATED ALWAYS AS (tool_input->>'url')`,
+		`ALTER TABLE messages ADD COLUMN tool_name_param TEXT GENERATED ALWAYS AS (tool_input->>'name')`,
+		`ALTER TABLE messages ADD COLUMN tool_prompt TEXT GENERATED ALWAYS AS (tool_input->>'prompt')`,
+		`ALTER TABLE messages ADD COLUMN tool_subject TEXT GENERATED ALWAYS AS (tool_input->>'subject')`,
+		`ALTER TABLE messages ADD COLUMN tool_status TEXT GENERATED ALWAYS AS (tool_input->>'status')`,
+		"ALTER TABLE messages ADD COLUMN tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId'))",
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("alter: %w", err)
