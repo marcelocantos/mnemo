@@ -13,6 +13,7 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -25,11 +26,30 @@ import (
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
+//go:embed agents-guide.md
+var agentsGuide string
+
 const version = "0.1.0"
 
 func main() {
 	addr := flag.String("addr", ":19419", "listen address")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	helpAgent := flag.Bool("help-agent", false, "print agent guide and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("mnemo", version)
+		return
+	}
+	if *helpAgent {
+		// Prepend flag usage so agents get CLI reference + domain guide.
+		flag.CommandLine.SetOutput(os.Stdout)
+		fmt.Fprintf(os.Stdout, "mnemo %s\n\nUsage: mnemo [flags]\n\nFlags:\n", version)
+		flag.PrintDefaults()
+		fmt.Fprintln(os.Stdout)
+		fmt.Print(agentsGuide)
+		return
+	}
 
 	// Determine paths.
 	homeDir, err := os.UserHomeDir()
