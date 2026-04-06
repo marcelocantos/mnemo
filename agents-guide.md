@@ -84,10 +84,22 @@ is not optional — tools registered mid-session are not picked up.
 
 ## Verifying the setup
 
-After restarting, confirm mnemo is working by calling `mnemo_stats`. It
-should return session and message counts. If it fails with a connection
-error, the server is not running — check `brew services list` or the
-log file.
+**Before restarting** (to confirm the server is listening):
+
+```bash
+lsof -iTCP:19419 -sTCP:LISTEN
+```
+
+This should show a `mnemo` process. Do **not** use `curl` to check —
+the MCP endpoint only responds to POST requests with a JSON-RPC body,
+so a plain GET or empty POST will return nothing, which is normal
+behaviour, not a sign that the server is down.
+
+**After restarting** (to confirm the MCP integration works):
+
+Call `mnemo_stats`. It should return session and message counts. If it
+fails with a connection error, check `brew services list` and
+`$(brew --prefix)/var/log/mnemo.log`.
 
 ## MCP Tools
 
