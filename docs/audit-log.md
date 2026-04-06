@@ -27,3 +27,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `7ae6d5b`
 - **Outcome**: Released v0.5.0 (darwin-arm64, linux-amd64, linux-arm64). Fixed FTS5 optimize causing 100% CPU for 10+ minutes. Defer-safe writer cleanup. RPC performance logging with adaptive severity. Performance test assertions (200ms max per operation). Schema version rebuild approach.
+
+## 2026-04-07 — /release v0.6.0
+
+- **Commit**: `69ba833`
+- **Outcome**: Released v0.6.0 (darwin-arm64, linux-amd64, linux-arm64). Fixed search query deadlocking daemon for 3+ minutes (two-phase FTS search, 5ms). Silenced deleted-file log spam in watcher.
