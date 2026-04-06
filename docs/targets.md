@@ -54,8 +54,9 @@ worktree/ephemeral). No awareness of content or purpose.
 - **Value**: 8
 - **Cost**: 5
 - **Weight**: 1.6 (value 8 / cost 5)
-- **Status**: identified
+- **Status**: achieved
 - **Discovered**: 2026-04-06
+- **Achieved**: 2026-04-07
 - **Related**: jevon 🎯T16.1 (active work dashboard)
 
 **Desired state:** mnemo exposes an API for cross-referencing recent

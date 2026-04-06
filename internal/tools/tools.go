@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -75,6 +76,11 @@ Results capped at 100 rows.`),
 		mcp.NewTool("mnemo_stats",
 			mcp.WithDescription("Show transcript index statistics — sessions and messages broken down by session type, with noise vs substantive counts."),
 		),
+		mcp.NewTool("mnemo_recent_activity",
+			mcp.WithDescription("Recent session activity grouped by repo. Returns per-repo JSON with session count, message count, last activity time, work types, and key topics. Useful for understanding where active work is happening across projects."),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7)")),
+			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -102,6 +108,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.query(args)
 	case "mnemo_repos":
 		return h.repos(args)
+	case "mnemo_recent_activity":
+		return h.recentActivity(args)
 	case "mnemo_stats":
 		return h.stats()
 	case "mnemo_self":
@@ -308,6 +316,28 @@ func (h *Handler) stats() (string, bool, error) {
 			ts.SessionType, ts.Sessions, ts.TotalMsgs, ts.SubstantiveMsgs, ts.NoiseMsgs)
 	}
 	return b.String(), false, nil
+}
+
+func (h *Handler) recentActivity(args map[string]any) (string, bool, error) {
+	days := 7
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+
+	results, err := h.mem.RecentActivity(days, repoFilter)
+	if err != nil {
+		return fmt.Sprintf("recent activity failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No recent activity found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }
 
 func (h *Handler) self(args map[string]any) (string, bool, error) {

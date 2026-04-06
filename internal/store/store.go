@@ -84,6 +84,17 @@ type RepoInfo struct {
 	LastActivity string `json:"last_activity"`
 }
 
+// RecentActivityInfo summarises recent session activity for a single repo.
+type RecentActivityInfo struct {
+	Repo         string   `json:"repo"`
+	Path         string   `json:"path"`
+	Sessions     int      `json:"sessions"`
+	Messages     int      `json:"messages"`
+	LastActivity string   `json:"last_activity"`
+	WorkTypes    []string `json:"work_types,omitempty"`
+	Topics       []string `json:"topics,omitempty"`
+}
+
 // TypeStats holds per-session-type statistics.
 type TypeStats struct {
 	SessionType     string `json:"session_type"`
@@ -995,6 +1006,70 @@ func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
 		var r RepoInfo
 		if err := rows.Scan(&r.Repo, &r.Path, &r.Sessions, &r.LastActivity); err != nil {
 			continue
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// RecentActivity returns per-repo summaries of session activity within the
+// given recency window. Only interactive sessions are included.
+func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 7
+	}
+
+	where := []string{
+		"ss.session_type = 'interactive'",
+		"ss.last_msg >= datetime('now', ?)",
+	}
+	args := []any{fmt.Sprintf("-%d days", days)}
+
+	if repoFilter != "" {
+		where = append(where, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+
+	q := `
+		SELECT
+			CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
+			MAX(sm.cwd) AS path,
+			COUNT(DISTINCT ss.session_id) AS sessions,
+			SUM(ss.substantive_msgs) AS messages,
+			MAX(ss.last_msg) AS last_activity,
+			GROUP_CONCAT(DISTINCT NULLIF(sm.work_type, '')) AS work_types,
+			GROUP_CONCAT(DISTINCT NULLIF(sm.topic, '')) AS topics
+		FROM session_summary ss
+		JOIN session_meta sm ON sm.session_id = ss.session_id
+		WHERE ` + strings.Join(where, " AND ") + `
+		GROUP BY display_repo
+		HAVING display_repo != ''
+		ORDER BY last_activity DESC
+	`
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []RecentActivityInfo
+	for rows.Next() {
+		var r RecentActivityInfo
+		var workTypes, topics sql.NullString
+		if err := rows.Scan(&r.Repo, &r.Path, &r.Sessions, &r.Messages,
+			&r.LastActivity, &workTypes, &topics); err != nil {
+			continue
+		}
+		if workTypes.Valid && workTypes.String != "" {
+			r.WorkTypes = strings.Split(workTypes.String, ",")
+		}
+		if topics.Valid && topics.String != "" {
+			r.Topics = strings.Split(topics.String, ",")
 		}
 		results = append(results, r)
 	}

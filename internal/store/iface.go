@@ -13,4 +13,5 @@ type Backend interface {
 	Stats() (*StatsResult, error)
 	ListRepos(filter string) ([]RepoInfo, error)
 	ResolveNonce(nonce string) (string, error)
+	RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error)
 }

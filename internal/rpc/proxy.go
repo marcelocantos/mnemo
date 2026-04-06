@@ -100,6 +100,15 @@ func (p *Proxy) ListRepos(filter string) ([]store.RepoInfo, error) {
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) RecentActivity(days int, repoFilter string) ([]store.RecentActivityInfo, error) {
+	raw, err := p.client.Call("RecentActivity", RecentActivityParams{Days: days, RepoFilter: repoFilter})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.RecentActivityInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {
