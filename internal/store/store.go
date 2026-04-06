@@ -437,23 +437,41 @@ func (s *Store) IngestAll() error {
 		 content_type, tool_name, tool_use_id, tool_input, is_error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
 
-	var writeErr error
+	if err := s.runWriter(parsedCh, insertSQL); err != nil {
+		return err
+	}
+
+	// FTS5 optimize (segment merging) is skipped intentionally.
+	// On a fresh 577k-message database it takes 10+ minutes of solid
+	// CPU at 100%, blocking all reads. FTS5 works fine with multiple
+	// segments — search performance is slightly suboptimal but queries
+	// complete in milliseconds regardless. Segments merge naturally as
+	// new data trickles in via the watcher.
+	return nil
+}
+
+// runWriter is the single-goroutine writer for the parallel ingest pipeline.
+// It consumes parsed files from the channel and inserts them in batched
+// transactions, yielding the write lock every 200ms for readers.
+func (s *Store) runWriter(parsedCh <-chan parsedFile, insertSQL string) error {
+	const commitInterval = 200 * time.Millisecond
+
 	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		s.rwmu.Unlock()
 		return err
 	}
+	defer func() { tx.Rollback() }()
+
 	stmt, err := tx.Prepare(insertSQL)
 	if err != nil {
-		tx.Rollback()
-		s.rwmu.Unlock()
 		return err
 	}
+	defer func() { stmt.Close() }()
 
 	lastCommit := time.Now()
-	totalMessages := 0
 
 	commitBatch := func() error {
 		stmt.Close()
@@ -484,7 +502,6 @@ func (s *Store) IngestAll() error {
 			}
 			stmt.Exec(pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 				m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
-			totalMessages++
 
 			// Detect self-identification nonces.
 			if m.contentType == "text" && strings.HasPrefix(m.text, NoncePrefix) {
@@ -517,33 +534,14 @@ func (s *Store) IngestAll() error {
 		// Commit periodically.
 		if time.Since(lastCommit) >= commitInterval {
 			if err := commitBatch(); err != nil {
-				writeErr = err
-				break
+				return err
 			}
 		}
 	}
 
 	// Final commit.
-	if writeErr == nil {
-		stmt.Close()
-		writeErr = tx.Commit()
-	} else {
-		stmt.Close()
-		tx.Rollback()
-	}
-	s.rwmu.Unlock()
-
-	if writeErr != nil {
-		return writeErr
-	}
-
-	// FTS5 optimize (segment merging) is skipped intentionally.
-	// On a fresh 577k-message database it takes 10+ minutes of solid
-	// CPU at 100%, blocking all reads. FTS5 works fine with multiple
-	// segments — search performance is slightly suboptimal but queries
-	// complete in milliseconds regardless. Segments merge naturally as
-	// new data trickles in via the watcher.
-	return nil
+	stmt.Close()
+	return tx.Commit()
 }
 
 // parseFile reads and parses a JSONL transcript file, returning all
