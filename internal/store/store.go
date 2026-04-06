@@ -130,10 +130,29 @@ func New(dbPath, projectDir string) (*Store, error) {
 			role TEXT NOT NULL,
 			text TEXT NOT NULL,
 			timestamp TEXT,
-			type TEXT
+			type TEXT,
+			content_type TEXT NOT NULL DEFAULT 'text',
+			tool_name TEXT,
+			tool_use_id TEXT,
+			tool_input BLOB,
+			is_error INTEGER NOT NULL DEFAULT 0,
+			tool_file_path TEXT GENERATED ALWAYS AS (tool_input->>'file_path'),
+			tool_command TEXT GENERATED ALWAYS AS (tool_input->>'command'),
+			tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern'),
+			tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description'),
+			tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill')
 		);
 		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 		CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
+		CREATE INDEX IF NOT EXISTS idx_messages_content_type ON messages(content_type);
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_name ON messages(tool_name);
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_use_id ON messages(tool_use_id);
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_file_path ON messages(tool_file_path) WHERE tool_file_path IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_command ON messages(tool_command) WHERE tool_command IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_pattern ON messages(tool_pattern) WHERE tool_pattern IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_description ON messages(tool_description) WHERE tool_description IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_skill ON messages(tool_skill) WHERE tool_skill IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
 		CREATE TABLE IF NOT EXISTS ingest_state (
 			path TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL
@@ -170,6 +189,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	if err := migrateContentTypes(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate content_types: %w", err)
 	}
 
 	if err := migrateSessionSummary(db); err != nil {
@@ -305,6 +329,52 @@ func migrate(db *sql.DB) error {
 	db.QueryRow(`SELECT COUNT(*) FROM messages WHERE is_noise = 1`).Scan(&noiseCount)
 	slog.Info("migration complete", "noise_rows_flagged", noiseCount)
 
+	return nil
+}
+
+// migrateContentTypes adds the content_type, tool_name, tool_use_id,
+// tool_input, and is_error columns and forces a full re-ingest so all
+// content block types are captured.
+func migrateContentTypes(db *sql.DB) error {
+	var colCount int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'content_type'
+	`).Scan(&colCount)
+	if err != nil {
+		return err
+	}
+	if colCount > 0 {
+		return nil // already migrated
+	}
+
+	slog.Info("migrating — adding content block columns and resetting ingest for full re-ingest")
+
+	for _, stmt := range []string{
+		`ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'`,
+		`ALTER TABLE messages ADD COLUMN tool_name TEXT`,
+		`ALTER TABLE messages ADD COLUMN tool_use_id TEXT`,
+		`ALTER TABLE messages ADD COLUMN tool_input BLOB`,
+		`ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("alter: %w", err)
+		}
+	}
+
+	// Wipe and re-ingest: the existing rows lack tool data, and we need
+	// to re-parse the JSONL to populate them. Simpler than backfilling.
+	_, err = db.Exec(`
+		DELETE FROM messages;
+		DELETE FROM ingest_state;
+		DELETE FROM session_summary;
+		DELETE FROM session_nonces;
+		DELETE FROM messages_fts;
+	`)
+	if err != nil {
+		return fmt.Errorf("reset for re-ingest: %w", err)
+	}
+
+	slog.Info("migration complete — full re-ingest will run on next startup")
 	return nil
 }
 
@@ -874,12 +944,11 @@ func extractMetaFromFile(path string) (cwd, branch, topic string) {
 			branch = entry.GitBranch
 		}
 
-		// Extract topic from first substantive user message.
+		// Extract topic from first substantive user text message.
 		if topic == "" && entry.Type == "user" {
-			texts := extractTexts(entry.Message)
-			for _, text := range texts {
-				if len(text) >= 10 && !isNoise(text) && !isBoilerplate(text) {
-					topic = text
+			for _, b := range extractBlocks(entry.Message) {
+				if b.ContentType == "text" && len(b.Text) >= 10 && !isNoise(b.Text) && !isBoilerplate(b.Text) {
+					topic = b.Text
 					if len(topic) > 200 {
 						topic = topic[:197] + "..."
 					}
@@ -978,9 +1047,9 @@ func isNoise(text string) bool {
 }
 
 // jsonlEntry is the minimal structure of a JSONL transcript line.
-// Using a typed struct avoids map[string]any allocations during ingest.
 type jsonlEntry struct {
 	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype"`
 	Timestamp string          `json:"timestamp"`
 	Cwd       string          `json:"cwd"`
 	GitBranch string          `json:"gitBranch"`
@@ -992,40 +1061,102 @@ type jsonlMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
-// jsonlContentBlock is a typed content block within a message.
-type jsonlContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+// contentBlock represents a parsed content block from a message.
+type contentBlock struct {
+	ContentType string // text, tool_use, tool_result, thinking
+	Text        string // the displayable text
+	ToolName    string // for tool_use
+	ToolUseID   string // for tool_use and tool_result
+	ToolInput   []byte // raw JSON for tool_use input
+	IsError     bool   // for tool_result
 }
 
-// extractTexts extracts all text content from a raw message JSON.
-func extractTexts(raw json.RawMessage) []string {
+// rawContentBlock is the JSON shape of a content block.
+type rawContentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Name      string          `json:"name"`
+	ID        string          `json:"id"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
+}
+
+// extractBlocks extracts all content blocks from a raw message JSON.
+func extractBlocks(raw json.RawMessage) []contentBlock {
 	var msg jsonlMessage
 	if json.Unmarshal(raw, &msg) != nil || msg.Content == nil {
 		return nil
 	}
 
-	// Try string content first.
+	// Try string content first (simple user messages).
 	var s string
 	if json.Unmarshal(msg.Content, &s) == nil {
 		if s != "" {
-			return []string{s}
+			return []contentBlock{{ContentType: "text", Text: s}}
 		}
 		return nil
 	}
 
-	// Try array of content blocks.
-	var blocks []jsonlContentBlock
-	if json.Unmarshal(msg.Content, &blocks) == nil {
-		var texts []string
-		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
-				texts = append(texts, b.Text)
-			}
-		}
-		return texts
+	// Parse array of content blocks.
+	var raws []rawContentBlock
+	if json.Unmarshal(msg.Content, &raws) != nil {
+		return nil
 	}
-	return nil
+
+	var blocks []contentBlock
+	for _, r := range raws {
+		switch r.Type {
+		case "text":
+			if r.Text != "" {
+				blocks = append(blocks, contentBlock{ContentType: "text", Text: r.Text})
+			}
+		case "thinking":
+			if r.Thinking != "" {
+				blocks = append(blocks, contentBlock{ContentType: "thinking", Text: r.Thinking})
+			}
+		case "tool_use":
+			text := r.Name
+			if r.Input != nil {
+				text = r.Name + " " + string(r.Input)
+			}
+			blocks = append(blocks, contentBlock{
+				ContentType: "tool_use",
+				Text:        text,
+				ToolName:    r.Name,
+				ToolUseID:   r.ID,
+				ToolInput:   r.Input,
+			})
+		case "tool_result":
+			// tool_result content can be string or array of blocks.
+			var resultText string
+			if r.Content != nil {
+				// Try string.
+				if json.Unmarshal(r.Content, &resultText) != nil {
+					// Try array of text blocks.
+					var parts []rawContentBlock
+					if json.Unmarshal(r.Content, &parts) == nil {
+						var texts []string
+						for _, p := range parts {
+							if p.Type == "text" && p.Text != "" {
+								texts = append(texts, p.Text)
+							}
+						}
+						resultText = strings.Join(texts, "\n")
+					}
+				}
+			}
+			blocks = append(blocks, contentBlock{
+				ContentType: "tool_result",
+				Text:        resultText,
+				ToolUseID:   r.ToolUseID,
+				IsError:     r.IsError,
+			})
+		}
+	}
+	return blocks
 }
 
 // isBoilerplate returns true if the text is system/skill boilerplate
@@ -1074,7 +1205,11 @@ func (s *Store) ingestFile(path string) error {
 	}
 	defer func() { tx.Rollback() }()
 
-	stmt, err := tx.Prepare(`INSERT INTO messages (session_id, project, role, text, timestamp, type, is_noise) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	const insertSQL = `INSERT INTO messages
+		(session_id, project, role, text, timestamp, type, is_noise,
+		 content_type, tool_name, tool_use_id, tool_input, is_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
+	stmt, err := tx.Prepare(insertSQL)
 	if err != nil {
 		return err
 	}
@@ -1103,11 +1238,12 @@ func (s *Store) ingestFile(path string) error {
 		}
 
 		if entry.Type != "user" && entry.Type != "assistant" {
+			// TODO: index system entries in a future pass.
 			continue
 		}
 
-		texts := extractTexts(entry.Message)
-		if len(texts) == 0 {
+		blocks := extractBlocks(entry.Message)
+		if len(blocks) == 0 {
 			continue
 		}
 
@@ -1116,24 +1252,37 @@ func (s *Store) ingestFile(path string) error {
 			ts = time.Now().Format(time.RFC3339)
 		}
 
-		for _, text := range texts {
+		for _, b := range blocks {
 			noise := 0
-			if isNoise(text) {
+			if b.ContentType == "text" && isNoise(b.Text) {
 				noise = 1
 			}
-			// Capture first substantive user message as topic.
-			if metaTopic == "" && entry.Type == "user" && noise == 0 && len(text) >= 10 && !isBoilerplate(text) {
-				metaTopic = text
+			// Capture first substantive user text message as topic.
+			if metaTopic == "" && entry.Type == "user" && b.ContentType == "text" && noise == 0 && len(b.Text) >= 10 && !isBoilerplate(b.Text) {
+				metaTopic = b.Text
 				if len(metaTopic) > 200 {
 					metaTopic = metaTopic[:197] + "..."
 				}
 			}
-			stmt.Exec(sessionID, project, entry.Type, text, ts, entry.Type, noise)
+
+			// tool_input: pass raw JSON or nil.
+			var toolInput any
+			if b.ToolInput != nil {
+				toolInput = string(b.ToolInput)
+			}
+
+			isErr := 0
+			if b.IsError {
+				isErr = 1
+			}
+
+			stmt.Exec(sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
 			count++
 
 			// Detect self-identification nonces.
-			if strings.HasPrefix(text, NoncePrefix) {
-				nonce := strings.TrimSpace(text)
+			if b.ContentType == "text" && strings.HasPrefix(b.Text, NoncePrefix) {
+				nonce := strings.TrimSpace(b.Text)
 				tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
 			}
 		}
@@ -1166,7 +1315,7 @@ func (s *Store) ingestFile(path string) error {
 				if err != nil {
 					return err
 				}
-				stmt, err = tx.Prepare(`INSERT INTO messages (session_id, project, role, text, timestamp, type, is_noise) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+				stmt, err = tx.Prepare(insertSQL)
 				if err != nil {
 					return err
 				}

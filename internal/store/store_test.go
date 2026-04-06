@@ -535,3 +535,155 @@ func TestIncrementalIngest(t *testing.T) {
 		t.Fatalf("expected 4 messages after incremental ingest, got %d", len(msgs))
 	}
 }
+
+func TestToolUseIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Build a transcript with tool_use and tool_result content blocks.
+	writeJSONL(t, projectDir, "myproject", "sess-tools", []map[string]any{
+		{
+			"type":      "user",
+			"timestamp": "2026-04-01T10:00:00Z",
+			"message": map[string]any{
+				"role":    "user",
+				"content": "Edit the store.go file",
+			},
+		},
+		{
+			"type":      "assistant",
+			"timestamp": "2026-04-01T10:00:05Z",
+			"message": map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{
+						"type":    "thinking",
+						"thinking": "I need to edit store.go to fix the bug.",
+					},
+					map[string]any{
+						"type": "tool_use",
+						"id":   "toolu_abc123",
+						"name": "Edit",
+						"input": map[string]any{
+							"file_path":  "/Users/dev/store.go",
+							"old_string": "foo",
+							"new_string": "bar",
+						},
+					},
+				},
+			},
+		},
+		{
+			"type":      "user",
+			"timestamp": "2026-04-01T10:00:10Z",
+			"message": map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_abc123",
+						"content":     "File edited successfully.",
+						"is_error":    false,
+					},
+				},
+			},
+		},
+		{
+			"type":      "assistant",
+			"timestamp": "2026-04-01T10:00:15Z",
+			"message": map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{
+						"type": "tool_use",
+						"id":   "toolu_def456",
+						"name": "Bash",
+						"input": map[string]any{
+							"command":     "go test ./...",
+							"description": "Run tests",
+						},
+					},
+				},
+			},
+		},
+		{
+			"type":      "user",
+			"timestamp": "2026-04-01T10:00:20Z",
+			"message": map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_def456",
+						"content":     "FAIL: tests failed",
+						"is_error":    true,
+					},
+				},
+			},
+		},
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query for Edit tool uses via the computed file_path column.
+	rows, err := s.Query("SELECT tool_name, tool_file_path FROM messages WHERE tool_name = 'Edit'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 Edit tool_use, got %d", len(rows))
+	}
+	if rows[0]["tool_file_path"] != "/Users/dev/store.go" {
+		t.Errorf("expected file_path '/Users/dev/store.go', got %v", rows[0]["tool_file_path"])
+	}
+
+	// Query for Bash commands via the computed command column.
+	rows, err = s.Query("SELECT tool_command FROM messages WHERE tool_name = 'Bash'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 Bash tool_use, got %d", len(rows))
+	}
+	if rows[0]["tool_command"] != "go test ./..." {
+		t.Errorf("expected command 'go test ./...', got %v", rows[0]["tool_command"])
+	}
+
+	// Query for failed tool results.
+	rows, err = s.Query("SELECT text, is_error FROM messages WHERE content_type = 'tool_result' AND is_error = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 failed tool_result, got %d", len(rows))
+	}
+
+	// Query for thinking blocks.
+	rows, err = s.Query("SELECT text FROM messages WHERE content_type = 'thinking'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 thinking block, got %d", len(rows))
+	}
+	if rows[0]["text"] != "I need to edit store.go to fix the bug." {
+		t.Errorf("unexpected thinking text: %v", rows[0]["text"])
+	}
+
+	// Join tool_use to tool_result via tool_use_id.
+	rows, err = s.Query(`
+		SELECT tu.tool_name, tr.text AS result, tr.is_error
+		FROM messages tu
+		JOIN messages tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
+		WHERE tu.content_type = 'tool_use'
+		ORDER BY tu.id
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 tool_use/result pairs, got %d", len(rows))
+	}
+}
