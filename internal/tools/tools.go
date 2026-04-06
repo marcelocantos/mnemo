@@ -5,13 +5,11 @@
 package tools
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -87,30 +85,6 @@ Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonc
 			mcp.WithString("nonce", mcp.Description("The nonce returned by a previous mnemo_self call. Omit on first call to generate a new nonce.")),
 		),
 	}
-}
-
-// Register adds all mnemo tools to an MCP server, using the handler for calls.
-// Used by the daemon for direct MCP serving (if needed in future).
-func Register(s *server.MCPServer, h *Handler) {
-	for _, tool := range Definitions() {
-		name := tool.Name
-		s.AddTool(tool, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			text, isErr, err := h.Call(name, req.GetArguments())
-			if err != nil {
-				return nil, err
-			}
-			if isErr {
-				return mcp.NewToolResultError(text), nil
-			}
-			return mcp.NewToolResultText(text), nil
-		})
-	}
-}
-
-// CallResult is the wire format for tool call results over RPC.
-type CallResult struct {
-	Text    string `json:"text"`
-	IsError bool   `json:"is_error,omitempty"`
 }
 
 // Call executes a tool by name with the given arguments.

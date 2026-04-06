@@ -4,39 +4,31 @@
 package rpc
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
-	"net"
-	"os"
-	"sync"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/marcelocantos/mcpbridge"
+
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
-// Server listens on a Unix domain socket and dispatches RPC calls to the store.
+// Server wraps mcpbridge.Server with mnemo-specific RPC methods.
 type Server struct {
-	store    *store.Store
-	tools    *tools.Handler
-	toolDefs []mcp.Tool
-	listener net.Listener
-
-	mu    sync.Mutex
-	conns []net.Conn
+	bridge *mcpbridge.Server
 }
 
 // ServerOption configures a Server.
-type ServerOption func(*Server)
+type ServerOption func(*serverConfig)
 
-// WithToolDefs overrides the default tool definitions (from tools.Definitions()).
-// Useful for testing tool list changes across daemon restarts.
+type serverConfig struct {
+	toolDefs []mcp.Tool
+}
+
+// WithToolDefs overrides the default tool definitions.
 func WithToolDefs(defs []mcp.Tool) ServerOption {
-	return func(s *Server) { s.toolDefs = defs }
+	return func(c *serverConfig) { c.toolDefs = defs }
 }
 
 // NewServer creates an RPC server bound to the default socket path.
@@ -46,114 +38,75 @@ func NewServer(s *store.Store, opts ...ServerOption) (*Server, error) {
 
 // NewServerAt creates an RPC server bound to the given socket path.
 func NewServerAt(s *store.Store, sockPath string, opts ...ServerOption) (*Server, error) {
-	// Remove stale socket file.
-	os.Remove(sockPath)
-
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
-	}
-
-	srv := &Server{
-		store:    s,
-		tools:    tools.NewHandler(s),
+	cfg := &serverConfig{
 		toolDefs: tools.Definitions(),
-		listener: listener,
 	}
 	for _, opt := range opts {
-		opt(srv)
+		opt(cfg)
 	}
-	return srv, nil
+
+	bridge, err := mcpbridge.NewServer(mcpbridge.DaemonConfig{
+		SocketPath:   sockPath,
+		Tools:        cfg.toolDefs,
+		Handler:      tools.NewHandler(s),
+		ExtraMethods: extraMethods(s),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Server{bridge: bridge}, nil
 }
 
-// Serve accepts connections and handles them. Blocks until the listener is closed.
-func (s *Server) Serve() error {
-	slog.Info("RPC server listening", "socket", SocketPath())
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			return err
-		}
-		go s.handleConn(conn)
-	}
-}
+// Serve accepts connections. Blocks until the listener is closed.
+func (s *Server) Serve() error { return s.bridge.Serve() }
 
 // Close shuts down the listener and all active connections.
-func (s *Server) Close() error {
-	err := s.listener.Close()
-	s.mu.Lock()
-	for _, c := range s.conns {
-		c.Close()
-	}
-	s.conns = nil
-	s.mu.Unlock()
-	return err
-}
+func (s *Server) Close() error { return s.bridge.Close() }
 
-func (s *Server) trackConn(conn net.Conn) {
-	s.mu.Lock()
-	s.conns = append(s.conns, conn)
-	s.mu.Unlock()
-}
-
-func (s *Server) handleConn(conn net.Conn) {
-	s.trackConn(conn)
-	defer conn.Close()
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 4<<20), 4<<20)
-	enc := json.NewEncoder(conn)
-
-	// Read and validate handshake.
-	if !scanner.Scan() {
-		return
-	}
-	var hs Handshake
-	if err := json.Unmarshal(scanner.Bytes(), &hs); err != nil {
-		enc.Encode(Response{Error: fmt.Sprintf("invalid handshake: %v", err)})
-		return
-	}
-	if hs.ProtocolVersion != ProtocolVersion {
-		enc.Encode(Response{Error: fmt.Sprintf(
-			"protocol version mismatch: proxy=%d, daemon=%d — restart the service with 'brew services restart mnemo'",
-			hs.ProtocolVersion, ProtocolVersion)})
-		return
-	}
-	enc.Encode(Response{Result: []byte(`"ok"`)})
-
-	for scanner.Scan() {
-		var req Request
-		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
-			enc.Encode(Response{Error: fmt.Sprintf("invalid request: %v", err)})
-			continue
-		}
-
-		start := time.Now()
-		result, err := s.dispatch(req)
-		dur := time.Since(start)
-
-		if err != nil {
-			slog.Warn("rpc", "method", req.Method, "dur", dur, "err", err)
-			enc.Encode(Response{Error: err.Error()})
-			continue
-		}
-
-		logLevel := slog.LevelDebug
-		if dur >= 100*time.Millisecond {
-			logLevel = slog.LevelInfo
-		}
-		if dur >= time.Second {
-			logLevel = slog.LevelWarn
-		}
-		slog.Log(context.Background(), logLevel, "rpc", "method", req.Method, "dur", dur)
-
-		resultJSON, err := json.Marshal(result)
-		if err != nil {
-			enc.Encode(Response{Error: fmt.Sprintf("marshal result: %v", err)})
-			continue
-		}
-		enc.Encode(Response{Result: resultJSON})
+// extraMethods registers mnemo-specific RPC methods (Search, ListSessions, etc.)
+// that the proxy uses for typed access beyond the generic CallTool path.
+func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
+	return map[string]mcpbridge.MethodFunc{
+		"Search": makeMethod(func(p SearchParams) (any, error) {
+			return s.Search(p.Query, p.Limit, p.SessionType, p.RepoFilter, p.ContextBefore, p.ContextAfter, p.SubstantiveOnly)
+		}),
+		"ListSessions": makeMethod(func(p ListSessionsParams) (any, error) {
+			return s.ListSessions(p.SessionType, p.MinMessages, p.Limit, p.ProjectFilter, p.RepoFilter, p.WorkTypeFilter)
+		}),
+		"ReadSession": makeMethod(func(p ReadSessionParams) (any, error) {
+			return s.ReadSession(p.SessionID, p.Role, p.Offset, p.Limit)
+		}),
+		"Query": makeMethod(func(p QueryParams) (any, error) {
+			return s.Query(p.Query)
+		}),
+		"Stats": func(_ json.RawMessage) (any, error) {
+			return s.Stats()
+		},
+		"ListRepos": makeMethod(func(p ListReposParams) (any, error) {
+			return s.ListRepos(p.Filter)
+		}),
+		"ResolveNonce": makeMethod(func(p ResolveNonceParams) (any, error) {
+			sid, err := s.ResolveNonce(p.Nonce)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"session_id": sid}, nil
+		}),
 	}
 }
+
+// makeMethod creates a MethodFunc that unmarshals params into type P.
+func makeMethod[P any](fn func(P) (any, error)) mcpbridge.MethodFunc {
+	return func(raw json.RawMessage) (any, error) {
+		var p P
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return fn(p)
+	}
+}
+
+// --- Param types for mnemo-specific RPC methods ---
 
 // SearchParams matches the Search method signature.
 type SearchParams struct {
@@ -194,83 +147,7 @@ type ListReposParams struct {
 	Filter string `json:"filter"`
 }
 
-// CallToolParams holds the parameters for the CallTool RPC method.
-type CallToolParams struct {
-	Name string         `json:"name"`
-	Args map[string]any `json:"args"`
-}
-
 // ResolveNonceParams matches the ResolveNonce method signature.
 type ResolveNonceParams struct {
 	Nonce string `json:"nonce"`
-}
-
-func (s *Server) dispatch(req Request) (any, error) {
-	switch req.Method {
-	case "Search":
-		var p SearchParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		return s.store.Search(p.Query, p.Limit, p.SessionType, p.RepoFilter, p.ContextBefore, p.ContextAfter, p.SubstantiveOnly)
-
-	case "ListSessions":
-		var p ListSessionsParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		return s.store.ListSessions(p.SessionType, p.MinMessages, p.Limit, p.ProjectFilter, p.RepoFilter, p.WorkTypeFilter)
-
-	case "ReadSession":
-		var p ReadSessionParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		return s.store.ReadSession(p.SessionID, p.Role, p.Offset, p.Limit)
-
-	case "Query":
-		var p QueryParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		return s.store.Query(p.Query)
-
-	case "Stats":
-		return s.store.Stats()
-
-	case "ListTools":
-		return s.toolDefs, nil
-
-	case "CallTool":
-		var p CallToolParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		text, isErr, err := s.tools.Call(p.Name, p.Args)
-		if err != nil {
-			return nil, err
-		}
-		return tools.CallResult{Text: text, IsError: isErr}, nil
-
-	case "ListRepos":
-		var p ListReposParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		return s.store.ListRepos(p.Filter)
-
-	case "ResolveNonce":
-		var p ResolveNonceParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("invalid params: %w", err)
-		}
-		sid, err := s.store.ResolveNonce(p.Nonce)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"session_id": sid}, nil
-
-	default:
-		return nil, fmt.Errorf("unknown method: %s", req.Method)
-	}
 }

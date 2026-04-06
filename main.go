@@ -21,8 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/marcelocantos/mcpbridge"
 
 	"github.com/marcelocantos/mnemo/internal/rpc"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -116,56 +115,19 @@ func runServe() {
 	}
 }
 
-// runStdio runs the stdio MCP server: connects to the serve process
-// over UDS and proxies MCP tool calls. The proxy is intentionally
-// dumb — all tool definitions and handling logic live on the daemon.
-// This means the proxy binary rarely needs updating.
+// runStdio runs the stdio MCP proxy via mcpbridge.
 func runStdio() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	})))
 
-	client, err := rpc.Dial()
-	if err != nil {
+	if err := mcpbridge.RunProxy(context.Background(), mcpbridge.ProxyConfig{
+		SocketPath: rpc.SocketPath(),
+		ServerName: "mnemo",
+		Version:    version,
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "mnemo: %v\n", err)
 		fmt.Fprintf(os.Stderr, "hint: start the server with 'brew services start mnemo' or 'mnemo serve'\n")
-		os.Exit(1)
-	}
-	defer client.Close()
-
-	proxy := rpc.NewProxy(client)
-
-	// Fetch tool definitions from the daemon.
-	toolDefs, err := proxy.ListTools()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mnemo: failed to fetch tools: %v\n", err)
-		os.Exit(1)
-	}
-
-	s := mcpserver.NewMCPServer(
-		"mnemo",
-		version,
-		mcpserver.WithToolCapabilities(true),
-	)
-
-	// Register each tool with a generic handler that forwards to the daemon.
-	for _, tool := range toolDefs {
-		name := tool.Name
-		s.AddTool(tool, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			result, err := proxy.CallTool(name, req.GetArguments())
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
-			}
-			if result.IsError {
-				return mcp.NewToolResultError(result.Text), nil
-			}
-			return mcp.NewToolResultText(result.Text), nil
-		})
-	}
-
-	stdio := mcpserver.NewStdioServer(s)
-	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "mnemo stdio: %v\n", err)
 		os.Exit(1)
 	}
 }
