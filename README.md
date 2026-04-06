@@ -9,6 +9,25 @@ maintains a realtime SQLite FTS5 index, and exposes search/query tools
 via MCP. New transcripts are picked up automatically via filesystem
 watching.
 
+## Quick start
+
+Tell your agent:
+
+> Install mnemo from https://github.com/marcelocantos/mnemo — brew
+> install, start the service, register it as an MCP server, and
+> restart the session. Follow the agents-guide.md in the repo.
+
+Or do it yourself:
+
+```bash
+brew install marcelocantos/tap/mnemo
+brew services start mnemo
+claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+```
+
+Then restart your Claude Code session. The `mnemo_*` tools will be
+available in every session from that point on.
+
 ## Install
 
 ```bash
@@ -21,22 +40,46 @@ Or build from source (requires Go and CGo for SQLite):
 go build -tags "sqlite_fts5" -o bin/mnemo .
 ```
 
-## Usage
+## Running
 
-Start the server:
+**As a service** (recommended — survives reboots):
+
+```bash
+brew services start mnemo       # macOS
+```
+
+Logs: `$(brew --prefix)/var/log/mnemo.log`
+
+**Manually**:
 
 ```bash
 mnemo                # listen on :19419 (default)
 mnemo --addr :8080   # custom port
 ```
 
-Register as an MCP server in Claude Code:
+## Registering as an MCP server
+
+**Claude Code** (global install to `~/.claude.json`):
 
 ```bash
 claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
-Restart your Claude Code session for the tools to become available.
+**Generic MCP client** JSON config:
+
+```json
+{
+  "mcpServers": {
+    "mnemo": {
+      "transport": "http",
+      "url": "http://localhost:19419/mcp"
+    }
+  }
+}
+```
+
+Restart your agent session after registration — tools registered
+mid-session are not picked up.
 
 ## MCP Tools
 

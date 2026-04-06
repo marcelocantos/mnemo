@@ -4,7 +4,11 @@ mnemo is an MCP server that provides searchable memory across all
 Claude Code session transcripts. It indexes JSONL transcript files from
 `~/.claude/projects/` and maintains a realtime FTS5 index in SQLite.
 
-## Installation
+## Full setup (all steps required)
+
+Installation is not complete until all four steps succeed. Do not stop
+after `brew install` — the server must be running and registered as an
+MCP server for mnemo to be usable.
 
 ### 1. Install the binary
 
@@ -12,13 +16,40 @@ Claude Code session transcripts. It indexes JSONL transcript files from
 brew install marcelocantos/tap/mnemo
 ```
 
-Or build from source:
+Or build from source (requires Go and CGo for SQLite):
 
 ```bash
 go build -tags "sqlite_fts5" -o bin/mnemo .
 ```
 
-### 2. Start the server
+### 2. Start the server as a background service
+
+**macOS (Homebrew)**:
+
+```bash
+brew services start mnemo
+```
+
+This starts mnemo on `:19419` via launchd and keeps it running across
+reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
+
+**Linux (systemd)** — create `~/.config/systemd/user/mnemo.service`:
+
+```ini
+[Unit]
+Description=mnemo MCP server
+
+[Service]
+ExecStart=%h/.local/bin/mnemo
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+Then: `systemctl --user enable --now mnemo`
+
+**Manual** (any platform):
 
 ```bash
 mnemo                # listen on :19419 (default)
@@ -46,8 +77,17 @@ claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 }
 ```
 
-**Important**: Restart your agent session after registration for the
-tools to become available.
+### 4. Restart your agent session
+
+The MCP tools only become available after restarting the session. This
+is not optional — tools registered mid-session are not picked up.
+
+## Verifying the setup
+
+After restarting, confirm mnemo is working by calling `mnemo_stats`. It
+should return session and message counts. If it fails with a connection
+error, the server is not running — check `brew services list` or the
+log file.
 
 ## MCP Tools
 

@@ -74,3 +74,11 @@ jobs:
           test: 'system bin/"mnemo", "--version"'
           skip_checksum: true
           update_readme_table: true
+          formula_includes: |
+            service do
+              run [opt_bin/"mnemo"]
+              keep_alive true
+              log_path var/"log/mnemo.log"
+              error_log_path var/"log/mnemo.log"
+              working_dir HOMEBREW_PREFIX
+            end
