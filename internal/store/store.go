@@ -658,6 +658,23 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 	}
 }
 
+// FindSessionByContent searches for a session containing the given text
+// in any message. Returns the session ID or an error if not found.
+func (s *Store) FindSessionByContent(text string) (string, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	var sessionID string
+	err := s.db.QueryRow(
+		"SELECT session_id FROM messages WHERE text LIKE ? LIMIT 1",
+		"%"+text+"%",
+	).Scan(&sessionID)
+	if err != nil {
+		return "", fmt.Errorf("no session found containing %q", text)
+	}
+	return sessionID, nil
+}
+
 // Query runs a read-only SQL query and returns rows as maps.
 func (s *Store) Query(query string) ([]map[string]any, error) {
 	q := strings.TrimSpace(query)

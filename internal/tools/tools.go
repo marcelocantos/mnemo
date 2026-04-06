@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -75,6 +76,19 @@ Results capped at 100 rows.`),
 			mcp.WithDescription("Show transcript index statistics — sessions and messages broken down by session type, with noise vs substantive counts."),
 		),
 		handleStats(mem),
+	)
+
+	s.AddTool(
+		mcp.NewTool("mnemo_self",
+			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
+
+Phase 1: Call with no arguments. Returns a unique nonce. This nonce appears in your transcript as the tool response.
+Phase 2: Call again with the nonce. mnemo searches for the session containing it and returns your session ID.
+
+Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonce "mnemo:abc123" → get your session ID. Then use mnemo_read_session to read your own transcript.`),
+			mcp.WithString("nonce", mcp.Description("The nonce returned by a previous mnemo_self call. Omit on first call to generate a new nonce.")),
+		),
+		handleSelf(mem),
 	)
 }
 
@@ -251,5 +265,33 @@ func handleStats(mem *store.Store) server.ToolHandlerFunc {
 				ts.SessionType, ts.Sessions, ts.TotalMsgs, ts.SubstantiveMsgs, ts.NoiseMsgs)
 		}
 		return mcp.NewToolResultText(b.String()), nil
+	}
+}
+
+const noncePrefix = "mnemo:self:"
+
+func handleSelf(mem *store.Store) server.ToolHandlerFunc {
+	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		nonce, _ := args["nonce"].(string)
+
+		if nonce == "" {
+			// Phase 1: generate and return a nonce.
+			nonce = noncePrefix + uuid.NewString()
+			return mcp.NewToolResultText(nonce), nil
+		}
+
+		// Phase 2: find the session containing this nonce.
+		if !strings.HasPrefix(nonce, noncePrefix) {
+			return mcp.NewToolResultError("invalid nonce — must be a value returned by a previous mnemo_self call"), nil
+		}
+
+		sessionID, err := mem.FindSessionByContent(nonce)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"Could not find session containing nonce. The transcript may not be ingested yet — wait a moment and retry. Error: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("session_id: %s", sessionID)), nil
 	}
 }
