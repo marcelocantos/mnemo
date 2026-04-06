@@ -101,16 +101,16 @@ func sessionTypeSQL(col string) string {
 END`
 }
 
-// New creates or opens a transcript store.
-func New(dbPath, projectDir string) (*Store, error) {
+// schemaVersion is incremented whenever the database schema changes.
+// On mismatch the database file is deleted and rebuilt from transcripts.
+const schemaVersion = 4
+
+func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-
-	// Tuning: WAL for concurrent reads, relaxed sync (safe with WAL),
-	// larger cache, memory-mapped I/O, and retry on contention.
 	for _, pragma := range []string{
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA synchronous = NORMAL",
@@ -123,8 +123,37 @@ func New(dbPath, projectDir string) (*Store, error) {
 			return nil, fmt.Errorf("%s: %w", pragma, err)
 		}
 	}
+	return db, nil
+}
 
-	// Create tables first (IF NOT EXISTS is safe for existing DBs).
+// New creates or opens a transcript store.
+func New(dbPath, projectDir string) (*Store, error) {
+	db, err := openDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check schema version. On mismatch, blow away the database.
+	var ver int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&ver); err == nil && ver != schemaVersion && ver != 0 {
+		slog.Info("schema version mismatch, rebuilding database", "have", ver, "want", schemaVersion)
+		db.Close()
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			os.Remove(dbPath + suffix)
+		}
+		db, err = openDB(dbPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Set the schema version.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set schema version: %w", err)
+	}
+
+	// Create tables.
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +163,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 			text TEXT NOT NULL,
 			timestamp TEXT,
 			type TEXT,
+			is_noise INTEGER NOT NULL DEFAULT 0,
 			content_type TEXT NOT NULL DEFAULT 'text',
 			tool_name TEXT,
 			tool_use_id TEXT,
@@ -189,22 +219,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
 
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
-	}
-
-	if err := migrateContentTypes(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate content_types: %w", err)
-	}
-
-	if err := migrateSessionSummary(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate session_summary: %w", err)
-	}
-
-	// Create indexes (runs after migrations so all columns exist).
+	// Create indexes.
 	_, err = db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 		CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
@@ -305,159 +320,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 	return s, nil
 }
 
-func migrate(db *sql.DB) error {
-	var colCount int
-	err := db.QueryRow(`
-		SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'is_noise'
-	`).Scan(&colCount)
-	if err != nil {
-		return err
-	}
-	if colCount > 0 {
-		return nil
-	}
-
-	slog.Info("migrating — adding is_noise column and rebuilding FTS index")
-
-	_, err = db.Exec(`ALTER TABLE messages ADD COLUMN is_noise INTEGER NOT NULL DEFAULT 0`)
-	if err != nil {
-		return fmt.Errorf("add column: %w", err)
-	}
-
-	_, err = db.Exec(`
-		UPDATE messages SET is_noise = 1
-		WHERE text LIKE '%[Request interrupted%'
-		   OR text LIKE '%Your task is to create a detailed summary%'
-		   OR text IN ('Tool loaded.', 'Tool loaded')
-		   OR text LIKE '%<local-command-caveat>%'
-		   OR (text LIKE '%<command-name>%' AND LENGTH(text) < 200)
-	`)
-	if err != nil {
-		return fmt.Errorf("backfill is_noise: %w", err)
-	}
-
-	_, err = db.Exec(`
-		DROP TRIGGER IF EXISTS messages_ai;
-		DROP TABLE IF EXISTS messages_fts;
-		CREATE VIRTUAL TABLE messages_fts USING fts5(
-			text, role, project, session_id,
-			content=messages,
-			content_rowid=id
-		);
-		INSERT INTO messages_fts(rowid, text, role, project, session_id)
-			SELECT id, text, role, project, session_id FROM messages WHERE is_noise = 0;
-	`)
-	if err != nil {
-		return fmt.Errorf("rebuild FTS: %w", err)
-	}
-
-	var noiseCount int
-	db.QueryRow(`SELECT COUNT(*) FROM messages WHERE is_noise = 1`).Scan(&noiseCount)
-	slog.Info("migration complete", "noise_rows_flagged", noiseCount)
-
-	return nil
-}
-
-// migrateContentTypes adds the content_type, tool_name, tool_use_id,
-// tool_input, and is_error columns and forces a full re-ingest so all
-// content block types are captured.
-func migrateContentTypes(db *sql.DB) error {
-	var colCount int
-	err := db.QueryRow(`
-		SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'content_type'
-	`).Scan(&colCount)
-	if err != nil {
-		return err
-	}
-	if colCount > 0 {
-		return nil // already migrated
-	}
-
-	slog.Info("migrating — adding content block columns and resetting ingest for full re-ingest")
-
-	for _, stmt := range []string{
-		`ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'`,
-		`ALTER TABLE messages ADD COLUMN tool_name TEXT`,
-		`ALTER TABLE messages ADD COLUMN tool_use_id TEXT`,
-		`ALTER TABLE messages ADD COLUMN tool_input BLOB`,
-		`ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE messages ADD COLUMN tool_file_path TEXT GENERATED ALWAYS AS (tool_input->>'file_path')`,
-		`ALTER TABLE messages ADD COLUMN tool_command TEXT GENERATED ALWAYS AS (tool_input->>'command')`,
-		`ALTER TABLE messages ADD COLUMN tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern')`,
-		`ALTER TABLE messages ADD COLUMN tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description')`,
-		`ALTER TABLE messages ADD COLUMN tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill')`,
-		`ALTER TABLE messages ADD COLUMN tool_old_string TEXT GENERATED ALWAYS AS (tool_input->>'old_string')`,
-		`ALTER TABLE messages ADD COLUMN tool_new_string TEXT GENERATED ALWAYS AS (tool_input->>'new_string')`,
-		`ALTER TABLE messages ADD COLUMN tool_content TEXT GENERATED ALWAYS AS (tool_input->>'content')`,
-		`ALTER TABLE messages ADD COLUMN tool_query TEXT GENERATED ALWAYS AS (tool_input->>'query')`,
-		`ALTER TABLE messages ADD COLUMN tool_url TEXT GENERATED ALWAYS AS (tool_input->>'url')`,
-		`ALTER TABLE messages ADD COLUMN tool_name_param TEXT GENERATED ALWAYS AS (tool_input->>'name')`,
-		`ALTER TABLE messages ADD COLUMN tool_prompt TEXT GENERATED ALWAYS AS (tool_input->>'prompt')`,
-		`ALTER TABLE messages ADD COLUMN tool_subject TEXT GENERATED ALWAYS AS (tool_input->>'subject')`,
-		`ALTER TABLE messages ADD COLUMN tool_status TEXT GENERATED ALWAYS AS (tool_input->>'status')`,
-		"ALTER TABLE messages ADD COLUMN tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId'))",
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("alter: %w", err)
-		}
-	}
-
-	// Wipe and re-ingest: the existing rows lack tool data, and we need
-	// to re-parse the JSONL to populate them. Simpler than backfilling.
-	_, err = db.Exec(`
-		DELETE FROM messages;
-		DELETE FROM ingest_state;
-		DELETE FROM session_summary;
-		DELETE FROM session_nonces;
-		DELETE FROM messages_fts;
-	`)
-	if err != nil {
-		return fmt.Errorf("reset for re-ingest: %w", err)
-	}
-
-	slog.Info("migration complete — full re-ingest will run on next startup")
-	return nil
-}
-
-// migrateSessionSummary backfills the session_summary table from existing
-// messages. Runs once — skips if the table is already populated.
-func migrateSessionSummary(db *sql.DB) error {
-	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM session_summary").Scan(&count); err != nil {
-		return nil // table doesn't exist yet, will be created later
-	}
-	if count > 0 {
-		return nil // already populated
-	}
-
-	// Check if there are messages to backfill from.
-	var msgCount int
-	db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&msgCount)
-	if msgCount == 0 {
-		return nil
-	}
-
-	slog.Info("backfilling session_summary from existing messages", "messages", msgCount)
-
-	_, err := db.Exec(`
-		INSERT INTO session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
-		SELECT
-			session_id, project,
-			` + sessionTypeSQL("project") + `,
-			COUNT(*),
-			SUM(CASE WHEN is_noise = 0 THEN 1 ELSE 0 END),
-			MIN(timestamp),
-			MAX(timestamp)
-		FROM messages
-		GROUP BY session_id
-	`)
-	if err != nil {
-		return fmt.Errorf("backfill session_summary: %w", err)
-	}
-
-	slog.Info("session_summary backfill complete")
-	return nil
-}
+// No migration functions needed — schema version mismatch deletes
+// the database and rebuilds from transcripts.
 
 // Close closes the store.
 func (s *Store) Close() error {
