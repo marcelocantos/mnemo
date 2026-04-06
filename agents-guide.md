@@ -108,6 +108,8 @@ fails with a connection error, check `brew services list` and
 Full-text search across session transcripts. Uses SQLite FTS5 syntax
 (words, "quoted phrases", OR, NOT). Defaults to interactive sessions
 only; pass `session_type: "all"` to include subagents and worktrees.
+Pass `repo` to scope results to a specific repo — accepts bare name
+("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragments.
 
 ### mnemo_sessions
 

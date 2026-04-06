@@ -85,7 +85,7 @@ mid-session are not picked up.
 
 | Tool | Description |
 |---|---|
-| `mnemo_search` | Full-text search across transcripts (FTS5 syntax: words, "phrases", OR, NOT) |
+| `mnemo_search` | Full-text search across transcripts (FTS5 syntax: words, "phrases", OR, NOT). Supports `repo` filter. |
 | `mnemo_sessions` | List sessions by recency; filter by project, repo, or work type |
 | `mnemo_read_session` | Read messages from a specific session (supports prefix IDs) |
 | `mnemo_query` | Raw SQL SELECT against the transcript database |
