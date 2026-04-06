@@ -71,13 +71,15 @@ PRs) to produce a unified view of where active work is happening.
 - **Status**: identified
 - **Discovered**: 2026-04-06
 
-**Desired state:** mnemo can read, search within, and truncate
-individual session transcripts. Absorbs jevon's `transcript_read`
-and `transcript_rewind` functionality.
+**Desired state:** mnemo can read and search within individual session
+transcripts. Absorbs jevon's `transcript_read` functionality.
+
+Transcript files are permanent archaeological records — mnemo never
+modifies or truncates them. Future work may add compressed archival
+with mnemo preserving the index, but the raw files stay intact.
 
 **Acceptance criteria:**
 - `mnemo_read_session` tool returns messages from a specific session ID.
 - Supports filtering by role, offset, limit.
-- `mnemo_truncate_session` tool truncates a session's JSONL file
-  (keeping the last N turns). Useful for context management.
 - Works on raw JSONL files, not just the indexed database.
+- No mutation of transcript files.
