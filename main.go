@@ -5,12 +5,15 @@
 // Claude Code session transcripts. It indexes JSONL files from
 // ~/.claude/projects/ and maintains a realtime FTS5 index in SQLite.
 //
-// Run as a stdio MCP server:
+// Run as a persistent HTTP service:
 //
-//	claude mcp add --scope user mnemo -- mnemo
+//	mnemo                          # listen on :19419
+//	mnemo --addr :8080             # custom port
+//	claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,6 +28,9 @@ import (
 const version = "0.1.0"
 
 func main() {
+	addr := flag.String("addr", ":19419", "listen address")
+	flag.Parse()
+
 	// Determine paths.
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -41,7 +47,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up logging to stderr (stdout is the MCP channel).
+	// Set up logging to stderr.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -80,9 +86,10 @@ func main() {
 	// Register tools.
 	tools.Register(s, mem)
 
-	// Run as stdio server.
-	slog.Info("mnemo starting", "version", version)
-	if err := server.ServeStdio(s); err != nil {
+	// Run as streamable HTTP server.
+	httpServer := server.NewStreamableHTTPServer(s)
+	slog.Info("mnemo starting", "version", version, "addr", *addr)
+	if err := httpServer.Start(*addr); err != nil {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	}

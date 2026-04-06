@@ -13,13 +13,14 @@ for new transcripts in realtime.
 
 ```bash
 go build -tags "sqlite_fts5" -o bin/mnemo .
-bin/mnemo  # runs as stdio MCP server
+bin/mnemo                # listen on :19419
+bin/mnemo --addr :8080   # custom port
 ```
 
 ## Install as MCP server
 
 ```bash
-claude mcp add --scope user mnemo -- /path/to/mnemo
+claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
 ## MCP Tools
