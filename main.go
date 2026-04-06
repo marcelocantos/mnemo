@@ -29,7 +29,7 @@ import (
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	addr := flag.String("addr", ":19419", "listen address")
