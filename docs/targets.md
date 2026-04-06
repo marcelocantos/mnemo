@@ -115,7 +115,8 @@ general facility → observe usage → promote patterns to dedicated tools.
 - **Value**: 6
 - **Cost**: 5
 - **Weight**: 1.2 (value 6 / cost 5)
-- **Status**: identified
+- **Status**: achieved
+- **Achieved**: 2026-04-06
 - **Discovered**: 2026-04-06
 
 **Desired state:** A session can easily discover its own transcript and
