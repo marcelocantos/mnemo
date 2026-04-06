@@ -184,6 +184,12 @@ stop reasons, Claude Code version, agent IDs, and more.
 
 #### 🎯T9.1 Full-fidelity ingest
 
+- **Value**: 8
+- **Cost**: 5
+- **Weight**: 1.6 (value 8 / cost 5)
+- **Status**: identified
+- **Parent**: 🎯T9
+
 Ingest all top-level JSONL fields and message sub-fields. Key
 additions: `usage` (token counts per response), `model`, `stop_reason`,
 `version`, `slug`, `agentId`, `data.*` (progress events),
@@ -193,6 +199,13 @@ Requires schema version bump (full re-index).
 
 #### 🎯T9.2 Token usage analytics (`mnemo_usage`)
 
+- **Value**: 8
+- **Cost**: 3
+- **Weight**: 2.7 (value 8 / cost 3)
+- **Status**: identified
+- **Parent**: 🎯T9
+- **Gates**: 🎯T9.1
+
 Report token consumption by day, repo, session, model — with cost
 estimates at current pricing. Data comes from `message.usage` fields
 (input_tokens, output_tokens, cache_read, cache_creation). Should
@@ -201,6 +214,13 @@ hourly rate detection ("am I spending too fast?").
 
 #### 🎯T9.3 Permission prompt analysis (`mnemo_permissions`)
 
+- **Value**: 5
+- **Cost**: 3
+- **Weight**: 1.7 (value 5 / cost 3)
+- **Status**: identified
+- **Parent**: 🎯T9
+- **Gates**: 🎯T9.1
+
 Identify most-used tools and frequent approval patterns from
 tool_use/tool_result message pairs. Suggest `allowedTools` rules
 for settings.json. "You approved Bash 90k times — consider adding
@@ -208,11 +228,25 @@ for settings.json. "You approved Bash 90k times — consider adding
 
 #### 🎯T9.4 Process attribution (`mnemo_who_ran`)
 
+- **Value**: 5
+- **Cost**: 2
+- **Weight**: 2.5 (value 5 / cost 2)
+- **Status**: identified
+- **Parent**: 🎯T9
+- **Gates**: 🎯T9.1
+
 Given a command pattern (e.g., "make", "clang", "python"), find which
 session(s) ran it recently. Answers "which session is hogging CPU?"
 by matching against `tool_command` in recent Bash tool_use entries.
 
 #### 🎯T9.5 System correlation (`mnemo_whatsup`)
+
+- **Value**: 5
+- **Cost**: 5
+- **Weight**: 1.0 (value 5 / cost 5)
+- **Status**: identified
+- **Parent**: 🎯T9
+- **Gates**: 🎯T9.1
 
 Correlate current system state (high CPU, fan spinning, disk I/O)
 with active mnemo sessions. Runs `top`/`ps` to find heavy processes,
@@ -221,6 +255,13 @@ activity. Answers "what's eating CPU?" with "session X in repo Y
 has been running a make build for 3 minutes."
 
 #### 🎯T9.6 Cross-session decision recall (`mnemo_decisions`)
+
+- **Value**: 8
+- **Cost**: 5
+- **Weight**: 1.6 (value 8 / cost 5)
+- **Status**: identified
+- **Parent**: 🎯T9
+- **Gates**: 🎯T9.1
 
 Surface past decisions across all sessions. During ingest, detect
 decision patterns: user confirmation ("yes", "lgtm", "go", "do it",
