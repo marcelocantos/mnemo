@@ -698,49 +698,84 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		sessionType = "interactive"
 	}
 
-	// Build WHERE clauses and JOINs dynamically.
-	where := []string{"messages_fts MATCH ?"}
-	args := []any{query}
-	joins := "JOIN messages m ON m.id = f.rowid"
+	// Two-phase search: first get top FTS hits (fast, no JOINs),
+	// then filter by session type/repo and enrich with message data.
+	// This avoids JOINing the full FTS result set with large tables.
+	needSessionFilter := sessionType != "all"
+	needRepoFilter := repoFilter != ""
 
-	needSessionSummary := sessionType != "all"
-	needSessionMeta := repoFilter != ""
-
-	if needSessionSummary {
-		joins += "\nJOIN session_summary ss ON ss.session_id = m.session_id"
-		where = append(where, "ss.session_type = ?")
-		args = append(args, sessionType)
+	// Phase 1: FTS-only scan with generous over-fetch.
+	// Over-fetch 10x to account for session type filtering.
+	fetchLimit := limit * 10
+	if fetchLimit < 200 {
+		fetchLimit = 200
 	}
-	if needSessionMeta {
-		joins += "\nJOIN session_meta sm ON sm.session_id = m.session_id"
-		where = append(where, "(sm.cwd LIKE ? OR sm.repo LIKE ?)")
-		pattern := "%" + repoFilter + "%"
-		args = append(args, pattern, pattern)
-	}
-
-	args = append(args, limit)
-
-	sqlQuery := `
-		SELECT m.id, m.session_id, m.project, m.role, m.text, m.timestamp, rank
-		FROM messages_fts f
-		` + joins + `
-		WHERE ` + strings.Join(where, " AND ") + `
+	ftsRows, err := s.db.Query(`
+		SELECT rowid, rank FROM messages_fts
+		WHERE messages_fts MATCH ?
 		ORDER BY rank
 		LIMIT ?
-	`
-
-	rows, err := s.db.Query(sqlQuery, args...)
+	`, query, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var results []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.MessageID, &r.SessionID, &r.Project, &r.Role, &r.Text, &r.Timestamp, &r.Rank); err != nil {
+	type ftsHit struct {
+		rowid int
+		rank  float64
+	}
+	var hits []ftsHit
+	for ftsRows.Next() {
+		var h ftsHit
+		if err := ftsRows.Scan(&h.rowid, &h.rank); err != nil {
 			continue
 		}
+		hits = append(hits, h)
+	}
+	ftsRows.Close()
+
+	if len(hits) == 0 {
+		return nil, nil
+	}
+
+	// Phase 2: enrich hits with message data and apply filters.
+	var results []SearchResult
+	for _, h := range hits {
+		if len(results) >= limit {
+			break
+		}
+
+		row := s.db.QueryRow(`
+			SELECT m.id, m.session_id, m.project, m.role, m.text, m.timestamp
+			FROM messages m
+			WHERE m.id = ?
+		`, h.rowid)
+
+		var r SearchResult
+		if err := row.Scan(&r.MessageID, &r.SessionID, &r.Project, &r.Role, &r.Text, &r.Timestamp); err != nil {
+			continue
+		}
+		r.Rank = h.rank
+
+		// Apply session type filter.
+		if needSessionFilter {
+			var st string
+			err := s.db.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", r.SessionID).Scan(&st)
+			if err != nil || st != sessionType {
+				continue
+			}
+		}
+
+		// Apply repo filter.
+		if needRepoFilter {
+			var count int
+			pattern := "%" + repoFilter + "%"
+			err := s.db.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", r.SessionID, pattern, pattern).Scan(&count)
+			if err != nil || count == 0 {
+				continue
+			}
+		}
+
 		if len(r.Text) > 500 {
 			r.Text = r.Text[:497] + "..."
 		}
