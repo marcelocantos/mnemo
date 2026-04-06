@@ -537,13 +537,12 @@ func (s *Store) IngestAll() error {
 		return writeErr
 	}
 
-	// Merge FTS5 segments for optimal search performance.
-	s.rwmu.Lock()
-	_, ftsErr := s.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
-	s.rwmu.Unlock()
-	if ftsErr != nil {
-		slog.Warn("FTS5 optimize failed", "err", ftsErr)
-	}
+	// FTS5 optimize (segment merging) is skipped intentionally.
+	// On a fresh 577k-message database it takes 10+ minutes of solid
+	// CPU at 100%, blocking all reads. FTS5 works fine with multiple
+	// segments — search performance is slightly suboptimal but queries
+	// complete in milliseconds regardless. Segments merge naturally as
+	// new data trickles in via the watcher.
 	return nil
 }
 
