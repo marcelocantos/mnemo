@@ -122,6 +122,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		}
 	}
 
+	// Create tables first (IF NOT EXISTS is safe for existing DBs).
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,29 +131,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 			role TEXT NOT NULL,
 			text TEXT NOT NULL,
 			timestamp TEXT,
-			type TEXT,
-			content_type TEXT NOT NULL DEFAULT 'text',
-			tool_name TEXT,
-			tool_use_id TEXT,
-			tool_input BLOB,
-			is_error INTEGER NOT NULL DEFAULT 0,
-			tool_file_path TEXT GENERATED ALWAYS AS (tool_input->>'file_path'),
-			tool_command TEXT GENERATED ALWAYS AS (tool_input->>'command'),
-			tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern'),
-			tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description'),
-			tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill')
+			type TEXT
 		);
-		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-		CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
-		CREATE INDEX IF NOT EXISTS idx_messages_content_type ON messages(content_type);
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_name ON messages(tool_name);
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_use_id ON messages(tool_use_id);
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_file_path ON messages(tool_file_path) WHERE tool_file_path IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_command ON messages(tool_command) WHERE tool_command IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_pattern ON messages(tool_pattern) WHERE tool_pattern IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_description ON messages(tool_description) WHERE tool_description IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS idx_messages_tool_skill ON messages(tool_skill) WHERE tool_skill IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
 		CREATE TABLE IF NOT EXISTS ingest_state (
 			path TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL
@@ -199,6 +179,25 @@ func New(dbPath, projectDir string) (*Store, error) {
 	if err := migrateSessionSummary(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate session_summary: %w", err)
+	}
+
+	// Create indexes (runs after migrations so all columns exist).
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+		CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
+		CREATE INDEX IF NOT EXISTS idx_messages_content_type ON messages(content_type);
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_name ON messages(tool_name);
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_use_id ON messages(tool_use_id);
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_file_path ON messages(tool_file_path) WHERE tool_file_path IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_command ON messages(tool_command) WHERE tool_command IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_pattern ON messages(tool_pattern) WHERE tool_pattern IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_description ON messages(tool_description) WHERE tool_description IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_tool_skill ON messages(tool_skill) WHERE tool_skill IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create indexes: %w", err)
 	}
 
 	_, err = db.Exec(`
@@ -355,6 +354,11 @@ func migrateContentTypes(db *sql.DB) error {
 		`ALTER TABLE messages ADD COLUMN tool_use_id TEXT`,
 		`ALTER TABLE messages ADD COLUMN tool_input BLOB`,
 		`ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN tool_file_path TEXT GENERATED ALWAYS AS (tool_input->>'file_path')`,
+		`ALTER TABLE messages ADD COLUMN tool_command TEXT GENERATED ALWAYS AS (tool_input->>'command')`,
+		`ALTER TABLE messages ADD COLUMN tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern')`,
+		`ALTER TABLE messages ADD COLUMN tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description')`,
+		`ALTER TABLE messages ADD COLUMN tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill')`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("alter: %w", err)

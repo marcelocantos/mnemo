@@ -5,14 +5,15 @@
 // Claude Code session transcripts. It indexes JSONL files from
 // ~/.claude/projects/ and maintains a realtime FTS5 index in SQLite.
 //
-// Run as a persistent HTTP service:
+// Two modes:
 //
-//	mnemo                          # listen on :19419
-//	mnemo --addr :8080             # custom port
-//	claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+//	mnemo              # stdio MCP server (what Claude Code launches)
+//	mnemo serve        # persistent daemon (what brew services runs)
+//	claude mcp add --scope user mnemo -- mnemo
 package main
 
 import (
+	"context"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -20,8 +21,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mark3labs/mcp-go/server"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	"github.com/marcelocantos/mnemo/internal/rpc"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
@@ -29,10 +31,9 @@ import (
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
-	addr := flag.String("addr", ":19419", "listen address")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	helpAgent := flag.Bool("help-agent", false, "print agent guide and exit")
 	flag.Parse()
@@ -42,16 +43,29 @@ func main() {
 		return
 	}
 	if *helpAgent {
-		// Prepend flag usage so agents get CLI reference + domain guide.
 		flag.CommandLine.SetOutput(os.Stdout)
-		fmt.Fprintf(os.Stdout, "mnemo %s\n\nUsage: mnemo [flags]\n\nFlags:\n", version)
+		fmt.Fprintf(os.Stdout, "mnemo %s\n\nUsage: mnemo [command] [flags]\n\nCommands:\n  serve    Run persistent daemon (for brew services)\n  (none)   Run stdio MCP server\n\nFlags:\n", version)
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stdout)
 		fmt.Print(agentsGuide)
 		return
 	}
 
-	// Determine paths.
+	args := flag.Args()
+	if len(args) > 0 && args[0] == "serve" {
+		runServe()
+	} else {
+		runStdio()
+	}
+}
+
+// runServe runs the persistent daemon: opens the store, ingests,
+// watches for changes, and serves RPC over a Unix domain socket.
+func runServe() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot determine home directory: %v\n", err)
@@ -61,18 +75,11 @@ func main() {
 	projectDir := filepath.Join(homeDir, ".claude", "projects")
 	dbPath := filepath.Join(homeDir, ".mnemo", "mnemo.db")
 
-	// Ensure db directory exists.
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "cannot create db directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Set up logging to stderr.
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
-
-	// Open the transcript store.
 	mem, err := store.New(dbPath, projectDir)
 	if err != nil {
 		slog.Error("failed to open store", "err", err)
@@ -80,8 +87,7 @@ func main() {
 	}
 	defer mem.Close()
 
-	// Ingest and watch in the background so the MCP server is
-	// immediately responsive.
+	// Ingest and watch in the background.
 	go func() {
 		slog.Info("ingesting transcripts", "dir", projectDir)
 		if err := mem.IngestAll(); err != nil {
@@ -90,27 +96,54 @@ func main() {
 		if stats, err := mem.Stats(); err == nil {
 			slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
 		}
-
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}
 	}()
 
-	// Create MCP server.
-	s := server.NewMCPServer(
+	// Serve RPC over Unix domain socket.
+	srv, err := rpc.NewServer(mem)
+	if err != nil {
+		slog.Error("failed to start RPC server", "err", err)
+		os.Exit(1)
+	}
+	defer srv.Close()
+
+	slog.Info("mnemo serve starting", "version", version)
+	if err := srv.Serve(); err != nil {
+		slog.Error("RPC server failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+// runStdio runs the stdio MCP server: connects to the serve process
+// over UDS and proxies MCP tool calls.
+func runStdio() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
+
+	client, err := rpc.Dial()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mnemo: %v\n", err)
+		fmt.Fprintf(os.Stderr, "hint: start the server with 'brew services start mnemo' or 'mnemo serve'\n")
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	proxy := rpc.NewProxy(client)
+
+	s := mcpserver.NewMCPServer(
 		"mnemo",
 		version,
-		server.WithToolCapabilities(true),
+		mcpserver.WithToolCapabilities(true),
 	)
 
-	// Register tools.
-	tools.Register(s, mem)
+	tools.Register(s, proxy)
 
-	// Run as streamable HTTP server.
-	httpServer := server.NewStreamableHTTPServer(s)
-	slog.Info("mnemo starting", "version", version, "addr", *addr)
-	if err := httpServer.Start(*addr); err != nil {
-		slog.Error("server failed", "err", err)
+	stdio := mcpserver.NewStdioServer(s)
+	if err := stdio.Listen(context.Background(), os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "mnemo stdio: %v\n", err)
 		os.Exit(1)
 	}
 }

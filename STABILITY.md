@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.2.0.
+Snapshot as of v0.3.0.
 
 ### CLI flags
 
@@ -28,6 +28,10 @@ Snapshot as of v0.2.0.
 | `query` | string | yes | FTS5 search query | Stable |
 | `limit` | number | no | Max results (default 20) | Stable |
 | `session_type` | string | no | Filter: interactive, subagent, worktree, ephemeral, all (default interactive) | Stable |
+| `repo` | string | no | Repo filter (bare name, org/repo, or path fragment) | Stable |
+| `context_before` | number | no | Messages before each hit (default 3) | Stable |
+| `context_after` | number | no | Messages after each hit (default 3) | Stable |
+| `context_filter` | string | no | "substantive" (default) or "all" | Needs review |
 
 #### mnemo_sessions
 
@@ -56,28 +60,43 @@ values are heuristically extracted and the set may evolve.
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `query` | string | yes | SQL SELECT query | Stable |
+| `query` | string | yes | SQL SELECT/WITH query | Stable |
 
-**Note**: The SQL schema is an implicit part of this surface. See
-database schema below.
+**Note**: Only SELECT and WITH queries are accepted. The SQL schema is
+an implicit part of this surface. See database schema below.
 
 #### mnemo_stats
 
 No parameters. Returns session/message counts by type. **Stability**: Stable.
 
+#### mnemo_self
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `nonce` | string | no | Nonce from previous call. Omit to generate. | Needs review |
+
+**Notes**: Two-phase nonce protocol. Nonces detected during ingest and
+stored in indexed `session_nonces` table. The mechanism may evolve.
+
 ### Database schema (exposed via mnemo_query)
 
 | Table/View | Columns | Stability |
 |---|---|---|
-| `messages` | id, session_id, project, role, text, timestamp, type, is_noise | Needs review |
+| `messages` | id, session_id, project, role, text, timestamp, type, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error | Needs review |
+| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill | Needs review |
 | `messages_fts` | FTS5 virtual table matching `messages` (excludes noise) | Stable |
-| `sessions` | session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
+| `sessions` | View joining session_summary + session_meta: session_id, project, session_type, repo, git_branch, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
+| `session_summary` | Trigger-maintained materialised table: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
+| `session_meta` | Per-session metadata: session_id, repo, cwd, git_branch, work_type, topic | Needs review |
+| `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 
-**Notes**: The `messages` and `sessions` schemas may gain columns
-(repo, work_type, topic are stored but not yet formally in the view).
-`ingest_state` is an internal implementation detail and should not be
-considered part of the public API.
+**Notes**: The `messages` schema expanded significantly in v0.3.0 with
+content block columns (content_type, tool_name, tool_use_id, tool_input,
+is_error) and virtual computed columns. This surface is still evolving.
+`ingest_state` and `session_nonces` are internal implementation details.
+
+Content types: `text`, `tool_use`, `tool_result`, `thinking`.
 
 ### Output formats
 
@@ -100,18 +119,16 @@ configurable before 1.0.
 ## Gaps and prerequisites
 
 - **Structured output**: MCP tools return plain text. Structured JSON
-  output would enable programmatic consumption by other tools (e.g.,
-  jevon dashboard). Must decide on output format before 1.0.
+  output would enable programmatic consumption by other tools. Must
+  decide on output format before 1.0. sqldeep integration (🎯T8)
+  would enable nested JSON queries.
 - **Configurable paths**: Database and transcript paths are hardcoded.
   Should be configurable via flags or env vars.
 - **Session metadata completeness**: repo, work_type, and topic are
   extracted heuristically and may be missing or inaccurate. Extraction
   quality should be audited before locking the schema.
-- **Database migrations**: No migration system. Adding columns or
-  changing the schema requires rebuilding the database. Need a
-  migration strategy before 1.0.
-- **Test coverage**: Minimal test suite. Core search, ingest, and
-  session filtering need comprehensive tests.
+- **System entry indexing**: System entries (hooks, stop reasons) are
+  not yet indexed. The ingest pipeline skips non-user/assistant entries.
 
 ## Out of scope for 1.0
 
@@ -120,3 +137,4 @@ configurable before 1.0.
 - Transcript modification or deletion tools
 - Integration with non-Claude-Code transcript formats
 - Summarisation or semantic search (vector embeddings)
+- Agent-defined query templates (🎯T7) — valuable but not a 1.0 gate

@@ -7,22 +7,25 @@ session.
 mnemo indexes JSONL transcript files from `~/.claude/projects/`,
 maintains a realtime SQLite FTS5 index, and exposes search/query tools
 via MCP. New transcripts are picked up automatically via filesystem
-watching.
+watching. All content block types are indexed — text, tool use, tool
+results, and thinking blocks.
 
 ## Quick start
 
 Tell your agent:
 
-> Install mnemo from https://github.com/marcelocantos/mnemo — brew
-> install, start the service, register it as an MCP server, and
-> restart the session. Follow the agents-guide.md in the repo.
+```
+Install mnemo from https://github.com/marcelocantos/mnemo — brew
+install, start the service, register it as an MCP server, and
+restart the session. Follow the agents-guide.md in the repo.
+```
 
 Or do it yourself:
 
 ```bash
 brew install marcelocantos/tap/mnemo
 brew services start mnemo
-claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+claude mcp add --scope user mnemo -- mnemo
 ```
 
 Then restart your Claude Code session. The `mnemo_*` tools will be
@@ -53,8 +56,7 @@ Logs: `$(brew --prefix)/var/log/mnemo.log`
 **Manually**:
 
 ```bash
-mnemo                # listen on :19419 (default)
-mnemo --addr :8080   # custom port
+mnemo serve
 ```
 
 ## Registering as an MCP server
@@ -62,7 +64,7 @@ mnemo --addr :8080   # custom port
 **Claude Code** (global install to `~/.claude.json`):
 
 ```bash
-claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+claude mcp add --scope user mnemo -- mnemo
 ```
 
 **Generic MCP client** JSON config:
@@ -71,8 +73,7 @@ claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 {
   "mcpServers": {
     "mnemo": {
-      "transport": "http",
-      "url": "http://localhost:19419/mcp"
+      "command": "mnemo"
     }
   }
 }
@@ -85,11 +86,19 @@ mid-session are not picked up.
 
 | Tool | Description |
 |---|---|
-| `mnemo_search` | Full-text search across transcripts (FTS5 syntax: words, "phrases", OR, NOT). Supports `repo` filter. |
+| `mnemo_search` | Full-text search with context. Supports `repo` filter, configurable before/after context (default 3). |
 | `mnemo_sessions` | List sessions by recency; filter by project, repo, or work type |
 | `mnemo_read_session` | Read messages from a specific session (supports prefix IDs) |
 | `mnemo_query` | Raw SQL SELECT against the transcript database |
 | `mnemo_stats` | Index statistics — sessions and messages by type |
+| `mnemo_self` | Discover the calling session's ID via nonce protocol |
+
+### Search with context
+
+`mnemo_search` returns surrounding messages with each hit (like
+`grep -C`). Defaults to 3 messages before and after. Context defaults
+to substantive messages only (user/assistant, non-noise); pass
+`context_filter: "all"` for everything including tool calls.
 
 ### Session filtering
 
@@ -109,9 +118,18 @@ The `mnemo_query` tool provides read-only access to:
 
 | Table | Key columns |
 |---|---|
-| `messages` | id, session_id, project, role, text, timestamp, type, is_noise |
+| `messages` | id, session_id, project, role, text, timestamp, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error |
+| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill |
 | `messages_fts` | FTS5 virtual table (excludes noise). `WHERE messages_fts MATCH 'terms'` |
-| `sessions` | View: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg |
+| `sessions` | View: session_id, project, session_type, repo, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg |
+
+Content types: `text`, `tool_use`, `tool_result`, `thinking`.
+
+### Session self-identification
+
+`mnemo_self` lets an agent discover its own session ID using a
+two-phase nonce protocol, then query its own transcript with
+`mnemo_read_session`.
 
 ## Agent guide
 

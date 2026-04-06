@@ -61,7 +61,7 @@ mnemo --addr :8080   # custom port
 **Claude Code** (global install to `~/.claude.json`):
 
 ```bash
-claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+claude mcp add --scope user mnemo -- mnemo
 ```
 
 **Generic MCP client** JSON config:
@@ -70,8 +70,7 @@ claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 {
   "mcpServers": {
     "mnemo": {
-      "transport": "http",
-      "url": "http://localhost:19419/mcp"
+      "command": "mnemo"
     }
   }
 }
@@ -84,22 +83,20 @@ is not optional — tools registered mid-session are not picked up.
 
 ## Verifying the setup
 
-**Before restarting** (to confirm the server is listening):
+**Before restarting** (to confirm the serve process is running):
 
 ```bash
-lsof -iTCP:19419 -sTCP:LISTEN
+ls -la ~/.mnemo/mnemo.sock
 ```
 
-This should show a `mnemo` process. Do **not** use `curl` to check —
-the MCP endpoint only responds to POST requests with a JSON-RPC body,
-so a plain GET or empty POST will return nothing, which is normal
-behaviour, not a sign that the server is down.
+This should show the Unix domain socket file. If it's missing, the
+serve process isn't running — check `brew services list` and
+`$(brew --prefix)/var/log/mnemo.log`.
 
 **After restarting** (to confirm the MCP integration works):
 
 Call `mnemo_stats`. It should return session and message counts. If it
-fails with a connection error, check `brew services list` and
-`$(brew --prefix)/var/log/mnemo.log`.
+fails with a connection error, the serve process may not be running.
 
 ## MCP Tools
 
@@ -108,8 +105,19 @@ fails with a connection error, check `brew services list` and
 Full-text search across session transcripts. Uses SQLite FTS5 syntax
 (words, "quoted phrases", OR, NOT). Defaults to interactive sessions
 only; pass `session_type: "all"` to include subagents and worktrees.
-Pass `repo` to scope results to a specific repo — accepts bare name
-("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragments.
+
+Key parameters:
+- `query` (required) — FTS5 search query
+- `repo` — scope to a specific repo. Flexible matching: bare name
+  ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragments.
+- `context_before` / `context_after` — number of surrounding messages
+  to include with each hit (default 3 each, like `grep -C`)
+- `context_filter` — `"substantive"` (default) returns only non-noise
+  user/assistant messages as context. `"all"` includes tool calls,
+  system messages, etc.
+- `limit` — max results (default 20)
+
+Each result includes a `message_id` for follow-up queries.
 
 ### mnemo_sessions
 
@@ -126,15 +134,39 @@ prefix. Supports `role` filtering ("user"/"assistant"), `offset`, and
 
 ### mnemo_query
 
-Run a read-only SQL SELECT against the database. Useful for ad-hoc
-analysis. Key tables:
+Run a read-only SQL SELECT (or WITH) against the database. Only
+SELECT/WITH queries are accepted — write operations are rejected.
 
-| Table | Description |
+Key tables and columns:
+
+| Table | Key columns |
 |---|---|
-| `messages` | All indexed messages (id, session_id, project, role, text, timestamp, type, is_noise) |
-| `messages_fts` | FTS5 virtual table (excludes noise). Use `WHERE messages_fts MATCH 'terms'` |
-| `sessions` | View with per-session stats: session_id, project, session_type, total/substantive msg counts, timestamps |
-| `ingest_state` | Tracks ingestion progress per file |
+| `messages` | id, session_id, project, role, text, timestamp, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error |
+| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill — computed from tool_input |
+| `messages_fts` | FTS5 virtual table (excludes noise). `WHERE messages_fts MATCH 'terms'` |
+| `sessions` | View: session_id, project, session_type, repo, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg |
+| `session_summary` | Materialised session stats (trigger-maintained) |
+| `session_meta` | Per-session metadata: repo, cwd, git_branch, work_type, topic |
+
+Content types in `content_type`: `text`, `tool_use`, `tool_result`, `thinking`.
+
+Example queries:
+```sql
+-- All Bash commands in a session
+SELECT tool_command FROM messages WHERE tool_name = 'Bash' AND session_id = ?
+
+-- Files edited across all sessions
+SELECT DISTINCT tool_file_path FROM messages WHERE tool_name = 'Edit'
+
+-- Failed tool calls
+SELECT tool_name, text FROM messages WHERE content_type = 'tool_result' AND is_error = 1
+
+-- Tool call with its result (join via tool_use_id)
+SELECT tu.tool_name, tu.tool_command, tr.text AS result
+FROM messages tu
+JOIN messages tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
+WHERE tu.content_type = 'tool_use' AND tu.tool_name = 'Bash'
+```
 
 Results capped at 100 rows.
 
@@ -143,9 +175,23 @@ Results capped at 100 rows.
 Index statistics — total sessions and messages broken down by session
 type, with noise vs substantive counts.
 
+### mnemo_self
+
+Discover the calling session's ID. Two-phase nonce protocol:
+
+1. Call `mnemo_self` with no arguments — returns a unique nonce
+2. Call `mnemo_self` with `nonce: "<the nonce>"` — returns your session ID
+
+The nonce appears in your transcript and is detected during ingestion.
+Use the resolved session ID with `mnemo_read_session` to read your own
+transcript.
+
 ## Common Patterns
 
 - **Find past decisions**: `mnemo_search` with query `"decided to" OR "went with" OR "chose"`
 - **Recent work on a repo**: `mnemo_sessions` with `repo: "org/repo"` and `limit: 5`
 - **Read a specific session**: `mnemo_sessions` to find the ID, then `mnemo_read_session`
+- **What files were edited**: `mnemo_query` with `SELECT DISTINCT tool_file_path FROM messages WHERE tool_name = 'Edit'`
+- **What commands were run**: `mnemo_query` with `SELECT tool_command FROM messages WHERE tool_name = 'Bash'`
+- **Search within a repo**: `mnemo_search` with `repo: "mnemo"` and a query term
 - **Custom analytics**: `mnemo_query` with SQL — e.g., message volume by day, most active projects

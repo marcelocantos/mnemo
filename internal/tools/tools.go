@@ -17,7 +17,7 @@ import (
 )
 
 // Register adds all mnemo tools to the MCP server.
-func Register(s *server.MCPServer, mem *store.Store) {
+func Register(s *server.MCPServer, mem store.Backend) {
 	s.AddTool(
 		mcp.NewTool("mnemo_search",
 			mcp.WithDescription("Search across Claude Code session transcripts. By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index."),
@@ -95,7 +95,7 @@ Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonc
 	)
 }
 
-func handleSearch(mem *store.Store) server.ToolHandlerFunc {
+func handleSearch(mem store.Backend) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		query, _ := args["query"].(string)
@@ -155,7 +155,7 @@ func handleSearch(mem *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleSessions(mem *store.Store) server.ToolHandlerFunc {
+func handleSessions(mem store.Backend) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		sessionType, _ := args["session_type"].(string)
@@ -209,7 +209,7 @@ func handleSessions(mem *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleReadSession(mem *store.Store) server.ToolHandlerFunc {
+func handleReadSession(mem store.Backend) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		sessionID, _ := args["session_id"].(string)
@@ -247,7 +247,7 @@ func handleReadSession(mem *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleQuery(mem *store.Store) server.ToolHandlerFunc {
+func handleQuery(mem store.Backend) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		query, _ := args["query"].(string)
@@ -275,7 +275,7 @@ func handleQuery(mem *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleStats(mem *store.Store) server.ToolHandlerFunc {
+func handleStats(mem store.Backend) server.ToolHandlerFunc {
 	return func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		stats, err := mem.Stats()
 		if err != nil {
@@ -294,7 +294,7 @@ func handleStats(mem *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleSelf(mem *store.Store) server.ToolHandlerFunc {
+func handleSelf(mem store.Backend) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		nonce, _ := args["nonce"].(string)

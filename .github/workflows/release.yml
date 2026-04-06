@@ -76,7 +76,7 @@ jobs:
           update_readme_table: true
           formula_includes: |
             service do
-              run [opt_bin/"mnemo"]
+              run [opt_bin/"mnemo", "serve"]
               keep_alive true
               log_path var/"log/mnemo.log"
               error_log_path var/"log/mnemo.log"
