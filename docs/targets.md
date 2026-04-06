@@ -220,12 +220,30 @@ cross-references PIDs and command patterns against recent session
 activity. Answers "what's eating CPU?" with "session X in repo Y
 has been running a make build for 3 minutes."
 
+#### 🎯T9.6 Cross-session decision recall (`mnemo_decisions`)
+
+Surface past decisions across all sessions. During ingest, detect
+decision patterns: user confirmation ("yes", "lgtm", "go", "do it",
+"that works") following a substantive assistant proposal. Store the
+pair (proposal + confirmation) in a `decisions` table with FTS5
+indexing on the proposal text.
+
+`mnemo_decisions` searches the decisions table — "relay protocol"
+finds the proposal where the assistant laid out the relay design and
+the user confirmed, even though "decide" never appears in the text.
+
+No RAG/embeddings needed for v1. The detection heuristic + dedicated
+FTS table covers the common case. Embeddings can upgrade ranking
+later if keyword search proves insufficient.
+
 **Acceptance criteria:**
 - Field census shows 0 unindexed high-frequency fields (> 1% of entries).
 - `mnemo_usage` returns daily token breakdown with cost estimates.
 - `mnemo_permissions` suggests concrete allowedTools rules.
 - `mnemo_who_ran "make"` returns session + repo + timestamp.
 - `mnemo_whatsup` correlates system load with session activity.
+- `mnemo_decisions "relay protocol"` returns the proposal + confirmation
+  with session context.
 
 ### 🎯T8 sqldeep integration
 
