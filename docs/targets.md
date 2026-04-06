@@ -68,8 +68,9 @@ PRs) to produce a unified view of where active work is happening.
 - **Value**: 5
 - **Cost**: 3
 - **Weight**: 1.7 (value 5 / cost 3)
-- **Status**: identified
+- **Status**: achieved
 - **Discovered**: 2026-04-06
+- **Achieved**: 2026-04-06
 
 **Desired state:** mnemo can read and search within individual session
 transcripts. Absorbs jevon's `transcript_read` functionality.
