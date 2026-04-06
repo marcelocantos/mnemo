@@ -39,6 +39,17 @@ func Register(s *server.MCPServer, mem *store.Store) {
 	)
 
 	s.AddTool(
+		mcp.NewTool("mnemo_read_session",
+			mcp.WithDescription("Read messages from a specific session transcript. Returns messages ordered chronologically."),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (the JSONL filename stem, or a prefix)")),
+			mcp.WithString("role", mcp.Description(`Filter by role: "user" or "assistant". Omit for all roles.`)),
+			mcp.WithNumber("offset", mcp.Description("Skip first N messages (default 0)")),
+			mcp.WithNumber("limit", mcp.Description("Max messages to return (default 50)")),
+		),
+		handleReadSession(mem),
+	)
+
+	s.AddTool(
 		mcp.NewTool("mnemo_query",
 			mcp.WithDescription(`Run a read-only SQL query against the transcript database.
 
@@ -146,6 +157,44 @@ func handleSessions(mem *store.Store) server.ToolHandlerFunc {
 			}
 			fmt.Fprintf(&b, "%-10s %-8s %-14s %5d %5d  %-20s  %s\n",
 				sid, si.SessionType, proj, si.TotalMsgs, si.SubstantiveMsgs, lastMsg, firstMsg)
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+}
+
+func handleReadSession(mem *store.Store) server.ToolHandlerFunc {
+	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		sessionID, _ := args["session_id"].(string)
+		if sessionID == "" {
+			return mcp.NewToolResultError("session_id is required"), nil
+		}
+		role, _ := args["role"].(string)
+		offset := 0
+		if o, ok := args["offset"].(float64); ok && o >= 0 {
+			offset = int(o)
+		}
+		limit := 50
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+
+		messages, err := mem.ReadSession(sessionID, role, offset, limit)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("read session failed: %v", err)), nil
+		}
+
+		if len(messages) == 0 {
+			return mcp.NewToolResultText("No messages found for session " + sessionID), nil
+		}
+
+		var b strings.Builder
+		for _, m := range messages {
+			marker := ""
+			if m.IsNoise {
+				marker = " [noise]"
+			}
+			fmt.Fprintf(&b, "[%s]%s %s\n%s\n\n", m.Role, marker, m.Timestamp, m.Text)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}

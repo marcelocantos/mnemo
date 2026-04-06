@@ -421,6 +421,97 @@ func (s *Store) Stats() (*StatsResult, error) {
 	return &result, nil
 }
 
+// SessionMessage is a single message from a session transcript.
+type SessionMessage struct {
+	ID        int    `json:"id"`
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"`
+	IsNoise   bool   `json:"is_noise"`
+}
+
+// ReadSession returns messages from a specific session, ordered by ID.
+func (s *Store) ReadSession(sessionID string, role string, offset int, limit int) ([]SessionMessage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Resolve prefix: if exact match fails, try prefix.
+	resolvedID, err := s.resolveSessionID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	where := []string{"session_id = ?"}
+	args := []any{resolvedID}
+
+	if role != "" {
+		where = append(where, "role = ?")
+		args = append(args, role)
+	}
+
+	args = append(args, limit, offset)
+
+	q := `SELECT id, role, text, timestamp, is_noise FROM messages
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY id ASC
+		LIMIT ? OFFSET ?`
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SessionMessage
+	for rows.Next() {
+		var m SessionMessage
+		var noise int
+		if err := rows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp, &noise); err != nil {
+			continue
+		}
+		m.IsNoise = noise != 0
+		results = append(results, m)
+	}
+	return results, nil
+}
+
+// resolveSessionID resolves a full or prefix session ID to an exact session ID.
+func (s *Store) resolveSessionID(id string) (string, error) {
+	// Try exact match first.
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = ? LIMIT 1", id).Scan(&count)
+	if err != nil {
+		return "", err
+	}
+	if count > 0 {
+		return id, nil
+	}
+
+	// Try prefix match.
+	rows, err := s.db.Query("SELECT DISTINCT session_id FROM messages WHERE session_id LIKE ? LIMIT 2", id+"%")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var matches []string
+	for rows.Next() {
+		var sid string
+		rows.Scan(&sid)
+		matches = append(matches, sid)
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no session found matching %q", id)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous session prefix %q: matches %s and others", id, matches[0])
+	}
+}
+
 // Query runs a read-only SQL query and returns rows as maps.
 func (s *Store) Query(query string) ([]map[string]any, error) {
 	rows, err := s.db.Query(query)
