@@ -135,11 +135,13 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE TABLE IF NOT EXISTS session_summary (
 			session_id TEXT PRIMARY KEY,
 			project TEXT NOT NULL,
+			session_type TEXT NOT NULL DEFAULT 'interactive',
 			total_msgs INTEGER NOT NULL DEFAULT 0,
 			substantive_msgs INTEGER NOT NULL DEFAULT 0,
 			first_msg TEXT NOT NULL DEFAULT '',
 			last_msg TEXT NOT NULL DEFAULT ''
 		);
+		CREATE INDEX IF NOT EXISTS idx_session_summary_type ON session_summary(session_type);
 	`)
 	if err != nil {
 		db.Close()
@@ -169,8 +171,10 @@ func New(dbPath, projectDir string) (*Store, error) {
 			SELECT new.id, new.text, new.role, new.project, new.session_id
 			WHERE new.is_noise = 0;
 
-			INSERT INTO session_summary (session_id, project, total_msgs, substantive_msgs, first_msg, last_msg)
-			VALUES (new.session_id, new.project, 1,
+			INSERT INTO session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
+			VALUES (new.session_id, new.project,
+				` + sessionTypeSQL("new.project") + `,
+				1,
 				CASE WHEN new.is_noise = 0 THEN 1 ELSE 0 END,
 				new.timestamp, new.timestamp)
 			ON CONFLICT(session_id) DO UPDATE SET
@@ -191,7 +195,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		SELECT
 			ss.session_id,
 			ss.project,
-			` + sessionTypeSQL("ss.project") + ` AS session_type,
+			ss.session_type,
 			COALESCE(sm.repo, '') AS repo,
 			COALESCE(sm.git_branch, '') AS git_branch,
 			COALESCE(sm.work_type, '') AS work_type,
@@ -306,9 +310,10 @@ func migrateSessionSummary(db *sql.DB) error {
 	slog.Info("backfilling session_summary from existing messages", "messages", msgCount)
 
 	_, err := db.Exec(`
-		INSERT INTO session_summary (session_id, project, total_msgs, substantive_msgs, first_msg, last_msg)
+		INSERT INTO session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
 		SELECT
 			session_id, project,
+			` + sessionTypeSQL("project") + `,
 			COUNT(*),
 			SUM(CASE WHEN is_noise = 0 THEN 1 ELSE 0 END),
 			MIN(timestamp),
@@ -331,12 +336,24 @@ func (s *Store) Close() error {
 
 // IngestAll scans the project directory and ingests all JSONL files.
 func (s *Store) IngestAll() error {
-	return filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
 		return s.ingestFile(path)
 	})
+	if err != nil {
+		return err
+	}
+
+	// Merge FTS5 segments for optimal search performance.
+	s.rwmu.Lock()
+	_, ftsErr := s.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
+	s.rwmu.Unlock()
+	if ftsErr != nil {
+		slog.Warn("FTS5 optimize failed", "err", ftsErr)
+	}
+	return nil
 }
 
 // Watch watches for new/modified JSONL files and ingests them in realtime.
@@ -349,7 +366,9 @@ func (s *Store) Watch() error {
 
 	filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
 		if err == nil && info.IsDir() {
-			watcher.Add(path)
+			if wErr := watcher.Add(path); wErr != nil {
+				slog.Warn("failed to watch directory", "path", path, "err", wErr)
+			}
 		}
 		return nil
 	})
@@ -370,7 +389,9 @@ func (s *Store) Watch() error {
 			}
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					watcher.Add(event.Name)
+					if wErr := watcher.Add(event.Name); wErr != nil {
+						slog.Warn("failed to watch new directory", "path", event.Name, "err", wErr)
+					}
 				}
 			}
 		case err, ok := <-watcher.Errors:
@@ -412,8 +433,9 @@ func (s *Store) Search(query string, limit int, sessionType string) ([]SearchRes
 			SELECT m.session_id, m.project, m.role, m.text, m.timestamp, rank
 			FROM messages_fts f
 			JOIN messages m ON m.id = f.rowid
+			JOIN session_summary ss ON ss.session_id = m.session_id
 			WHERE messages_fts MATCH ?
-			  AND (` + sessionTypeSQL("m.project") + `) = ?
+			  AND ss.session_type = ?
 			ORDER BY rank
 			LIMIT ?
 		`
@@ -508,22 +530,14 @@ func (s *Store) Stats() (*StatsResult, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
-	var result StatsResult
-
-	err := s.db.QueryRow("SELECT COUNT(DISTINCT session_id), COUNT(*) FROM messages").
-		Scan(&result.TotalSessions, &result.TotalMessages)
-	if err != nil {
-		return nil, err
-	}
-
 	rows, err := s.db.Query(`
 		SELECT
-			` + sessionTypeSQL("project") + ` AS session_type,
-			COUNT(DISTINCT session_id) AS sessions,
-			COUNT(*) AS total_msgs,
-			SUM(CASE WHEN is_noise = 0 THEN 1 ELSE 0 END) AS substantive_msgs,
-			SUM(CASE WHEN is_noise = 1 THEN 1 ELSE 0 END) AS noise_msgs
-		FROM messages
+			session_type,
+			COUNT(*) AS sessions,
+			SUM(total_msgs) AS total_msgs,
+			SUM(substantive_msgs) AS substantive_msgs,
+			SUM(total_msgs - substantive_msgs) AS noise_msgs
+		FROM session_summary
 		GROUP BY session_type
 		ORDER BY sessions DESC
 	`)
@@ -532,12 +546,15 @@ func (s *Store) Stats() (*StatsResult, error) {
 	}
 	defer rows.Close()
 
+	var result StatsResult
 	for rows.Next() {
 		var ts TypeStats
 		if err := rows.Scan(&ts.SessionType, &ts.Sessions, &ts.TotalMsgs,
 			&ts.SubstantiveMsgs, &ts.NoiseMsgs); err != nil {
 			continue
 		}
+		result.TotalSessions += ts.Sessions
+		result.TotalMessages += ts.TotalMsgs
 		result.ByType = append(result.ByType, ts)
 	}
 	return &result, nil
@@ -603,18 +620,18 @@ func (s *Store) ReadSession(sessionID string, role string, offset int, limit int
 
 // resolveSessionID resolves a full or prefix session ID to an exact session ID.
 func (s *Store) resolveSessionID(id string) (string, error) {
-	// Try exact match first.
-	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = ? LIMIT 1", id).Scan(&count)
-	if err != nil {
-		return "", err
-	}
-	if count > 0 {
+	// Try exact match first (session_summary has one row per session).
+	var exists int
+	err := s.db.QueryRow("SELECT 1 FROM session_summary WHERE session_id = ?", id).Scan(&exists)
+	if err == nil {
 		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
 	}
 
 	// Try prefix match.
-	rows, err := s.db.Query("SELECT DISTINCT session_id FROM messages WHERE session_id LIKE ? LIMIT 2", id+"%")
+	rows, err := s.db.Query("SELECT session_id FROM session_summary WHERE session_id LIKE ? LIMIT 2", id+"%")
 	if err != nil {
 		return "", err
 	}
@@ -639,6 +656,12 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 
 // Query runs a read-only SQL query and returns rows as maps.
 func (s *Store) Query(query string) ([]map[string]any, error) {
+	q := strings.TrimSpace(query)
+	upper := strings.ToUpper(q)
+	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
+		return nil, fmt.Errorf("only SELECT and WITH queries are allowed")
+	}
+
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
@@ -672,12 +695,20 @@ func (s *Store) Query(query string) ([]map[string]any, error) {
 }
 
 func backfillSessionMeta(db *sql.DB, projectDir string) {
+	// Quick check: any sessions missing metadata?
+	var missing int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM session_summary ss
+		WHERE NOT EXISTS (SELECT 1 FROM session_meta sm WHERE sm.session_id = ss.session_id)
+	`).Scan(&missing); err != nil || missing == 0 {
+		return
+	}
+
 	// Find sessions without metadata.
 	rows, err := db.Query(`
-		SELECT DISTINCT m.session_id, m.project
-		FROM messages m
-		LEFT JOIN session_meta sm ON sm.session_id = m.session_id
-		WHERE sm.session_id IS NULL
+		SELECT ss.session_id, ss.project
+		FROM session_summary ss
+		WHERE NOT EXISTS (SELECT 1 FROM session_meta sm WHERE sm.session_id = ss.session_id)
 	`)
 	if err != nil {
 		slog.Warn("backfill query failed", "err", err)
@@ -736,28 +767,27 @@ func extractMetaFromFile(path string) (cwd, branch, topic string) {
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
 	for scanner.Scan() {
-		var entry map[string]any
+		var entry jsonlEntry
 		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
 			continue
 		}
-		if c, _ := entry["cwd"].(string); c != "" && cwd == "" {
-			cwd = c
+		if entry.Cwd != "" && cwd == "" {
+			cwd = entry.Cwd
 		}
-		if b, _ := entry["gitBranch"].(string); b != "" && branch == "" {
-			branch = b
+		if entry.GitBranch != "" && branch == "" {
+			branch = entry.GitBranch
 		}
 
 		// Extract topic from first substantive user message.
-		if topic == "" {
-			if typ, _ := entry["type"].(string); typ == "user" {
-				if msg, _ := entry["message"].(map[string]any); msg != nil {
-					text := extractText(msg)
-					if len(text) >= 10 && !isNoise(text) && !isBoilerplate(text) {
-						topic = text
-						if len(topic) > 200 {
-							topic = topic[:197] + "..."
-						}
+		if topic == "" && entry.Type == "user" {
+			texts := extractTexts(entry.Message)
+			for _, text := range texts {
+				if len(text) >= 10 && !isNoise(text) && !isBoilerplate(text) {
+					topic = text
+					if len(topic) > 200 {
+						topic = topic[:197] + "..."
 					}
+					break
 				}
 			}
 		}
@@ -767,24 +797,6 @@ func extractMetaFromFile(path string) (cwd, branch, topic string) {
 		}
 	}
 	return
-}
-
-// extractText pulls text content from a message's content field.
-func extractText(msg map[string]any) string {
-	switch content := msg["content"].(type) {
-	case string:
-		return content
-	case []any:
-		for _, c := range content {
-			cm, _ := c.(map[string]any)
-			if cm["type"] == "text" {
-				if text, _ := cm["text"].(string); text != "" {
-					return text
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // repoPattern extracts org/repo from paths like /Users/.../github.com/org/repo/...
@@ -869,8 +881,57 @@ func isNoise(text string) bool {
 	return false
 }
 
-// isBoilerplate returns true if the text looks like a slash-command
-// skill expansion rather than genuine user input.
+// jsonlEntry is the minimal structure of a JSONL transcript line.
+// Using a typed struct avoids map[string]any allocations during ingest.
+type jsonlEntry struct {
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Cwd       string          `json:"cwd"`
+	GitBranch string          `json:"gitBranch"`
+	Message   json.RawMessage `json:"message"`
+}
+
+// jsonlMessage is the message field within a JSONL entry.
+type jsonlMessage struct {
+	Content json.RawMessage `json:"content"`
+}
+
+// jsonlContentBlock is a typed content block within a message.
+type jsonlContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// extractTexts extracts all text content from a raw message JSON.
+func extractTexts(raw json.RawMessage) []string {
+	var msg jsonlMessage
+	if json.Unmarshal(raw, &msg) != nil || msg.Content == nil {
+		return nil
+	}
+
+	// Try string content first.
+	var s string
+	if json.Unmarshal(msg.Content, &s) == nil {
+		if s != "" {
+			return []string{s}
+		}
+		return nil
+	}
+
+	// Try array of content blocks.
+	var blocks []jsonlContentBlock
+	if json.Unmarshal(msg.Content, &blocks) == nil {
+		var texts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				texts = append(texts, b.Text)
+			}
+		}
+		return texts
+	}
+	return nil
+}
+
 // isBoilerplate returns true if the text is system/skill boilerplate
 // rather than genuine user input — unsuitable as a session topic.
 func isBoilerplate(text string) bool {
@@ -932,66 +993,47 @@ func (s *Store) ingestFile(path string) error {
 			continue
 		}
 
-		var entry map[string]any
+		var entry jsonlEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
 
 		// Extract session metadata from any entry.
-		if cwd, _ := entry["cwd"].(string); cwd != "" && metaCwd == "" {
-			metaCwd = cwd
+		if entry.Cwd != "" && metaCwd == "" {
+			metaCwd = entry.Cwd
 		}
-		if branch, _ := entry["gitBranch"].(string); branch != "" && metaBranch == "" {
-			metaBranch = branch
+		if entry.GitBranch != "" && metaBranch == "" {
+			metaBranch = entry.GitBranch
 		}
 
-		typ, _ := entry["type"].(string)
-		if typ != "user" && typ != "assistant" {
+		if entry.Type != "user" && entry.Type != "assistant" {
 			continue
 		}
 
-		msg, _ := entry["message"].(map[string]any)
-		if msg == nil {
+		texts := extractTexts(entry.Message)
+		if len(texts) == 0 {
 			continue
 		}
 
-		ts, _ := entry["timestamp"].(string)
+		ts := entry.Timestamp
 		if ts == "" {
 			ts = time.Now().Format(time.RFC3339)
 		}
 
-		role := typ
-
-		insertMsg := func(text string) {
+		for _, text := range texts {
 			noise := 0
 			if isNoise(text) {
 				noise = 1
 			}
 			// Capture first substantive user message as topic.
-			if metaTopic == "" && role == "user" && noise == 0 && len(text) >= 10 && !isBoilerplate(text) {
+			if metaTopic == "" && entry.Type == "user" && noise == 0 && len(text) >= 10 && !isBoilerplate(text) {
 				metaTopic = text
 				if len(metaTopic) > 200 {
 					metaTopic = metaTopic[:197] + "..."
 				}
 			}
-			stmt.Exec(sessionID, project, role, text, ts, typ, noise)
+			stmt.Exec(sessionID, project, entry.Type, text, ts, entry.Type, noise)
 			count++
-		}
-
-		switch content := msg["content"].(type) {
-		case string:
-			if content != "" {
-				insertMsg(content)
-			}
-		case []any:
-			for _, c := range content {
-				cm, _ := c.(map[string]any)
-				if cm["type"] == "text" {
-					if text, _ := cm["text"].(string); text != "" {
-						insertMsg(text)
-					}
-				}
-			}
 		}
 
 		// Periodically yield the write lock so readers aren't starved.

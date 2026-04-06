@@ -324,6 +324,25 @@ func TestQuery(t *testing.T) {
 	if !ok || cnt != 2 {
 		t.Errorf("expected count=2, got %v", rows[0]["cnt"])
 	}
+
+	// Write queries must be rejected.
+	_, err = s.Query("DELETE FROM messages")
+	if err == nil {
+		t.Error("expected error for DELETE query")
+	}
+	_, err = s.Query("DROP TABLE messages")
+	if err == nil {
+		t.Error("expected error for DROP query")
+	}
+
+	// WITH (CTE) queries should work.
+	rows, err = s.Query("WITH s AS (SELECT COUNT(*) AS c FROM messages) SELECT c FROM s")
+	if err != nil {
+		t.Fatalf("expected WITH query to work, got %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row from CTE, got %d", len(rows))
+	}
 }
 
 func TestSessionMetadata(t *testing.T) {
