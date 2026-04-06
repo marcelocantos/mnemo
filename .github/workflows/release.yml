@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          go build -tags "sqlite_fts5" \
+            -ldflags "-s -w" \
+            -o mnemo .
+          tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" mnemo
+
+      - name: Upload release artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -tags "sqlite_fts5" ./...
+
+  homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Justintime50/homebrew-releaser@v3
+        with:
+          homebrew_owner: marcelocantos
+          homebrew_tap: homebrew-tap
+          github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          formula_folder: Formula
+          version: ${{ github.event.release.tag_name }}
+          install: 'bin.install "mnemo" => "mnemo"'
+          target_darwin_arm64: true
+          target_linux_amd64: true
+          target_linux_arm64: true
+          test: 'system bin/"mnemo", "--version"'
+          skip_checksum: true
+          update_readme_table: true
