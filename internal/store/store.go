@@ -30,6 +30,8 @@ type Store struct {
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
+
+	rwmu sync.RWMutex // protects db access: writers (ingest), readers (queries)
 }
 
 // SearchResult is a single search hit.
@@ -85,10 +87,11 @@ END`
 
 // New creates or opens a transcript store.
 func New(dbPath, projectDir string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL")
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
@@ -303,6 +306,9 @@ func (s *Store) Watch() error {
 
 // Search performs a full-text search and returns matching messages.
 func (s *Store) Search(query string, limit int, sessionType string) ([]SearchResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
 	if limit <= 0 {
 		limit = 20
 	}
@@ -358,6 +364,9 @@ func (s *Store) Search(query string, limit int, sessionType string) ([]SearchRes
 
 // ListSessions returns session summaries, filtered and sorted.
 func (s *Store) ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]SessionInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
 	if sessionType == "" {
 		sessionType = "interactive"
 	}
@@ -418,6 +427,9 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 
 // Stats returns detailed index statistics broken down by session type.
 func (s *Store) Stats() (*StatsResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
 	var result StatsResult
 
 	err := s.db.QueryRow("SELECT COUNT(DISTINCT session_id), COUNT(*) FROM messages").
@@ -464,6 +476,9 @@ type SessionMessage struct {
 
 // ReadSession returns messages from a specific session, ordered by ID.
 func (s *Store) ReadSession(sessionID string, role string, offset int, limit int) ([]SessionMessage, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
 	if limit <= 0 {
 		limit = 50
 	}
@@ -546,6 +561,9 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 
 // Query runs a read-only SQL query and returns rows as maps.
 func (s *Store) Query(query string) ([]map[string]any, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -808,6 +826,9 @@ func (s *Store) ingestFile(path string) error {
 
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
