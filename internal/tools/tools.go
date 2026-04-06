@@ -23,6 +23,7 @@ func Register(s *server.MCPServer, mem *store.Store) {
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query (FTS5 syntax: words, phrases in quotes, OR, NOT)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
+			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
 		),
 		handleSearch(mem),
 	)
@@ -86,12 +87,13 @@ func handleSearch(mem *store.Store) server.ToolHandlerFunc {
 			limit = int(l)
 		}
 		sessionType, _ := args["session_type"].(string)
+		repoFilter, _ := args["repo"].(string)
 
 		if query == "" {
 			return mcp.NewToolResultError("query is required"), nil
 		}
 
-		results, err := mem.Search(query, limit, sessionType)
+		results, err := mem.Search(query, limit, sessionType, repoFilter)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}

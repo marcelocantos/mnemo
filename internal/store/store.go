@@ -404,7 +404,7 @@ func (s *Store) Watch() error {
 }
 
 // Search performs a full-text search and returns matching messages.
-func (s *Store) Search(query string, limit int, sessionType string) ([]SearchResult, error) {
+func (s *Store) Search(query string, limit int, sessionType, repoFilter string) ([]SearchResult, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
@@ -415,32 +415,36 @@ func (s *Store) Search(query string, limit int, sessionType string) ([]SearchRes
 		sessionType = "interactive"
 	}
 
-	var sqlQuery string
-	var args []any
+	// Build WHERE clauses and JOINs dynamically.
+	where := []string{"messages_fts MATCH ?"}
+	args := []any{query}
+	joins := "JOIN messages m ON m.id = f.rowid"
 
-	if sessionType == "all" {
-		sqlQuery = `
-			SELECT m.session_id, m.project, m.role, m.text, m.timestamp, rank
-			FROM messages_fts f
-			JOIN messages m ON m.id = f.rowid
-			WHERE messages_fts MATCH ?
-			ORDER BY rank
-			LIMIT ?
-		`
-		args = []any{query, limit}
-	} else {
-		sqlQuery = `
-			SELECT m.session_id, m.project, m.role, m.text, m.timestamp, rank
-			FROM messages_fts f
-			JOIN messages m ON m.id = f.rowid
-			JOIN session_summary ss ON ss.session_id = m.session_id
-			WHERE messages_fts MATCH ?
-			  AND ss.session_type = ?
-			ORDER BY rank
-			LIMIT ?
-		`
-		args = []any{query, sessionType, limit}
+	needSessionSummary := sessionType != "all"
+	needSessionMeta := repoFilter != ""
+
+	if needSessionSummary {
+		joins += "\nJOIN session_summary ss ON ss.session_id = m.session_id"
+		where = append(where, "ss.session_type = ?")
+		args = append(args, sessionType)
 	}
+	if needSessionMeta {
+		joins += "\nJOIN session_meta sm ON sm.session_id = m.session_id"
+		where = append(where, "(sm.cwd LIKE ? OR sm.repo LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+
+	args = append(args, limit)
+
+	sqlQuery := `
+		SELECT m.session_id, m.project, m.role, m.text, m.timestamp, rank
+		FROM messages_fts f
+		` + joins + `
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY rank
+		LIMIT ?
+	`
 
 	rows, err := s.db.Query(sqlQuery, args...)
 	if err != nil {
