@@ -8,9 +8,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
+
+// maxLatency is the maximum acceptable time for any single RPC call
+// in the test suite. Tests fail if any operation exceeds this.
+const maxLatency = 200 * time.Millisecond
+
+// timed runs f and fails if it takes longer than maxLatency.
+func timed(t *testing.T, name string, f func()) {
+	t.Helper()
+	start := time.Now()
+	f()
+	dur := time.Since(start)
+	if dur > maxLatency {
+		t.Errorf("%s took %v (max %v)", name, dur, maxLatency)
+	}
+}
 
 // writeJSONL writes transcript entries as a JSONL file.
 func writeJSONL(t *testing.T, dir, project, sessionID string, entries []map[string]any) {
@@ -146,7 +162,11 @@ func TestRPCSearch(t *testing.T) {
 	client := setupTestServer(t)
 	proxy := NewProxy(client)
 
-	results, err := proxy.Search("authentication", 10, "all", "", 1, 1, false)
+	var results []store.SearchResult
+	var err error
+	timed(t, "Search with context", func() {
+		results, err = proxy.Search("authentication", 10, "all", "", 1, 1, false)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +186,11 @@ func TestRPCListSessions(t *testing.T) {
 	client := setupTestServer(t)
 	proxy := NewProxy(client)
 
-	sessions, err := proxy.ListSessions("all", 1, 30, "", "", "")
+	var sessions []store.SessionInfo
+	var err error
+	timed(t, "ListSessions", func() {
+		sessions, err = proxy.ListSessions("all", 1, 30, "", "", "")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +203,11 @@ func TestRPCReadSession(t *testing.T) {
 	client := setupTestServer(t)
 	proxy := NewProxy(client)
 
-	msgs, err := proxy.ReadSession("sess-rpc-test", "", 0, 50)
+	var msgs []store.SessionMessage
+	var err error
+	timed(t, "ReadSession", func() {
+		msgs, err = proxy.ReadSession("sess-rpc-test", "", 0, 50)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +229,11 @@ func TestRPCQuery(t *testing.T) {
 	client := setupTestServer(t)
 	proxy := NewProxy(client)
 
-	rows, err := proxy.Query("SELECT tool_name, tool_file_path FROM messages WHERE tool_name = 'Edit'")
+	var rows []map[string]any
+	var err error
+	timed(t, "Query", func() {
+		rows, err = proxy.Query("SELECT tool_name, tool_file_path FROM messages WHERE tool_name = 'Edit'")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +252,11 @@ func TestRPCStats(t *testing.T) {
 	client := setupTestServer(t)
 	proxy := NewProxy(client)
 
-	stats, err := proxy.Stats()
+	var stats *store.StatsResult
+	var err error
+	timed(t, "Stats", func() {
+		stats, err = proxy.Stats()
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,5 +387,77 @@ func TestRPCReadSessionNotFound(t *testing.T) {
 	_, err := proxy.ReadSession("nonexistent-session-id", "", 0, 10)
 	if err == nil {
 		t.Error("expected error for nonexistent session")
+	}
+}
+
+func TestRPCPerformance(t *testing.T) {
+	client := setupTestServer(t)
+	proxy := NewProxy(client)
+
+	ops := []struct {
+		name string
+		fn   func() error
+	}{
+		{"Search", func() error {
+			_, err := proxy.Search("authentication", 10, "all", "", 0, 0, false)
+			return err
+		}},
+		{"Search+context", func() error {
+			_, err := proxy.Search("authentication", 10, "all", "", 3, 3, true)
+			return err
+		}},
+		{"Search+repo", func() error {
+			_, err := proxy.Search("authentication", 10, "all", "acme/webapp", 0, 0, false)
+			return err
+		}},
+		{"ListSessions", func() error {
+			_, err := proxy.ListSessions("all", 1, 30, "", "", "")
+			return err
+		}},
+		{"ListSessions+repo", func() error {
+			_, err := proxy.ListSessions("all", 1, 30, "", "acme/webapp", "")
+			return err
+		}},
+		{"ReadSession", func() error {
+			_, err := proxy.ReadSession("sess-rpc-test", "", 0, 50)
+			return err
+		}},
+		{"ReadSession+prefix", func() error {
+			_, err := proxy.ReadSession("sess-rpc-te", "", 0, 1)
+			return err
+		}},
+		{"Query", func() error {
+			_, err := proxy.Query("SELECT COUNT(*) FROM messages")
+			return err
+		}},
+		{"Query+tool_join", func() error {
+			_, err := proxy.Query(`
+				SELECT tu.tool_name, tr.text
+				FROM messages tu
+				JOIN messages tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
+				WHERE tu.content_type = 'tool_use'
+			`)
+			return err
+		}},
+		{"Query+computed_col", func() error {
+			_, err := proxy.Query("SELECT tool_file_path FROM messages WHERE tool_file_path IS NOT NULL")
+			return err
+		}},
+		{"Stats", func() error {
+			_, err := proxy.Stats()
+			return err
+		}},
+	}
+
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			var err error
+			timed(t, op.name, func() {
+				err = op.fn()
+			})
+			if err != nil {
+				t.Fatalf("%s failed: %v", op.name, err)
+			}
+		})
 	}
 }
