@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1368,6 +1369,9 @@ func (s *Store) ingestFile(path string) error {
 
 	f, err := os.Open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // file deleted between event and open
+		}
 		return err
 	}
 	defer f.Close()
