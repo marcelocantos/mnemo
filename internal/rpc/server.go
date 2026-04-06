@@ -61,6 +61,22 @@ func (s *Server) handleConn(conn net.Conn) {
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
 	enc := json.NewEncoder(conn)
 
+	// Read and validate handshake.
+	if !scanner.Scan() {
+		return
+	}
+	var hs Handshake
+	if err := json.Unmarshal(scanner.Bytes(), &hs); err != nil {
+		enc.Encode(Response{Error: fmt.Sprintf("invalid handshake: %v", err)})
+		return
+	}
+	serverHash := BinaryHash()
+	if serverHash != "" && hs.BinaryHash != "" && hs.BinaryHash != serverHash {
+		enc.Encode(Response{Error: "binary mismatch: the mnemo proxy and serve processes are different binaries — restart the service with 'brew services restart mnemo'"})
+		return
+	}
+	enc.Encode(Response{Result: []byte(`"ok"`)})
+
 	for scanner.Scan() {
 		var req Request
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
