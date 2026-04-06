@@ -15,11 +15,16 @@ memory system for Claude Code sessions — remembering decisions,
 preferences, and project context across sessions. Not just "what was
 said" but "what was decided" and "what matters for next time."
 
+**Note:** 🎯T10 (live context compaction) addresses the core of this
+target — a summarisation layer that distills sessions into key facts,
+available instantly across /clear boundaries. Once 🎯T10 is achieved,
+reassess whether 🎯T1 has residual scope or should be retired.
+
 **Open questions:**
 - What's the data model beyond raw transcript messages?
 - Should it extract and index decisions, action items, code changes?
 - How does it relate to Claude's auto-memory (MEMORY.md files)?
-- Is there a summarisation layer that distills sessions into key facts?
+- Is there a summarisation layer that distills sessions into key facts? → See 🎯T10.
 
 ### 🎯T2 Smarter session classification
 
@@ -285,6 +290,77 @@ later if keyword search proves insufficient.
 - `mnemo_whatsup` correlates system load with session activity.
 - `mnemo_decisions "relay protocol"` returns the proposal + confirmation
   with session context.
+
+### 🎯T10 Live context compaction
+
+- **Value**: 10
+- **Cost**: 8
+- **Weight**: 1.25 (value 10 / cost 8)
+- **Status**: identified
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T1 (subsumes "broader memory"), 🎯T9.6 (decision recall becomes a compaction output)
+- **Depends**: jevon `claude.Process` / `manager.Manager` for Claude instance lifecycle
+
+**Desired state:** mnemo maintains a live compacted context for each
+active session. When a session `/clear`s (or a new session starts in
+the same project), the compacted context is available instantly via
+`mnemo_restore` — no multi-round search/summarize needed. The /clear
+firewall becomes nearly free.
+
+**Architecture:**
+
+The mnemo daemon spawns a Sonnet summarizer instance (via jevon's
+`Manager`/`Process` API) per active session. The summarizer:
+
+1. Receives fixed-size batches of new transcript lines as they appear.
+2. Maintains a rolling compacted context in its conversation head —
+   decisions made, files touched, reasoning chains, open threads,
+   target progress, blockers.
+3. On `/clear` detection (command message in JSONL), notes the boundary
+   but keeps its accumulated understanding.
+4. When `mnemo_restore` is called, ingests any final increments and
+   emits the compacted context as structured output.
+5. After idle timeout (configurable, e.g. 10 min), the summarizer
+   instance is reaped. On next activity, a new one bootstraps from
+   raw transcript (or a persisted checkpoint).
+
+**Recursion guard:** Summarizer sessions are spawned with a known
+marker (e.g., `--system-prompt` tag or registry metadata). mnemo
+excludes these session IDs from summarizer spawning. The jevon
+`disallow_tools` mechanism strips `Agent`, `TeamCreate`, etc. to
+prevent summarizers from spawning further processes.
+
+**Session continuity:** `/clear` does not change the session ID —
+the JSONL file and UUID persist. A single summarizer instance tracks
+the full session lifecycle across multiple /clear cycles.
+
+**Compaction output structure** (v1):
+```json
+{
+  "session_id": "...",
+  "project": "...",
+  "repo": "...",
+  "targets_active": ["🎯T3", "🎯T10"],
+  "targets_progressed": {"🎯T10": "target created, architecture designed"},
+  "decisions": [
+    {"what": "Use jevon Process API for summarizer lifecycle", "why": "..."}
+  ],
+  "files_touched": ["docs/targets.md", "internal/tools/tools.go"],
+  "open_threads": ["Need to design checkpoint persistence format"],
+  "next_steps": ["Implement mnemo_restore tool", "Add summarizer spawn logic"],
+  "key_context": "Free-text summary of important reasoning and context"
+}
+```
+
+**Acceptance criteria:**
+- Summarizer spawns automatically for active sessions (not for its own sessions).
+- Compacted context available within 2s of `mnemo_restore` call.
+- Compaction survives `/clear` boundaries within a session.
+- Idle reaping cleans up summarizer instances.
+- `mnemo_restore` in a fresh post-clear segment returns useful context
+  covering the pre-clear work.
+- Token cost of summarizer < 10% of the session it tracks (Sonnet
+  on fixed-size batches keeps this lean).
 
 ### 🎯T8 sqldeep integration
 
