@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,9 @@ type SessionInfo struct {
 	SessionID       string `json:"session_id"`
 	Project         string `json:"project"`
 	SessionType     string `json:"session_type"`
+	Repo            string `json:"repo,omitempty"`
+	GitBranch       string `json:"git_branch,omitempty"`
+	WorkType        string `json:"work_type,omitempty"`
 	TotalMsgs       int    `json:"total_msgs"`
 	SubstantiveMsgs int    `json:"substantive_msgs"`
 	FirstMsg        string `json:"first_msg"`
@@ -99,6 +103,13 @@ func New(dbPath, projectDir string) (*Store, error) {
 			path TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS session_meta (
+			session_id TEXT PRIMARY KEY,
+			repo TEXT NOT NULL DEFAULT '',
+			cwd TEXT NOT NULL DEFAULT '',
+			git_branch TEXT NOT NULL DEFAULT '',
+			work_type TEXT NOT NULL DEFAULT ''
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -133,20 +144,28 @@ func New(dbPath, projectDir string) (*Store, error) {
 		DROP VIEW IF EXISTS sessions;
 		CREATE VIEW sessions AS
 		SELECT
-			session_id,
-			project,
-			` + sessionTypeSQL("project") + ` AS session_type,
+			m.session_id,
+			m.project,
+			` + sessionTypeSQL("m.project") + ` AS session_type,
+			COALESCE(sm.repo, '') AS repo,
+			COALESCE(sm.git_branch, '') AS git_branch,
+			COALESCE(sm.work_type, '') AS work_type,
 			COUNT(*) AS total_msgs,
-			SUM(CASE WHEN is_noise = 0 THEN 1 ELSE 0 END) AS substantive_msgs,
-			MIN(timestamp) AS first_msg,
-			MAX(timestamp) AS last_msg
-		FROM messages
-		GROUP BY session_id;
+			SUM(CASE WHEN m.is_noise = 0 THEN 1 ELSE 0 END) AS substantive_msgs,
+			MIN(m.timestamp) AS first_msg,
+			MAX(m.timestamp) AS last_msg
+		FROM messages m
+		LEFT JOIN session_meta sm ON sm.session_id = m.session_id
+		GROUP BY m.session_id;
 	`)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create sessions view: %w", err)
 	}
+
+	// Backfill session_meta for sessions without metadata by
+	// re-reading the first entry of each JSONL file.
+	backfillSessionMeta(db, projectDir)
 
 	s := &Store{
 		db:         db,
@@ -335,7 +354,7 @@ func (s *Store) Search(query string, limit int, sessionType string) ([]SearchRes
 }
 
 // ListSessions returns session summaries, filtered and sorted.
-func (s *Store) ListSessions(sessionType string, minMessages int, limit int, projectFilter string) ([]SessionInfo, error) {
+func (s *Store) ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]SessionInfo, error) {
 	if sessionType == "" {
 		sessionType = "interactive"
 	}
@@ -357,10 +376,19 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 		where = append(where, "project LIKE ?")
 		args = append(args, "%"+projectFilter+"%")
 	}
+	if repoFilter != "" {
+		where = append(where, "repo LIKE ?")
+		args = append(args, "%"+repoFilter+"%")
+	}
+	if workTypeFilter != "" {
+		where = append(where, "work_type = ?")
+		args = append(args, workTypeFilter)
+	}
 
 	args = append(args, limit)
 
-	q := `SELECT session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg
+	q := `SELECT session_id, project, session_type, repo, git_branch, work_type,
+			total_msgs, substantive_msgs, first_msg, last_msg
 		FROM sessions
 		WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY last_msg DESC
@@ -376,6 +404,7 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 	for rows.Next() {
 		var si SessionInfo
 		if err := rows.Scan(&si.SessionID, &si.Project, &si.SessionType,
+			&si.Repo, &si.GitBranch, &si.WorkType,
 			&si.TotalMsgs, &si.SubstantiveMsgs, &si.FirstMsg, &si.LastMsg); err != nil {
 			continue
 		}
@@ -543,6 +572,150 @@ func (s *Store) Query(query string) ([]map[string]any, error) {
 	return results, nil
 }
 
+func backfillSessionMeta(db *sql.DB, projectDir string) {
+	// Find sessions without metadata.
+	rows, err := db.Query(`
+		SELECT DISTINCT m.session_id, m.project
+		FROM messages m
+		LEFT JOIN session_meta sm ON sm.session_id = m.session_id
+		WHERE sm.session_id IS NULL
+	`)
+	if err != nil {
+		slog.Warn("backfill query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	type pending struct {
+		sessionID, project string
+	}
+	var sessions []pending
+	for rows.Next() {
+		var p pending
+		rows.Scan(&p.sessionID, &p.project)
+		sessions = append(sessions, p)
+	}
+	if len(sessions) == 0 {
+		return
+	}
+
+	slog.Info("backfilling session metadata", "sessions", len(sessions))
+
+	tx, _ := db.Begin()
+	defer tx.Rollback()
+
+	stmt, _ := tx.Prepare(`INSERT OR IGNORE INTO session_meta
+		(session_id, repo, cwd, git_branch, work_type) VALUES (?, ?, ?, ?, ?)`)
+	defer stmt.Close()
+
+	filled := 0
+	for _, s := range sessions {
+		path := filepath.Join(projectDir, s.project, s.sessionID+".jsonl")
+		cwd, branch := extractMetaFromFile(path)
+		repo := extractRepo(cwd)
+		workType := classifyWorkType(branch)
+		stmt.Exec(s.sessionID, repo, cwd, branch, workType)
+		if repo != "" {
+			filled++
+		}
+	}
+
+	tx.Commit()
+	slog.Info("backfill complete", "total", len(sessions), "with_repo", filled)
+}
+
+// extractMetaFromFile reads the first few lines of a JSONL file to
+// extract cwd and gitBranch.
+func extractMetaFromFile(path string) (cwd, branch string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+
+	for i := 0; i < 10 && scanner.Scan(); i++ {
+		var entry map[string]any
+		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
+			continue
+		}
+		if c, _ := entry["cwd"].(string); c != "" && cwd == "" {
+			cwd = c
+		}
+		if b, _ := entry["gitBranch"].(string); b != "" && branch == "" {
+			branch = b
+		}
+		if cwd != "" && branch != "" {
+			return
+		}
+	}
+	return
+}
+
+// repoPattern extracts org/repo from paths like /Users/.../github.com/org/repo/...
+var repoPattern = regexp.MustCompile(`/work/github\.com/([^/]+/[^/]+)`)
+
+// extractRepo derives an org/repo string from a working directory path.
+func extractRepo(cwd string) string {
+	m := repoPattern.FindStringSubmatch(cwd)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// classifyWorkType derives a work type from a git branch name.
+func classifyWorkType(branch string) string {
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+
+	b := strings.ToLower(branch)
+
+	// Check prefix patterns.
+	prefixes := map[string]string{
+		"fix/":      "bugfix",
+		"bugfix/":   "bugfix",
+		"hotfix/":   "bugfix",
+		"feature/":  "feature",
+		"feat/":     "feature",
+		"refactor/": "refactor",
+		"chore/":    "chore",
+		"docs/":     "docs",
+		"test/":     "test",
+		"ci/":       "ci",
+		"release/":  "release",
+		"review/":   "review",
+	}
+	for prefix, workType := range prefixes {
+		if strings.HasPrefix(b, prefix) {
+			return workType
+		}
+	}
+
+	// Check if it contains common keywords.
+	keywords := map[string]string{
+		"fix":      "bugfix",
+		"bug":      "bugfix",
+		"feature":  "feature",
+		"refactor": "refactor",
+	}
+	for kw, workType := range keywords {
+		if strings.Contains(b, kw) {
+			return workType
+		}
+	}
+
+	// Default branch = general development.
+	if b == "master" || b == "main" || b == "dev" || b == "develop" {
+		return "development"
+	}
+
+	return "branch-work"
+}
+
 // isNoise returns true if a message text matches noise patterns.
 func isNoise(text string) bool {
 	if strings.Contains(text, "[Request interrupted") {
@@ -585,6 +758,8 @@ func (s *Store) ingestFile(path string) error {
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
 	count := 0
+	var metaCwd, metaBranch string
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -606,6 +781,14 @@ func (s *Store) ingestFile(path string) error {
 		var entry map[string]any
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
+		}
+
+		// Extract session metadata from any entry.
+		if cwd, _ := entry["cwd"].(string); cwd != "" && metaCwd == "" {
+			metaCwd = cwd
+		}
+		if branch, _ := entry["gitBranch"].(string); branch != "" && metaBranch == "" {
+			metaBranch = branch
 		}
 
 		typ, _ := entry["type"].(string)
@@ -649,6 +832,20 @@ func (s *Store) ingestFile(path string) error {
 				}
 			}
 		}
+	}
+
+	// Upsert session metadata.
+	if metaCwd != "" || metaBranch != "" {
+		repo := extractRepo(metaCwd)
+		workType := classifyWorkType(metaBranch)
+		tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
+				cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
+				git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
+				work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END`,
+			sessionID, repo, metaCwd, metaBranch, workType)
 	}
 
 	if err := tx.Commit(); err != nil {

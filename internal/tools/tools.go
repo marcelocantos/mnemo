@@ -34,6 +34,8 @@ func Register(s *server.MCPServer, mem *store.Store) {
 			mcp.WithNumber("min_messages", mcp.Description("Minimum substantive (non-noise) messages to include (default 6)")),
 			mcp.WithNumber("limit", mcp.Description("Max sessions to return (default 30)")),
 			mcp.WithString("project", mcp.Description("Filter by project name substring")),
+			mcp.WithString("repo", mcp.Description("Filter by repo (org/name substring, e.g. \"marcelocantos/mnemo\")")),
+			mcp.WithString("work_type", mcp.Description(`Filter by work type: "development", "feature", "bugfix", "refactor", "chore", "docs", "test", "ci", "release", "review", "branch-work"`)),
 		),
 		handleSessions(mem),
 	)
@@ -124,8 +126,10 @@ func handleSessions(mem *store.Store) server.ToolHandlerFunc {
 			limit = int(l)
 		}
 		projectFilter, _ := args["project"].(string)
+		repoFilter, _ := args["repo"].(string)
+		workTypeFilter, _ := args["work_type"].(string)
 
-		sessions, err := mem.ListSessions(sessionType, minMessages, limit, projectFilter)
+		sessions, err := mem.ListSessions(sessionType, minMessages, limit, projectFilter, repoFilter, workTypeFilter)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("list sessions failed: %v", err)), nil
 		}
@@ -135,28 +139,31 @@ func handleSessions(mem *store.Store) server.ToolHandlerFunc {
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "%-10s %-8s %-14s %5s %5s  %-20s  %s\n",
-			"Session", "Type", "Project", "Msgs", "Subst", "Last Activity", "First Activity")
-		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 90))
+		fmt.Fprintf(&b, "%-10s %-25s %-12s %-11s %5s %5s  %-20s\n",
+			"Session", "Repo", "Work Type", "Sess Type", "Msgs", "Subst", "Last Activity")
+		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 95))
 		for _, si := range sessions {
 			sid := si.SessionID
 			if len(sid) > 10 {
 				sid = sid[:10]
 			}
-			proj := si.Project
-			if len(proj) > 14 {
-				proj = proj[:14]
+			repo := si.Repo
+			if repo == "" {
+				repo = "-"
+			}
+			if len(repo) > 25 {
+				repo = repo[:25]
+			}
+			workType := si.WorkType
+			if workType == "" {
+				workType = "-"
 			}
 			lastMsg := si.LastMsg
 			if len(lastMsg) > 20 {
 				lastMsg = lastMsg[:20]
 			}
-			firstMsg := si.FirstMsg
-			if len(firstMsg) > 20 {
-				firstMsg = firstMsg[:20]
-			}
-			fmt.Fprintf(&b, "%-10s %-8s %-14s %5d %5d  %-20s  %s\n",
-				sid, si.SessionType, proj, si.TotalMsgs, si.SubstantiveMsgs, lastMsg, firstMsg)
+			fmt.Fprintf(&b, "%-10s %-25s %-12s %-11s %5d %5d  %-20s\n",
+				sid, repo, workType, si.SessionType, si.TotalMsgs, si.SubstantiveMsgs, lastMsg)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
