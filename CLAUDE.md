@@ -25,7 +25,7 @@ claude mcp add --scope user mnemo -- /path/to/mnemo
 ## MCP Tools
 
 - `mnemo_search` — Full-text search across transcripts
-- `mnemo_sessions` — List sessions by recency, type, project
+- `mnemo_sessions` — List sessions by recency, type, project, repo, work type
 - `mnemo_read_session` — Read messages from a specific session (supports prefix IDs)
 - `mnemo_query` — Raw SQL against the transcript database
 - `mnemo_stats` — Index statistics

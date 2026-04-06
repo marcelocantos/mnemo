@@ -26,8 +26,9 @@ said" but "what was decided" and "what matters for next time."
 - **Value**: 5
 - **Cost**: 3
 - **Weight**: 1.7 (value 5 / cost 3)
-- **Status**: identified
+- **Status**: achieved
 - **Discovered**: 2026-04-06
+- **Achieved**: 2026-04-06
 
 **Desired state:** Session classification goes beyond path-based
 heuristics. mnemo understands what a session was *about* — which
