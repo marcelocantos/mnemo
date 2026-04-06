@@ -139,9 +139,6 @@ func handleSessions(mem *store.Store) server.ToolHandlerFunc {
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "%-10s %-25s %-12s %-11s %5s %5s  %-20s\n",
-			"Session", "Repo", "Work Type", "Sess Type", "Msgs", "Subst", "Last Activity")
-		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 95))
 		for _, si := range sessions {
 			sid := si.SessionID
 			if len(sid) > 10 {
@@ -151,19 +148,20 @@ func handleSessions(mem *store.Store) server.ToolHandlerFunc {
 			if repo == "" {
 				repo = "-"
 			}
-			if len(repo) > 25 {
-				repo = repo[:25]
-			}
 			workType := si.WorkType
 			if workType == "" {
 				workType = "-"
 			}
 			lastMsg := si.LastMsg
-			if len(lastMsg) > 20 {
-				lastMsg = lastMsg[:20]
+			if len(lastMsg) > 19 {
+				lastMsg = lastMsg[:19]
 			}
-			fmt.Fprintf(&b, "%-10s %-25s %-12s %-11s %5d %5d  %-20s\n",
-				sid, repo, workType, si.SessionType, si.TotalMsgs, si.SubstantiveMsgs, lastMsg)
+			topic := si.Topic
+			if len(topic) > 80 {
+				topic = topic[:77] + "..."
+			}
+			fmt.Fprintf(&b, "%s  %s  %s  %s  %d/%d msgs  %s\n",
+				sid, repo, workType, lastMsg, si.SubstantiveMsgs, si.TotalMsgs, topic)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}

@@ -50,6 +50,7 @@ type SessionInfo struct {
 	Repo            string `json:"repo,omitempty"`
 	GitBranch       string `json:"git_branch,omitempty"`
 	WorkType        string `json:"work_type,omitempty"`
+	Topic           string `json:"topic,omitempty"`
 	TotalMsgs       int    `json:"total_msgs"`
 	SubstantiveMsgs int    `json:"substantive_msgs"`
 	FirstMsg        string `json:"first_msg"`
@@ -108,7 +109,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 			repo TEXT NOT NULL DEFAULT '',
 			cwd TEXT NOT NULL DEFAULT '',
 			git_branch TEXT NOT NULL DEFAULT '',
-			work_type TEXT NOT NULL DEFAULT ''
+			work_type TEXT NOT NULL DEFAULT '',
+			topic TEXT NOT NULL DEFAULT ''
 		);
 	`)
 	if err != nil {
@@ -150,6 +152,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 			COALESCE(sm.repo, '') AS repo,
 			COALESCE(sm.git_branch, '') AS git_branch,
 			COALESCE(sm.work_type, '') AS work_type,
+			COALESCE(sm.topic, '') AS topic,
 			COUNT(*) AS total_msgs,
 			SUM(CASE WHEN m.is_noise = 0 THEN 1 ELSE 0 END) AS substantive_msgs,
 			MIN(m.timestamp) AS first_msg,
@@ -387,7 +390,7 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 
 	args = append(args, limit)
 
-	q := `SELECT session_id, project, session_type, repo, git_branch, work_type,
+	q := `SELECT session_id, project, session_type, repo, git_branch, work_type, topic,
 			total_msgs, substantive_msgs, first_msg, last_msg
 		FROM sessions
 		WHERE ` + strings.Join(where, " AND ") + `
@@ -404,7 +407,7 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 	for rows.Next() {
 		var si SessionInfo
 		if err := rows.Scan(&si.SessionID, &si.Project, &si.SessionType,
-			&si.Repo, &si.GitBranch, &si.WorkType,
+			&si.Repo, &si.GitBranch, &si.WorkType, &si.Topic,
 			&si.TotalMsgs, &si.SubstantiveMsgs, &si.FirstMsg, &si.LastMsg); err != nil {
 			continue
 		}
@@ -605,16 +608,16 @@ func backfillSessionMeta(db *sql.DB, projectDir string) {
 	defer tx.Rollback()
 
 	stmt, _ := tx.Prepare(`INSERT OR IGNORE INTO session_meta
-		(session_id, repo, cwd, git_branch, work_type) VALUES (?, ?, ?, ?, ?)`)
+		(session_id, repo, cwd, git_branch, work_type, topic) VALUES (?, ?, ?, ?, ?, ?)`)
 	defer stmt.Close()
 
 	filled := 0
 	for _, s := range sessions {
 		path := filepath.Join(projectDir, s.project, s.sessionID+".jsonl")
-		cwd, branch := extractMetaFromFile(path)
+		cwd, branch, topic := extractMetaFromFile(path)
 		repo := extractRepo(cwd)
 		workType := classifyWorkType(branch)
-		stmt.Exec(s.sessionID, repo, cwd, branch, workType)
+		stmt.Exec(s.sessionID, repo, cwd, branch, workType, topic)
 		if repo != "" {
 			filled++
 		}
@@ -624,19 +627,19 @@ func backfillSessionMeta(db *sql.DB, projectDir string) {
 	slog.Info("backfill complete", "total", len(sessions), "with_repo", filled)
 }
 
-// extractMetaFromFile reads the first few lines of a JSONL file to
-// extract cwd and gitBranch.
-func extractMetaFromFile(path string) (cwd, branch string) {
+// extractMetaFromFile reads a JSONL file to extract cwd, gitBranch,
+// and the first substantive user message as topic.
+func extractMetaFromFile(path string) (cwd, branch, topic string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
-	for i := 0; i < 10 && scanner.Scan(); i++ {
+	for scanner.Scan() {
 		var entry map[string]any
 		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
 			continue
@@ -647,11 +650,45 @@ func extractMetaFromFile(path string) (cwd, branch string) {
 		if b, _ := entry["gitBranch"].(string); b != "" && branch == "" {
 			branch = b
 		}
-		if cwd != "" && branch != "" {
+
+		// Extract topic from first substantive user message.
+		if topic == "" {
+			if typ, _ := entry["type"].(string); typ == "user" {
+				if msg, _ := entry["message"].(map[string]any); msg != nil {
+					text := extractText(msg)
+					if len(text) >= 10 && !isNoise(text) && !isBoilerplate(text) {
+						topic = text
+						if len(topic) > 200 {
+							topic = topic[:197] + "..."
+						}
+					}
+				}
+			}
+		}
+
+		if cwd != "" && branch != "" && topic != "" {
 			return
 		}
 	}
 	return
+}
+
+// extractText pulls text content from a message's content field.
+func extractText(msg map[string]any) string {
+	switch content := msg["content"].(type) {
+	case string:
+		return content
+	case []any:
+		for _, c := range content {
+			cm, _ := c.(map[string]any)
+			if cm["type"] == "text" {
+				if text, _ := cm["text"].(string); text != "" {
+					return text
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // repoPattern extracts org/repo from paths like /Users/.../github.com/org/repo/...
@@ -736,6 +773,18 @@ func isNoise(text string) bool {
 	return false
 }
 
+// isBoilerplate returns true if the text looks like a slash-command
+// skill expansion rather than genuine user input.
+// isBoilerplate returns true if the text is system/skill boilerplate
+// rather than genuine user input — unsuitable as a session topic.
+func isBoilerplate(text string) bool {
+	return strings.HasPrefix(text, "Base directory for this skill:") ||
+		strings.HasPrefix(text, "Read and execute ~/") ||
+		strings.HasPrefix(text, "Read and return the full contents") ||
+		strings.HasPrefix(text, "<task-notification>") ||
+		strings.HasPrefix(text, "<system-reminder>")
+}
+
 func (s *Store) ingestFile(path string) error {
 	s.mu.Lock()
 	offset := s.offsets[path]
@@ -758,7 +807,7 @@ func (s *Store) ingestFile(path string) error {
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
 	count := 0
-	var metaCwd, metaBranch string
+	var metaCwd, metaBranch, metaTopic string
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -813,6 +862,13 @@ func (s *Store) ingestFile(path string) error {
 			if isNoise(text) {
 				noise = 1
 			}
+			// Capture first substantive user message as topic.
+			if metaTopic == "" && role == "user" && noise == 0 && len(text) >= 10 && !isBoilerplate(text) {
+				metaTopic = text
+				if len(metaTopic) > 200 {
+					metaTopic = metaTopic[:197] + "..."
+				}
+			}
 			stmt.Exec(sessionID, project, role, text, ts, typ, noise)
 			count++
 		}
@@ -835,17 +891,18 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	// Upsert session metadata.
-	if metaCwd != "" || metaBranch != "" {
+	if metaCwd != "" || metaBranch != "" || metaTopic != "" {
 		repo := extractRepo(metaCwd)
 		workType := classifyWorkType(metaBranch)
-		tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type)
-			VALUES (?, ?, ?, ?, ?)
+		tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
+			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
 				cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
 				git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
-				work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END`,
-			sessionID, repo, metaCwd, metaBranch, workType)
+				work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
+				topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END`,
+			sessionID, repo, metaCwd, metaBranch, workType, metaTopic)
 	}
 
 	if err := tx.Commit(); err != nil {
