@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -427,16 +429,213 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// IngestAll scans the project directory and ingests all JSONL files.
+// parsedMessage is a single message ready for insertion.
+type parsedMessage struct {
+	role        string
+	text        string
+	timestamp   string
+	typ         string
+	isNoise     int
+	contentType string
+	toolName    string
+	toolUseID   string
+	toolInput   []byte // raw JSON, nil if not tool_use
+	isError     int
+}
+
+// parsedFile is the result of parsing a single JSONL file.
+type parsedFile struct {
+	path      string
+	sessionID string
+	project   string
+	messages  []parsedMessage
+	cwd       string
+	branch    string
+	topic     string
+	newOffset int64
+}
+
+// IngestAll scans the project directory and ingests all JSONL files
+// using a parallel pipeline: collector → N workers → 1 writer.
 func (s *Store) IngestAll() error {
-	err := filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 2 {
+		numWorkers = 2
+	}
+
+	// Stage 1: Collector — gather paths, sort newest-first, filter already-done.
+	type fileEntry struct {
+		path   string
+		mtime  time.Time
+		size   int64
+		offset int64 // already-ingested offset
+	}
+	var files []fileEntry
+	filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
-		return s.ingestFile(path)
+		s.mu.Lock()
+		offset := s.offsets[path]
+		s.mu.Unlock()
+		// Skip fully ingested files.
+		if offset >= info.Size() {
+			return nil
+		}
+		files = append(files, fileEntry{
+			path:   path,
+			mtime:  info.ModTime(),
+			size:   info.Size(),
+			offset: offset,
+		})
+		return nil
 	})
+
+	if len(files) == 0 {
+		return nil
+	}
+
+	// Sort newest first so recent sessions are available quickly.
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].mtime.After(files[j].mtime)
+	})
+
+	slog.Info("ingest starting", "files", len(files), "workers", numWorkers)
+
+	// Stage 2: Workers — parse JSONL files in parallel.
+	pathCh := make(chan fileEntry, numWorkers)
+	parsedCh := make(chan parsedFile, numWorkers*2)
+
+	var wg sync.WaitGroup
+	for range numWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for fe := range pathCh {
+				if pf, err := parseFile(fe.path, fe.offset); err == nil {
+					parsedCh <- pf
+				} else {
+					slog.Warn("parse failed", "file", filepath.Base(fe.path), "err", err)
+				}
+			}
+		}()
+	}
+
+	// Feed the workers.
+	go func() {
+		for _, fe := range files {
+			pathCh <- fe
+		}
+		close(pathCh)
+		wg.Wait()
+		close(parsedCh)
+	}()
+
+	// Stage 3: Writer — single goroutine, batched transactions.
+	const commitInterval = 200 * time.Millisecond
+	const insertSQL = `INSERT INTO messages
+		(session_id, project, role, text, timestamp, type, is_noise,
+		 content_type, tool_name, tool_use_id, tool_input, is_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
+
+	var writeErr error
+	s.rwmu.Lock()
+
+	tx, err := s.db.Begin()
 	if err != nil {
+		s.rwmu.Unlock()
 		return err
+	}
+	stmt, err := tx.Prepare(insertSQL)
+	if err != nil {
+		tx.Rollback()
+		s.rwmu.Unlock()
+		return err
+	}
+
+	lastCommit := time.Now()
+	totalMessages := 0
+
+	commitBatch := func() error {
+		stmt.Close()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		// Yield write lock for readers.
+		s.rwmu.Unlock()
+		s.rwmu.Lock()
+		tx, err = s.db.Begin()
+		if err != nil {
+			return err
+		}
+		stmt, err = tx.Prepare(insertSQL)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		lastCommit = time.Now()
+		return nil
+	}
+
+	for pf := range parsedCh {
+		for _, m := range pf.messages {
+			var toolInput any
+			if m.toolInput != nil {
+				toolInput = string(m.toolInput)
+			}
+			stmt.Exec(pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+				m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
+			totalMessages++
+
+			// Detect self-identification nonces.
+			if m.contentType == "text" && strings.HasPrefix(m.text, NoncePrefix) {
+				tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
+					strings.TrimSpace(m.text), pf.sessionID)
+			}
+		}
+
+		// Upsert session metadata.
+		if pf.cwd != "" || pf.branch != "" || pf.topic != "" {
+			repo := extractRepo(pf.cwd)
+			workType := classifyWorkType(pf.branch)
+			tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
+				VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(session_id) DO UPDATE SET
+					repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
+					cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
+					git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
+					work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
+					topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END`,
+				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic)
+		}
+
+		// Update ingest offset.
+		tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", pf.path, pf.newOffset)
+		s.mu.Lock()
+		s.offsets[pf.path] = pf.newOffset
+		s.mu.Unlock()
+
+		// Commit periodically.
+		if time.Since(lastCommit) >= commitInterval {
+			if err := commitBatch(); err != nil {
+				writeErr = err
+				break
+			}
+		}
+	}
+
+	// Final commit.
+	if writeErr == nil {
+		stmt.Close()
+		writeErr = tx.Commit()
+	} else {
+		stmt.Close()
+		tx.Rollback()
+	}
+	s.rwmu.Unlock()
+
+	if writeErr != nil {
+		return writeErr
 	}
 
 	// Merge FTS5 segments for optimal search performance.
@@ -447,6 +646,99 @@ func (s *Store) IngestAll() error {
 		slog.Warn("FTS5 optimize failed", "err", ftsErr)
 	}
 	return nil
+}
+
+// parseFile reads and parses a JSONL transcript file, returning all
+// extracted messages and metadata. Pure computation — no DB access.
+func parseFile(path string, offset int64) (parsedFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return parsedFile{}, err
+	}
+	defer f.Close()
+
+	if offset > 0 {
+		f.Seek(offset, 0)
+	}
+
+	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	project := filepath.Base(filepath.Dir(path))
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+
+	pf := parsedFile{
+		path:      path,
+		sessionID: sessionID,
+		project:   project,
+	}
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry jsonlEntry
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+
+		if entry.Cwd != "" && pf.cwd == "" {
+			pf.cwd = entry.Cwd
+		}
+		if entry.GitBranch != "" && pf.branch == "" {
+			pf.branch = entry.GitBranch
+		}
+
+		if entry.Type != "user" && entry.Type != "assistant" {
+			continue
+		}
+
+		blocks := extractBlocks(entry.Message)
+		if len(blocks) == 0 {
+			continue
+		}
+
+		ts := entry.Timestamp
+		if ts == "" {
+			ts = time.Now().Format(time.RFC3339)
+		}
+
+		for _, b := range blocks {
+			noise := 0
+			if b.ContentType == "text" && isNoise(b.Text) {
+				noise = 1
+			}
+			if pf.topic == "" && entry.Type == "user" && b.ContentType == "text" && noise == 0 && len(b.Text) >= 10 && !isBoilerplate(b.Text) {
+				pf.topic = b.Text
+				if len(pf.topic) > 200 {
+					pf.topic = pf.topic[:197] + "..."
+				}
+			}
+
+			isErr := 0
+			if b.IsError {
+				isErr = 1
+			}
+
+			pf.messages = append(pf.messages, parsedMessage{
+				role:        entry.Type,
+				text:        b.Text,
+				timestamp:   ts,
+				typ:         entry.Type,
+				isNoise:     noise,
+				contentType: b.ContentType,
+				toolName:    b.ToolName,
+				toolUseID:   b.ToolUseID,
+				toolInput:   b.ToolInput,
+				isError:     isErr,
+			})
+		}
+	}
+
+	pf.newOffset, _ = f.Seek(0, 1)
+	return pf, nil
 }
 
 // Watch watches for new/modified JSONL files and ingests them in realtime.
