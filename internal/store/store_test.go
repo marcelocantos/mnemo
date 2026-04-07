@@ -691,6 +691,103 @@ func TestToolUseIngest(t *testing.T) {
 	}
 }
 
+func TestSnapshotFiles(t *testing.T) {
+	projectDir := t.TempDir()
+
+	writeJSONL(t, projectDir, "myproject", "sess-snap", []map[string]any{
+		msg("user", "working on files", "2026-04-01T10:00:00Z"),
+		{
+			"type": "file-history-snapshot",
+			"snapshot": map[string]any{
+				"messageId": "msg-123",
+				"trackedFileBackups": map[string]any{
+					"internal/store/store.go": map[string]any{
+						"backupFileName": "abc123@v1",
+						"version":        1,
+						"backupTime":     "2026-04-01T10:00:05Z",
+					},
+					"main.go": map[string]any{
+						"backupFileName": "def456@v1",
+						"version":        1,
+						"backupTime":     "2026-04-01T10:00:06Z",
+					},
+				},
+				"timestamp": "2026-04-01T10:00:05Z",
+			},
+			"isSnapshotUpdate": false,
+		},
+		// Empty snapshot (no tracked files).
+		{
+			"type": "file-history-snapshot",
+			"snapshot": map[string]any{
+				"messageId":          "msg-456",
+				"trackedFileBackups": map[string]any{},
+				"timestamp":          "2026-04-01T10:01:00Z",
+			},
+		},
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two files should be extracted from the first snapshot.
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM snapshot_files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 2 {
+		t.Fatalf("expected 2 snapshot_files, got %v", rows[0]["cnt"])
+	}
+
+	// Check file paths.
+	rows, err = s.Query("SELECT file_path, backup_time FROM snapshot_files ORDER BY file_path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0]["file_path"] != "internal/store/store.go" {
+		t.Errorf("expected internal/store/store.go, got %v", rows[0]["file_path"])
+	}
+	if rows[1]["file_path"] != "main.go" {
+		t.Errorf("expected main.go, got %v", rows[1]["file_path"])
+	}
+	if rows[0]["backup_time"] != "2026-04-01T10:00:05Z" {
+		t.Errorf("expected backup_time, got %v", rows[0]["backup_time"])
+	}
+
+	// FTS search for store.go.
+	rows, err = s.Query("SELECT file_path FROM snapshot_files WHERE id IN (SELECT rowid FROM snapshot_files_fts WHERE snapshot_files_fts MATCH 'store')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 FTS match, got %d", len(rows))
+	}
+	if rows[0]["file_path"] != "internal/store/store.go" {
+		t.Errorf("expected store.go from FTS, got %v", rows[0]["file_path"])
+	}
+
+	// Join with session_meta.
+	rows, err = s.Query(`
+		SELECT sf.file_path, sf.session_id
+		FROM snapshot_files sf
+		WHERE sf.file_path LIKE '%main.go'
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row for main.go, got %d", len(rows))
+	}
+	if rows[0]["session_id"] != "sess-snap" {
+		t.Errorf("expected session sess-snap, got %v", rows[0]["session_id"])
+	}
+}
+
 func TestEntriesTable(t *testing.T) {
 	projectDir := t.TempDir()
 

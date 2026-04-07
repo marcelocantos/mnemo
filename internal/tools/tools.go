@@ -87,6 +87,9 @@ Tables:
     — tool_use fields: tool_name, tool_use_id, tool_input (JSONB), content_type
     — virtual columns from tool_input: tool_file_path, tool_command, etc.
   messages_fts — FTS5 virtual table (excludes noise). Use: WHERE messages_fts MATCH 'terms'
+  snapshot_files (id, entry_id, session_id, file_path, backup_time)
+    — auto-extracted from file-history-snapshot entries via trigger
+  snapshot_files_fts — FTS5 on file_path. Use: WHERE snapshot_files_fts MATCH 'pattern'
   sessions — view: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg
   session_meta (session_id, repo, cwd, git_branch, work_type, topic)
   session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
@@ -97,6 +100,11 @@ Join pattern — message with its entry metadata:
 Token usage query:
   SELECT date(timestamp) AS day, SUM(input_tokens) AS input, SUM(output_tokens) AS output
   FROM entries WHERE type = 'assistant' GROUP BY day ORDER BY day DESC
+
+File history — which sessions touched a file:
+  SELECT sf.session_id, sf.backup_time, sm.repo
+  FROM snapshot_files sf JOIN session_meta sm ON sm.session_id = sf.session_id
+  WHERE sf.file_path LIKE '%store.go'
 
 Session types (derived from project path): interactive, subagent, worktree, ephemeral.
 is_noise = 1 for interrupts, compaction summaries, tool-loaded markers, slash command markup.

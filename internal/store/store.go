@@ -157,7 +157,7 @@ END`
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 5
+const schemaVersion = 6
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -292,6 +292,13 @@ func New(dbPath, projectDir string) (*Store, error) {
 			last_msg TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX IF NOT EXISTS idx_session_summary_type ON session_summary(session_type);
+		CREATE TABLE IF NOT EXISTS snapshot_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entry_id INTEGER NOT NULL REFERENCES entries(id),
+			session_id TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			backup_time TEXT
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -326,10 +333,25 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_url ON messages(tool_url) WHERE tool_url IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_task_id ON messages(tool_task_id) WHERE tool_task_id IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
+		CREATE INDEX IF NOT EXISTS idx_snapshot_files_session ON snapshot_files(session_id);
+		CREATE INDEX IF NOT EXISTS idx_snapshot_files_entry ON snapshot_files(entry_id);
+		CREATE INDEX IF NOT EXISTS idx_snapshot_files_path ON snapshot_files(file_path);
 	`)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create indexes: %w", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS snapshot_files_fts USING fts5(
+			file_path,
+			content=snapshot_files,
+			content_rowid=id
+		);
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create snapshot_files FTS: %w", err)
 	}
 
 	_, err = db.Exec(`
@@ -361,6 +383,29 @@ func New(dbPath, projectDir string) (*Store, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create FTS: %w", err)
+	}
+
+	// Trigger to extract file paths from file-history-snapshot entries
+	// and populate snapshot_files + its FTS index.
+	_, err = db.Exec(`
+		DROP TRIGGER IF EXISTS entries_file_snapshot;
+		CREATE TRIGGER entries_file_snapshot AFTER INSERT ON entries
+		WHEN new.type = 'file-history-snapshot'
+		BEGIN
+			INSERT INTO snapshot_files (entry_id, session_id, file_path, backup_time)
+			SELECT new.id, new.session_id, f.key, f.value->>'backupTime'
+			FROM json_each(new.raw, '$.snapshot.trackedFileBackups') f
+			WHERE f.key != '';
+
+			INSERT INTO snapshot_files_fts(rowid, file_path)
+			SELECT sf.id, sf.file_path
+			FROM snapshot_files sf
+			WHERE sf.entry_id = new.id;
+		END;
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create snapshot trigger: %w", err)
 	}
 
 	_, err = db.Exec(`
