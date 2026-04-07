@@ -137,7 +137,7 @@ targets:
     discovered: 2026-04-07
   T9.1:
     name: Full-fidelity ingest
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     acceptance:
@@ -150,6 +150,7 @@ targets:
     parent: T9
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-07
   T9.2:
     name: Token usage analytics (mnemo_usage)
     status: identified
