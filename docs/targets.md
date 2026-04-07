@@ -586,6 +586,59 @@ meant zero results for each attempt.
 - [x] Multi-word queries return partial matches ranked by relevance
 - [ ] Session metadata (repo, topic) contributes to search ranking
 
+### 🎯T16 Semantic search
+
+- **Value**: 9
+- **Cost**: 8
+- **Weight**: 1.1 (value 9 / cost 8)
+- **Status**: identified (needs research)
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T15 (search resilience — OR relaxation is a lexical bandaid),
+  🎯T10 (claudia-based agent spawning applies here too)
+
+**Desired state:** mnemo finds relevant content even when the query
+uses completely different vocabulary from the corpus. An agent
+searching for "pairing ceremony" finds sessions about "QR transfer
+handoff" because the concepts are semantically close, not because
+any words overlap.
+
+**Problem:** FTS5 (even with OR relaxation) is purely lexical. It
+can't bridge vocabulary gaps — "pairing" vs "transfer", "bootstrap"
+vs "handoff", "ceremony" vs "flow". These are the hardest search
+failures to debug because the user is sure the content exists and
+the index confirms it does, but the terms don't intersect.
+
+**Approach tiers (research needed):**
+
+1. **Embedding-based retrieval** — compute vector embeddings for
+   messages at ingest time, store in a vector index (sqlite-vec,
+   or a sidecar like Qdrant). At search time, embed the query and
+   find nearest neighbours. Hybrid ranking: combine BM25 score with
+   cosine similarity.
+   - Key question: which embedding model? Local (e.g. nomic-embed,
+     all-MiniLM) vs API (Voyage, OpenAI)? Latency and cost at
+     mnemo's scale (~1M messages)?
+   - sqlite-vec keeps everything in one DB file — appealing for
+     mnemo's single-file architecture.
+
+2. **Agentic search** — spawn a lightweight agent (via claudia) that
+   reformulates failed queries, tries synonyms, uses session metadata
+   as context, and synthesises results across multiple search passes.
+   Ironic (the user IS an agent) but practical — a search-specialised
+   agent with access to the FTS index can explore the vocabulary space
+   much faster than the calling agent guessing at terms.
+   - Shares architecture with 🎯T10's summarizer: claudia-managed
+     agent, mnemo-scoped tools, recursion guard.
+
+3. **Hybrid** — embeddings for recall, agentic layer for synthesis
+   and drill-down. Embeddings catch the vocabulary gap; the agent
+   interprets and contextualises.
+
+**Acceptance criteria:**
+- Searching "pairing ceremony" finds sessions about "QR transfer handoff"
+- Vocabulary mismatch no longer causes 0-result failures for indexed content
+- Search latency remains under 2s for interactive use
+
 ### 🎯T8 sqldeep integration
 
 - **Value**: 6
