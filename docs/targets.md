@@ -171,7 +171,7 @@ reinvented each session.
 - **Value**: 9
 - **Cost**: 8
 - **Weight**: 1.1 (value 9 / cost 8)
-- **Status**: converging (1/6 sub-targets achieved)
+- **Status**: converging (2/6 sub-targets achieved)
 - **Discovered**: 2026-04-07
 - **Related**: 🎯T5 (pattern discovery), 🎯T3 (dashboard data)
 - **Census**: `/tmp/field-census.txt` (1.3M entries, 10,766 paths, 3.4 GB)
@@ -214,7 +214,8 @@ Schema version 5.
 - **Value**: 8
 - **Cost**: 3
 - **Weight**: 2.7 (value 8 / cost 3)
-- **Status**: identified
+- **Status**: achieved
+- **Achieved**: 2026-04-07
 - **Parent**: 🎯T9
 - **Gates**: 🎯T9.1
 
@@ -223,6 +224,11 @@ estimates at current pricing. Data comes from `message.usage` fields
 (input_tokens, output_tokens, cache_read, cache_creation). Should
 support: daily totals, per-repo breakdown, per-model breakdown,
 hourly rate detection ("am I spending too fast?").
+
+**Implementation:** `mnemo_usage` tool with filters (repo, model, days)
+and grouping (day, model, repo). Cost estimates use published Anthropic
+pricing for Opus/Sonnet/Haiku families with Sonnet fallback for unknown
+models.
 
 #### 🎯T9.3 Permission prompt analysis (`mnemo_permissions`)
 
@@ -473,7 +479,7 @@ the JSON structure is simple enough.
 - **Status**: identified
 - **Discovered**: 2026-04-07
 - **Related**: 🎯T1 (subsumes "broader memory"), 🎯T9.6 (decision recall becomes a compaction output)
-- **Depends**: jevon `claude.Process` / `manager.Manager` for Claude instance lifecycle
+- **Depends**: claudia (`marcelocantos/claudia`) for Claude instance lifecycle (agent control mechanism)
 
 **Desired state:** mnemo maintains a live compacted context for each
 active session. When a session `/clear`s (or a new session starts in
@@ -483,8 +489,8 @@ firewall becomes nearly free.
 
 **Architecture:**
 
-The mnemo daemon spawns a Sonnet summarizer instance (via jevon's
-`Manager`/`Process` API) per active session. The summarizer:
+The mnemo daemon spawns a Sonnet summarizer instance (via claudia's
+agent control API) per active session. The summarizer:
 
 1. Receives fixed-size batches of new transcript lines as they appear.
 2. Maintains a rolling compacted context in its conversation head —
@@ -500,7 +506,7 @@ The mnemo daemon spawns a Sonnet summarizer instance (via jevon's
 
 **Recursion guard:** Summarizer sessions are spawned with a known
 marker (e.g., `--system-prompt` tag or registry metadata). mnemo
-excludes these session IDs from summarizer spawning. The jevon
+excludes these session IDs from summarizer spawning. The claudia
 `disallow_tools` mechanism strips `Agent`, `TeamCreate`, etc. to
 prevent summarizers from spawning further processes.
 
