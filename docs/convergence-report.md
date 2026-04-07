@@ -1,12 +1,13 @@
 # Convergence Report
 
-Standing invariants: all green. Tests pass, CI green (v0.7.0 release succeeded).
+Standing invariants: all green. Tests pass, CI green (v0.8.0 release succeeded).
 
 ## Movement
 
-- 🎯T9: (new — added since last report, with 6 sub-targets)
-- 🎯T3: (unchanged) not started
-- 🎯T8: (unchanged) not started
+- 🎯T3: not started → **achieved** (mnemo_recent_activity tool implemented and released in v0.8.0)
+- 🎯T8: not started → **achieved** (sqldeep integration merged and released in v0.8.0)
+- 🎯T10: (new — live context compaction target added)
+- 🎯T9.1: (unchanged) not started
 - 🎯T5: (unchanged) not started
 - 🎯T7: (unchanged) not started
 - 🎯T1: (unchanged) not started
@@ -14,27 +15,27 @@ Standing invariants: all green. Tests pass, CI green (v0.7.0 release succeeded).
 
 ## Gap report
 
-### 🎯T3 Active work dashboard data  [weight 1.6]
+### 🎯T9.1 Full-fidelity ingest  [weight 1.6]
 Gap: **not started**
-No `mnemo_recent_activity` tool exists. The data needed (session recency, message counts) is available in the database via `sessions` view, but no dedicated tool exposes the structured JSON output the acceptance criteria require.
+No usage, model, stop_reason, agentId, or version fields in the store schema. Messages table stores only id, session_id, project, role, text, block_type, tool_name, tool_id, timestamp, seq. No JSONB storage. Full schema redesign and re-index required.
 
-### 🎯T8 sqldeep integration  [weight 1.2]
+### 🎯T10 Live context compaction  [weight 1.25]
 Gap: **not started**
-No sqldeep references in the codebase. `mnemo_query` accepts only plain SQL. No transpilation layer.
+No mnemo_restore tool, no summarizer spawning logic, no compaction infrastructure. References to "compaction" and "summarizer" exist only in docs/targets.md. Depends on jevon `claude.Process` / `manager.Manager` which is an external dependency.
+
+### 🎯T5 Self-improving tool discovery  [weight 1.1]
+Gap: **not started** (status only)
+No pattern discovery tool or workaround detection logic in the codebase.
 
 ### 🎯T9 Full-fidelity ingest and observability tools  [weight 1.1]
 Gap: **not started** (converging 0/6 sub-targets achieved)
 
-  [ ] 🎯T9.1 Full-fidelity ingest (weight 1.6) — not started: no usage/model/stop_reason fields in store schema
+  [ ] 🎯T9.1 Full-fidelity ingest (weight 1.6) — not started
   [ ] 🎯T9.2 Token usage analytics (weight 2.7) — not started, blocked by 🎯T9.1
   [ ] 🎯T9.3 Permission prompt analysis (weight 1.7) — not started, blocked by 🎯T9.1
   [ ] 🎯T9.4 Process attribution (weight 2.5) — not started, blocked by 🎯T9.1
   [ ] 🎯T9.5 System correlation (weight 1.0) — not started, blocked by 🎯T9.1
   [ ] 🎯T9.6 Cross-session decision recall (weight 1.6) — not started, blocked by 🎯T9.1
-
-### 🎯T5 Self-improving tool discovery  [weight 1.1]
-Gap: **not started** (status only)
-No pattern discovery tool or workaround detection logic.
 
 ### 🎯T7 Agent-defined query templates  [weight 0.9]
 Gap: **not started** (status only)
@@ -42,9 +43,12 @@ No template system. Weight < 1.0 — cost exceeds value. Consider reframing or r
 
 ### 🎯T1 Broader memory beyond transcripts  [weight 0.6]
 Gap: **not started** (status only)
-No work beyond the design philosophy note. Weight 0.6 — cost significantly exceeds value. Consider decomposition or deferral.
+No work beyond design notes. Weight 0.6 — cost significantly exceeds value. 🎯T10 subsumes the core of this target; reassess after 🎯T10 is achieved.
 
 ### 🎯T2 Smarter session classification  [weight 1.7]
+Gap: **achieved**
+
+### 🎯T3 Active work dashboard data  [weight 1.6]
 Gap: **achieved**
 
 ### 🎯T4 Individual session transcript access  [weight 1.7]
@@ -53,18 +57,34 @@ Gap: **achieved**
 ### 🎯T6 Session self-identification  [weight 1.2]
 Gap: **achieved**
 
+### 🎯T8 sqldeep integration  [weight 1.2]
+Gap: **achieved**
+
 ## Recommendation
 
-Work on: **🎯T3 Active work dashboard data**
-Reason: Highest effective weight (1.6) among non-achieved, unblocked targets. Clear acceptance criteria, moderate cost, and high value for cross-tool integration. The underlying data already exists in the sessions view — this is primarily a tool definition and structured output task. While 🎯T9.2 has higher weight (2.7), it is blocked by 🎯T9.1 which requires schema redesign and full re-index.
+Work on: **🎯T9.1 Full-fidelity ingest**
+
+Both the markdown ranking and bullseye agree: 🎯T9.1 is the highest-leverage next step. It has the highest effective weight among unblocked non-achieved targets (markdown: 1.6, bullseye: 2) and it is the critical-path gate for 5 downstream targets (🎯T9.2 through 🎯T9.6), several of which have very high weights (🎯T9.2 at 2.7, 🎯T9.4 at 2.5). Completing 🎯T9.1 unlocks the entire observability tools suite.
+
+While 🎯T10 has the highest raw value (10), it depends on an external API (jevon `claude.Process`) and has no downstream dependents to unblock. 🎯T9.1 is purely internal work with a clear path and outsized multiplier effect.
 
 ## Suggested action
 
-Add a `mnemo_recent_activity` tool to `internal/tools/tools.go` that queries the `sessions` view grouped by repo, returning per-repo JSON with last session time, message count, and key topics. Start by defining the tool schema and Backend interface method, then implement the store query. Accept a `days` parameter (default 7) for the recency window.
+Design the new schema for full-fidelity ingest. Read `internal/store/store.go` to understand the current schema, then extend the `messages` table (or add a new `entries` table) to store the full JSONB entry alongside extracted virtual columns for `model`, `stop_reason`, `usage.input_tokens`, `usage.output_tokens`, `agentId`, and `version`. Bump the schema version constant to trigger a full re-index. Start with schema changes and the ingest path — tools come in subsequent sub-targets.
+
+## Bullseye scorecard
+
+**Ranking**:        +1
+**Blocking**:       +1
+**Data quality**:   -1
+**Overall**:        0
+**Markdown rec**:   🎯T9.1 Full-fidelity ingest
+**Bullseye rec**:   🎯T9.1 Full-fidelity ingest
+**Notes**: Ranking +1: bullseye's integer weights gave a clearer separation between T9.1 (weight 2) and T10 (weight 1) than markdown's 1.6 vs 1.25. Blocking +1: bullseye correctly identified all 5 T9.x sub-targets as blocked by T9.1, matching markdown's Gates analysis. Data quality -1: fresh bootstrap — all targets imported but the T10 dependency on external jevon API is not modeled as a depends_on edge in bullseye (markdown captures it as a note). Also, bullseye weights use integer rounding which loses some fidelity (T10 and T5 both show weight 1 despite different ratios). Overall 0: equivalent recommendation this run; bullseye's blocking analysis is slightly more structured, but data was just bootstrapped so hasn't been tested over time.
 
 <!-- convergence-deps
-evaluated: 2026-04-07T12:00:00Z
-sha: ebbd6f4
+evaluated: 2026-04-07T18:00:00Z
+sha: 6a54f25
 
 🎯T2:
   gap: achieved
@@ -79,8 +99,8 @@ sha: ebbd6f4
     - internal/tools/tools.go
 
 🎯T3:
-  gap: not started
-  assessment: "No mnemo_recent_activity tool. Data exists in sessions view but no structured API."
+  gap: achieved
+  assessment: "mnemo_recent_activity implemented and released in v0.8.0."
   read:
     - internal/tools/tools.go
 
@@ -91,26 +111,31 @@ sha: ebbd6f4
     - internal/tools/tools.go
 
 🎯T8:
+  gap: achieved
+  assessment: "sqldeep integration merged. mnemo_query transparently transpiles. Released in v0.8.0."
+  read:
+    - internal/tools/tools.go
+
+🎯T9.1:
   gap: not started
-  assessment: "No sqldeep references in codebase. mnemo_query accepts plain SQL only."
+  assessment: "No usage/model/stop_reason/agentId fields in store schema. No JSONB storage. Full schema redesign needed."
+  read:
+    - internal/store/store.go
+
+🎯T10:
+  gap: not started
+  assessment: "No mnemo_restore tool, no summarizer logic, no compaction infrastructure. External dependency on jevon."
   read:
     - internal/tools/tools.go
 
 🎯T5:
   gap: not started
   assessment: "No pattern discovery tool or workaround detection logic."
-  read:
-    - internal/tools/tools.go
+  read: []
 
 🎯T9:
   gap: not started
-  assessment: "New target. No sub-targets started. 0/6 achieved."
-  read:
-    - internal/store/store.go
-
-🎯T9.1:
-  gap: not started
-  assessment: "No usage/model/stop_reason/agentId fields in store schema. No JSONB storage."
+  assessment: "0/6 sub-targets achieved."
   read:
     - internal/store/store.go
 
@@ -146,6 +171,14 @@ sha: ebbd6f4
 
 🎯T1:
   gap: not started
-  assessment: "No work beyond design notes. Weight 0.6 — consider decomposition."
+  assessment: "No work beyond design notes. Weight 0.6 — T10 subsumes core."
   read: []
+
+bullseye:
+  ranking: 1
+  blocking: 1
+  data_quality: -1
+  overall: 0
+  markdown_rec: T9.1
+  bullseye_rec: T9.1
 -->

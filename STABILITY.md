@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.8.0.
+Snapshot as of v0.9.0.
 
 ### CLI flags
 
@@ -113,7 +113,9 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 
 | Table/View | Columns | Stability |
 |---|---|---|
-| `messages` | id, session_id, project, role, text, timestamp, type, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error | Needs review |
+| `entries` | id, session_id, project, type, timestamp, raw (JSONB) | Needs review |
+| `entries` (virtual) | model, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, agent_id, version, slug, is_sidechain, data_type, data_command, data_hook_event, top_tool_use_id, parent_tool_use_id | Needs review |
+| `messages` | id, entry_id, session_id, project, role, text, timestamp, type, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error | Needs review |
 | `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill, tool_old_string, tool_new_string, tool_content, tool_query, tool_url, tool_name_param, tool_prompt, tool_subject, tool_status, tool_task_id | Needs review |
 | `messages_fts` | FTS5 virtual table matching `messages` (excludes noise) | Stable |
 | `sessions` | View joining session_summary + session_meta: session_id, project, session_type, repo, git_branch, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
@@ -122,12 +124,15 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 
-**Notes**: The `messages` schema expanded significantly in v0.3.0 with
-content block columns (content_type, tool_name, tool_use_id, tool_input,
-is_error) and virtual computed columns. This surface is still evolving.
-`ingest_state` and `session_nonces` are internal implementation details.
+**Notes**: v0.9.0 added the `entries` table which stores every JSONL line
+as JSONB with 15 virtual columns for high-query fields. All entry types
+(user, assistant, progress, system, file-history-snapshot) are now ingested.
+`messages` gained `entry_id` FK linking content blocks to their source entry.
+This surface is still evolving. `ingest_state` and `session_nonces` are
+internal implementation details.
 
-Content types: `text`, `tool_use`, `tool_result`, `thinking`.
+Entry types: `user`, `assistant`, `progress`, `system`, `file-history-snapshot`.
+Content types (messages): `text`, `tool_use`, `tool_result`, `thinking`.
 
 ### Output formats
 
@@ -158,8 +163,6 @@ configurable before 1.0.
 - **Session metadata completeness**: repo, work_type, and topic are
   extracted heuristically and may be missing or inaccurate. Extraction
   quality should be audited before locking the schema.
-- **System entry indexing**: System entries (hooks, stop reasons) are
-  not yet indexed. The ingest pipeline skips non-user/assistant entries.
 
 ## Out of scope for 1.0
 

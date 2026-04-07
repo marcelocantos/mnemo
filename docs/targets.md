@@ -193,7 +193,8 @@ stop reasons, Claude Code version, agent IDs, and more.
 - **Value**: 8
 - **Cost**: 5
 - **Weight**: 1.6 (value 8 / cost 5)
-- **Status**: identified
+- **Status**: achieved
+- **Achieved**: 2026-04-07
 - **Parent**: 🎯T9
 
 Ingest all top-level JSONL fields and message sub-fields. Key
@@ -202,6 +203,11 @@ additions: `usage` (token counts per response), `model`, `stop_reason`,
 `toolUseResult.*` (structured tool results). Store the full entry as
 JSONB where practical; add virtual columns for high-query fields.
 Requires schema version bump (full re-index).
+
+**Implementation:** New `entries` table stores every JSONL line as
+JSONB with 15 virtual columns. All entry types ingested (progress,
+system, file-history-snapshot). Messages linked via `entry_id` FK.
+Schema version 5.
 
 #### 🎯T9.2 Token usage analytics (`mnemo_usage`)
 

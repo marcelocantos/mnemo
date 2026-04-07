@@ -691,6 +691,217 @@ func TestToolUseIngest(t *testing.T) {
 	}
 }
 
+func TestEntriesTable(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Build a transcript with multiple entry types: user, assistant (with model/usage),
+	// progress, and system.
+	writeJSONL(t, projectDir, "myproject", "sess-entries", []map[string]any{
+		// System entry (gitStatus).
+		{
+			"type":      "system",
+			"timestamp": "2026-04-01T10:00:00Z",
+			"cwd":       "/Users/dev/work/github.com/acme/webapp",
+			"gitBranch": "feature/entries",
+			"version":   "2.1.81",
+			"message":   map[string]any{"content": "system init"},
+		},
+		// User message.
+		{
+			"type":      "user",
+			"timestamp": "2026-04-01T10:00:01Z",
+			"cwd":       "/Users/dev/work/github.com/acme/webapp",
+			"gitBranch": "feature/entries",
+			"version":   "2.1.81",
+			"message":   map[string]any{"content": "Build the new feature"},
+		},
+		// Assistant with model and usage.
+		{
+			"type":      "assistant",
+			"timestamp": "2026-04-01T10:00:05Z",
+			"cwd":       "/Users/dev/work/github.com/acme/webapp",
+			"gitBranch": "feature/entries",
+			"version":   "2.1.81",
+			"slug":      "myproject-sess-entries",
+			"message": map[string]any{
+				"role": "assistant",
+				"content": []any{
+					map[string]any{
+						"type": "text",
+						"text": "I'll build the feature now.",
+					},
+				},
+				"model":       "claude-opus-4-6",
+				"stop_reason": "end_turn",
+				"usage": map[string]any{
+					"input_tokens":                50000,
+					"output_tokens":               500,
+					"cache_read_input_tokens":      45000,
+					"cache_creation_input_tokens":  1000,
+				},
+			},
+		},
+		// Progress event (bash).
+		{
+			"type":            "progress",
+			"timestamp":       "2026-04-01T10:00:10Z",
+			"parentToolUseID": "toolu_abc123",
+			"agentId":         "agent-xyz",
+			"data": map[string]any{
+				"type":    "bash_progress",
+				"command": "make build",
+				"output":  "Building...",
+			},
+		},
+		// Progress event (hook).
+		{
+			"type":            "progress",
+			"timestamp":       "2026-04-01T10:00:15Z",
+			"parentToolUseID": "toolu_abc123",
+			"data": map[string]any{
+				"type":      "hook_progress",
+				"hookEvent": "PostToolUse",
+				"command":   "python3 hook.py",
+			},
+		},
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// All 5 JSONL lines should be in entries.
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM entries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 5 {
+		t.Fatalf("expected 5 entries, got %v", rows[0]["cnt"])
+	}
+
+	// Verify entry types.
+	rows, err = s.Query("SELECT type, COUNT(*) AS cnt FROM entries GROUP BY type ORDER BY type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typeCounts := map[string]int64{}
+	for _, r := range rows {
+		typeCounts[r["type"].(string)] = r["cnt"].(int64)
+	}
+	if typeCounts["assistant"] != 1 {
+		t.Errorf("expected 1 assistant entry, got %d", typeCounts["assistant"])
+	}
+	if typeCounts["progress"] != 2 {
+		t.Errorf("expected 2 progress entries, got %d", typeCounts["progress"])
+	}
+	if typeCounts["system"] != 1 {
+		t.Errorf("expected 1 system entry, got %d", typeCounts["system"])
+	}
+
+	// Verify virtual columns on assistant entry.
+	rows, err = s.Query("SELECT model, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, version, slug FROM entries WHERE type = 'assistant'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 assistant entry, got %d", len(rows))
+	}
+	r := rows[0]
+	if r["model"] != "claude-opus-4-6" {
+		t.Errorf("expected model claude-opus-4-6, got %v", r["model"])
+	}
+	if r["stop_reason"] != "end_turn" {
+		t.Errorf("expected stop_reason end_turn, got %v", r["stop_reason"])
+	}
+	if r["input_tokens"] != int64(50000) {
+		t.Errorf("expected input_tokens 50000, got %v", r["input_tokens"])
+	}
+	if r["output_tokens"] != int64(500) {
+		t.Errorf("expected output_tokens 500, got %v", r["output_tokens"])
+	}
+	if r["cache_read_tokens"] != int64(45000) {
+		t.Errorf("expected cache_read_tokens 45000, got %v", r["cache_read_tokens"])
+	}
+	if r["cache_creation_tokens"] != int64(1000) {
+		t.Errorf("expected cache_creation_tokens 1000, got %v", r["cache_creation_tokens"])
+	}
+	if r["version"] != "2.1.81" {
+		t.Errorf("expected version 2.1.81, got %v", r["version"])
+	}
+	if r["slug"] != "myproject-sess-entries" {
+		t.Errorf("expected slug myproject-sess-entries, got %v", r["slug"])
+	}
+
+	// Verify progress event virtual columns.
+	rows, err = s.Query("SELECT data_type, agent_id, parent_tool_use_id FROM entries WHERE type = 'progress' AND data_type = 'bash_progress'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 bash_progress entry, got %d", len(rows))
+	}
+	if rows[0]["agent_id"] != "agent-xyz" {
+		t.Errorf("expected agent_id agent-xyz, got %v", rows[0]["agent_id"])
+	}
+	if rows[0]["parent_tool_use_id"] != "toolu_abc123" {
+		t.Errorf("expected parent_tool_use_id toolu_abc123, got %v", rows[0]["parent_tool_use_id"])
+	}
+
+	// Verify hook progress.
+	rows, err = s.Query("SELECT data_type, data_hook_event, data_command FROM entries WHERE data_type = 'hook_progress'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 hook_progress entry, got %d", len(rows))
+	}
+	if rows[0]["data_hook_event"] != "PostToolUse" {
+		t.Errorf("expected hookEvent PostToolUse, got %v", rows[0]["data_hook_event"])
+	}
+	if rows[0]["data_command"] != "python3 hook.py" {
+		t.Errorf("expected command 'python3 hook.py', got %v", rows[0]["data_command"])
+	}
+
+	// Only user/assistant should produce messages (2 entries → content blocks).
+	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 2 {
+		t.Fatalf("expected 2 messages (user+assistant), got %v", rows[0]["cnt"])
+	}
+
+	// Messages should be linked to entries via entry_id.
+	rows, err = s.Query(`
+		SELECT m.text, e.model, e.version
+		FROM messages m
+		JOIN entries e ON e.id = m.entry_id
+		WHERE m.role = 'assistant'
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 joined row, got %d", len(rows))
+	}
+	if rows[0]["model"] != "claude-opus-4-6" {
+		t.Errorf("expected model from join, got %v", rows[0]["model"])
+	}
+
+	// Verify raw JSON access via json_extract.
+	rows, err = s.Query("SELECT json_extract(raw, '$.data.output') AS output FROM entries WHERE data_type = 'bash_progress'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row for raw json_extract, got %d", len(rows))
+	}
+	if rows[0]["output"] != "Building..." {
+		t.Errorf("expected raw output 'Building...', got %v", rows[0]["output"])
+	}
+}
+
 func TestSchemaVersionRebuild(t *testing.T) {
 	projectDir := t.TempDir()
 
