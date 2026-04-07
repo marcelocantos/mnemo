@@ -100,6 +100,18 @@ func (p *Proxy) ListRepos(filter string) ([]store.RepoInfo, error) {
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*store.StatusResult, error) {
+	raw, err := p.client.Call("Status", StatusParams{
+		Days: days, RepoFilter: repoFilter,
+		MaxSessions: maxSessions, MaxExcerpts: maxExcerpts, TruncateLen: truncateLen,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result store.StatusResult
+	return &result, json.Unmarshal(raw, &result)
+}
+
 func (p *Proxy) RecentActivity(days int, repoFilter string) ([]store.RecentActivityInfo, error) {
 	raw, err := p.client.Call("RecentActivity", RecentActivityParams{Days: days, RepoFilter: repoFilter})
 	if err != nil {

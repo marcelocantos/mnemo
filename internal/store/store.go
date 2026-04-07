@@ -96,6 +96,39 @@ type RecentActivityInfo struct {
 	Topics       []string `json:"topics,omitempty"`
 }
 
+// StatusResult is the top-level response from Status.
+type StatusResult struct {
+	Days  int          `json:"days"`
+	Repos []RepoStatus `json:"repos"`
+}
+
+// RepoStatus summarises recent activity for a single repo.
+type RepoStatus struct {
+	Repo         string          `json:"repo"`
+	Path         string          `json:"path"`
+	LastActivity string          `json:"last_activity"`
+	Sessions     []SessionStatus `json:"sessions"`
+}
+
+// SessionStatus summarises a single session with conversation excerpts.
+type SessionStatus struct {
+	SessionID  string          `json:"session_id"`
+	LastMsg    string          `json:"last_msg"`
+	Messages   int             `json:"messages"`
+	WorkType   string          `json:"work_type,omitempty"`
+	Topic      string          `json:"topic,omitempty"`
+	Excerpts   []MessageExcerpt `json:"excerpts"`
+}
+
+// MessageExcerpt is a possibly-truncated message with its database ID for drill-down.
+type MessageExcerpt struct {
+	ID        int    `json:"id"`
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
 // TypeStats holds per-session-type statistics.
 type TypeStats struct {
 	SessionType     string `json:"session_type"`
@@ -1075,6 +1108,134 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// Status returns a rich status report: repos → sessions → truncated message excerpts.
+func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 7
+	}
+	if maxSessions <= 0 {
+		maxSessions = 3
+	}
+	if maxExcerpts <= 0 {
+		maxExcerpts = 20
+	}
+	if truncateLen <= 0 {
+		truncateLen = 200
+	}
+
+	// Step 1: Find repos with recent activity.
+	repoWhere := []string{
+		"ss.session_type = 'interactive'",
+		"ss.last_msg >= datetime('now', ?)",
+	}
+	repoArgs := []any{fmt.Sprintf("-%d days", days)}
+
+	if repoFilter != "" {
+		repoWhere = append(repoWhere, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		repoArgs = append(repoArgs, pattern, pattern)
+	}
+
+	repoQ := `
+		SELECT
+			CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
+			MAX(sm.cwd) AS path,
+			MAX(ss.last_msg) AS last_activity
+		FROM session_summary ss
+		JOIN session_meta sm ON sm.session_id = ss.session_id
+		WHERE ` + strings.Join(repoWhere, " AND ") + `
+		GROUP BY display_repo
+		HAVING display_repo != ''
+		ORDER BY last_activity DESC
+	`
+
+	repoRows, err := s.db.Query(repoQ, repoArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer repoRows.Close()
+
+	var repos []RepoStatus
+	for repoRows.Next() {
+		var r RepoStatus
+		if err := repoRows.Scan(&r.Repo, &r.Path, &r.LastActivity); err != nil {
+			continue
+		}
+		repos = append(repos, r)
+	}
+
+	// Step 2: For each repo, find recent sessions.
+	for i := range repos {
+		sessQ := `
+			SELECT ss.session_id, ss.last_msg, ss.substantive_msgs,
+				COALESCE(sm.work_type, ''), COALESCE(sm.topic, '')
+			FROM session_summary ss
+			JOIN session_meta sm ON sm.session_id = ss.session_id
+			WHERE ss.session_type = 'interactive'
+				AND ss.last_msg >= datetime('now', ?)
+				AND (sm.repo = ? OR sm.cwd = ?)
+			ORDER BY ss.last_msg DESC
+			LIMIT ?
+		`
+		sessRows, err := s.db.Query(sessQ,
+			fmt.Sprintf("-%d days", days), repos[i].Repo, repos[i].Path, maxSessions)
+		if err != nil {
+			continue
+		}
+
+		for sessRows.Next() {
+			var ss SessionStatus
+			if err := sessRows.Scan(&ss.SessionID, &ss.LastMsg, &ss.Messages,
+				&ss.WorkType, &ss.Topic); err != nil {
+				continue
+			}
+			repos[i].Sessions = append(repos[i].Sessions, ss)
+		}
+		sessRows.Close()
+
+		// Step 3: For each session, pull substantive messages.
+		for j := range repos[i].Sessions {
+			sid := repos[i].Sessions[j].SessionID
+			msgQ := `
+				SELECT id, role, text, timestamp FROM messages
+				WHERE session_id = ? AND is_noise = 0
+					AND role IN ('user', 'assistant')
+				ORDER BY id ASC
+			`
+			msgRows, err := s.db.Query(msgQ, sid)
+			if err != nil {
+				continue
+			}
+
+			var excerpts []MessageExcerpt
+			for msgRows.Next() {
+				var m MessageExcerpt
+				if err := msgRows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp); err != nil {
+					continue
+				}
+				// Truncate assistant messages.
+				if m.Role == "assistant" && len(m.Text) > truncateLen {
+					m.Text = m.Text[:truncateLen] + "..."
+					m.Truncated = true
+				}
+				excerpts = append(excerpts, m)
+			}
+			msgRows.Close()
+
+			// Keep last N excerpts if there are too many.
+			if len(excerpts) > maxExcerpts {
+				excerpts = excerpts[len(excerpts)-maxExcerpts:]
+			}
+			repos[i].Sessions[j].Excerpts = excerpts
+		}
+	}
+
+	return &StatusResult{Days: days, Repos: repos}, nil
 }
 
 // SessionMessage is a single message from a session transcript.

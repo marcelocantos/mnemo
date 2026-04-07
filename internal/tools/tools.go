@@ -98,6 +98,19 @@ Results capped at 100 rows.`),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7)")),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
 		),
+		mcp.NewTool("mnemo_status",
+			mcp.WithDescription(`Rich status report of recent work across repos. Returns repos → sessions → conversation excerpts with drill-down offsets.
+
+User messages are shown in full. Assistant messages are truncated (default 200 chars). Each message includes its database ID — use mnemo_read_session with offset to retrieve the full text.
+
+Ideal for session startup context: "what's been happening across my projects?"
+`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7)")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("max_sessions", mcp.Description("Max sessions per repo (default 3)")),
+			mcp.WithNumber("max_excerpts", mcp.Description("Max message excerpts per session (default 20, most recent kept)")),
+			mcp.WithNumber("truncate_len", mcp.Description("Truncate assistant messages to this length (default 200)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -127,6 +140,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.repos(args)
 	case "mnemo_recent_activity":
 		return h.recentActivity(args)
+	case "mnemo_status":
+		return h.status(args)
 	case "mnemo_stats":
 		return h.stats()
 	case "mnemo_self":
@@ -333,6 +348,40 @@ func (h *Handler) stats() (string, bool, error) {
 			ts.SessionType, ts.Sessions, ts.TotalMsgs, ts.SubstantiveMsgs, ts.NoiseMsgs)
 	}
 	return b.String(), false, nil
+}
+
+func (h *Handler) status(args map[string]any) (string, bool, error) {
+	days := 7
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+	maxSessions := 3
+	if m, ok := args["max_sessions"].(float64); ok && m > 0 {
+		maxSessions = int(m)
+	}
+	maxExcerpts := 20
+	if m, ok := args["max_excerpts"].(float64); ok && m > 0 {
+		maxExcerpts = int(m)
+	}
+	truncateLen := 200
+	if t, ok := args["truncate_len"].(float64); ok && t > 0 {
+		truncateLen = int(t)
+	}
+
+	result, err := h.mem.Status(days, repoFilter, maxSessions, maxExcerpts, truncateLen)
+	if err != nil {
+		return fmt.Sprintf("status failed: %v", err), true, nil
+	}
+	if len(result.Repos) == 0 {
+		return "No recent activity found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }
 
 func (h *Handler) recentActivity(args map[string]any) (string, bool, error) {

@@ -31,7 +31,9 @@ claude mcp add --scope user mnemo -- mnemo    # register stdio proxy
 - `mnemo_search` — Full-text search with context (default 3 before/after). Supports repo filter.
 - `mnemo_sessions` — List sessions by recency, type, project, repo, work type
 - `mnemo_read_session` — Read messages from a specific session (supports prefix IDs)
-- `mnemo_query` — Raw SQL SELECT/WITH against the transcript database
+- `mnemo_query` — SQL SELECT/WITH or sqldeep nested syntax (FROM ... SELECT { }) against the transcript database
+- `mnemo_recent_activity` — Per-repo summary of recent session activity (counts, recency, work types, topics)
+- `mnemo_status` — Rich status report: repos → sessions → truncated conversation excerpts with drill-down offsets
 - `mnemo_repos` — List repos with paths, session counts, last activity. Supports globs.
 - `mnemo_stats` — Index statistics
 - `mnemo_self` — Session self-identification via nonce protocol
