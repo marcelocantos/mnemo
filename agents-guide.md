@@ -132,10 +132,37 @@ Read messages from a specific session. Accepts a full session ID or a
 prefix. Supports `role` filtering ("user"/"assistant"), `offset`, and
 `limit` for pagination.
 
+### mnemo_recent_activity
+
+Per-repo summary of recent session activity. Returns structured JSON
+with session count, message count, last activity time, work types, and
+key topics for each repo. Configurable recency window (default 7 days).
+
+Use this for quick overviews of where active work is happening.
+
+### mnemo_status
+
+Rich status report: repos → sessions → conversation excerpts with
+drill-down offsets. User messages in full, assistant messages truncated
+(default 200 chars). Each message carries its database `id` — use
+`mnemo_read_session` with `offset` to retrieve the full text.
+
+Use this when you need context about recent work: the user references
+prior discussions, you need project history before making decisions, or
+you want to know what's been happening across repos. Don't dump the
+output to the user — use it to inform your own understanding.
+
+Parameters:
+- `days` — recency window (default 7)
+- `repo` — filter by repo name or path fragment
+- `max_sessions` — per repo (default 3)
+- `max_excerpts` — per session (default 20, most recent kept)
+- `truncate_len` — assistant message truncation (default 200 chars)
+
 ### mnemo_query
 
-Run a read-only SQL SELECT (or WITH) against the database. Only
-SELECT/WITH queries are accepted — write operations are rejected.
+Run a read-only SQL query against the database. Accepts plain SQL
+(SELECT/WITH) or sqldeep nested syntax for hierarchical JSON output.
 
 Key tables and columns:
 
@@ -166,6 +193,21 @@ SELECT tu.tool_name, tu.tool_command, tr.text AS result
 FROM messages tu
 JOIN messages tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
 WHERE tu.content_type = 'tool_use' AND tu.tool_name = 'Bash'
+```
+
+sqldeep nested syntax returns hierarchical JSON directly from SQL:
+```sql
+FROM session_meta sm
+JOIN session_summary ss ON ss.session_id = sm.session_id
+WHERE ss.last_msg >= datetime('now', '-7 days')
+  AND ss.session_type = 'interactive'
+SELECT {
+  sm.repo,
+  sm.cwd,
+  ss.substantive_msgs,
+  ss.last_msg,
+}
+ORDER BY ss.last_msg DESC
 ```
 
 Results capped at 100 rows.
@@ -202,6 +244,7 @@ transcript.
 
 ## Common Patterns
 
+- **What's been happening?**: `mnemo_status` — repos, sessions, and conversation excerpts from the last 7 days
 - **Find a repo on disk**: `mnemo_repos` with `filter: "mnemo"` — returns the filesystem path
 - **Find related repos**: `mnemo_repos` with `filter: "marcelocantos/sql*"` — glob matching
 - **Find past decisions**: `mnemo_search` with query `"decided to" OR "went with" OR "chose"`
