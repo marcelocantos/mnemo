@@ -37,3 +37,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `e8b5f65`
 - **Outcome**: Released v0.7.0 (darwin-arm64, linux-amd64, linux-arm64). Added mnemo_repos tool for repo discovery. Dumb proxy architecture via mcpbridge — tool definitions and handling moved to daemon. Auto-reconnect on daemon restart. Protocol versioning replaces binary hash.
+
+## 2026-04-07 — /release v0.9.0
+
+- **Commit**: `a593481`
+- **Outcome**: Released v0.9.0 (darwin-arm64, linux-amd64, linux-arm64). Full-fidelity ingest (🎯T9.1): new entries table stores every JSONL line as JSONB with 15 virtual columns. All entry types ingested (progress, system, file-history-snapshot). Messages linked via entry_id FK. Schema version 5 (triggers re-index). Unblocks 🎯T9.2–T9.6.
