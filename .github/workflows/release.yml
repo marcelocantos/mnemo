@@ -24,14 +24,29 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: mnemo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: marcelocantos/sqldeep
+          path: sqldeep
+
+      - name: Build sqldeep
+        run: |
+          cd sqldeep && mkdir -p build
+          c++ -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
+          cc -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
+          ar rcs build/libsqldeep.a build/sqldeep.o
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: mnemo/go.mod
 
       - name: Build
         env:
           CGO_ENABLED: "1"
+        working-directory: mnemo
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           go build -tags "sqlite_fts5" \
@@ -42,6 +57,7 @@ jobs:
       - name: Upload release artifact
         env:
           GH_TOKEN: ${{ github.token }}
+        working-directory: mnemo
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release upload "$GITHUB_REF_NAME" \
@@ -51,10 +67,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: mnemo
+      - uses: actions/checkout@v4
+        with:
+          repository: marcelocantos/sqldeep
+          path: sqldeep
+      - name: Build sqldeep
+        run: |
+          cd sqldeep && mkdir -p build
+          c++ -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
+          cc -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
+          ar rcs build/libsqldeep.a build/sqldeep.o
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-      - run: go test -tags "sqlite_fts5" ./...
+          go-version-file: mnemo/go.mod
+      - run: cd mnemo && go test -tags "sqlite_fts5" ./...
 
   homebrew:
     needs: build

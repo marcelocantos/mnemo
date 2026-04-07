@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.7.0.
+Snapshot as of v0.8.0.
 
 ### CLI flags
 
@@ -56,14 +56,36 @@ values are heuristically extracted and the set may evolve.
 | `offset` | number | no | Skip first N messages (default 0) | Stable |
 | `limit` | number | no | Max messages (default 50) | Stable |
 
+#### mnemo_recent_activity
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `days` | number | no | Recency window in days (default 7) | Stable |
+| `repo` | string | no | Repo filter (name or path fragment) | Stable |
+
+**Added in v0.8.0.** Returns structured JSON per repo. **Stability**: Needs review — output shape may evolve.
+
+#### mnemo_status
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `days` | number | no | Recency window in days (default 7) | Stable |
+| `repo` | string | no | Repo filter | Stable |
+| `max_sessions` | number | no | Max sessions per repo (default 3) | Needs review |
+| `max_excerpts` | number | no | Max message excerpts per session (default 20) | Needs review |
+| `truncate_len` | number | no | Assistant message truncation length (default 200) | Needs review |
+
+**Added in v0.8.0.** Returns hierarchical JSON (repos → sessions → excerpts). **Stability**: Needs review — defaults and output shape may evolve.
+
 #### mnemo_query
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `query` | string | yes | SQL SELECT/WITH query | Stable |
+| `query` | string | yes | SQL SELECT/WITH or sqldeep nested syntax | Stable |
 
-**Note**: Only SELECT and WITH queries are accepted. The SQL schema is
-an implicit part of this surface. See database schema below.
+**Note**: Accepts plain SQL (SELECT/WITH) and sqldeep nested syntax
+(`FROM ... SELECT { }`). sqldeep queries are transparently transpiled.
+The SQL schema is an implicit part of this surface. See database schema below.
 
 #### mnemo_repos
 
@@ -127,10 +149,10 @@ configurable before 1.0.
 
 ## Gaps and prerequisites
 
-- **Structured output**: MCP tools return plain text. Structured JSON
-  output would enable programmatic consumption by other tools. Must
-  decide on output format before 1.0. sqldeep integration (🎯T8)
-  would enable nested JSON queries.
+- **Structured output**: Most MCP tools return plain text. `mnemo_recent_activity`
+  and `mnemo_status` return structured JSON; `mnemo_query` with sqldeep
+  syntax returns hierarchical JSON. Remaining text-output tools may
+  migrate to structured output before 1.0.
 - **Configurable paths**: Database and transcript paths are hardcoded.
   Should be configurable via flags or env vars.
 - **Session metadata completeness**: repo, work_type, and topic are
