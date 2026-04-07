@@ -42,3 +42,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `a593481`
 - **Outcome**: Released v0.9.0 (darwin-arm64, linux-amd64, linux-arm64). Full-fidelity ingest (🎯T9.1): new entries table stores every JSONL line as JSONB with 15 virtual columns. All entry types ingested (progress, system, file-history-snapshot). Messages linked via entry_id FK. Schema version 5 (triggers re-index). Unblocks 🎯T9.2–T9.6.
+
+## 2026-04-07 — /release v0.10.0
+
+- **Commit**: `736594c`
+- **Outcome**: Released v0.10.0 (darwin-arm64, linux-amd64, linux-arm64). File-history-snapshot indexing (🎯T14): snapshot_files table with FTS5 auto-extracted via SQL trigger. Schema version 6. New targets: 🎯T11 git history, 🎯T12 GitHub activity, 🎯T13 CI/CD history.
