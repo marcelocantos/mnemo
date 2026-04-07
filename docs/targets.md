@@ -368,8 +368,9 @@ the full session lifecycle across multiple /clear cycles.
 - **Value**: 6
 - **Cost**: 5
 - **Weight**: 1.2 (value 6 / cost 5)
-- **Status**: identified
+- **Status**: achieved
 - **Discovered**: 2026-04-06
+- **Achieved**: 2026-04-07
 - **Related**: 🎯T7 (templates benefit from expressive query syntax)
 
 **Desired state:** `mnemo_query` accepts sqldeep syntax (JSON5-like

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/marcelocantos/sqldeep/go/sqldeep"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -1185,18 +1186,34 @@ func (s *Store) ResolveNonce(nonce string) (string, error) {
 	return sessionID, nil
 }
 
+// isSqldeep returns true if the query uses sqldeep nested syntax.
+func isSqldeep(upper string) bool {
+	return strings.HasPrefix(upper, "FROM") || strings.Contains(upper, "SELECT {")
+}
+
 // Query runs a read-only SQL query and returns rows as maps.
+// Accepts both plain SQL (SELECT/WITH) and sqldeep nested syntax
+// (FROM ... SELECT { ... }). sqldeep queries are transparently
+// transpiled to SQL before execution.
 func (s *Store) Query(query string) ([]map[string]any, error) {
 	q := strings.TrimSpace(query)
 	upper := strings.ToUpper(q)
-	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
-		return nil, fmt.Errorf("only SELECT and WITH queries are allowed")
+
+	execSQL := query
+	if isSqldeep(upper) {
+		sql, err := sqldeep.Transpile(q)
+		if err != nil {
+			return nil, fmt.Errorf("sqldeep transpile: %w", err)
+		}
+		execSQL = sql
+	} else if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
+		return nil, fmt.Errorf("only SELECT, WITH, and sqldeep (FROM ... SELECT { }) queries are allowed")
 	}
 
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query(query)
+	rows, err := s.db.Query(execSQL)
 	if err != nil {
 		return nil, err
 	}

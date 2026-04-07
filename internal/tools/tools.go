@@ -56,18 +56,35 @@ func Definitions() []mcp.Tool {
 			mcp.WithNumber("limit", mcp.Description("Max messages to return (default 50)")),
 		),
 		mcp.NewTool("mnemo_query",
-			mcp.WithDescription(`Run a read-only SQL query against the transcript database.
+			mcp.WithDescription(`Run a read-only query against the transcript database.
+
+Accepts plain SQL (SELECT/WITH) or sqldeep nested syntax for hierarchical JSON output.
+
+sqldeep example — repos with their recent sessions:
+  FROM session_meta sm
+  JOIN session_summary ss ON ss.session_id = sm.session_id
+  WHERE ss.last_msg >= datetime('now', '-7 days')
+    AND ss.session_type = 'interactive'
+  SELECT {
+    sm.repo,
+    sessions: FROM session_summary s
+      WHERE s.session_id = sm.session_id
+      SELECT { s.session_id, s.last_msg, s.substantive_msgs, },
+  }
+  GROUP BY sm.repo
 
 Tables:
   messages (id, session_id, project, role, text, timestamp, type, is_noise)
   messages_fts — FTS5 virtual table (excludes noise). Use: WHERE messages_fts MATCH 'terms'
   sessions — view: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg
+  session_meta (session_id, repo, cwd, git_branch, work_type, topic)
+  session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
   ingest_state (path, offset)
 
 Session types (derived from project path): interactive, subagent, worktree, ephemeral.
 is_noise = 1 for interrupts, compaction summaries, tool-loaded markers, slash command markup.
 Results capped at 100 rows.`),
-			mcp.WithString("query", mcp.Required(), mcp.Description("SQL SELECT query")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("SQL SELECT/WITH query, or sqldeep nested syntax (FROM ... SELECT { ... })")),
 		),
 		mcp.NewTool("mnemo_repos",
 			mcp.WithDescription(`List repositories that have been worked on in Claude Code sessions. Returns repo name, filesystem path, session count, and last activity. Use this to discover repo locations, find related projects, or get an overview of recent work.`),
