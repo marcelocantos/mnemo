@@ -615,32 +615,33 @@ the index confirms it does, but the terms don't intersect.
    similarity. Hybrid ranking: combine BM25 score with embedding
    distance.
 
-   **SQLite-native options** (preserves mnemo's single-file architecture):
-   - **sqlite-vec** — SQLite extension for vector search. Stores
-     embeddings as virtual table columns, supports KNN queries.
-     Go bindings via `github.com/asg017/sqlite-vec-go-bindings`.
-   - **sqlite-lembed** — companion extension that generates embeddings
-     inside SQLite using GGUF models. Could embed at ingest time
-     without an external service: `SELECT lembed('nomic-embed-text-v1.5',
-     text) FROM messages`. Needs a local GGUF model file.
-   - **Ollama integration** — alternative to sqlite-lembed. mnemo's
-     daemon calls `ollama` (already installed via Homebrew) for
-     embeddings at ingest time. Models like `nomic-embed-text` or
-     `all-minilm` run locally with no API cost. Ollama's HTTP API
-     (`POST /api/embeddings`) is trivial to call from Go. Advantages
-     over sqlite-lembed: model management via `ollama pull`, GPU
-     acceleration, shared model cache across tools.
+   **Architecture:**
+   - **sqlite-vec** for vector storage — SQLite extension, keeps
+     everything in one DB file. Stores embeddings as virtual table
+     columns, supports KNN queries. Go bindings via
+     `github.com/asg017/sqlite-vec-go-bindings`.
+   - **Ollama** for embedding generation — mnemo's daemon calls
+     Ollama's `/api/embed` endpoint at ingest time. Already installed
+     via Homebrew, handles model management (`ollama pull`), GPU
+     acceleration, shared model cache. No API cost, no build
+     complexity. Models like `nomic-embed-text` (768d, ~270MB) or
+     `all-minilm` (384d, ~45MB) run locally.
+   - Embeddings computed in Go application code, not inside SQLite.
+     This gives full control over batching, error handling, and
+     backpressure during ingest. (sqlite-lembed exists for in-SQLite
+     embedding but adds GGUF model dependencies to the SQLite
+     connection for no real benefit — mnemo's search and ingest
+     always go through handler code.)
 
    **Key questions:**
-   - Embedding model choice: nomic-embed-text (768d, good quality),
-     all-minilm (384d, smaller/faster), or mxbai-embed-large (1024d)?
+   - Embedding model choice: nomic-embed-text (768d, good quality,
+     Matryoshka — can truncate to 256d), all-minilm (384d, smaller/
+     faster), or mxbai-embed-large (1024d, highest quality)?
    - Ingest cost: ~1M messages × embedding latency. Batch embedding
      and incremental-only processing make this manageable.
-   - Storage: 768d float32 = 3KB/vector × 1M = ~3GB. Quantisation
-     (int8) drops this to ~750MB.
-   - sqlite-lembed vs Ollama: lembed is in-process (no network hop)
-     but less mature; Ollama is battle-tested and already on the
-     machine.
+   - Storage: 768d float32 = 3KB/vector × 1M = ~3GB. Matryoshka
+     truncation to 256d or int8 quantisation can cut this
+     significantly.
 
 2. **Agentic search** — spawn a lightweight agent (via claudia) that
    reformulates failed queries, tries synonyms, uses session metadata
