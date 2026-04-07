@@ -432,8 +432,9 @@ and stores the failed job log summary. FTS5 on failure messages.
 - **Value**: 5
 - **Cost**: 2
 - **Weight**: 2.5 (value 5 / cost 2)
-- **Status**: identified
+- **Status**: achieved
 - **Discovered**: 2026-04-07
+- **Achieved**: 2026-04-07
 - **Related**: 🎯T9.1 (full-fidelity ingest — snapshots already stored)
 
 **Desired state:** The `file-history-snapshot` entries already stored

@@ -83,7 +83,7 @@ targets:
     discovered: 2026-04-07
   T14:
     name: File-history-snapshots surfaced as queryable tool
-    status: identified
+    status: achieved
     value: 5.0
     cost: 2.0
     acceptance:
@@ -96,6 +96,7 @@ targets:
     - observability
     origin: user suggestion
     discovered: 2026-04-07
+    achieved: 2026-04-07
   T2:
     name: Smarter session classification
     status: achieved
