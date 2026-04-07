@@ -564,14 +564,14 @@ because the agent used 4-7 word queries with terms not in the corpus
 ("pairing", "ceremony", "bootstrap"). FTS5 implicit AND semantics
 meant zero results for each attempt.
 
-**Mitigations applied (v1 — tool description + empty-result guidance):**
-- Tool description now explains FTS5 AND semantics and search strategies
-- Empty results with 3+ term queries now suggest reducing terms
-- Query parameter description guides toward 1-3 key terms
+**Implemented (v1 — OR-by-default search):**
+- Plain word queries now use OR semantics — "QR pairing protocol" finds
+  messages with ANY of those words, ranked by BM25 (more/rarer matches
+  rank higher). Explicit operators (AND, OR, NOT, NEAR, quotes) still
+  work for precise control.
+- Tool description explains the fuzzy default and precise alternatives.
 
-**Possible deeper improvements:**
-- Automatic query relaxation: when a multi-word query returns 0 results,
-  try dropping terms one at a time and report which subsets match
+**Remaining improvements:**
 - Session-level search: match queries against session metadata (repo,
   topic, work_type) in addition to message FTS — "HMS QR" could match
   repo="hms" + message containing "QR"
@@ -581,9 +581,10 @@ meant zero results for each attempt.
   parts of the query even if the message doesn't contain all terms
 
 **Acceptance criteria:**
-- Agent searching "QR pairing HMS" finds the QR transfer session in HMS
-- Multi-word queries that partially match still return useful results
-- Empty-result responses guide agents toward better queries
+- [x] Agent searching "QR pairing protocol" finds messages containing "QR"
+  even though "pairing" and "protocol" don't appear (OR semantics)
+- [x] Multi-word queries return partial matches ranked by relevance
+- [ ] Session metadata (repo, topic) contributes to search ranking
 
 ### 🎯T8 sqldeep integration
 

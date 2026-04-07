@@ -30,16 +30,18 @@ func NewHandler(mem store.Backend) *Handler {
 func Definitions() []mcp.Tool {
 	return []mcp.Tool{
 		mcp.NewTool("mnemo_search",
-			mcp.WithDescription(`Search across Claude Code session transcripts. Uses FTS5 full-text search.
+			mcp.WithDescription(`Search across Claude Code session transcripts. Uses FTS5 full-text search with fuzzy matching.
 
-IMPORTANT — FTS5 uses implicit AND: "QR code pairing protocol" requires ALL four words in a single message. This often fails because concepts span multiple messages. Search strategies:
-- Start with 1-2 distinctive terms: "QR transfer" not "HMS QR code pairing protocol"
-- Use OR for synonyms: "pairing OR transfer OR bootstrap"
-- Use quotes for exact phrases: "\"QR transfer\""
-- If no results, try fewer/different terms before giving up — the content may use different vocabulary than expected
+Plain word queries use OR matching — "QR code pairing protocol" finds messages containing ANY of those words, ranked by how many match (BM25). This means partial matches surface instead of returning nothing. Messages matching more/rarer terms rank higher.
+
+For exact matching, use explicit FTS5 operators:
+- Require all terms: "QR AND transfer"
+- Exact phrase: "\"QR transfer\""
+- Exclude terms: "QR NOT test"
+- Proximity: NEAR(QR transfer, 5)
 
 By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.`),
-			mcp.WithString("query", mcp.Required(), mcp.Description("FTS5 query. Implicit AND between words. Use OR for alternatives, NOT to exclude, quotes for exact phrases. Keep queries short (1-3 key terms) for best results.")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words use OR (fuzzy). Use AND/NOT/NEAR/quotes for precise control.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
@@ -223,11 +225,7 @@ func (h *Handler) search(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("search failed: %v", err), true, nil
 	}
 	if len(results) == 0 {
-		words := strings.Fields(query)
-		if len(words) > 2 {
-			return fmt.Sprintf("No results found. Your query has %d terms (FTS5 requires ALL terms in a single message). Try fewer terms — e.g., just the 1-2 most distinctive words, or use OR between alternatives.", len(words)), false, nil
-		}
-		return "No results found.", false, nil
+		return "No results found. Try different terms — the content may use different vocabulary than expected.", false, nil
 	}
 
 	var b strings.Builder

@@ -199,6 +199,29 @@ func sessionTypeSQL(col string) string {
 END`
 }
 
+// fts5Operators matches explicit FTS5 syntax that should not be rewritten.
+var fts5Operators = regexp.MustCompile(`(?i)\b(OR|NOT|AND|NEAR)\b|"`)
+
+// relaxQuery rewrites a plain word list into an OR query so that partial
+// matches surface instead of requiring every term. Queries that already
+// contain explicit FTS5 operators (OR, NOT, AND, NEAR, quoted phrases)
+// are returned unchanged.
+func relaxQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return q
+	}
+	// If the query uses any explicit FTS5 operators, leave it alone.
+	if fts5Operators.MatchString(q) {
+		return q
+	}
+	words := strings.Fields(q)
+	if len(words) <= 1 {
+		return q
+	}
+	return strings.Join(words, " OR ")
+}
+
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
 const schemaVersion = 6
@@ -943,6 +966,10 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	needSessionFilter := sessionType != "all"
 	needRepoFilter := repoFilter != ""
 
+	// Rewrite plain word lists to OR queries so partial matches surface.
+	// Explicit FTS5 operators (OR, NOT, AND, NEAR, quotes) are preserved.
+	ftsQuery := relaxQuery(query)
+
 	// Phase 1: FTS-only scan with generous over-fetch.
 	// Over-fetch 10x to account for session type filtering.
 	fetchLimit := limit * 10
@@ -954,7 +981,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		WHERE messages_fts MATCH ?
 		ORDER BY rank
 		LIMIT ?
-	`, query, fetchLimit)
+	`, ftsQuery, fetchLimit)
 	if err != nil {
 		return nil, err
 	}

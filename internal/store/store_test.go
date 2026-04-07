@@ -180,6 +180,49 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 }
 
+func TestFuzzySearch(t *testing.T) {
+	projectDir := t.TempDir()
+
+	writeJSONL(t, projectDir, "myproject", "sess-fuzzy1", []map[string]any{
+		msg("user", "How does the QR transfer work?", "2026-04-01T10:00:00Z"),
+		msg("assistant", "The QR transfer uses a token-based handoff.", "2026-04-01T10:00:05Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// "QR pairing protocol" — no message contains "pairing" or "protocol",
+	// but with OR semantics, "QR" alone should match.
+	results, err := s.Search("QR pairing protocol", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected fuzzy search to find partial matches via OR")
+	}
+	found := false
+	for _, r := range results {
+		if r.SessionID == "sess-fuzzy1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected sess-fuzzy1 in fuzzy search results")
+	}
+
+	// Explicit AND should still require all terms — this should find nothing.
+	results, err = s.Search("QR AND pairing AND protocol", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results for explicit AND with missing terms, got %d", len(results))
+	}
+}
+
 func TestListSessions(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -1060,5 +1103,38 @@ func TestSchemaVersionRebuild(t *testing.T) {
 	}
 	if len(results) == 0 {
 		t.Fatal("expected search results after re-ingest")
+	}
+}
+
+func TestRelaxQuery(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		// Single word — unchanged.
+		{"hello", "hello"},
+		// Multiple words — OR-joined.
+		{"QR code pairing", "QR OR code OR pairing"},
+		// Explicit OR — unchanged.
+		{"QR OR pairing", "QR OR pairing"},
+		// Explicit AND — unchanged.
+		{"QR AND pairing", "QR AND pairing"},
+		// Explicit NOT — unchanged.
+		{"QR NOT test", "QR NOT test"},
+		// Quoted phrase — unchanged.
+		{`"QR transfer"`, `"QR transfer"`},
+		// NEAR — unchanged.
+		{"NEAR(QR transfer)", "NEAR(QR transfer)"},
+		// Case-insensitive operator detection.
+		{"hello or world", "hello or world"},
+		// Empty — unchanged.
+		{"", ""},
+		// Whitespace only.
+		{"   ", ""},
+	}
+	for _, tt := range tests {
+		got := relaxQuery(tt.input)
+		if got != tt.want {
+			t.Errorf("relaxQuery(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
