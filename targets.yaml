@@ -27,14 +27,14 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
   T11:
-    name: Git history indexed and cross-referenced with session activity
+    name: Git history indexed cross-repo with FTS and session correlation
     status: identified
     value: 8.0
     cost: 5.0
     acceptance:
-    - Commits from repos in session_meta are indexed automatically
-    - mnemo_commits returns commits with correlated session IDs
-    - mnemo_blame <file> returns recent commits with session context
+    - Commits from repos in session_meta indexed automatically
+    - mnemo_commits supports cross-repo queries (repo glob, date range)
+    - FTS5 index on commit messages enables keyword search across corpus
     - Commit data queryable via mnemo_query (joins with sessions/entries)
     - Incremental — only fetches new commits since last ingest
     context: mnemo knows what was discussed; git history knows what changed. Cross-referencing the two lets agents answer 'why was this changed?' and 'which session produced this commit?' without leaving mnemo.

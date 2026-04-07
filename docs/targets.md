@@ -307,11 +307,16 @@ later if keyword search proves insufficient.
 - **Discovered**: 2026-04-07
 - **Related**: 🎯T3 (dashboard data), 🎯T9.6 (decision recall)
 
-**Desired state:** mnemo indexes Git commit history from repos that
-appear in session transcripts and cross-references commits with session
-activity. Agents can ask "what changed in this repo recently?", "which
-session produced this commit?", or "what was the reasoning behind
-changes to this file?" — all without leaving the mnemo query interface.
+**Desired state:** mnemo indexes Git commit history from all repos
+that appear in session transcripts and exposes cross-repo, corpus-level
+queries. Single-repo git operations (log, blame, diff) are already
+well-served by Claude Code's built-in tools — mnemo's value is in
+indexed search across the entire corpus and session-commit correlation.
+
+Agents can ask "which repos had auth-related commits this week?",
+"show all commits across all projects by this author", or "what was
+the session context when this change was made?" — queries that span
+repos and join code history with conversation history.
 
 **Architecture sketch:**
 
@@ -327,17 +332,15 @@ table for per-file change tracking.
 
 **Tools:**
 
-- `mnemo_commits` — search/list commits with filters (repo, author,
-  date range, file path, message pattern). Returns commit metadata
-  with links to correlated sessions.
-- `mnemo_blame` — given a file path, show recent commits touching it
-  with session context. Answers "why was this changed?" by surfacing
-  the session discussion alongside the diff.
+- `mnemo_commits` — cross-repo commit search with filters (repo glob,
+  author, date range, file path pattern, message FTS). Returns commit
+  metadata with correlated session IDs. The cross-repo and FTS
+  capabilities are the differentiators vs built-in `git log`.
 
 **Acceptance criteria:**
 - Commits from repos in `session_meta` are indexed automatically.
-- `mnemo_commits` returns commits with correlated session IDs.
-- `mnemo_blame <file>` returns recent commits with session context.
+- `mnemo_commits` supports cross-repo queries (repo glob, date range).
+- FTS5 index on commit messages enables keyword search across corpus.
 - Commit data queryable via `mnemo_query` (joins with sessions/entries).
 - Incremental — only fetches new commits since last ingest.
 
