@@ -26,6 +26,25 @@ brew services start mnemo                     # start the daemon
 claude mcp add --scope user mnemo -- mnemo    # register stdio proxy
 ```
 
+After installing, add the following to your global `~/.claude/CLAUDE.md`
+so agents know when to use mnemo:
+
+```markdown
+## Session context via mnemo
+
+The `mnemo` MCP server indexes all Claude Code session transcripts.
+When you need context about recent work — what repos have been
+active, what was discussed, what decisions were made — use
+`mnemo_status` or `mnemo_search` rather than guessing or asking the
+user. Good moments to reach for mnemo:
+- The user references prior work ("that thing we discussed", "the
+  approach from last session", "continue where I left off")
+- You need to understand the broader context of a project before
+  making architectural decisions
+- `/waw` or `/cv` needs recent activity data
+- The user asks what's been happening across repos
+```
+
 ## MCP Tools
 
 - `mnemo_search` — Full-text search with context (default 3 before/after). Supports repo filter.

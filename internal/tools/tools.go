@@ -103,8 +103,7 @@ Results capped at 100 rows.`),
 
 User messages are shown in full. Assistant messages are truncated (default 200 chars). Each message includes its database ID — use mnemo_read_session with offset to retrieve the full text.
 
-Ideal for session startup context: "what's been happening across my projects?"
-`),
+Use this when you need context about recent work: the user references prior discussions, you need to understand project history before making decisions, or you want to know what's been happening across repos. Don't dump the output to the user — use it to inform your own understanding.`),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7)")),
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("max_sessions", mcp.Description("Max sessions per repo (default 3)")),
