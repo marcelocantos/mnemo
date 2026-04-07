@@ -43,6 +43,59 @@ targets:
     - observability
     origin: user suggestion
     discovered: 2026-04-07
+  T12:
+    name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - PRs and issues from repos in session_meta indexed automatically
+    - mnemo_prs supports cross-repo queries with FTS on title/body
+    - PR reviews and comments indexed and searchable
+    - Correlated with sessions and commits
+    - Queryable via mnemo_query
+    - Incremental polling
+    context: gh CLI queries one repo at a time. mnemo adds corpus-level FTS search over PRs/issues/reviews and cross-references with session context and git history.
+    tags:
+    - ingest
+    - observability
+    - github
+    origin: user suggestion
+    discovered: 2026-04-07
+  T13:
+    name: CI/CD run history indexed cross-repo with failure pattern detection
+    status: identified
+    value: 8.0
+    cost: 3.0
+    acceptance:
+    - CI runs from repos in session_meta indexed automatically
+    - mnemo_ci supports cross-repo queries with status/conclusion filters
+    - Failed run logs indexed with FTS
+    - Correlated with commits and sessions
+    - Queryable via mnemo_query
+    - Incremental polling
+    context: GitHub Actions logs are ephemeral (90-day retention) and per-repo. mnemo preserves them permanently and makes them searchable across the full corpus. Would have been useful today for diagnosing CI patterns.
+    tags:
+    - ingest
+    - observability
+    - ci
+    origin: user suggestion
+    discovered: 2026-04-07
+  T14:
+    name: File-history-snapshots surfaced as queryable tool
+    status: identified
+    value: 5.0
+    cost: 2.0
+    acceptance:
+    - File-history-snapshot data queryable via dedicated tool or view
+    - 'Cross-session file tracking: which sessions touched this file?'
+    - Queryable via mnemo_query
+    - No additional ingest needed — data already in entries table
+    context: 26k+ file-history-snapshot entries already stored in entries table after T9.1. Just needs extraction logic and a tool/view. Low cost, high leverage.
+    tags:
+    - observability
+    origin: user suggestion
+    discovered: 2026-04-07
   T2:
     name: Smarter session classification
     status: achieved

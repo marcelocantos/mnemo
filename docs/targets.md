@@ -344,6 +344,126 @@ table for per-file change tracking.
 - Commit data queryable via `mnemo_query` (joins with sessions/entries).
 - Incremental — only fetches new commits since last ingest.
 
+### 🎯T12 GitHub activity indexing
+
+- **Value**: 8
+- **Cost**: 5
+- **Weight**: 1.6 (value 8 / cost 5)
+- **Status**: identified
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T11 (git history), 🎯T9.6 (decision recall)
+
+**Desired state:** mnemo indexes GitHub activity (PRs, issues, reviews,
+comments) from repos that appear in session transcripts. Agents can
+search across the full corpus — "which PRs across all my repos are
+stale?", "what did the reviewer say about the auth approach?", "find
+all issues mentioning performance regression."
+
+The `gh` CLI queries one repo at a time and returns ephemeral results.
+mnemo's value is corpus-level FTS search and cross-referencing with
+session context and git history.
+
+**Architecture sketch:**
+
+The daemon periodically polls GitHub via `gh api` for repos discovered
+from `session_meta`. Ingests PRs (title, body, state, author, reviewers,
+merge status), PR reviews and comments, and issues into dedicated tables.
+FTS5 on PR/issue bodies and comments.
+
+**Tools:**
+
+- `mnemo_prs` — cross-repo PR search with filters (repo glob, state,
+  author, reviewer, date range, body/title FTS). Returns PR metadata
+  with correlated session IDs and commit hashes.
+- `mnemo_issues` — cross-repo issue search with similar filters.
+
+**Acceptance criteria:**
+- PRs and issues from repos in `session_meta` indexed automatically.
+- `mnemo_prs` supports cross-repo queries with FTS on title/body.
+- PR reviews and comments indexed and searchable.
+- Correlated with sessions (by repo + time overlap) and commits (by merge SHA).
+- Queryable via `mnemo_query` (joins with sessions/entries/commits).
+- Incremental — only fetches activity since last poll.
+
+### 🎯T13 CI/CD history and statistics
+
+- **Value**: 8
+- **Cost**: 3
+- **Weight**: 2.7 (value 8 / cost 3)
+- **Status**: identified
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T12 (GitHub activity), 🎯T11 (git history)
+
+**Desired state:** mnemo indexes CI/CD run history (GitHub Actions)
+and exposes cross-repo queries over build outcomes. Agents can ask
+"has this test failed before? what fixed it?", "which repos have been
+red this week?", "what's my CI success rate by repo?"
+
+GitHub Actions logs are ephemeral (90-day retention) and per-repo.
+mnemo preserves them permanently and makes them searchable across the
+full corpus, correlated with the sessions and commits that triggered
+them.
+
+**Architecture sketch:**
+
+The daemon polls `gh api` for workflow runs from repos in `session_meta`.
+Stores run metadata (workflow name, status, conclusion, duration, trigger
+event, head SHA, branch) in a `ci_runs` table. For failed runs, fetches
+and stores the failed job log summary. FTS5 on failure messages.
+
+**Tools:**
+
+- `mnemo_ci` — cross-repo CI query with filters (repo glob, workflow,
+  conclusion, date range, branch). Returns run metadata with correlated
+  sessions and commits.
+- Failure pattern detection: "this test has failed 3 times this week
+  in 2 different repos."
+
+**Acceptance criteria:**
+- CI runs from repos in `session_meta` indexed automatically.
+- `mnemo_ci` supports cross-repo queries with status/conclusion filters.
+- Failed run logs indexed with FTS for "has this failed before?" queries.
+- Correlated with commits (by head SHA) and sessions (by repo + time).
+- Queryable via `mnemo_query`.
+- Incremental polling with configurable interval.
+
+### 🎯T14 File-history-snapshot surfacing
+
+- **Value**: 5
+- **Cost**: 2
+- **Weight**: 2.5 (value 5 / cost 2)
+- **Status**: identified
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T9.1 (full-fidelity ingest — snapshots already stored)
+
+**Desired state:** The `file-history-snapshot` entries already stored
+in the `entries` table (26k+ entries) are surfaced as a queryable tool.
+Agents can track which files existed at session boundaries and how the
+working tree evolved across sessions, without running per-file git
+queries.
+
+This is low-cost because the data is already ingested — it just needs
+extraction logic and a dedicated tool or view.
+
+**Architecture sketch:**
+
+Extract file lists from `entries.raw` where `type = 'file-history-snapshot'`
+into a `file_snapshots` table (session_id, timestamp, file_path, status).
+Or expose via a view/virtual columns on the existing entries table if
+the JSON structure is simple enough.
+
+**Tools:**
+
+- `mnemo_files` — query file presence/modification across sessions.
+  "Which sessions touched store.go?", "What files were in the working
+  tree during session X?"
+
+**Acceptance criteria:**
+- File-history-snapshot data queryable via dedicated tool or view.
+- Cross-session file tracking: "which sessions touched this file?"
+- Queryable via `mnemo_query`.
+- No additional ingest needed — data already in `entries` table.
+
 ### 🎯T10 Live context compaction
 
 - **Value**: 10
