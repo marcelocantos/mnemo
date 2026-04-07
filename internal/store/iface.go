@@ -15,4 +15,5 @@ type Backend interface {
 	ResolveNonce(nonce string) (string, error)
 	RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error)
 	Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error)
+	Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error)
 }

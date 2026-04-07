@@ -135,6 +135,15 @@ Use this when you need context about recent work: the user references prior disc
 			mcp.WithNumber("max_excerpts", mcp.Description("Max message excerpts per session (default 20, most recent kept)")),
 			mcp.WithNumber("truncate_len", mcp.Description("Truncate assistant messages to this length (default 200)")),
 		),
+		mcp.NewTool("mnemo_usage",
+			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
+
+Returns per-period breakdown and totals. Cost estimates use published Anthropic pricing (Opus, Sonnet, Haiku families). Unknown models use Sonnet pricing as fallback.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
+			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
+			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", or "repo"`)),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -168,6 +177,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.status(args)
 	case "mnemo_stats":
 		return h.stats()
+	case "mnemo_usage":
+		return h.usage(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -424,6 +435,30 @@ func (h *Handler) recentActivity(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) usage(args map[string]any) (string, bool, error) {
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+	model, _ := args["model"].(string)
+	groupBy, _ := args["group_by"].(string)
+
+	result, err := h.mem.Usage(days, repoFilter, model, groupBy)
+	if err != nil {
+		return fmt.Sprintf("usage query failed: %v", err), true, nil
+	}
+	if len(result.Rows) == 0 {
+		return "No usage data found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

@@ -145,6 +145,50 @@ type StatsResult struct {
 	ByType        []TypeStats `json:"by_type"`
 }
 
+// UsageRow holds aggregated token usage for a single group (date, model, repo).
+type UsageRow struct {
+	Period              string  `json:"period"`
+	Model               string  `json:"model,omitempty"`
+	Repo                string  `json:"repo,omitempty"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	Messages            int     `json:"messages"`
+	CostUSD             float64 `json:"cost_usd"`
+}
+
+// UsageResult holds aggregated token usage with totals.
+type UsageResult struct {
+	Days  int        `json:"days"`
+	Rows  []UsageRow `json:"rows"`
+	Total UsageRow   `json:"total"`
+}
+
+// modelCosts maps model slug prefixes to per-token costs in USD.
+// Prices are per-million tokens; we store per-token for calculation.
+var modelCosts = map[string]struct{ input, output, cacheRead, cacheWrite float64 }{
+	"claude-opus-4":   {15.0 / 1e6, 75.0 / 1e6, 1.5 / 1e6, 18.75 / 1e6},
+	"claude-sonnet-4": {3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
+	"claude-haiku-4":  {0.80 / 1e6, 4.0 / 1e6, 0.08 / 1e6, 1.0 / 1e6},
+	"claude-3-5":      {3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
+}
+
+func estimateCost(model string, input, output, cacheRead, cacheCreate int64) float64 {
+	for prefix, cost := range modelCosts {
+		if strings.HasPrefix(model, prefix) {
+			return float64(input)*cost.input +
+				float64(output)*cost.output +
+				float64(cacheRead)*cost.cacheRead +
+				float64(cacheCreate)*cost.cacheWrite
+		}
+	}
+	// Fallback: use sonnet pricing as a reasonable middle ground.
+	c := modelCosts["claude-sonnet-4"]
+	return float64(input)*c.input + float64(output)*c.output +
+		float64(cacheRead)*c.cacheRead + float64(cacheCreate)*c.cacheWrite
+}
+
 // sessionTypeSQL returns a SQL CASE expression for deriving session type.
 func sessionTypeSQL(col string) string {
 	return `CASE
@@ -1250,6 +1294,137 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// Usage returns aggregated token usage statistics from the entries table.
+// groupBy can be "day" (default), "model", or "repo".
+func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 30
+	}
+	if groupBy == "" {
+		groupBy = "day"
+	}
+
+	// Build GROUP BY expression.
+	var groupExpr, periodExpr string
+	switch groupBy {
+	case "model":
+		groupExpr = "e.model"
+		periodExpr = "e.model"
+	case "repo":
+		groupExpr = "CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END"
+		periodExpr = groupExpr
+	default: // "day"
+		groupExpr = "date(e.timestamp)"
+		periodExpr = "date(e.timestamp)"
+	}
+
+	where := []string{
+		"e.type = 'assistant'",
+		"e.timestamp >= datetime('now', ?)",
+	}
+	args := []any{fmt.Sprintf("-%d days", days)}
+
+	if repoFilter != "" {
+		where = append(where, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+	if model != "" {
+		where = append(where, "e.model LIKE ?")
+		args = append(args, model+"%")
+	}
+
+	needJoin := repoFilter != "" || groupBy == "repo"
+	joinClause := ""
+	if needJoin {
+		joinClause = "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
+	}
+
+	// Always group by model too, so cost estimation is accurate.
+	// Re-aggregate in Go when the requested groupBy isn't "model".
+	q := fmt.Sprintf(`
+		SELECT
+			%s AS period,
+			COALESCE(e.model, '') AS model,
+			COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+			COALESCE(SUM(e.cache_read_tokens), 0) AS cache_read_tokens,
+			COALESCE(SUM(e.cache_creation_tokens), 0) AS cache_creation_tokens,
+			COUNT(*) AS messages
+		FROM entries e
+		%s
+		WHERE %s
+		GROUP BY %s, e.model
+		ORDER BY period DESC
+	`, periodExpr, joinClause, strings.Join(where, " AND "), groupExpr)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Accumulate per-(period, model) rows, computing accurate costs.
+	merged := map[string]*UsageRow{} // period → aggregated row
+	var order []string
+
+	result := &UsageResult{Days: days}
+	for rows.Next() {
+		var period, rowModel string
+		var input, output, cacheRead, cacheCreate int64
+		var msgs int
+		if err := rows.Scan(&period, &rowModel, &input, &output,
+			&cacheRead, &cacheCreate, &msgs); err != nil {
+			continue
+		}
+		cost := estimateCost(rowModel, input, output, cacheRead, cacheCreate)
+
+		if groupBy == "model" {
+			// Each model is its own row — no merging needed.
+			result.Rows = append(result.Rows, UsageRow{
+				Period: period, Model: period,
+				InputTokens: input, OutputTokens: output,
+				CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreate,
+				Messages: msgs, CostUSD: cost,
+			})
+		} else {
+			r, ok := merged[period]
+			if !ok {
+				r = &UsageRow{Period: period}
+				if groupBy == "repo" {
+					r.Repo = period
+				}
+				merged[period] = r
+				order = append(order, period)
+			}
+			r.InputTokens += input
+			r.OutputTokens += output
+			r.CacheReadTokens += cacheRead
+			r.CacheCreationTokens += cacheCreate
+			r.Messages += msgs
+			r.CostUSD += cost
+		}
+
+		result.Total.InputTokens += input
+		result.Total.OutputTokens += output
+		result.Total.CacheReadTokens += cacheRead
+		result.Total.CacheCreationTokens += cacheCreate
+		result.Total.Messages += msgs
+		result.Total.CostUSD += cost
+	}
+
+	if groupBy != "model" {
+		for _, k := range order {
+			result.Rows = append(result.Rows, *merged[k])
+		}
+	}
+	result.Total.Period = "total"
+	return result, nil
 }
 
 // Status returns a rich status report: repos → sessions → truncated message excerpts.

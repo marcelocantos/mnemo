@@ -91,6 +91,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Status": makeMethod(func(p StatusParams) (any, error) {
 			return s.Status(p.Days, p.RepoFilter, p.MaxSessions, p.MaxExcerpts, p.TruncateLen)
 		}),
+		"Usage": makeMethod(func(p UsageParams) (any, error) {
+			return s.Usage(p.Days, p.RepoFilter, p.Model, p.GroupBy)
+		}),
 		"ResolveNonce": makeMethod(func(p ResolveNonceParams) (any, error) {
 			sid, err := s.ResolveNonce(p.Nonce)
 			if err != nil {
@@ -166,6 +169,14 @@ type StatusParams struct {
 	MaxSessions int    `json:"max_sessions"`
 	MaxExcerpts int    `json:"max_excerpts"`
 	TruncateLen int    `json:"truncate_len"`
+}
+
+// UsageParams matches the Usage method signature.
+type UsageParams struct {
+	Days       int    `json:"days"`
+	RepoFilter string `json:"repo_filter"`
+	Model      string `json:"model"`
+	GroupBy    string `json:"group_by"`
 }
 
 // ResolveNonceParams matches the ResolveNonce method signature.
