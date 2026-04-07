@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.9.0.
+Snapshot as of v0.10.0.
 
 ### CLI flags
 
@@ -118,6 +118,8 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `messages` | id, entry_id, session_id, project, role, text, timestamp, type, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error | Needs review |
 | `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill, tool_old_string, tool_new_string, tool_content, tool_query, tool_url, tool_name_param, tool_prompt, tool_subject, tool_status, tool_task_id | Needs review |
 | `messages_fts` | FTS5 virtual table matching `messages` (excludes noise) | Stable |
+| `snapshot_files` | id, entry_id, session_id, file_path, backup_time — auto-extracted via trigger from file-history-snapshot entries | Needs review |
+| `snapshot_files_fts` | FTS5 on file_path | Needs review |
 | `sessions` | View joining session_summary + session_meta: session_id, project, session_type, repo, git_branch, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
 | `session_summary` | Trigger-maintained materialised table: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
 | `session_meta` | Per-session metadata: session_id, repo, cwd, git_branch, work_type, topic | Needs review |
@@ -128,6 +130,8 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 as JSONB with 15 virtual columns for high-query fields. All entry types
 (user, assistant, progress, system, file-history-snapshot) are now ingested.
 `messages` gained `entry_id` FK linking content blocks to their source entry.
+v0.10.0 added `snapshot_files` with trigger-based extraction from
+file-history-snapshot entries and FTS5 on file paths.
 This surface is still evolving. `ingest_state` and `session_nonces` are
 internal implementation details.
 
