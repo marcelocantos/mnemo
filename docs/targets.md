@@ -611,15 +611,36 @@ the index confirms it does, but the terms don't intersect.
 **Approach tiers (research needed):**
 
 1. **Embedding-based retrieval** — compute vector embeddings for
-   messages at ingest time, store in a vector index (sqlite-vec,
-   or a sidecar like Qdrant). At search time, embed the query and
-   find nearest neighbours. Hybrid ranking: combine BM25 score with
-   cosine similarity.
-   - Key question: which embedding model? Local (e.g. nomic-embed,
-     all-MiniLM) vs API (Voyage, OpenAI)? Latency and cost at
-     mnemo's scale (~1M messages)?
-   - sqlite-vec keeps everything in one DB file — appealing for
-     mnemo's single-file architecture.
+   messages at ingest time, store in a vector index, query by cosine
+   similarity. Hybrid ranking: combine BM25 score with embedding
+   distance.
+
+   **SQLite-native options** (preserves mnemo's single-file architecture):
+   - **sqlite-vec** — SQLite extension for vector search. Stores
+     embeddings as virtual table columns, supports KNN queries.
+     Go bindings via `github.com/asg017/sqlite-vec-go-bindings`.
+   - **sqlite-lembed** — companion extension that generates embeddings
+     inside SQLite using GGUF models. Could embed at ingest time
+     without an external service: `SELECT lembed('nomic-embed-text-v1.5',
+     text) FROM messages`. Needs a local GGUF model file.
+   - **Ollama integration** — alternative to sqlite-lembed. mnemo's
+     daemon calls `ollama` (already installed via Homebrew) for
+     embeddings at ingest time. Models like `nomic-embed-text` or
+     `all-minilm` run locally with no API cost. Ollama's HTTP API
+     (`POST /api/embeddings`) is trivial to call from Go. Advantages
+     over sqlite-lembed: model management via `ollama pull`, GPU
+     acceleration, shared model cache across tools.
+
+   **Key questions:**
+   - Embedding model choice: nomic-embed-text (768d, good quality),
+     all-minilm (384d, smaller/faster), or mxbai-embed-large (1024d)?
+   - Ingest cost: ~1M messages × embedding latency. Batch embedding
+     and incremental-only processing make this manageable.
+   - Storage: 768d float32 = 3KB/vector × 1M = ~3GB. Quantisation
+     (int8) drops this to ~750MB.
+   - sqlite-lembed vs Ollama: lembed is in-process (no network hop)
+     but less mature; Ollama is battle-tested and already on the
+     machine.
 
 2. **Agentic search** — spawn a lightweight agent (via claudia) that
    reformulates failed queries, tries synonyms, uses session metadata
