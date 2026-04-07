@@ -298,6 +298,49 @@ later if keyword search proves insufficient.
 - `mnemo_decisions "relay protocol"` returns the proposal + confirmation
   with session context.
 
+### 🎯T11 Git history indexing
+
+- **Value**: 8
+- **Cost**: 5
+- **Weight**: 1.6 (value 8 / cost 5)
+- **Status**: identified
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T3 (dashboard data), 🎯T9.6 (decision recall)
+
+**Desired state:** mnemo indexes Git commit history from repos that
+appear in session transcripts and cross-references commits with session
+activity. Agents can ask "what changed in this repo recently?", "which
+session produced this commit?", or "what was the reasoning behind
+changes to this file?" — all without leaving the mnemo query interface.
+
+**Architecture sketch:**
+
+The daemon discovers repos from `session_meta.cwd` paths and
+periodically runs `git log` to ingest commit metadata into a `commits`
+table. Cross-referencing uses timestamp overlap, branch name matching,
+and cwd correlation — a commit on branch `fix/auth-bug` at 10:05 likely
+came from the session on the same branch that was active at 10:05.
+
+Key fields: hash, repo, author, timestamp, branch, message, files
+changed, insertions, deletions. Stored alongside a `commit_files`
+table for per-file change tracking.
+
+**Tools:**
+
+- `mnemo_commits` — search/list commits with filters (repo, author,
+  date range, file path, message pattern). Returns commit metadata
+  with links to correlated sessions.
+- `mnemo_blame` — given a file path, show recent commits touching it
+  with session context. Answers "why was this changed?" by surfacing
+  the session discussion alongside the diff.
+
+**Acceptance criteria:**
+- Commits from repos in `session_meta` are indexed automatically.
+- `mnemo_commits` returns commits with correlated session IDs.
+- `mnemo_blame <file>` returns recent commits with session context.
+- Commit data queryable via `mnemo_query` (joins with sessions/entries).
+- Incremental — only fetches new commits since last ingest.
+
 ### 🎯T10 Live context compaction
 
 - **Value**: 10
