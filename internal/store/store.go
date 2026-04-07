@@ -157,7 +157,7 @@ END`
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 4
+const schemaVersion = 5
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -209,8 +209,33 @@ func New(dbPath, projectDir string) (*Store, error) {
 
 	// Create tables.
 	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			project TEXT NOT NULL,
+			type TEXT NOT NULL,
+			timestamp TEXT,
+			raw BLOB,
+			-- Virtual columns for high-query entry-level fields.
+			model TEXT GENERATED ALWAYS AS (raw->>'$.message.model'),
+			stop_reason TEXT GENERATED ALWAYS AS (raw->>'$.message.stop_reason'),
+			input_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.input_tokens')),
+			output_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.output_tokens')),
+			cache_read_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_read_input_tokens')),
+			cache_creation_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation_input_tokens')),
+			agent_id TEXT GENERATED ALWAYS AS (raw->>'$.agentId'),
+			version TEXT GENERATED ALWAYS AS (raw->>'$.version'),
+			slug TEXT GENERATED ALWAYS AS (raw->>'$.slug'),
+			is_sidechain INTEGER GENERATED ALWAYS AS (CASE WHEN json_extract(raw, '$.isSidechain') THEN 1 ELSE 0 END),
+			data_type TEXT GENERATED ALWAYS AS (raw->>'$.data.type'),
+			data_command TEXT GENERATED ALWAYS AS (raw->>'$.data.command'),
+			data_hook_event TEXT GENERATED ALWAYS AS (raw->>'$.data.hookEvent'),
+			top_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.toolUseID'),
+			parent_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.parentToolUseID')
+		);
 		CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entry_id INTEGER REFERENCES entries(id),
 			session_id TEXT NOT NULL,
 			project TEXT NOT NULL,
 			role TEXT NOT NULL,
@@ -275,8 +300,19 @@ func New(dbPath, projectDir string) (*Store, error) {
 
 	// Create indexes.
 	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id);
+		CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project);
+		CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);
+		CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_entries_model ON entries(model) WHERE model IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_entries_agent_id ON entries(agent_id) WHERE agent_id IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_entries_data_type ON entries(data_type) WHERE data_type IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_entries_data_hook_event ON entries(data_hook_event) WHERE data_hook_event IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_entries_top_tool_use_id ON entries(top_tool_use_id) WHERE top_tool_use_id IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_entries_parent_tool_use_id ON entries(parent_tool_use_id) WHERE parent_tool_use_id IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 		CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
+		CREATE INDEX IF NOT EXISTS idx_messages_entry_id ON messages(entry_id) WHERE entry_id IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_messages_content_type ON messages(content_type);
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_name ON messages(tool_name);
 		CREATE INDEX IF NOT EXISTS idx_messages_tool_use_id ON messages(tool_use_id);
@@ -382,8 +418,9 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// parsedMessage is a single message ready for insertion.
+// parsedMessage is a single content block ready for insertion.
 type parsedMessage struct {
+	entryIdx    int // index into parsedFile.entries
 	role        string
 	text        string
 	timestamp   string
@@ -396,11 +433,19 @@ type parsedMessage struct {
 	isError     int
 }
 
+// parsedRawEntry is a raw JSONL line ready for insertion into the entries table.
+type parsedRawEntry struct {
+	entryType string
+	timestamp string
+	raw       []byte // full JSONL line
+}
+
 // parsedFile is the result of parsing a single JSONL file.
 type parsedFile struct {
 	path      string
 	sessionID string
 	project   string
+	entries   []parsedRawEntry
 	messages  []parsedMessage
 	cwd       string
 	branch    string
@@ -485,13 +530,7 @@ func (s *Store) IngestAll() error {
 	}()
 
 	// Stage 3: Writer — single goroutine, batched transactions.
-	const commitInterval = 200 * time.Millisecond
-	const insertSQL = `INSERT INTO messages
-		(session_id, project, role, text, timestamp, type, is_noise,
-		 content_type, tool_name, tool_use_id, tool_input, is_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
-
-	if err := s.runWriter(parsedCh, insertSQL); err != nil {
+	if err := s.runWriter(parsedCh); err != nil {
 		return err
 	}
 
@@ -504,44 +543,75 @@ func (s *Store) IngestAll() error {
 	return nil
 }
 
+const (
+	entryInsertSQL = `INSERT INTO entries
+		(session_id, project, type, timestamp, raw)
+		VALUES (?, ?, ?, ?, jsonb(?))`
+	messageInsertSQL = `INSERT INTO messages
+		(entry_id, session_id, project, role, text, timestamp, type, is_noise,
+		 content_type, tool_name, tool_use_id, tool_input, is_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
+)
+
+// writerState holds prepared statements for the two-table insert.
+type writerState struct {
+	tx       *sql.Tx
+	entryStmt *sql.Stmt
+	msgStmt   *sql.Stmt
+}
+
+func newWriterState(db *sql.DB) (*writerState, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	entryStmt, err := tx.Prepare(entryInsertSQL)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	msgStmt, err := tx.Prepare(messageInsertSQL)
+	if err != nil {
+		entryStmt.Close()
+		tx.Rollback()
+		return nil, err
+	}
+	return &writerState{tx: tx, entryStmt: entryStmt, msgStmt: msgStmt}, nil
+}
+
+func (ws *writerState) Close() {
+	ws.entryStmt.Close()
+	ws.msgStmt.Close()
+}
+
 // runWriter is the single-goroutine writer for the parallel ingest pipeline.
 // It consumes parsed files from the channel and inserts them in batched
 // transactions, yielding the write lock every 200ms for readers.
-func (s *Store) runWriter(parsedCh <-chan parsedFile, insertSQL string) error {
+func (s *Store) runWriter(parsedCh <-chan parsedFile) error {
 	const commitInterval = 200 * time.Millisecond
 
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	tx, err := s.db.Begin()
+	ws, err := newWriterState(s.db)
 	if err != nil {
 		return err
 	}
-	defer func() { tx.Rollback() }()
-
-	stmt, err := tx.Prepare(insertSQL)
-	if err != nil {
-		return err
-	}
-	defer func() { stmt.Close() }()
+	defer func() { ws.tx.Rollback() }()
+	defer ws.Close()
 
 	lastCommit := time.Now()
 
 	commitBatch := func() error {
-		stmt.Close()
-		if err := tx.Commit(); err != nil {
+		ws.Close()
+		if err := ws.tx.Commit(); err != nil {
 			return err
 		}
 		// Yield write lock for readers.
 		s.rwmu.Unlock()
 		s.rwmu.Lock()
-		tx, err = s.db.Begin()
+		ws, err = newWriterState(s.db)
 		if err != nil {
-			return err
-		}
-		stmt, err = tx.Prepare(insertSQL)
-		if err != nil {
-			tx.Rollback()
 			return err
 		}
 		lastCommit = time.Now()
@@ -549,17 +619,32 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, insertSQL string) error {
 	}
 
 	for pf := range parsedCh {
+		// Insert all raw entries and build entryIdx→entryID map.
+		entryIDs := make(map[int]int64, len(pf.entries))
+		for i, e := range pf.entries {
+			result, err := ws.entryStmt.Exec(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
+			if err != nil {
+				slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
+				continue
+			}
+			if id, err := result.LastInsertId(); err == nil {
+				entryIDs[i] = id
+			}
+		}
+
+		// Insert content block messages linked to their entries.
 		for _, m := range pf.messages {
 			var toolInput any
 			if m.toolInput != nil {
 				toolInput = string(m.toolInput)
 			}
-			stmt.Exec(pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+			entryID := entryIDs[m.entryIdx]
+			ws.msgStmt.Exec(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 				m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
 
 			// Detect self-identification nonces.
 			if m.contentType == "text" && strings.HasPrefix(m.text, NoncePrefix) {
-				tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
+				ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
 					strings.TrimSpace(m.text), pf.sessionID)
 			}
 		}
@@ -568,7 +653,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, insertSQL string) error {
 		if pf.cwd != "" || pf.branch != "" || pf.topic != "" {
 			repo := extractRepo(pf.cwd)
 			workType := classifyWorkType(pf.branch)
-			tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
+			ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
 				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(session_id) DO UPDATE SET
 					repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
@@ -580,7 +665,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, insertSQL string) error {
 		}
 
 		// Update ingest offset.
-		tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", pf.path, pf.newOffset)
+		ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", pf.path, pf.newOffset)
 		s.mu.Lock()
 		s.offsets[pf.path] = pf.newOffset
 		s.mu.Unlock()
@@ -594,8 +679,8 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, insertSQL string) error {
 	}
 
 	// Final commit.
-	stmt.Close()
-	return tx.Commit()
+	ws.Close()
+	return ws.tx.Commit()
 }
 
 // parseFile reads and parses a JSONL transcript file, returning all
@@ -641,6 +726,22 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 			pf.branch = entry.GitBranch
 		}
 
+		ts := entry.Timestamp
+		if ts == "" {
+			ts = time.Now().Format(time.RFC3339)
+		}
+
+		// Store every JSONL line in the entries table.
+		rawCopy := make([]byte, len(line))
+		copy(rawCopy, line)
+		entryIdx := len(pf.entries)
+		pf.entries = append(pf.entries, parsedRawEntry{
+			entryType: entry.Type,
+			timestamp: ts,
+			raw:       rawCopy,
+		})
+
+		// Only extract content blocks for user/assistant messages.
 		if entry.Type != "user" && entry.Type != "assistant" {
 			continue
 		}
@@ -648,11 +749,6 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 		blocks := extractBlocks(entry.Message)
 		if len(blocks) == 0 {
 			continue
-		}
-
-		ts := entry.Timestamp
-		if ts == "" {
-			ts = time.Now().Format(time.RFC3339)
 		}
 
 		for _, b := range blocks {
@@ -673,6 +769,7 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 			}
 
 			pf.messages = append(pf.messages, parsedMessage{
+				entryIdx:    entryIdx,
 				role:        entry.Type,
 				text:        b.Text,
 				timestamp:   ts,
@@ -1745,21 +1842,12 @@ func (s *Store) ingestFile(path string) error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	tx, err := s.db.Begin()
+	ws, err := newWriterState(s.db)
 	if err != nil {
 		return err
 	}
-	defer func() { tx.Rollback() }()
-
-	const insertSQL = `INSERT INTO messages
-		(session_id, project, role, text, timestamp, type, is_noise,
-		 content_type, tool_name, tool_use_id, tool_input, is_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
-	stmt, err := tx.Prepare(insertSQL)
-	if err != nil {
-		return err
-	}
-	defer func() { stmt.Close() }()
+	defer func() { ws.tx.Rollback() }()
+	defer ws.Close()
 
 	lockAcquired := time.Now()
 	linesSinceLockCheck := 0
@@ -1783,56 +1871,62 @@ func (s *Store) ingestFile(path string) error {
 			metaBranch = entry.GitBranch
 		}
 
-		if entry.Type != "user" && entry.Type != "assistant" {
-			// TODO: index system entries in a future pass.
-			continue
-		}
-
-		blocks := extractBlocks(entry.Message)
-		if len(blocks) == 0 {
-			continue
-		}
-
 		ts := entry.Timestamp
 		if ts == "" {
 			ts = time.Now().Format(time.RFC3339)
 		}
 
-		for _, b := range blocks {
-			noise := 0
-			if b.ContentType == "text" && isNoise(b.Text) {
-				noise = 1
-			}
-			// Capture first substantive user text message as topic.
-			if metaTopic == "" && entry.Type == "user" && b.ContentType == "text" && noise == 0 && len(b.Text) >= 10 && !isBoilerplate(b.Text) {
-				metaTopic = b.Text
-				if len(metaTopic) > 200 {
-					metaTopic = metaTopic[:197] + "..."
+		// Insert every JSONL line into entries table.
+		var entryID int64
+		result, entryErr := ws.entryStmt.Exec(sessionID, project, entry.Type, ts, string(line))
+		if entryErr == nil {
+			entryID, _ = result.LastInsertId()
+		}
+
+		// Only extract content blocks for user/assistant messages.
+		if entry.Type != "user" && entry.Type != "assistant" {
+			goto yieldCheck
+		}
+
+		{
+			blocks := extractBlocks(entry.Message)
+			for _, b := range blocks {
+				noise := 0
+				if b.ContentType == "text" && isNoise(b.Text) {
+					noise = 1
 				}
-			}
+				// Capture first substantive user text message as topic.
+				if metaTopic == "" && entry.Type == "user" && b.ContentType == "text" && noise == 0 && len(b.Text) >= 10 && !isBoilerplate(b.Text) {
+					metaTopic = b.Text
+					if len(metaTopic) > 200 {
+						metaTopic = metaTopic[:197] + "..."
+					}
+				}
 
-			// tool_input: pass raw JSON or nil.
-			var toolInput any
-			if b.ToolInput != nil {
-				toolInput = string(b.ToolInput)
-			}
+				// tool_input: pass raw JSON or nil.
+				var toolInput any
+				if b.ToolInput != nil {
+					toolInput = string(b.ToolInput)
+				}
 
-			isErr := 0
-			if b.IsError {
-				isErr = 1
-			}
+				isErr := 0
+				if b.IsError {
+					isErr = 1
+				}
 
-			stmt.Exec(sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
-				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
-			count++
+				ws.msgStmt.Exec(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+					b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
+				count++
 
-			// Detect self-identification nonces.
-			if b.ContentType == "text" && strings.HasPrefix(b.Text, NoncePrefix) {
-				nonce := strings.TrimSpace(b.Text)
-				tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
+				// Detect self-identification nonces.
+				if b.ContentType == "text" && strings.HasPrefix(b.Text, NoncePrefix) {
+					nonce := strings.TrimSpace(b.Text)
+					ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
+				}
 			}
 		}
 
+	yieldCheck:
 		// Periodically yield the write lock so readers aren't starved.
 		linesSinceLockCheck++
 		if linesSinceLockCheck >= lineCheckInterval {
@@ -1840,10 +1934,10 @@ func (s *Store) ingestFile(path string) error {
 			if time.Since(lockAcquired) >= yieldInterval {
 				// Commit current transaction with offset update.
 				curOffset, _ := f.Seek(0, 1)
-				tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, curOffset)
+				ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, curOffset)
 
-				stmt.Close()
-				if err := tx.Commit(); err != nil {
+				ws.Close()
+				if err := ws.tx.Commit(); err != nil {
 					return err
 				}
 
@@ -1857,11 +1951,7 @@ func (s *Store) ingestFile(path string) error {
 				lockAcquired = time.Now()
 
 				// Start a new transaction.
-				tx, err = s.db.Begin()
-				if err != nil {
-					return err
-				}
-				stmt, err = tx.Prepare(insertSQL)
+				ws, err = newWriterState(s.db)
 				if err != nil {
 					return err
 				}
@@ -1873,7 +1963,7 @@ func (s *Store) ingestFile(path string) error {
 	if metaCwd != "" || metaBranch != "" || metaTopic != "" {
 		repo := extractRepo(metaCwd)
 		workType := classifyWorkType(metaBranch)
-		tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
+		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
 			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
@@ -1885,9 +1975,10 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	newOffset, _ := f.Seek(0, 1)
-	tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, newOffset)
+	ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, newOffset)
 
-	if err := tx.Commit(); err != nil {
+	ws.Close()
+	if err := ws.tx.Commit(); err != nil {
 		return err
 	}
 

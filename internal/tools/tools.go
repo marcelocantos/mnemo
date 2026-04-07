@@ -74,12 +74,29 @@ sqldeep example — repos with their recent sessions:
   GROUP BY sm.repo
 
 Tables:
-  messages (id, session_id, project, role, text, timestamp, type, is_noise)
+  entries (id, session_id, project, type, timestamp, raw)
+    — every JSONL line stored as JSONB in 'raw'. Virtual columns:
+      model, stop_reason, input_tokens, output_tokens,
+      cache_read_tokens, cache_creation_tokens, agent_id, version,
+      slug, is_sidechain, data_type, data_command, data_hook_event,
+      top_tool_use_id, parent_tool_use_id
+    — entry types: user, assistant, progress, system, file-history-snapshot
+    — use json_extract(raw, '$.path') for fields without virtual columns
+  messages (id, entry_id, session_id, project, role, text, timestamp, type, is_noise)
+    — content blocks from user/assistant entries. entry_id links to entries.
+    — tool_use fields: tool_name, tool_use_id, tool_input (JSONB), content_type
+    — virtual columns from tool_input: tool_file_path, tool_command, etc.
   messages_fts — FTS5 virtual table (excludes noise). Use: WHERE messages_fts MATCH 'terms'
   sessions — view: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg
   session_meta (session_id, repo, cwd, git_branch, work_type, topic)
   session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
-  ingest_state (path, offset)
+
+Join pattern — message with its entry metadata:
+  SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
+
+Token usage query:
+  SELECT date(timestamp) AS day, SUM(input_tokens) AS input, SUM(output_tokens) AS output
+  FROM entries WHERE type = 'assistant' GROUP BY day ORDER BY day DESC
 
 Session types (derived from project path): interactive, subagent, worktree, ephemeral.
 is_noise = 1 for interrupts, compaction summaries, tool-loaded markers, slash command markup.
