@@ -542,6 +542,49 @@ the full session lifecycle across multiple /clear cycles.
 - Token cost of summarizer < 10% of the session it tracks (Sonnet
   on fixed-size batches keeps this lean).
 
+### 🎯T15 Search resilience
+
+- **Value**: 8
+- **Cost**: 5
+- **Weight**: 1.6 (value 8 / cost 5)
+- **Status**: converging
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T5 (pattern discovery could surface search failures)
+
+**Desired state:** mnemo search reliably finds relevant content even
+when agents use imprecise or over-specific queries. Agents searching
+for "HMS QR code pairing protocol" should find sessions about
+"QR transfer" in the HMS repo, even though the word "pairing" never
+appears.
+
+**Problem observed:** An agent searched 8 times for HMS QR protocol
+design content that was fully indexed (60 FTS hits for "QR" in the
+target session, ranked #1 for "QR transfer"). Every search failed
+because the agent used 4-7 word queries with terms not in the corpus
+("pairing", "ceremony", "bootstrap"). FTS5 implicit AND semantics
+meant zero results for each attempt.
+
+**Mitigations applied (v1 — tool description + empty-result guidance):**
+- Tool description now explains FTS5 AND semantics and search strategies
+- Empty results with 3+ term queries now suggest reducing terms
+- Query parameter description guides toward 1-3 key terms
+
+**Possible deeper improvements:**
+- Automatic query relaxation: when a multi-word query returns 0 results,
+  try dropping terms one at a time and report which subsets match
+- Session-level search: match queries against session metadata (repo,
+  topic, work_type) in addition to message FTS — "HMS QR" could match
+  repo="hms" + message containing "QR"
+- Term suggestion: on 0 results, show the most frequent terms in the
+  FTS index that co-occur with any of the query terms
+- Hybrid ranking: boost results where repo/session metadata matches
+  parts of the query even if the message doesn't contain all terms
+
+**Acceptance criteria:**
+- Agent searching "QR pairing HMS" finds the QR transfer session in HMS
+- Multi-word queries that partially match still return useful results
+- Empty-result responses guide agents toward better queries
+
 ### 🎯T8 sqldeep integration
 
 - **Value**: 6
