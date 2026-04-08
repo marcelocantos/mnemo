@@ -113,6 +113,10 @@ Tables:
   claude_configs (id, repo, file_path, content, updated_at)
     — CLAUDE.md project instruction files from all repo roots
   claude_configs_fts — FTS5 on content, repo
+  audit_entries (id, repo, file_path, date, skill, version, summary, raw_text)
+    — parsed entries from docs/audit-log.md in each repo
+    — skill: release, audit, docs, etc. version: vN.N.N if present
+  audit_entries_fts — FTS5 on summary, raw_text, repo
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -186,6 +190,13 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_audit",
+			mcp.WithDescription(`Search across audit logs (docs/audit-log.md) from all repos. Audit logs record maintenance activities: releases, audits, documentation runs. Use this to check when a project was last released, find maintenance patterns across repos, or review past audit findings.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name")),
+			mcp.WithString("skill", mcp.Description("Filter by skill name (e.g. 'release', 'audit')")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -227,6 +238,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.usage(args)
 	case "mnemo_configs":
 		return h.configs(args)
+	case "mnemo_audit":
+		return h.auditLogs(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -586,6 +599,30 @@ func (h *Handler) usage(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) auditLogs(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	skill, _ := args["skill"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchAuditLogs(query, repo, skill, limit)
+	if err != nil {
+		return fmt.Sprintf("audit log search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No audit log entries found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

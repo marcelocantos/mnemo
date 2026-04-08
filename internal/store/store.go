@@ -391,6 +391,17 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS audit_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			date TEXT NOT NULL DEFAULT '',
+			skill TEXT NOT NULL DEFAULT '',
+			version TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			raw_text TEXT NOT NULL,
+			UNIQUE(file_path, date, skill)
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -432,6 +443,9 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 		CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 		CREATE INDEX IF NOT EXISTS idx_claude_configs_repo ON claude_configs(repo);
+		CREATE INDEX IF NOT EXISTS idx_audit_entries_repo ON audit_entries(repo);
+		CREATE INDEX IF NOT EXISTS idx_audit_entries_date ON audit_entries(date);
+		CREATE INDEX IF NOT EXISTS idx_audit_entries_skill ON audit_entries(skill);
 	`)
 	if err != nil {
 		db.Close()
@@ -444,6 +458,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content=snapshot_files,
 			content_rowid=id
 		);
+		CREATE VIRTUAL TABLE IF NOT EXISTS audit_entries_fts USING fts5(
+			summary, raw_text, repo,
+			content=audit_entries,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS audit_entries_ai;
+		CREATE TRIGGER audit_entries_ai AFTER INSERT ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts(rowid, summary, raw_text, repo)
+			VALUES (new.id, new.summary, new.raw_text, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS audit_entries_au;
+		CREATE TRIGGER audit_entries_au AFTER UPDATE ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts(audit_entries_fts, rowid, summary, raw_text, repo)
+			VALUES ('delete', old.id, old.summary, old.raw_text, old.repo);
+			INSERT INTO audit_entries_fts(rowid, summary, raw_text, repo)
+			VALUES (new.id, new.summary, new.raw_text, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS audit_entries_ad;
+		CREATE TRIGGER audit_entries_ad AFTER DELETE ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts(audit_entries_fts, rowid, summary, raw_text, repo)
+			VALUES ('delete', old.id, old.summary, old.raw_text, old.repo);
+		END;
 		CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 			name, description, content, project,
 			content=memories,
@@ -1151,6 +1190,265 @@ func (s *Store) queryClaudeConfigs(q string, args ...any) ([]ClaudeConfigInfo, e
 	return results, nil
 }
 
+
+// AuditEntryInfo holds a single audit log entry from the index.
+type AuditEntryInfo struct {
+	ID       int    `json:"id"`
+	Repo     string `json:"repo"`
+	FilePath string `json:"file_path"`
+	Date     string `json:"date"`
+	Skill    string `json:"skill"`
+	Version  string `json:"version"`
+	Summary  string `json:"summary"`
+	RawText  string `json:"raw_text"`
+}
+
+// versionPattern matches version strings like v1.2.3.
+var versionPattern = regexp.MustCompile(`v\d+\.\d+\.\d+`)
+
+// parseAuditLogEntries parses a docs/audit-log.md file into individual entries.
+// Each ## heading starts a new entry. The first word after ## is the date;
+// skill follows a — or / separator; version matches vN.N.N.
+func parseAuditLogEntries(content string) []AuditEntryInfo {
+	var entries []AuditEntryInfo
+	lines := strings.Split(content, "\n")
+
+	var current *AuditEntryInfo
+	var rawLines []string
+
+	flush := func() {
+		if current != nil {
+			current.RawText = strings.TrimSpace(strings.Join(rawLines, "\n"))
+			// Use the heading line as summary if no body lines.
+			if current.Summary == "" {
+				current.Summary = current.RawText
+			}
+			entries = append(entries, *current)
+			current = nil
+			rawLines = nil
+		}
+	}
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "## ") {
+			flush()
+			heading := strings.TrimPrefix(line, "## ")
+			entry := AuditEntryInfo{}
+
+			// Parse date: first word.
+			fields := strings.Fields(heading)
+			if len(fields) > 0 {
+				entry.Date = fields[0]
+			}
+
+			// Parse skill: look for — or / after the date.
+			// Format: "DATE — /skill vN.N.N" or "DATE — skill description"
+			rest := strings.TrimSpace(strings.TrimPrefix(heading, entry.Date))
+			rest = strings.TrimPrefix(rest, "—")
+			rest = strings.TrimSpace(rest)
+			// Strip leading slash if present (skill name indicator).
+			if strings.HasPrefix(rest, "/") {
+				rest = rest[1:]
+				// First word after / is the skill.
+				skillFields := strings.Fields(rest)
+				if len(skillFields) > 0 {
+					entry.Skill = skillFields[0]
+				}
+			} else if rest != "" {
+				// No slash — use first word as skill.
+				skillFields := strings.Fields(rest)
+				if len(skillFields) > 0 {
+					entry.Skill = skillFields[0]
+				}
+			}
+
+			// Parse version: find vN.N.N in the heading.
+			if m := versionPattern.FindString(heading); m != "" {
+				entry.Version = m
+			}
+
+			// Use the full heading (after ##) as the initial summary.
+			entry.Summary = heading
+
+			current = &entry
+			rawLines = []string{line}
+		} else if current != nil {
+			rawLines = append(rawLines, line)
+		}
+	}
+	flush()
+	return entries
+}
+
+// IngestAuditLogs scans all repo roots discovered from session_meta and
+// ingests any docs/audit-log.md files found. Audit logs change rarely so
+// startup-only ingest is sufficient; no file watcher is set up.
+func (s *Store) IngestAuditLogs() error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	// Collect distinct cwd values from session metadata.
+	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	if err != nil {
+		return err
+	}
+	cwds := make([]string, 0)
+	for rows.Next() {
+		var cwd string
+		if rows.Scan(&cwd) == nil {
+			cwds = append(cwds, cwd)
+		}
+	}
+	rows.Close()
+
+	// Walk up each cwd to find the repo root (contains .git).
+	seen := make(map[string]bool)
+	count := 0
+	for _, cwd := range cwds {
+		root := findRepoRoot(cwd)
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+
+		auditPath := filepath.Join(root, "docs", "audit-log.md")
+		if _, err := os.Stat(auditPath); os.IsNotExist(err) {
+			continue
+		}
+
+		// Derive repo name from the root path (last two path components).
+		repo := repoNameFromPath(root)
+		if err := s.ingestAuditLogFileLocked(auditPath, repo); err != nil {
+			slog.Error("ingest audit log failed", "file", auditPath, "err", err)
+			continue
+		}
+		count++
+	}
+	slog.Info("ingested audit logs", "count", count)
+	return nil
+}
+
+// repoNameFromPath returns a "org/repo" style name from a filesystem path,
+// taking the last two non-empty path components.
+func repoNameFromPath(path string) string {
+	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
+	// Remove empty segments.
+	var nonempty []string
+	for _, p := range parts {
+		if p != "" {
+			nonempty = append(nonempty, p)
+		}
+	}
+	if len(nonempty) >= 2 {
+		return nonempty[len(nonempty)-2] + "/" + nonempty[len(nonempty)-1]
+	}
+	if len(nonempty) == 1 {
+		return nonempty[0]
+	}
+	return path
+}
+
+// ingestAuditLogFile ingests a single audit log file (acquires write lock).
+func (s *Store) ingestAuditLogFile(path, repo string) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	return s.ingestAuditLogFileLocked(path, repo)
+}
+
+// ingestAuditLogFileLocked ingests a single audit log file (caller must hold rwmu write lock).
+func (s *Store) ingestAuditLogFileLocked(path, repo string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			_, _ = s.db.Exec("DELETE FROM audit_entries WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	entries := parseAuditLogEntries(string(data))
+
+	// Full replace: delete existing entries for this file, then insert fresh.
+	if _, err := s.db.Exec("DELETE FROM audit_entries WHERE file_path = ?", path); err != nil {
+		return fmt.Errorf("delete old audit entries: %w", err)
+	}
+
+	for _, e := range entries {
+		_, err := s.db.Exec(`
+			INSERT OR IGNORE INTO audit_entries (repo, file_path, date, skill, version, summary, raw_text)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, repo, path, e.Date, e.Skill, e.Version, e.Summary, e.RawText)
+		if err != nil {
+			slog.Error("insert audit entry failed", "file", path, "date", e.Date, "err", err)
+		}
+	}
+	return nil
+}
+
+// SearchAuditLogs searches across all indexed audit log entries.
+func (s *Store) SearchAuditLogs(query string, repo string, skill string, limit int) ([]AuditEntryInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		q := `SELECT ae.id, ae.repo, ae.file_path, ae.date, ae.skill, ae.version, ae.summary, ae.raw_text
+			FROM audit_entries ae
+			JOIN audit_entries_fts f ON f.rowid = ae.id
+			WHERE audit_entries_fts MATCH ?`
+		args := []any{ftsQuery}
+		if repo != "" {
+			q += " AND ae.repo LIKE ?"
+			args = append(args, "%"+repo+"%")
+		}
+		if skill != "" {
+			q += " AND ae.skill = ?"
+			args = append(args, skill)
+		}
+		q += " ORDER BY rank LIMIT ?"
+		args = append(args, limit)
+		return s.queryAuditEntries(q, args...)
+	}
+
+	// No query — list with optional filters.
+	where := []string{"1=1"}
+	var args []any
+	if repo != "" {
+		where = append(where, "repo LIKE ?")
+		args = append(args, "%"+repo+"%")
+	}
+	if skill != "" {
+		where = append(where, "skill = ?")
+		args = append(args, skill)
+	}
+	q := `SELECT id, repo, file_path, date, skill, version, summary, raw_text
+		FROM audit_entries WHERE ` + strings.Join(where, " AND ") + ` ORDER BY date DESC LIMIT ?`
+	args = append(args, limit)
+	return s.queryAuditEntries(q, args...)
+}
+
+func (s *Store) queryAuditEntries(q string, args ...any) ([]AuditEntryInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []AuditEntryInfo
+	for rows.Next() {
+		var e AuditEntryInfo
+		if err := rows.Scan(&e.ID, &e.Repo, &e.FilePath, &e.Date, &e.Skill,
+			&e.Version, &e.Summary, &e.RawText); err != nil {
+			continue
+		}
+		results = append(results, e)
+	}
+	return results, nil
+}
 
 // parsedMessage is a single content block ready for insertion.
 type parsedMessage struct {

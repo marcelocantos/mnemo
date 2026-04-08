@@ -54,7 +54,8 @@ user. Good moments to reach for mnemo:
 - `mnemo_skills` — Search across skill files from ~/.claude/skills/. Discover available workflows and reusable procedures.
 - `mnemo_configs` — Search across CLAUDE.md project instruction files from all repos. Find build instructions, conventions, and delivery definitions.
 - `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with cost estimates. Filters by repo, model, date range. Groups by day, model, or repo.
-- `mnemo_query` — SQL SELECT/WITH or sqldeep nested syntax (FROM ... SELECT { }) against the transcript database
+- `mnemo_audit` — Search across audit logs (docs/audit-log.md) from all repos. Filters by repo, skill (release/audit/docs). Use to check when a project was last released or find maintenance patterns.
+- `mnemo_query` — SQL SELECT/WITH or sqldeep nested syntax (FROM ... SELECT { }) against the transcript database. Tables include: audit_entries (id, repo, file_path, date, skill, version, summary, raw_text), audit_entries_fts.
 - `mnemo_recent_activity` — Per-repo summary of recent session activity (counts, recency, work types, topics)
 - `mnemo_status` — Rich status report: repos → sessions → truncated conversation excerpts with drill-down offsets
 - `mnemo_repos` — List repos with paths, session counts, last activity. Supports globs.

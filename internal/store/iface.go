@@ -19,4 +19,5 @@ type Backend interface {
 	SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error)
 	SearchSkills(query string, limit int) ([]SkillInfo, error)
 	SearchClaudeConfigs(query string, repo string, limit int) ([]ClaudeConfigInfo, error)
+	SearchAuditLogs(query string, repo string, skill string, limit int) ([]AuditEntryInfo, error)
 }

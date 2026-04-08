@@ -163,7 +163,16 @@ func (p *Proxy) SearchClaudeConfigs(query string, repo string, limit int) ([]sto
 	return results, json.Unmarshal(raw, &results)
 }
 
-
+func (p *Proxy) SearchAuditLogs(query string, repo string, skill string, limit int) ([]store.AuditEntryInfo, error) {
+	raw, err := p.client.Call("SearchAuditLogs", SearchAuditLogsParams{
+		Query: query, Repo: repo, Skill: skill, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.AuditEntryInfo
+	return results, json.Unmarshal(raw, &results)
+}
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

@@ -1490,3 +1490,139 @@ Merged to master via squash PR.
 		t.Fatal("expected results for updated content 'library'")
 	}
 }
+
+func TestAuditLogIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a fake repo with a .git marker and docs/audit-log.md.
+	repoDir := filepath.Join(t.TempDir(), "myorg", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	docsDir := filepath.Join(repoDir, "docs")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	auditContent := `# Audit Log
+
+Chronological record of maintenance activities.
+
+## 2026-04-06 — /release v0.1.0
+
+- **Commit**: ` + "`" + `abc123` + "`" + `
+- **Outcome**: Released v0.1.0 with initial features.
+
+## 2026-04-07 — /audit
+
+- Reviewed code quality and security.
+- No critical issues found.
+
+## 2026-04-08 — /release v0.2.0
+
+- **Commit**: ` + "`" + `def456` + "`" + `
+- **Outcome**: Released v0.2.0 with bug fixes.
+`
+	auditPath := filepath.Join(docsDir, "audit-log.md")
+	if err := os.WriteFile(auditPath, []byte(auditContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session with cwd pointing to the repo so IngestAuditLogs can discover it.
+	writeJSONL(t, projectDir, "myproject", "sess-audit", []map[string]any{
+		metaMsg("user", "working on repo", "2026-04-08T10:00:00Z",
+			repoDir, "master"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestAuditLogs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have 3 entries.
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM audit_entries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 3 {
+		t.Fatalf("expected 3 audit entries, got %v", rows[0]["cnt"])
+	}
+
+	// Verify parsed fields for the first release entry.
+	results, err := s.SearchAuditLogs("", "", "release", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 release entries, got %d", len(results))
+	}
+	// Results are ordered by date DESC.
+	first := results[0]
+	if first.Date != "2026-04-08" {
+		t.Errorf("expected date 2026-04-08, got %q", first.Date)
+	}
+	if first.Skill != "release" {
+		t.Errorf("expected skill 'release', got %q", first.Skill)
+	}
+	if first.Version != "v0.2.0" {
+		t.Errorf("expected version v0.2.0, got %q", first.Version)
+	}
+
+	// Verify the audit entry (no version).
+	auditResults, err := s.SearchAuditLogs("", "", "audit", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auditResults) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(auditResults))
+	}
+	if auditResults[0].Version != "" {
+		t.Errorf("expected empty version for audit entry, got %q", auditResults[0].Version)
+	}
+	if auditResults[0].Date != "2026-04-07" {
+		t.Errorf("expected date 2026-04-07, got %q", auditResults[0].Date)
+	}
+
+	// FTS search.
+	ftsResults, err := s.SearchAuditLogs("bug fixes", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ftsResults) == 0 {
+		t.Fatal("expected FTS search to find 'bug fixes'")
+	}
+	found := false
+	for _, r := range ftsResults {
+		if r.Version == "v0.2.0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find v0.2.0 entry via FTS 'bug fixes'")
+	}
+
+	// Filter by repo.
+	repoResults, err := s.SearchAuditLogs("", "myrepo", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repoResults) != 3 {
+		t.Fatalf("expected 3 results for repo filter 'myrepo', got %d", len(repoResults))
+	}
+
+	// Re-ingest should replace all entries (not duplicate them).
+	if err := s.IngestAuditLogs(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM audit_entries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 3 {
+		t.Fatalf("expected 3 audit entries after re-ingest (no duplicates), got %v", rows[0]["cnt"])
+	}
+}
