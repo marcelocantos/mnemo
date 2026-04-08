@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.11.0.
+Snapshot as of v0.12.0.
 
 ### CLI flags
 
@@ -102,6 +102,57 @@ review — first release, output format and filters may evolve.
 **Added in v0.11.0.** Returns aggregated token usage with cost estimates.
 **Stability**: Needs review — cost model and grouping options may evolve.
 
+#### mnemo_skills
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.12.0.** Searches `~/.claude/skills/*.md`. **Stability**: Needs review.
+
+#### mnemo_configs
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.12.0.** Searches CLAUDE.md files from all repos. **Stability**: Needs review.
+
+#### mnemo_audit
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `skill` | string | no | Skill name filter (e.g. "release") | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.12.0.** Searches `docs/audit-log.md` from all repos. **Stability**: Needs review.
+
+#### mnemo_targets
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `status` | string | no | Status filter: identified, converging, achieved | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.12.0.** Searches `docs/targets.md` from all repos. **Stability**: Needs review.
+
+#### mnemo_plans
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.12.0.** Searches `.planning/` directories from all repos. **Stability**: Needs review.
+
 #### mnemo_query
 
 | Parameter | Type | Required | Description | Stability |
@@ -150,6 +201,16 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `session_meta` | Per-session metadata: session_id, repo, cwd, git_branch, work_type, topic | Needs review |
 | `memories` | id, project, file_path (unique), name, description, memory_type, content, updated_at — auto-memory files from ~/.claude/projects/*/memory/*.md | Needs review |
 | `memories_fts` | FTS5 on name, description, content, project — with insert/update/delete triggers | Needs review |
+| `skills` | id, file_path (unique), name, description, content, updated_at — ~/.claude/skills/*.md | Needs review |
+| `skills_fts` | FTS5 on name, description, content | Needs review |
+| `claude_configs` | id, repo, file_path (unique), content, updated_at — CLAUDE.md from all repos | Needs review |
+| `claude_configs_fts` | FTS5 on content, repo | Needs review |
+| `audit_entries` | id, repo, file_path, date, skill, version, summary, raw_text — docs/audit-log.md | Needs review |
+| `audit_entries_fts` | FTS5 on summary, raw_text, repo | Needs review |
+| `targets` | id, repo, file_path, target_id, name, status, weight, description, raw_text — docs/targets.md | Needs review |
+| `targets_fts` | FTS5 on name, description, raw_text, repo | Needs review |
+| `plans` | id, repo, file_path (unique), phase, content, updated_at — .planning/**/*.md | Needs review |
+| `plans_fts` | FTS5 on content, repo, phase | Needs review |
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 
@@ -162,6 +223,10 @@ file-history-snapshot entries and FTS5 on file paths.
 v0.11.0 added `memories` table for cross-project auto-memory indexing,
 `mnemo_usage` for token analytics, and changed search to OR-by-default
 with BM25 ranking for fuzzy matching.
+v0.12.0 added five context source tables: `skills`, `claude_configs`,
+`audit_entries`, `targets`, `plans` — each with FTS5 indexes. These
+index non-transcript sources (skill files, CLAUDE.md configs, audit
+logs, convergence targets, implementation plans) from all known repos.
 This surface is still evolving. `ingest_state` and `session_nonces` are
 internal implementation details.
 
