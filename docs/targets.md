@@ -490,30 +490,48 @@ firewall becomes nearly free.
 **Architecture — two options under consideration:**
 
 **Option A: Local model via Ollama (preferred).** The mnemo daemon
-calls a local model (qwen3:8b via Ollama) for compaction. No API
-cost, no network dependency, runs entirely on-device. The daemon
-manages compaction lifecycle directly — no need for claudia's agent
-control for this path.
+calls a local model via Ollama for compaction. No API cost, no
+network dependency, runs entirely on-device. The daemon manages
+compaction lifecycle directly.
 
-**Option B: Claude via claudia.** The daemon spawns a Sonnet
-summarizer instance (via claudia's agent control API) per active
-session. Higher quality but incurs API cost. May be worth it for
-deep periodic compaction alongside lightweight local realtime
-compaction.
+**Option B: Online API.** Use a cheap cloud model (Gemini 2.5 Flash,
+GPT-4.1 mini) for sub-second latency at negligible cost (~$1-3/month).
+Requires API key and network.
+
+The implementation should support both — Ollama by default, with an
+optional API backend for users who prefer it.
 
 **Benchmark results (M4 Max, 128 GB, ~550 tok input batch):**
 
-| Model | Size | Think | Wall | Gen speed | Quality |
-|-------|------|-------|------|-----------|---------|
-| qwen3:8b | 5.2 GB | on | **7s** | 74 t/s | **Best balance** — all targets, decisions, files, open threads |
-| qwen3:8b | 5.2 GB | off | 15s | 70 t/s | Good — missed one target |
-| gemma3:4b | 3.3 GB | off | 15s | 97 t/s | Good — missed one target |
-| gemma4:31b | 19 GB | off | 37s | 17 t/s | Richest output but too slow for realtime |
-| phi4-mini | 2.5 GB | off | 21s | 115 t/s | Weak — mangled target names, missed files |
+Local models (all Western-origin except qwen3 noted):
 
-**Recommended approach:** qwen3:8b with thinking for realtime
-compaction (7s per batch, every 2-3 minutes). Optionally gemma4:31b
-or Claude for periodic deep compaction at session boundaries.
+| Model | Origin | Size | Wall | Gen speed | Quality |
+|-------|--------|------|------|-----------|---------|
+| phi4:14b | Microsoft | 9.1 GB | **15s** | 44 t/s | **Best Western** — all targets w/ descriptions, 4 decisions |
+| mistral-small | Mistral (FR) | 14 GB | **14s** | 30 t/s | Good — correct, concise |
+| gemma3:4b | Google | 3.3 GB | **9s** | 100 t/s | Good — fast but weaker extraction |
+| gemma4:31b | Google | 19 GB | **45s** | 10 t/s | Richest output but too slow |
+| llama4:scout | Meta | 67 GB | **35s** | 36 t/s | Good quality, ignored "no fences" instruction |
+| phi4-mini | Microsoft | 2.5 GB | **21s** | 115 t/s | Weak — mangled targets, missed files |
+| qwen3:8b* | Alibaba (CN) | 5.2 GB | **7s** | 74 t/s | Best overall (w/ thinking) |
+
+*qwen3 included for reference but may not be preferred due to provenance.
+
+Online models (estimated from published pricing, ~500 tok in / ~300 tok out):
+
+| Model | Provider | Cost/batch | Est. cost/month | Latency |
+|-------|----------|-----------|-----------------|---------|
+| Gemini 2.5 Flash | Google | $0.0003 | ~$1.50 | ~1s |
+| Grok 3 mini | xAI | $0.0003 | ~$1.50 | ~1s |
+| GPT-4.1 mini | OpenAI | $0.0007 | ~$3.30 | ~1s |
+| Haiku 4.5 | Anthropic | $0.002 | ~$9.60 | ~1s |
+| Sonnet 4 | Anthropic | $0.006 | ~$15 | ~2s |
+
+(Monthly estimate: 160 batches/day × 30 days, assuming 8h active work.)
+
+**Recommended default:** phi4:14b via Ollama (best Western local
+model, 15s per batch, zero cost). For users with API keys, Gemini
+2.5 Flash or GPT-4.1 mini offer sub-second latency at ~$1-3/month.
 
 **Compaction flow:**
 
