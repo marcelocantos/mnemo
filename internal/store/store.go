@@ -384,6 +384,13 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS claude_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL DEFAULT '',
+			file_path TEXT NOT NULL UNIQUE,
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -424,6 +431,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
 		CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 		CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+		CREATE INDEX IF NOT EXISTS idx_claude_configs_repo ON claude_configs(repo);
 	`)
 	if err != nil {
 		db.Close()
@@ -485,6 +493,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO skills_fts(skills_fts, rowid, name, description, content)
 			VALUES ('delete', old.id, old.name, old.description, old.content);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS claude_configs_fts USING fts5(
+			content, repo,
+			content=claude_configs,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS claude_configs_ai;
+		CREATE TRIGGER claude_configs_ai AFTER INSERT ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts(rowid, content, repo)
+			VALUES (new.id, new.content, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS claude_configs_au;
+		CREATE TRIGGER claude_configs_au AFTER UPDATE ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts(claude_configs_fts, rowid, content, repo)
+			VALUES ('delete', old.id, old.content, old.repo);
+			INSERT INTO claude_configs_fts(rowid, content, repo)
+			VALUES (new.id, new.content, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS claude_configs_ad;
+		CREATE TRIGGER claude_configs_ad AFTER DELETE ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts(claude_configs_fts, rowid, content, repo)
+			VALUES ('delete', old.id, old.content, old.repo);
 		END;
 	`)
 	if err != nil {
@@ -957,6 +990,168 @@ func (s *Store) querySkills(q string, args ...any) ([]SkillInfo, error) {
 	return results, nil
 }
 
+// ClaudeConfigInfo holds a single CLAUDE.md record from the index.
+type ClaudeConfigInfo struct {
+	ID        int    `json:"id"`
+	Repo      string `json:"repo"`
+	FilePath  string `json:"file_path"`
+	Content   string `json:"content"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// IngestClaudeConfigs scans all repo roots discovered via session_meta and ingests CLAUDE.md files.
+// It also checks ~/.claude/CLAUDE.md and ~/CLAUDE.md.
+func (s *Store) IngestClaudeConfigs() error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	// Gather unique cwd values from session_meta.
+	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	if err != nil {
+		return fmt.Errorf("query session_meta: %w", err)
+	}
+	var cwds []string
+	for rows.Next() {
+		var cwd string
+		if err := rows.Scan(&cwd); err == nil && cwd != "" {
+			cwds = append(cwds, cwd)
+		}
+	}
+	rows.Close()
+
+	// Find repo roots for each cwd by walking up to a .git directory.
+	seen := map[string]bool{}
+	for _, cwd := range cwds {
+		root := findRepoRoot(cwd)
+		if root != "" && !seen[root] {
+			seen[root] = true
+			claudePath := filepath.Join(root, "CLAUDE.md")
+			repo := extractRepo(cwd)
+			if err := s.ingestClaudeConfigFileLocked(claudePath, repo); err != nil && !os.IsNotExist(err) {
+				slog.Error("ingest claude config failed", "file", claudePath, "err", err)
+			}
+		}
+	}
+
+	// Also check ~/.claude/CLAUDE.md and ~/CLAUDE.md.
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		for _, extra := range []struct{ path, repo string }{
+			{filepath.Join(homeDir, ".claude", "CLAUDE.md"), "global"},
+			{filepath.Join(homeDir, "CLAUDE.md"), "home"},
+		} {
+			if !seen[extra.path] {
+				seen[extra.path] = true
+				if err := s.ingestClaudeConfigFileLocked(extra.path, extra.repo); err != nil && !os.IsNotExist(err) {
+					slog.Error("ingest claude config failed", "file", extra.path, "err", err)
+				}
+			}
+		}
+	}
+
+	slog.Info("ingested claude configs", "repos", len(seen))
+	return nil
+}
+
+// findRepoRoot walks up from dir to find the nearest directory containing .git.
+// Returns "" if no .git ancestor is found.
+func findRepoRoot(dir string) string {
+	dir = filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+// ingestClaudeConfigFileLocked ingests a single CLAUDE.md file (caller must hold rwmu write lock).
+func (s *Store) ingestClaudeConfigFileLocked(path, repo string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.db.Exec("DELETE FROM claude_configs WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	content := string(data)
+	now := time.Now().Format(time.RFC3339)
+
+	_, err = s.db.Exec(`
+		INSERT INTO claude_configs (repo, file_path, content, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			repo = excluded.repo,
+			content = excluded.content,
+			updated_at = excluded.updated_at
+	`, repo, path, content, now)
+	return err
+}
+
+// SearchClaudeConfigs searches across all indexed CLAUDE.md files.
+func (s *Store) SearchClaudeConfigs(query string, repo string, limit int) ([]ClaudeConfigInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	var q string
+	var args []any
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		q = `SELECT c.id, c.repo, c.file_path, c.content, c.updated_at
+			FROM claude_configs c
+			JOIN claude_configs_fts f ON f.rowid = c.id
+			WHERE claude_configs_fts MATCH ?`
+		args = []any{ftsQuery}
+		if repo != "" {
+			q += " AND c.repo LIKE ?"
+			args = append(args, "%"+repo+"%")
+		}
+		q += " ORDER BY rank LIMIT ?"
+		args = append(args, limit)
+	} else {
+		q = `SELECT id, repo, file_path, content, updated_at FROM claude_configs`
+		if repo != "" {
+			q += " WHERE repo LIKE ?"
+			args = append(args, "%"+repo+"%")
+		}
+		q += " ORDER BY updated_at DESC LIMIT ?"
+		args = append(args, limit)
+	}
+
+	return s.queryClaudeConfigs(q, args...)
+}
+
+func (s *Store) queryClaudeConfigs(q string, args ...any) ([]ClaudeConfigInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ClaudeConfigInfo
+	for rows.Next() {
+		var c ClaudeConfigInfo
+		if err := rows.Scan(&c.ID, &c.Repo, &c.FilePath, &c.Content, &c.UpdatedAt); err != nil {
+			continue
+		}
+		results = append(results, c)
+	}
+	return results, nil
+}
+
+
 // parsedMessage is a single content block ready for insertion.
 type parsedMessage struct {
 	entryIdx    int // index into parsedFile.entries
@@ -1352,6 +1547,10 @@ func (s *Store) Watch() error {
 	}
 
 	slog.Info("watching for transcript changes", "dir", s.projectDir)
+	// NOTE: Realtime watching of repo CLAUDE.md files is deferred.
+	// CLAUDE.md files live in repo roots (not under projectDir), and they change
+	// rarely enough that restart-based refresh (via IngestClaudeConfigs at startup)
+	// is acceptable for now.
 
 	for {
 		select {

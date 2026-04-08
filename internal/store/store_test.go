@@ -1386,3 +1386,107 @@ Updated content.
 		}
 	}
 }
+
+func TestClaudeConfigIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a fake repo directory with a .git marker and CLAUDE.md.
+	repoDir := filepath.Join(t.TempDir(), "work", "github.com", "acme", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudeContent := `# myrepo
+
+## Build & Run
+
+` + "```bash\nmake build\n```" + `
+
+## Delivery
+
+Merged to master via squash PR.
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a session_meta row pointing cwd into the repo.
+	writeJSONL(t, projectDir, "myproject", "sess-cfg1", []map[string]any{
+		metaMsg("user", "let's build this", "2026-04-01T10:00:00Z",
+			filepath.Join(repoDir, "internal", "store"), "master"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestClaudeConfigs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "squash" should find the CLAUDE.md.
+	results, err := s.SearchClaudeConfigs("squash", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for 'squash' in CLAUDE.md")
+	}
+	found := false
+	for _, r := range results {
+		if r.FilePath == filepath.Join(repoDir, "CLAUDE.md") {
+			found = true
+			if r.Repo == "" {
+				t.Error("expected non-empty repo in ClaudeConfigInfo")
+			}
+			t.Logf("found config: repo=%q path=%q content=%.80q", r.Repo, r.FilePath, r.Content)
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find config at %s", filepath.Join(repoDir, "CLAUDE.md"))
+	}
+
+	// List all (no query).
+	all, err := s.SearchClaudeConfigs("", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) == 0 {
+		t.Fatal("expected at least one config in list-all mode")
+	}
+
+	// Repo filter — should find by fragment.
+	filtered, err := s.SearchClaudeConfigs("", "myrepo", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) == 0 {
+		t.Fatal("expected results for repo filter 'myrepo'")
+	}
+
+	// Repo filter — no match.
+	none, err := s.SearchClaudeConfigs("", "doesnotexist", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("expected no results for repo filter 'doesnotexist', got %d", len(none))
+	}
+
+	// Update the CLAUDE.md and re-ingest.
+	updatedContent := claudeContent + "\n## Gates\nprofile: library\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "CLAUDE.md"), []byte(updatedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestClaudeConfigs(); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err = s.SearchClaudeConfigs("library", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for updated content 'library'")
+	}
+}

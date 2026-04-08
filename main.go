@@ -101,6 +101,9 @@ func runServe() {
 		if err := mem.IngestSkills(); err != nil {
 			slog.Error("skill ingest failed", "err", err)
 		}
+		if err := mem.IngestClaudeConfigs(); err != nil {
+			slog.Error("claude config ingest failed", "err", err)
+		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}

@@ -18,4 +18,5 @@ type Backend interface {
 	Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error)
 	SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error)
 	SearchSkills(query string, limit int) ([]SkillInfo, error)
+	SearchClaudeConfigs(query string, repo string, limit int) ([]ClaudeConfigInfo, error)
 }

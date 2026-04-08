@@ -110,6 +110,9 @@ Tables:
   skills (id, file_path, name, description, content, updated_at)
     — skill files from ~/.claude/skills/*.md
   skills_fts — FTS5 on name, description, content
+  claude_configs (id, repo, file_path, content, updated_at)
+    — CLAUDE.md project instruction files from all repo roots
+  claude_configs_fts — FTS5 on content, repo
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -177,6 +180,12 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_configs",
+			mcp.WithDescription(`Search across CLAUDE.md project instruction files from all repos. These files contain build instructions, conventions, delivery definitions, and project-specific agent guidance. Use this to understand how other projects are configured or to find cross-project patterns.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -216,6 +225,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.skills(args)
 	case "mnemo_usage":
 		return h.usage(args)
+	case "mnemo_configs":
+		return h.configs(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -532,6 +543,30 @@ func (h *Handler) skills(args map[string]any) (string, bool, error) {
 	}
 	return b.String(), false, nil
 }
+
+func (h *Handler) configs(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchClaudeConfigs(query, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("config search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No CLAUDE.md configs found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, c := range results {
+		fmt.Fprintf(&b, "## %s\n**Path:** %s\n\n%s\n\n---\n\n", c.Repo, c.FilePath, c.Content)
+	}
+	return b.String(), false, nil
+}
+
 
 func (h *Handler) usage(args map[string]any) (string, bool, error) {
 	days := 30

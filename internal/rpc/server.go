@@ -100,6 +100,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"SearchSkills": makeMethod(func(p SearchSkillsParams) (any, error) {
 			return s.SearchSkills(p.Query, p.Limit)
 		}),
+		"SearchClaudeConfigs": makeMethod(func(p SearchClaudeConfigsParams) (any, error) {
+			return s.SearchClaudeConfigs(p.Query, p.Repo, p.Limit)
+		}),
 		"ResolveNonce": makeMethod(func(p ResolveNonceParams) (any, error) {
 			sid, err := s.ResolveNonce(p.Nonce)
 			if err != nil {
@@ -198,6 +201,14 @@ type SearchSkillsParams struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit"`
 }
+
+// SearchClaudeConfigsParams matches the SearchClaudeConfigs method signature.
+type SearchClaudeConfigsParams struct {
+	Query string `json:"query"`
+	Repo  string `json:"repo"`
+	Limit int    `json:"limit"`
+}
+
 
 // ResolveNonceParams matches the ResolveNonce method signature.
 type ResolveNonceParams struct {
