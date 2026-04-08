@@ -1106,6 +1106,131 @@ func TestSchemaVersionRebuild(t *testing.T) {
 	}
 }
 
+func TestMemoryIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a memory directory structure mimicking ~/.claude/projects/<project>/memory/
+	memDir := filepath.Join(projectDir, "myproject", "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a memory file with frontmatter.
+	memContent := `---
+name: QR transfer protocol
+description: Design decisions for QR-based session transfer in HMS
+type: project
+---
+
+The QR transfer uses a token-based handoff. The phone scans the QR code
+which contains a transfer token. The server validates the token and
+creates a new session for the mobile device.
+`
+	if err := os.WriteFile(filepath.Join(memDir, "qr_transfer.md"), []byte(memContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a MEMORY.md index file.
+	indexContent := "- [QR transfer](qr_transfer.md) — QR-based session transfer design\n"
+	if err := os.WriteFile(filepath.Join(memDir, "MEMORY.md"), []byte(indexContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also need a JSONL file so the store has a valid project.
+	writeJSONL(t, projectDir, "myproject", "sess-mem1", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestMemories(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "QR transfer" should find the memory.
+	results, err := s.SearchMemories("QR transfer", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected memory search results for 'QR transfer'")
+	}
+	for i, r := range results {
+		t.Logf("result[%d]: name=%q type=%q project=%q path=%q content=%.60q", i, r.Name, r.MemoryType, r.Project, r.FilePath, r.Content)
+	}
+	// Find the actual qr_transfer.md result (MEMORY.md index may also match).
+	found := false
+	for _, r := range results {
+		if r.Name == "QR transfer protocol" {
+			found = true
+			if r.MemoryType != "project" {
+				t.Errorf("expected type 'project', got %q", r.MemoryType)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find memory 'QR transfer protocol'")
+	}
+
+	// Search for "pairing" — not in the memory, but "transfer" is.
+	// With OR semantics, "pairing transfer" should still find it via "transfer".
+	results, err = s.SearchMemories("pairing transfer", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected fuzzy memory search to find partial match")
+	}
+
+	// Filter by type.
+	results, err = s.SearchMemories("", "project", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for type filter 'project'")
+	}
+
+	// Filter by type — no match.
+	results, err = s.SearchMemories("", "reference", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results for type 'reference', got %d", len(results))
+	}
+
+	// Update the memory file and re-ingest.
+	updatedContent := `---
+name: QR transfer protocol (revised)
+description: Updated design for QR-based session transfer
+type: project
+---
+
+The revised protocol uses ECDH key exchange after QR scan.
+`
+	if err := os.WriteFile(filepath.Join(memDir, "qr_transfer.md"), []byte(updatedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestMemories(); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err = s.SearchMemories("ECDH", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for updated content 'ECDH'")
+	}
+	if results[0].Name != "QR transfer protocol (revised)" {
+		t.Errorf("expected updated name, got %q", results[0].Name)
+	}
+}
+
 func TestRelaxQuery(t *testing.T) {
 	tests := []struct {
 		input, want string

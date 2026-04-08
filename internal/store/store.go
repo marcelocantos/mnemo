@@ -224,7 +224,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 6
+const schemaVersion = 7
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -366,6 +366,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 			file_path TEXT NOT NULL,
 			backup_time TEXT
 		);
+		CREATE TABLE IF NOT EXISTS memories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			memory_type TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -403,6 +413,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_session ON snapshot_files(session_id);
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_entry ON snapshot_files(entry_id);
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_path ON snapshot_files(file_path);
+		CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
+		CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 	`)
 	if err != nil {
 		db.Close()
@@ -415,6 +427,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content=snapshot_files,
 			content_rowid=id
 		);
+		CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+			name, description, content, project,
+			content=memories,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS memories_ai;
+		CREATE TRIGGER memories_ai AFTER INSERT ON memories
+		BEGIN
+			INSERT INTO memories_fts(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+		DROP TRIGGER IF EXISTS memories_au;
+		CREATE TRIGGER memories_au AFTER UPDATE ON memories
+		BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
+			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+			INSERT INTO memories_fts(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+		DROP TRIGGER IF EXISTS memories_ad;
+		CREATE TRIGGER memories_ad AFTER DELETE ON memories
+		BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
+			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+		END;
 	`)
 	if err != nil {
 		db.Close()
@@ -528,6 +565,216 @@ func New(dbPath, projectDir string) (*Store, error) {
 // Close closes the store.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// MemoryInfo holds a single memory record from the index.
+type MemoryInfo struct {
+	ID          int    `json:"id"`
+	Project     string `json:"project"`
+	FilePath    string `json:"file_path"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MemoryType  string `json:"memory_type"`
+	Content     string `json:"content"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// IngestMemories scans all memory directories under projectDir and ingests them.
+func (s *Store) IngestMemories() error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	memDirs, err := filepath.Glob(filepath.Join(s.projectDir, "*/memory"))
+	if err != nil {
+		return err
+	}
+
+	count := 0
+	for _, dir := range memDirs {
+		files, err := filepath.Glob(filepath.Join(dir, "*.md"))
+		if err != nil {
+			continue
+		}
+		project := filepath.Base(filepath.Dir(dir))
+		for _, f := range files {
+			if err := s.ingestMemoryFileLocked(f, project); err != nil {
+				slog.Error("ingest memory failed", "file", f, "err", err)
+				continue
+			}
+			count++
+		}
+	}
+	slog.Info("ingested memories", "count", count)
+	return nil
+}
+
+// ingestMemoryFile ingests a single memory file (acquires write lock).
+func (s *Store) ingestMemoryFile(path string) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	// Derive project from path: .../projects/<project>/memory/<file>.md
+	dir := filepath.Dir(path)
+	project := filepath.Base(filepath.Dir(dir))
+	return s.ingestMemoryFileLocked(path, project)
+}
+
+// ingestMemoryFileLocked ingests a single memory file (caller must hold rwmu write lock).
+func (s *Store) ingestMemoryFileLocked(path, project string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File was deleted — remove from index.
+			s.db.Exec("DELETE FROM memories WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	content := string(data)
+	name, description, memType, body := parseMemoryFrontmatter(content)
+	now := time.Now().Format(time.RFC3339)
+
+	// Use body (content after frontmatter) for the stored content,
+	// but if there's no frontmatter, use the whole file.
+	if body == "" {
+		body = content
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO memories (project, file_path, name, description, memory_type, content, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			project = excluded.project,
+			name = excluded.name,
+			description = excluded.description,
+			memory_type = excluded.memory_type,
+			content = excluded.content,
+			updated_at = excluded.updated_at
+	`, project, path, name, description, memType, body, now)
+	return err
+}
+
+// parseMemoryFrontmatter extracts YAML frontmatter fields from a memory file.
+func parseMemoryFrontmatter(content string) (name, description, memType, body string) {
+	if !strings.HasPrefix(content, "---\n") {
+		return "", "", "", content
+	}
+	end := strings.Index(content[4:], "\n---")
+	if end < 0 {
+		return "", "", "", content
+	}
+	frontmatter := content[4 : 4+end]
+	body = strings.TrimSpace(content[4+end+4:])
+
+	for _, line := range strings.Split(frontmatter, "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "name":
+			name = val
+		case "description":
+			description = val
+		case "type":
+			memType = val
+		}
+	}
+	return
+}
+
+// deleteMemoryFile removes a memory file from the index (acquires write lock).
+func (s *Store) deleteMemoryFile(path string) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	s.db.Exec("DELETE FROM memories WHERE file_path = ?", path)
+}
+
+// SearchMemories searches across all indexed memory files.
+func (s *Store) SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	if query == "" && memType == "" && project == "" {
+		// List all memories.
+		where := []string{"1=1"}
+		var args []any
+		if memType != "" {
+			where = append(where, "memory_type = ?")
+			args = append(args, memType)
+		}
+		if project != "" {
+			where = append(where, "project LIKE ?")
+			args = append(args, "%"+project+"%")
+		}
+		q := `SELECT id, project, file_path, name, description, memory_type, content, updated_at
+			FROM memories WHERE ` + strings.Join(where, " AND ") + ` ORDER BY updated_at DESC LIMIT ?`
+		args = append(args, limit)
+		return s.queryMemories(q, args...)
+	}
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		// FTS search with optional filters.
+		q := `SELECT m.id, m.project, m.file_path, m.name, m.description, m.memory_type, m.content, m.updated_at
+			FROM memories m
+			JOIN memories_fts f ON f.rowid = m.id
+			WHERE memories_fts MATCH ?`
+		args := []any{ftsQuery}
+		if memType != "" {
+			q += " AND m.memory_type = ?"
+			args = append(args, memType)
+		}
+		if project != "" {
+			q += " AND m.project LIKE ?"
+			args = append(args, "%"+project+"%")
+		}
+		q += " ORDER BY rank LIMIT ?"
+		args = append(args, limit)
+		return s.queryMemories(q, args...)
+	}
+
+	// No query, just filters.
+	where := []string{"1=1"}
+	var args []any
+	if memType != "" {
+		where = append(where, "memory_type = ?")
+		args = append(args, memType)
+	}
+	if project != "" {
+		where = append(where, "project LIKE ?")
+		args = append(args, "%"+project+"%")
+	}
+	q := `SELECT id, project, file_path, name, description, memory_type, content, updated_at
+		FROM memories WHERE ` + strings.Join(where, " AND ") + ` ORDER BY updated_at DESC LIMIT ?`
+	args = append(args, limit)
+	return s.queryMemories(q, args...)
+}
+
+func (s *Store) queryMemories(q string, args ...any) ([]MemoryInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []MemoryInfo
+	for rows.Next() {
+		var m MemoryInfo
+		if err := rows.Scan(&m.ID, &m.Project, &m.FilePath, &m.Name, &m.Description,
+			&m.MemoryType, &m.Content, &m.UpdatedAt); err != nil {
+			continue
+		}
+		results = append(results, m)
+	}
+	return results, nil
 }
 
 // parsedMessage is a single content block ready for insertion.
@@ -929,6 +1176,17 @@ func (s *Store) Watch() error {
 				(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
 				if err := s.ingestFile(event.Name); err != nil {
 					slog.Error("ingest failed", "file", event.Name, "err", err)
+				}
+			}
+			// Watch memory file changes.
+			if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/memory/") {
+				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+					if err := s.ingestMemoryFile(event.Name); err != nil {
+						slog.Error("ingest memory failed", "file", event.Name, "err", err)
+					}
+				}
+				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+					s.deleteMemoryFile(event.Name)
 				}
 			}
 			if event.Has(fsnotify.Create) {

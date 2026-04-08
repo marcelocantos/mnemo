@@ -7,9 +7,10 @@
 - **Value**: 8
 - **Cost**: 3
 - **Weight**: 2.7 (value 8 / cost 3)
-- **Status**: identified
+- **Status**: achieved
 - **Discovered**: 2026-04-06
 - **Revised**: 2026-04-08
+- **Achieved**: 2026-04-08
 - **Related**: 🎯T10 (compaction outputs are also memories)
 
 **Desired state:** mnemo indexes Claude Code auto-memory files

@@ -121,6 +121,17 @@ func (p *Proxy) RecentActivity(days int, repoFilter string) ([]store.RecentActiv
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) SearchMemories(query string, memType string, project string, limit int) ([]store.MemoryInfo, error) {
+	raw, err := p.client.Call("SearchMemories", SearchMemoriesParams{
+		Query: query, MemoryType: memType, Project: project, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.MemoryInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) Usage(days int, repoFilter, model, groupBy string) (*store.UsageResult, error) {
 	raw, err := p.client.Call("Usage", UsageParams{
 		Days: days, RepoFilter: repoFilter, Model: model, GroupBy: groupBy,

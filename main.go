@@ -95,6 +95,9 @@ func runServe() {
 		if stats, err := mem.Stats(); err == nil {
 			slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
 		}
+		if err := mem.IngestMemories(); err != nil {
+			slog.Error("memory ingest failed", "err", err)
+		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}
