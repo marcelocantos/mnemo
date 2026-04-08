@@ -47,3 +47,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `736594c`
 - **Outcome**: Released v0.10.0 (darwin-arm64, linux-amd64, linux-arm64). File-history-snapshot indexing (🎯T14): snapshot_files table with FTS5 auto-extracted via SQL trigger. Schema version 6. New targets: 🎯T11 git history, 🎯T12 GitHub activity, 🎯T13 CI/CD history.
+
+## 2026-04-08 — /release v0.11.0
+
+- **Commit**: `05fe3b4`
+- **Outcome**: Released v0.11.0 (darwin-arm64, linux-amd64, linux-arm64). New tools: mnemo_memories (cross-project memory search), mnemo_usage (token analytics). Fuzzy OR-by-default search. Schema v7.
