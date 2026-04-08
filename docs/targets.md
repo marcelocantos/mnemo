@@ -529,9 +529,12 @@ Online models (estimated from published pricing, ~500 tok in / ~300 tok out):
 
 (Monthly estimate: 160 batches/day × 30 days, assuming 8h active work.)
 
-**Recommended default:** phi4:14b via Ollama (best Western local
-model, 15s per batch, zero cost). For users with API keys, Gemini
-2.5 Flash or GPT-4.1 mini offer sub-second latency at ~$1-3/month.
+**Recommended approach:** Sonnet 4 via claudia. ~$15/month for
+best quality at sub-second latency. claudia becomes the single LLM
+interface for mnemo (compaction now, agentic search later for 🎯T16),
+avoiding the complexity of maintaining a separate Ollama integration.
+Local model support (phi4:14b via Ollama) remains a documented
+fallback for offline/zero-cost use but is not the default path.
 
 **Compaction flow:**
 
