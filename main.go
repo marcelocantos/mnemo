@@ -30,7 +30,7 @@ import (
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.11.0"
+const version = "0.12.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -97,6 +97,23 @@ func runServe() {
 		}
 		if err := mem.IngestMemories(); err != nil {
 			slog.Error("memory ingest failed", "err", err)
+		}
+		if err := mem.IngestSkills(); err != nil {
+			slog.Error("skill ingest failed", "err", err)
+		}
+		if err := mem.IngestClaudeConfigs(); err != nil {
+			slog.Error("claude config ingest failed", "err", err)
+		}
+		// Audit logs change rarely — startup-only ingest is sufficient.
+		// No file watcher needed for docs/audit-log.md files.
+		if err := mem.IngestAuditLogs(); err != nil {
+			slog.Error("audit log ingest failed", "err", err)
+		}
+		if err := mem.IngestTargets(); err != nil {
+			slog.Error("target ingest failed", "err", err)
+		}
+		if err := mem.IngestPlans(); err != nil {
+			slog.Error("plan ingest failed", "err", err)
 		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)

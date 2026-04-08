@@ -107,6 +107,16 @@ Tables:
     — auto-memory files from ~/.claude/projects/*/memory/*.md
     — memory_type: user, feedback, project, reference
   memories_fts — FTS5 on name, description, content, project
+  skills (id, file_path, name, description, content, updated_at)
+    — skill files from ~/.claude/skills/*.md
+  skills_fts — FTS5 on name, description, content
+  claude_configs (id, repo, file_path, content, updated_at)
+    — CLAUDE.md project instruction files from all repo roots
+  claude_configs_fts — FTS5 on content, repo
+  audit_entries (id, repo, file_path, date, skill, version, summary, raw_text)
+    — parsed entries from docs/audit-log.md in each repo
+    — skill: release, audit, docs, etc. version: vN.N.N if present
+  audit_entries_fts — FTS5 on summary, raw_text, repo
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -169,6 +179,37 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
 			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", or "repo"`)),
 		),
+		mcp.NewTool("mnemo_skills",
+			mcp.WithDescription(`Search across Claude Code skill files (~/.claude/skills/). Skills define reusable workflows — release processes, audit procedures, documentation generation, etc. Use this to discover relevant skills or understand what workflows are available.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_configs",
+			mcp.WithDescription(`Search across CLAUDE.md project instruction files from all repos. These files contain build instructions, conventions, delivery definitions, and project-specific agent guidance. Use this to understand how other projects are configured or to find cross-project patterns.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_audit",
+			mcp.WithDescription(`Search across audit logs (docs/audit-log.md) from all repos. Audit logs record maintenance activities: releases, audits, documentation runs. Use this to check when a project was last released, find maintenance patterns across repos, or review past audit findings.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name")),
+			mcp.WithString("skill", mcp.Description("Filter by skill name (e.g. 'release', 'audit')")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_targets",
+			mcp.WithDescription(`Search across convergence targets (docs/targets.md) from all repos. Targets track desired states — features to build, bugs to fix, quality gaps to close. Use this to find targets across projects, check what's active/achieved, or discover cross-project priorities.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name")),
+			mcp.WithString("status", mcp.Description("Filter by status: identified, converging, achieved")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_plans",
+			mcp.WithDescription(`Search across implementation plans (.planning/ directories) from all repos. Plans contain architectural decisions, task breakdowns, and implementation reasoning from GSD workflows. Use this to find past design decisions or understand how features were planned.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -204,8 +245,18 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.stats()
 	case "mnemo_memories":
 		return h.memories(args)
+	case "mnemo_skills":
+		return h.skills(args)
 	case "mnemo_usage":
 		return h.usage(args)
+	case "mnemo_configs":
+		return h.configs(args)
+	case "mnemo_audit":
+		return h.auditLogs(args)
+	case "mnemo_targets":
+		return h.targets(args)
+	case "mnemo_plans":
+		return h.plans(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -501,6 +552,52 @@ func (h *Handler) memories(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
+func (h *Handler) skills(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchSkills(query, limit)
+	if err != nil {
+		return fmt.Sprintf("skill search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No skills found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, sk := range results {
+		fmt.Fprintf(&b, "## %s\n%s\n\n%s\n\n", sk.Name, sk.Description, sk.Content)
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) configs(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchClaudeConfigs(query, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("config search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No CLAUDE.md configs found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, c := range results {
+		fmt.Fprintf(&b, "## %s\n**Path:** %s\n\n%s\n\n---\n\n", c.Repo, c.FilePath, c.Content)
+	}
+	return b.String(), false, nil
+}
+
+
 func (h *Handler) usage(args map[string]any) (string, bool, error) {
 	days := 30
 	if d, ok := args["days"].(float64); ok && d > 0 {
@@ -523,6 +620,93 @@ func (h *Handler) usage(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *Handler) auditLogs(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	skill, _ := args["skill"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchAuditLogs(query, repo, skill, limit)
+	if err != nil {
+		return fmt.Sprintf("audit log search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No audit log entries found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) targets(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	status, _ := args["status"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchTargets(query, repo, status, limit)
+	if err != nil {
+		return fmt.Sprintf("targets search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No targets found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, t := range results {
+		statusStr := t.Status
+		if statusStr == "" {
+			statusStr = "unknown"
+		}
+		weightStr := ""
+		if t.Weight != 0 {
+			weightStr = fmt.Sprintf(" weight=%.1f", t.Weight)
+		}
+		fmt.Fprintf(&b, "## %s %s [%s%s] (%s)\n", t.TargetID, t.Name, statusStr, weightStr, t.Repo)
+		if t.Description != "" {
+			fmt.Fprintf(&b, "%s\n", t.Description)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) plans(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchPlans(query, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("plan search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No plans found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, p := range results {
+		phase := p.Phase
+		if phase == "" {
+			phase = "(root)"
+		}
+		fmt.Fprintf(&b, "## %s [phase: %s] (%s)\n\n%s\n\n", p.FilePath, phase, p.Repo, p.Content)
+	}
+	return b.String(), false, nil
 }
 
 func (h *Handler) self(args map[string]any) (string, bool, error) {

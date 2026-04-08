@@ -1263,3 +1263,606 @@ func TestRelaxQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillIngest(t *testing.T) {
+	projectDir := t.TempDir()
+	skillsDir := t.TempDir()
+
+	// Write a skill file with YAML frontmatter.
+	skillContent := `---
+name: release workflow
+description: Steps to publish a new release with CI and Homebrew tap
+---
+
+1. Bump the version constant in main.go.
+2. Run the release CI workflow via GitHub Actions.
+3. Update the Homebrew tap formula with the new sha256 checksums.
+`
+	if err := os.WriteFile(filepath.Join(skillsDir, "release.md"), []byte(skillContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a skill file without frontmatter — name derived from filename.
+	plainContent := `Use this skill to audit the codebase for code quality,
+security issues, and documentation gaps.`
+	if err := os.WriteFile(filepath.Join(skillsDir, "audit-codebase.md"), []byte(plainContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestStore(t, projectDir)
+
+	// Directly ingest from the temp skills dir using ingestSkillFileLocked.
+	s.rwmu.Lock()
+	for _, name := range []string{"release.md", "audit-codebase.md"} {
+		if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, name)); err != nil {
+			s.rwmu.Unlock()
+			t.Fatalf("ingest skill %s: %v", name, err)
+		}
+	}
+	s.rwmu.Unlock()
+
+	// Search for "release" should find the release skill.
+	results, err := s.SearchSkills("release", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for 'release'")
+	}
+	found := false
+	for _, r := range results {
+		t.Logf("result: name=%q description=%.60q", r.Name, r.Description)
+		if r.Name == "release workflow" {
+			found = true
+			if r.Description != "Steps to publish a new release with CI and Homebrew tap" {
+				t.Errorf("unexpected description: %q", r.Description)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find skill 'release workflow'")
+	}
+
+	// Filename-derived name for the plain skill.
+	results, err = s.SearchSkills("audit codebase", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, r := range results {
+		if r.Name == "audit codebase" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find skill 'audit codebase'")
+	}
+
+	// List all (empty query).
+	results, err = s.SearchSkills("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) < 2 {
+		t.Errorf("expected at least 2 skills, got %d", len(results))
+	}
+
+	// Update a skill file and re-ingest.
+	updatedContent := `---
+name: release workflow
+description: Updated release steps including signing
+---
+
+Updated content.
+`
+	if err := os.WriteFile(filepath.Join(skillsDir, "release.md"), []byte(updatedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.rwmu.Lock()
+	if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, "release.md")); err != nil {
+		s.rwmu.Unlock()
+		t.Fatal(err)
+	}
+	s.rwmu.Unlock()
+
+	results, err = s.SearchSkills("signing", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected updated skill to be searchable by new description")
+	}
+
+	// Delete the skill.
+	s.deleteSkillFile(filepath.Join(skillsDir, "release.md"))
+	results, err = s.SearchSkills("release workflow", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.Name == "release workflow" {
+			t.Error("expected deleted skill to be removed from index")
+		}
+	}
+}
+
+func TestClaudeConfigIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a fake repo directory with a .git marker and CLAUDE.md.
+	repoDir := filepath.Join(t.TempDir(), "work", "github.com", "acme", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudeContent := `# myrepo
+
+## Build & Run
+
+` + "```bash\nmake build\n```" + `
+
+## Delivery
+
+Merged to master via squash PR.
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a session_meta row pointing cwd into the repo.
+	writeJSONL(t, projectDir, "myproject", "sess-cfg1", []map[string]any{
+		metaMsg("user", "let's build this", "2026-04-01T10:00:00Z",
+			filepath.Join(repoDir, "internal", "store"), "master"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestClaudeConfigs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "squash" should find the CLAUDE.md.
+	results, err := s.SearchClaudeConfigs("squash", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for 'squash' in CLAUDE.md")
+	}
+	found := false
+	for _, r := range results {
+		if r.FilePath == filepath.Join(repoDir, "CLAUDE.md") {
+			found = true
+			if r.Repo == "" {
+				t.Error("expected non-empty repo in ClaudeConfigInfo")
+			}
+			t.Logf("found config: repo=%q path=%q content=%.80q", r.Repo, r.FilePath, r.Content)
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find config at %s", filepath.Join(repoDir, "CLAUDE.md"))
+	}
+
+	// List all (no query).
+	all, err := s.SearchClaudeConfigs("", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) == 0 {
+		t.Fatal("expected at least one config in list-all mode")
+	}
+
+	// Repo filter — should find by fragment.
+	filtered, err := s.SearchClaudeConfigs("", "myrepo", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) == 0 {
+		t.Fatal("expected results for repo filter 'myrepo'")
+	}
+
+	// Repo filter — no match.
+	none, err := s.SearchClaudeConfigs("", "doesnotexist", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("expected no results for repo filter 'doesnotexist', got %d", len(none))
+	}
+
+	// Update the CLAUDE.md and re-ingest.
+	updatedContent := claudeContent + "\n## Gates\nprofile: library\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "CLAUDE.md"), []byte(updatedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestClaudeConfigs(); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err = s.SearchClaudeConfigs("library", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for updated content 'library'")
+	}
+}
+
+func TestAuditLogIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a fake repo with a .git marker and docs/audit-log.md.
+	repoDir := filepath.Join(t.TempDir(), "myorg", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	docsDir := filepath.Join(repoDir, "docs")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	auditContent := `# Audit Log
+
+Chronological record of maintenance activities.
+
+## 2026-04-06 — /release v0.1.0
+
+- **Commit**: ` + "`" + `abc123` + "`" + `
+- **Outcome**: Released v0.1.0 with initial features.
+
+## 2026-04-07 — /audit
+
+- Reviewed code quality and security.
+- No critical issues found.
+
+## 2026-04-08 — /release v0.2.0
+
+- **Commit**: ` + "`" + `def456` + "`" + `
+- **Outcome**: Released v0.2.0 with bug fixes.
+`
+	auditPath := filepath.Join(docsDir, "audit-log.md")
+	if err := os.WriteFile(auditPath, []byte(auditContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session with cwd pointing to the repo so IngestAuditLogs can discover it.
+	writeJSONL(t, projectDir, "myproject", "sess-audit", []map[string]any{
+		metaMsg("user", "working on repo", "2026-04-08T10:00:00Z",
+			repoDir, "master"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestAuditLogs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have 3 entries.
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM audit_entries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 3 {
+		t.Fatalf("expected 3 audit entries, got %v", rows[0]["cnt"])
+	}
+
+	// Verify parsed fields for the first release entry.
+	results, err := s.SearchAuditLogs("", "", "release", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 release entries, got %d", len(results))
+	}
+	// Results are ordered by date DESC.
+	first := results[0]
+	if first.Date != "2026-04-08" {
+		t.Errorf("expected date 2026-04-08, got %q", first.Date)
+	}
+	if first.Skill != "release" {
+		t.Errorf("expected skill 'release', got %q", first.Skill)
+	}
+	if first.Version != "v0.2.0" {
+		t.Errorf("expected version v0.2.0, got %q", first.Version)
+	}
+
+	// Verify the audit entry (no version).
+	auditResults, err := s.SearchAuditLogs("", "", "audit", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auditResults) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(auditResults))
+	}
+	if auditResults[0].Version != "" {
+		t.Errorf("expected empty version for audit entry, got %q", auditResults[0].Version)
+	}
+	if auditResults[0].Date != "2026-04-07" {
+		t.Errorf("expected date 2026-04-07, got %q", auditResults[0].Date)
+	}
+
+	// FTS search.
+	ftsResults, err := s.SearchAuditLogs("bug fixes", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ftsResults) == 0 {
+		t.Fatal("expected FTS search to find 'bug fixes'")
+	}
+	found := false
+	for _, r := range ftsResults {
+		if r.Version == "v0.2.0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find v0.2.0 entry via FTS 'bug fixes'")
+	}
+
+	// Filter by repo.
+	repoResults, err := s.SearchAuditLogs("", "myrepo", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repoResults) != 3 {
+		t.Fatalf("expected 3 results for repo filter 'myrepo', got %d", len(repoResults))
+	}
+
+	// Re-ingest should replace all entries (not duplicate them).
+	if err := s.IngestAuditLogs(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM audit_entries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, ok := rows[0]["cnt"].(int64); !ok || cnt != 3 {
+		t.Fatalf("expected 3 audit entries after re-ingest (no duplicates), got %v", rows[0]["cnt"])
+	}
+}
+
+func TestTargetIngest(t *testing.T) {
+	// Create a fake repo with .git and docs/targets.md.
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetsContent := `# Convergence Targets
+
+### 🎯T1 All tests pass on CI
+
+- **Status**: converging
+- **Weight**: 8
+
+The CI pipeline should run all unit and integration tests and report green
+on every pull request before merge.
+
+### 🎯T2 Documentation is complete
+
+- **Status**: identified
+- **Weight**: 5
+
+All public APIs and user-facing features must have documentation.
+
+### 🎯T3 Achieved target example
+
+- **Status**: achieved
+- **Weight**: 3
+
+This target has already been completed.
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "docs", "targets.md"), []byte(targetsContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session that uses this repo as cwd.
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "myproject", "sess-targets", []map[string]any{
+		metaMsg("user", "working on CI", "2026-04-01T10:00:00Z", repoDir, "master"),
+		msg("assistant", "OK, I'll look at CI.", "2026-04-01T10:00:05Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestTargets(); err != nil {
+		t.Fatal(err)
+	}
+
+	// List all targets.
+	results, err := s.SearchTargets("", "", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(results))
+	}
+
+	// Find T1 and verify parsed fields.
+	var t1 *TargetInfo
+	for i := range results {
+		if results[i].TargetID == "🎯T1" {
+			t1 = &results[i]
+			break
+		}
+	}
+	if t1 == nil {
+		t.Fatal("expected to find 🎯T1")
+	}
+	if t1.Name != "All tests pass on CI" {
+		t.Errorf("T1 name = %q, want %q", t1.Name, "All tests pass on CI")
+	}
+	if t1.Status != "converging" {
+		t.Errorf("T1 status = %q, want %q", t1.Status, "converging")
+	}
+	if t1.Weight != 8 {
+		t.Errorf("T1 weight = %v, want 8", t1.Weight)
+	}
+	if t1.Description == "" {
+		t.Error("T1 description should not be empty")
+	}
+	if t1.RawText == "" {
+		t.Error("T1 raw_text should not be empty")
+	}
+	if t1.Repo == "" {
+		t.Error("T1 repo should not be empty")
+	}
+
+	// Filter by status.
+	results, err = s.SearchTargets("", "", "identified", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 target with status=identified, got %d", len(results))
+	}
+	if results[0].TargetID != "🎯T2" {
+		t.Errorf("expected 🎯T2, got %s", results[0].TargetID)
+	}
+
+	// Filter by status=achieved.
+	results, err = s.SearchTargets("", "", "achieved", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].TargetID != "🎯T3" {
+		t.Errorf("expected 🎯T3 with status=achieved, got %v", results)
+	}
+
+	// FTS search.
+	results, err = s.SearchTargets("documentation APIs", "", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS results for 'documentation APIs'")
+	}
+}
+
+func TestPlanIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a fake repo with a .git directory to make findRepoRoot work.
+	repoRoot := filepath.Join(projectDir, "work", "github.com", "testorg", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .planning/ structure:
+	//   .planning/phase-1/PLAN.md
+	//   .planning/milestone-v2/phase-1/PLAN.md
+	//   .planning/OVERVIEW.md
+	planDir := filepath.Join(repoRoot, ".planning")
+	if err := os.MkdirAll(filepath.Join(planDir, "phase-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(planDir, "milestone-v2", "phase-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(filepath.Join(planDir, "phase-1", "PLAN.md"),
+		"# Phase 1\n\nImplement the widget factory using dependency injection.\n")
+	writeFile(filepath.Join(planDir, "milestone-v2", "phase-1", "PLAN.md"),
+		"# Milestone v2 Phase 1\n\nRefactor widget factory for performance.\n")
+	writeFile(filepath.Join(planDir, "OVERVIEW.md"),
+		"# Overview\n\nHigh-level architecture for the widget system.\n")
+
+	// Seed session_meta so IngestPlans can discover the repo root.
+	writeJSONL(t, projectDir, "testorg-myrepo", "sess-plan1", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually insert a session_meta row pointing at the repo.
+	if _, err := s.db.Exec(
+		"INSERT OR IGNORE INTO session_meta (session_id, cwd) VALUES (?, ?)",
+		"sess-plan1", repoRoot,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.IngestPlans(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "widget factory" — should find phase-1 PLAN.md.
+	results, err := s.SearchPlans("widget factory", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected plan search results for 'widget factory'")
+	}
+	t.Logf("found %d results", len(results))
+
+	// Verify phase parsing.
+	phaseMap := map[string]string{}
+	for _, r := range results {
+		t.Logf("  file=%q phase=%q repo=%q", r.FilePath, r.Phase, r.Repo)
+		phaseMap[r.Phase] = r.FilePath
+	}
+
+	// phase-1/PLAN.md → phase "1"
+	if _, ok := phaseMap["1"]; !ok {
+		t.Errorf("expected phase '1' in results, got: %v", phaseMap)
+	}
+
+	// List all plans (no query).
+	all, err := s.SearchPlans("", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) < 3 {
+		t.Errorf("expected at least 3 plans (3 files), got %d", len(all))
+	}
+
+	// Check milestone-v2/phase-1 → phase "v2/1"
+	foundMilestone := false
+	for _, r := range all {
+		if r.Phase == "v2/1" {
+			foundMilestone = true
+		}
+	}
+	if !foundMilestone {
+		t.Error("expected phase 'v2/1' for milestone-v2/phase-1/PLAN.md")
+	}
+
+	// Filter by repo.
+	filtered, err := s.SearchPlans("", "testorg/myrepo", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) == 0 {
+		t.Error("expected results when filtering by repo 'testorg/myrepo'")
+	}
+
+	// Fuzzy OR search — "performance architecture" should match via OR.
+	fuzzy, err := s.SearchPlans("performance architecture", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fuzzy) == 0 {
+		t.Error("expected fuzzy OR results for 'performance architecture'")
+	}
+}

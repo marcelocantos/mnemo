@@ -143,6 +143,59 @@ func (p *Proxy) Usage(days int, repoFilter, model, groupBy string) (*store.Usage
 	return &result, json.Unmarshal(raw, &result)
 }
 
+func (p *Proxy) SearchSkills(query string, limit int) ([]store.SkillInfo, error) {
+	raw, err := p.client.Call("SearchSkills", SearchSkillsParams{Query: query, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.SkillInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchClaudeConfigs(query string, repo string, limit int) ([]store.ClaudeConfigInfo, error) {
+	raw, err := p.client.Call("SearchClaudeConfigs", SearchClaudeConfigsParams{
+		Query: query, Repo: repo, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.ClaudeConfigInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchAuditLogs(query string, repo string, skill string, limit int) ([]store.AuditEntryInfo, error) {
+	raw, err := p.client.Call("SearchAuditLogs", SearchAuditLogsParams{
+		Query: query, Repo: repo, Skill: skill, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.AuditEntryInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchTargets(query string, repo string, status string, limit int) ([]store.TargetInfo, error) {
+	raw, err := p.client.Call("SearchTargets", SearchTargetsParams{
+		Query: query, Repo: repo, Status: status, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.TargetInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchPlans(query string, repo string, limit int) ([]store.PlanInfo, error) {
+	raw, err := p.client.Call("SearchPlans", SearchPlansParams{
+		Query: query, Repo: repo, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.PlanInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

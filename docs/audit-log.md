@@ -52,3 +52,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `05fe3b4`
 - **Outcome**: Released v0.11.0 (darwin-arm64, linux-amd64, linux-arm64). New tools: mnemo_memories (cross-project memory search), mnemo_usage (token analytics). Fuzzy OR-by-default search. Schema v7.
+
+## 2026-04-09 — /release v0.12.0
+
+- **Commit**: `77964e2`
+- **Outcome**: Released v0.12.0 (darwin-arm64, linux-amd64, linux-arm64). Five new context source tools: mnemo_skills, mnemo_configs, mnemo_audit, mnemo_targets, mnemo_plans. Schema v8. Homebrew formula updated.

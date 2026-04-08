@@ -97,6 +97,21 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"SearchMemories": makeMethod(func(p SearchMemoriesParams) (any, error) {
 			return s.SearchMemories(p.Query, p.MemoryType, p.Project, p.Limit)
 		}),
+		"SearchSkills": makeMethod(func(p SearchSkillsParams) (any, error) {
+			return s.SearchSkills(p.Query, p.Limit)
+		}),
+		"SearchClaudeConfigs": makeMethod(func(p SearchClaudeConfigsParams) (any, error) {
+			return s.SearchClaudeConfigs(p.Query, p.Repo, p.Limit)
+		}),
+		"SearchAuditLogs": makeMethod(func(p SearchAuditLogsParams) (any, error) {
+			return s.SearchAuditLogs(p.Query, p.Repo, p.Skill, p.Limit)
+		}),
+		"SearchTargets": makeMethod(func(p SearchTargetsParams) (any, error) {
+			return s.SearchTargets(p.Query, p.Repo, p.Status, p.Limit)
+		}),
+		"SearchPlans": makeMethod(func(p SearchPlansParams) (any, error) {
+			return s.SearchPlans(p.Query, p.Repo, p.Limit)
+		}),
 		"ResolveNonce": makeMethod(func(p ResolveNonceParams) (any, error) {
 			sid, err := s.ResolveNonce(p.Nonce)
 			if err != nil {
@@ -188,6 +203,41 @@ type UsageParams struct {
 	RepoFilter string `json:"repo_filter"`
 	Model      string `json:"model"`
 	GroupBy    string `json:"group_by"`
+}
+
+// SearchSkillsParams matches the SearchSkills method signature.
+type SearchSkillsParams struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+// SearchClaudeConfigsParams matches the SearchClaudeConfigs method signature.
+type SearchClaudeConfigsParams struct {
+	Query string `json:"query"`
+	Repo  string `json:"repo"`
+	Limit int    `json:"limit"`
+}
+
+// SearchAuditLogsParams matches the SearchAuditLogs method signature.
+type SearchAuditLogsParams struct {
+	Query string `json:"query"`
+	Repo  string `json:"repo"`
+	Skill string `json:"skill"`
+	Limit int    `json:"limit"`
+}
+// SearchTargetsParams matches the SearchTargets method signature.
+type SearchTargetsParams struct {
+	Query  string `json:"query"`
+	Repo   string `json:"repo"`
+	Status string `json:"status"`
+	Limit  int    `json:"limit"`
+}
+
+// SearchPlansParams matches the SearchPlans method signature.
+type SearchPlansParams struct {
+	Query string `json:"query"`
+	Repo  string `json:"repo"`
+	Limit int    `json:"limit"`
 }
 
 // ResolveNonceParams matches the ResolveNonce method signature.
