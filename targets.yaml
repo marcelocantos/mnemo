@@ -218,25 +218,25 @@ targets:
     - Virtual columns for high-query fields
     - Schema version bump with full re-index
     context: Ingest all top-level JSONL fields and message sub-fields. Currently ~70% of data is discarded.
-    parent: T9
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-07
   T9.2:
     name: Token usage analytics (mnemo_usage)
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - mnemo_usage returns daily token breakdown with cost estimates
     - Supports daily totals, per-repo breakdown, per-model breakdown
     - Hourly rate detection
     context: Report token consumption by day, repo, session, model with cost estimates. Data comes from message.usage fields. Gates on T9.1 (full-fidelity ingest).
-    parent: T9
     depends_on:
     - T9.1
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-09
   T9.3:
     name: Permission prompt analysis (mnemo_permissions)
     status: identified
@@ -246,7 +246,6 @@ targets:
     - Identifies most-used tools and frequent approval patterns
     - Suggests concrete allowedTools rules for settings.json
     context: Identify tool approval patterns from tool_use/tool_result pairs. Suggest allowedTools rules. Gates on T9.1.
-    parent: T9
     depends_on:
     - T9.1
     origin: targets.md bootstrap
@@ -260,7 +259,6 @@ targets:
     - mnemo_who_ran returns session + repo + timestamp for a command pattern
     - Matches against tool_command in recent Bash tool_use entries
     context: Given a command pattern, find which session(s) ran it recently. Gates on T9.1.
-    parent: T9
     depends_on:
     - T9.1
     origin: targets.md bootstrap
@@ -274,7 +272,6 @@ targets:
     - Correlates current system state with active mnemo sessions
     - Cross-references PIDs and command patterns against recent session activity
     context: Correlate system load (CPU, disk I/O) with active sessions. Gates on T9.1.
-    parent: T9
     depends_on:
     - T9.1
     origin: targets.md bootstrap
@@ -289,7 +286,6 @@ targets:
     - Decision detection heuristic identifies proposal + user confirmation pairs
     - Decisions stored in dedicated FTS5 table
     context: Surface past decisions across all sessions. Detect decision patterns during ingest. Gates on T9.1.
-    parent: T9
     depends_on:
     - T9.1
     origin: targets.md bootstrap
