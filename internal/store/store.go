@@ -145,6 +145,50 @@ type StatsResult struct {
 	ByType        []TypeStats `json:"by_type"`
 }
 
+// UsageRow holds aggregated token usage for a single group (date, model, repo).
+type UsageRow struct {
+	Period              string  `json:"period"`
+	Model               string  `json:"model,omitempty"`
+	Repo                string  `json:"repo,omitempty"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	Messages            int     `json:"messages"`
+	CostUSD             float64 `json:"cost_usd"`
+}
+
+// UsageResult holds aggregated token usage with totals.
+type UsageResult struct {
+	Days  int        `json:"days"`
+	Rows  []UsageRow `json:"rows"`
+	Total UsageRow   `json:"total"`
+}
+
+// modelCosts maps model slug prefixes to per-token costs in USD.
+// Prices are per-million tokens; we store per-token for calculation.
+var modelCosts = map[string]struct{ input, output, cacheRead, cacheWrite float64 }{
+	"claude-opus-4":   {15.0 / 1e6, 75.0 / 1e6, 1.5 / 1e6, 18.75 / 1e6},
+	"claude-sonnet-4": {3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
+	"claude-haiku-4":  {0.80 / 1e6, 4.0 / 1e6, 0.08 / 1e6, 1.0 / 1e6},
+	"claude-3-5":      {3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
+}
+
+func estimateCost(model string, input, output, cacheRead, cacheCreate int64) float64 {
+	for prefix, cost := range modelCosts {
+		if strings.HasPrefix(model, prefix) {
+			return float64(input)*cost.input +
+				float64(output)*cost.output +
+				float64(cacheRead)*cost.cacheRead +
+				float64(cacheCreate)*cost.cacheWrite
+		}
+	}
+	// Fallback: use sonnet pricing as a reasonable middle ground.
+	c := modelCosts["claude-sonnet-4"]
+	return float64(input)*c.input + float64(output)*c.output +
+		float64(cacheRead)*c.cacheRead + float64(cacheCreate)*c.cacheWrite
+}
+
 // sessionTypeSQL returns a SQL CASE expression for deriving session type.
 func sessionTypeSQL(col string) string {
 	return `CASE
@@ -155,9 +199,32 @@ func sessionTypeSQL(col string) string {
 END`
 }
 
+// fts5Operators matches explicit FTS5 syntax that should not be rewritten.
+var fts5Operators = regexp.MustCompile(`(?i)\b(OR|NOT|AND|NEAR)\b|"`)
+
+// relaxQuery rewrites a plain word list into an OR query so that partial
+// matches surface instead of requiring every term. Queries that already
+// contain explicit FTS5 operators (OR, NOT, AND, NEAR, quoted phrases)
+// are returned unchanged.
+func relaxQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return q
+	}
+	// If the query uses any explicit FTS5 operators, leave it alone.
+	if fts5Operators.MatchString(q) {
+		return q
+	}
+	words := strings.Fields(q)
+	if len(words) <= 1 {
+		return q
+	}
+	return strings.Join(words, " OR ")
+}
+
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 6
+const schemaVersion = 7
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -299,6 +366,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 			file_path TEXT NOT NULL,
 			backup_time TEXT
 		);
+		CREATE TABLE IF NOT EXISTS memories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			memory_type TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -336,6 +413,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_session ON snapshot_files(session_id);
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_entry ON snapshot_files(entry_id);
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_path ON snapshot_files(file_path);
+		CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
+		CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 	`)
 	if err != nil {
 		db.Close()
@@ -348,6 +427,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content=snapshot_files,
 			content_rowid=id
 		);
+		CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+			name, description, content, project,
+			content=memories,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS memories_ai;
+		CREATE TRIGGER memories_ai AFTER INSERT ON memories
+		BEGIN
+			INSERT INTO memories_fts(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+		DROP TRIGGER IF EXISTS memories_au;
+		CREATE TRIGGER memories_au AFTER UPDATE ON memories
+		BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
+			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+			INSERT INTO memories_fts(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+		DROP TRIGGER IF EXISTS memories_ad;
+		CREATE TRIGGER memories_ad AFTER DELETE ON memories
+		BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
+			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+		END;
 	`)
 	if err != nil {
 		db.Close()
@@ -461,6 +565,216 @@ func New(dbPath, projectDir string) (*Store, error) {
 // Close closes the store.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// MemoryInfo holds a single memory record from the index.
+type MemoryInfo struct {
+	ID          int    `json:"id"`
+	Project     string `json:"project"`
+	FilePath    string `json:"file_path"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MemoryType  string `json:"memory_type"`
+	Content     string `json:"content"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// IngestMemories scans all memory directories under projectDir and ingests them.
+func (s *Store) IngestMemories() error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	memDirs, err := filepath.Glob(filepath.Join(s.projectDir, "*/memory"))
+	if err != nil {
+		return err
+	}
+
+	count := 0
+	for _, dir := range memDirs {
+		files, err := filepath.Glob(filepath.Join(dir, "*.md"))
+		if err != nil {
+			continue
+		}
+		project := filepath.Base(filepath.Dir(dir))
+		for _, f := range files {
+			if err := s.ingestMemoryFileLocked(f, project); err != nil {
+				slog.Error("ingest memory failed", "file", f, "err", err)
+				continue
+			}
+			count++
+		}
+	}
+	slog.Info("ingested memories", "count", count)
+	return nil
+}
+
+// ingestMemoryFile ingests a single memory file (acquires write lock).
+func (s *Store) ingestMemoryFile(path string) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	// Derive project from path: .../projects/<project>/memory/<file>.md
+	dir := filepath.Dir(path)
+	project := filepath.Base(filepath.Dir(dir))
+	return s.ingestMemoryFileLocked(path, project)
+}
+
+// ingestMemoryFileLocked ingests a single memory file (caller must hold rwmu write lock).
+func (s *Store) ingestMemoryFileLocked(path, project string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File was deleted — remove from index.
+			s.db.Exec("DELETE FROM memories WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	content := string(data)
+	name, description, memType, body := parseMemoryFrontmatter(content)
+	now := time.Now().Format(time.RFC3339)
+
+	// Use body (content after frontmatter) for the stored content,
+	// but if there's no frontmatter, use the whole file.
+	if body == "" {
+		body = content
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO memories (project, file_path, name, description, memory_type, content, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			project = excluded.project,
+			name = excluded.name,
+			description = excluded.description,
+			memory_type = excluded.memory_type,
+			content = excluded.content,
+			updated_at = excluded.updated_at
+	`, project, path, name, description, memType, body, now)
+	return err
+}
+
+// parseMemoryFrontmatter extracts YAML frontmatter fields from a memory file.
+func parseMemoryFrontmatter(content string) (name, description, memType, body string) {
+	if !strings.HasPrefix(content, "---\n") {
+		return "", "", "", content
+	}
+	end := strings.Index(content[4:], "\n---")
+	if end < 0 {
+		return "", "", "", content
+	}
+	frontmatter := content[4 : 4+end]
+	body = strings.TrimSpace(content[4+end+4:])
+
+	for _, line := range strings.Split(frontmatter, "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "name":
+			name = val
+		case "description":
+			description = val
+		case "type":
+			memType = val
+		}
+	}
+	return
+}
+
+// deleteMemoryFile removes a memory file from the index (acquires write lock).
+func (s *Store) deleteMemoryFile(path string) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	s.db.Exec("DELETE FROM memories WHERE file_path = ?", path)
+}
+
+// SearchMemories searches across all indexed memory files.
+func (s *Store) SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	if query == "" && memType == "" && project == "" {
+		// List all memories.
+		where := []string{"1=1"}
+		var args []any
+		if memType != "" {
+			where = append(where, "memory_type = ?")
+			args = append(args, memType)
+		}
+		if project != "" {
+			where = append(where, "project LIKE ?")
+			args = append(args, "%"+project+"%")
+		}
+		q := `SELECT id, project, file_path, name, description, memory_type, content, updated_at
+			FROM memories WHERE ` + strings.Join(where, " AND ") + ` ORDER BY updated_at DESC LIMIT ?`
+		args = append(args, limit)
+		return s.queryMemories(q, args...)
+	}
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		// FTS search with optional filters.
+		q := `SELECT m.id, m.project, m.file_path, m.name, m.description, m.memory_type, m.content, m.updated_at
+			FROM memories m
+			JOIN memories_fts f ON f.rowid = m.id
+			WHERE memories_fts MATCH ?`
+		args := []any{ftsQuery}
+		if memType != "" {
+			q += " AND m.memory_type = ?"
+			args = append(args, memType)
+		}
+		if project != "" {
+			q += " AND m.project LIKE ?"
+			args = append(args, "%"+project+"%")
+		}
+		q += " ORDER BY rank LIMIT ?"
+		args = append(args, limit)
+		return s.queryMemories(q, args...)
+	}
+
+	// No query, just filters.
+	where := []string{"1=1"}
+	var args []any
+	if memType != "" {
+		where = append(where, "memory_type = ?")
+		args = append(args, memType)
+	}
+	if project != "" {
+		where = append(where, "project LIKE ?")
+		args = append(args, "%"+project+"%")
+	}
+	q := `SELECT id, project, file_path, name, description, memory_type, content, updated_at
+		FROM memories WHERE ` + strings.Join(where, " AND ") + ` ORDER BY updated_at DESC LIMIT ?`
+	args = append(args, limit)
+	return s.queryMemories(q, args...)
+}
+
+func (s *Store) queryMemories(q string, args ...any) ([]MemoryInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []MemoryInfo
+	for rows.Next() {
+		var m MemoryInfo
+		if err := rows.Scan(&m.ID, &m.Project, &m.FilePath, &m.Name, &m.Description,
+			&m.MemoryType, &m.Content, &m.UpdatedAt); err != nil {
+			continue
+		}
+		results = append(results, m)
+	}
+	return results, nil
 }
 
 // parsedMessage is a single content block ready for insertion.
@@ -864,6 +1178,17 @@ func (s *Store) Watch() error {
 					slog.Error("ingest failed", "file", event.Name, "err", err)
 				}
 			}
+			// Watch memory file changes.
+			if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/memory/") {
+				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+					if err := s.ingestMemoryFile(event.Name); err != nil {
+						slog.Error("ingest memory failed", "file", event.Name, "err", err)
+					}
+				}
+				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+					s.deleteMemoryFile(event.Name)
+				}
+			}
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 					if wErr := watcher.Add(event.Name); wErr != nil {
@@ -899,6 +1224,10 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	needSessionFilter := sessionType != "all"
 	needRepoFilter := repoFilter != ""
 
+	// Rewrite plain word lists to OR queries so partial matches surface.
+	// Explicit FTS5 operators (OR, NOT, AND, NEAR, quotes) are preserved.
+	ftsQuery := relaxQuery(query)
+
 	// Phase 1: FTS-only scan with generous over-fetch.
 	// Over-fetch 10x to account for session type filtering.
 	fetchLimit := limit * 10
@@ -910,7 +1239,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		WHERE messages_fts MATCH ?
 		ORDER BY rank
 		LIMIT ?
-	`, query, fetchLimit)
+	`, ftsQuery, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1250,6 +1579,137 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// Usage returns aggregated token usage statistics from the entries table.
+// groupBy can be "day" (default), "model", or "repo".
+func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 30
+	}
+	if groupBy == "" {
+		groupBy = "day"
+	}
+
+	// Build GROUP BY expression.
+	var groupExpr, periodExpr string
+	switch groupBy {
+	case "model":
+		groupExpr = "e.model"
+		periodExpr = "e.model"
+	case "repo":
+		groupExpr = "CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END"
+		periodExpr = groupExpr
+	default: // "day"
+		groupExpr = "date(e.timestamp)"
+		periodExpr = "date(e.timestamp)"
+	}
+
+	where := []string{
+		"e.type = 'assistant'",
+		"e.timestamp >= datetime('now', ?)",
+	}
+	args := []any{fmt.Sprintf("-%d days", days)}
+
+	if repoFilter != "" {
+		where = append(where, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+	if model != "" {
+		where = append(where, "e.model LIKE ?")
+		args = append(args, model+"%")
+	}
+
+	needJoin := repoFilter != "" || groupBy == "repo"
+	joinClause := ""
+	if needJoin {
+		joinClause = "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
+	}
+
+	// Always group by model too, so cost estimation is accurate.
+	// Re-aggregate in Go when the requested groupBy isn't "model".
+	q := fmt.Sprintf(`
+		SELECT
+			%s AS period,
+			COALESCE(e.model, '') AS model,
+			COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+			COALESCE(SUM(e.cache_read_tokens), 0) AS cache_read_tokens,
+			COALESCE(SUM(e.cache_creation_tokens), 0) AS cache_creation_tokens,
+			COUNT(*) AS messages
+		FROM entries e
+		%s
+		WHERE %s
+		GROUP BY %s, e.model
+		ORDER BY period DESC
+	`, periodExpr, joinClause, strings.Join(where, " AND "), groupExpr)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Accumulate per-(period, model) rows, computing accurate costs.
+	merged := map[string]*UsageRow{} // period → aggregated row
+	var order []string
+
+	result := &UsageResult{Days: days}
+	for rows.Next() {
+		var period, rowModel string
+		var input, output, cacheRead, cacheCreate int64
+		var msgs int
+		if err := rows.Scan(&period, &rowModel, &input, &output,
+			&cacheRead, &cacheCreate, &msgs); err != nil {
+			continue
+		}
+		cost := estimateCost(rowModel, input, output, cacheRead, cacheCreate)
+
+		if groupBy == "model" {
+			// Each model is its own row — no merging needed.
+			result.Rows = append(result.Rows, UsageRow{
+				Period: period, Model: period,
+				InputTokens: input, OutputTokens: output,
+				CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreate,
+				Messages: msgs, CostUSD: cost,
+			})
+		} else {
+			r, ok := merged[period]
+			if !ok {
+				r = &UsageRow{Period: period}
+				if groupBy == "repo" {
+					r.Repo = period
+				}
+				merged[period] = r
+				order = append(order, period)
+			}
+			r.InputTokens += input
+			r.OutputTokens += output
+			r.CacheReadTokens += cacheRead
+			r.CacheCreationTokens += cacheCreate
+			r.Messages += msgs
+			r.CostUSD += cost
+		}
+
+		result.Total.InputTokens += input
+		result.Total.OutputTokens += output
+		result.Total.CacheReadTokens += cacheRead
+		result.Total.CacheCreationTokens += cacheCreate
+		result.Total.Messages += msgs
+		result.Total.CostUSD += cost
+	}
+
+	if groupBy != "model" {
+		for _, k := range order {
+			result.Rows = append(result.Rows, *merged[k])
+		}
+	}
+	result.Total.Period = "total"
+	return result, nil
 }
 
 // Status returns a rich status report: repos → sessions → truncated message excerpts.

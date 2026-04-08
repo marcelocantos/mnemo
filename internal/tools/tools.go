@@ -30,8 +30,18 @@ func NewHandler(mem store.Backend) *Handler {
 func Definitions() []mcp.Tool {
 	return []mcp.Tool{
 		mcp.NewTool("mnemo_search",
-			mcp.WithDescription("Search across Claude Code session transcripts. By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search query (FTS5 syntax: words, phrases in quotes, OR, NOT)")),
+			mcp.WithDescription(`Search across Claude Code session transcripts. Uses FTS5 full-text search with fuzzy matching.
+
+Plain word queries use OR matching — "QR code pairing protocol" finds messages containing ANY of those words, ranked by how many match (BM25). This means partial matches surface instead of returning nothing. Messages matching more/rarer terms rank higher.
+
+For exact matching, use explicit FTS5 operators:
+- Require all terms: "QR AND transfer"
+- Exact phrase: "\"QR transfer\""
+- Exclude terms: "QR NOT test"
+- Proximity: NEAR(QR transfer, 5)
+
+By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.`),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words use OR (fuzzy). Use AND/NOT/NEAR/quotes for precise control.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
@@ -93,6 +103,10 @@ Tables:
   sessions — view: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg
   session_meta (session_id, repo, cwd, git_branch, work_type, topic)
   session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
+  memories (id, project, file_path, name, description, memory_type, content, updated_at)
+    — auto-memory files from ~/.claude/projects/*/memory/*.md
+    — memory_type: user, feedback, project, reference
+  memories_fts — FTS5 on name, description, content, project
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -135,6 +149,26 @@ Use this when you need context about recent work: the user references prior disc
 			mcp.WithNumber("max_excerpts", mcp.Description("Max message excerpts per session (default 20, most recent kept)")),
 			mcp.WithNumber("truncate_len", mcp.Description("Truncate assistant messages to this length (default 200)")),
 		),
+		mcp.NewTool("mnemo_memories",
+			mcp.WithDescription(`Search across Claude Code auto-memory files from all projects. Memories are structured notes with frontmatter (name, description, type) that agents save across sessions.
+
+Memory types: "user" (role/preferences), "feedback" (corrections/confirmations), "project" (ongoing work context), "reference" (pointers to external systems).
+
+Use this to find decisions, preferences, and context captured in any project — even when working in a different repo. Also queryable via mnemo_query against the memories table.`),
+			mcp.WithString("query", mcp.Description("Search query (uses same fuzzy OR matching as mnemo_search). Omit to list all.")),
+			mcp.WithString("type", mcp.Description(`Filter by memory type: "user", "feedback", "project", "reference"`)),
+			mcp.WithString("project", mcp.Description("Filter by project name substring")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_usage",
+			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
+
+Returns per-period breakdown and totals. Cost estimates use published Anthropic pricing (Opus, Sonnet, Haiku families). Unknown models use Sonnet pricing as fallback.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
+			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
+			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", or "repo"`)),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -168,6 +202,10 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.status(args)
 	case "mnemo_stats":
 		return h.stats()
+	case "mnemo_memories":
+		return h.memories(args)
+	case "mnemo_usage":
+		return h.usage(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -204,7 +242,7 @@ func (h *Handler) search(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("search failed: %v", err), true, nil
 	}
 	if len(results) == 0 {
-		return "No results found.", false, nil
+		return "No results found. Try different terms — the content may use different vocabulary than expected.", false, nil
 	}
 
 	var b strings.Builder
@@ -424,6 +462,63 @@ func (h *Handler) recentActivity(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) memories(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	memType, _ := args["type"].(string)
+	project, _ := args["project"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchMemories(query, memType, project, limit)
+	if err != nil {
+		return fmt.Sprintf("memory search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No memories found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, m := range results {
+		proj := m.Project
+		if len(proj) > 30 {
+			// Trim project path prefix for readability.
+			parts := strings.Split(proj, "-")
+			if len(parts) > 1 {
+				proj = parts[len(parts)-1]
+			}
+		}
+		fmt.Fprintf(&b, "## %s [%s] (%s)\n%s\n\n%s\n\n",
+			m.Name, m.MemoryType, proj, m.Description, m.Content)
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) usage(args map[string]any) (string, bool, error) {
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+	model, _ := args["model"].(string)
+	groupBy, _ := args["group_by"].(string)
+
+	result, err := h.mem.Usage(days, repoFilter, model, groupBy)
+	if err != nil {
+		return fmt.Sprintf("usage query failed: %v", err), true, nil
+	}
+	if len(result.Rows) == 0 {
+		return "No usage data found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

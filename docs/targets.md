@@ -2,29 +2,52 @@
 
 ## Active
 
-### 🎯T1 Broader memory beyond transcripts
+### 🎯T1 Memory indexing
 
 - **Value**: 8
-- **Cost**: 13
-- **Weight**: 0.6 (value 8 / cost 13)
-- **Status**: identified
+- **Cost**: 3
+- **Weight**: 2.7 (value 8 / cost 3)
+- **Status**: achieved
 - **Discovered**: 2026-04-06
+- **Revised**: 2026-04-08
+- **Achieved**: 2026-04-08
+- **Related**: 🎯T10 (compaction outputs are also memories)
 
-**Desired state:** mnemo evolves from transcript search into a general
-memory system for Claude Code sessions — remembering decisions,
-preferences, and project context across sessions. Not just "what was
-said" but "what was decided" and "what matters for next time."
+**Desired state:** mnemo indexes Claude Code auto-memory files
+(`~/.claude/projects/*/memory/*.md`) alongside transcripts. Memories
+are searchable cross-project — an agent working in repo A can find
+decisions, preferences, and context captured in repo B.
 
-**Note:** 🎯T10 (live context compaction) addresses the core of this
-target — a summarisation layer that distills sessions into key facts,
-available instantly across /clear boundaries. Once 🎯T10 is achieved,
-reassess whether 🎯T1 has residual scope or should be retired.
+**Corpus:** ~208 memory files across all projects. Each has YAML
+frontmatter (name, description, type: user/feedback/project/reference)
+and markdown content. MEMORY.md files are indexes (pointers to other
+files) — index those too for discoverability.
 
-**Open questions:**
-- What's the data model beyond raw transcript messages?
-- Should it extract and index decisions, action items, code changes?
-- How does it relate to Claude's auto-memory (MEMORY.md files)?
-- Is there a summarisation layer that distills sessions into key facts? → See 🎯T10.
+**Architecture:**
+
+The daemon watches `~/.claude/projects/*/memory/` directories
+(same fsnotify pattern as transcript ingest). On change:
+
+1. Parse frontmatter (name, description, type).
+2. Extract project from directory path.
+3. Store in a `memories` table: id, project, file_path, name,
+   description, memory_type, content, updated_at.
+4. FTS5 index on name + description + content.
+
+**Tools:**
+
+- `mnemo_memories` — search across all project memories. Filters:
+  project, memory_type (user/feedback/project/reference), FTS query.
+  Returns name, description, type, project, content snippet.
+- Also queryable via `mnemo_query` (joins with sessions via project).
+
+**Acceptance criteria:**
+- All memory files across all projects indexed and searchable.
+- Changes detected in realtime (fsnotify).
+- `mnemo_memories "QR pairing"` finds relevant project memories
+  even if the current session is in a different repo.
+- Deletions remove the memory from the index.
+- MEMORY.md index files indexed for discoverability.
 
 ### 🎯T2 Smarter session classification
 
@@ -171,7 +194,7 @@ reinvented each session.
 - **Value**: 9
 - **Cost**: 8
 - **Weight**: 1.1 (value 9 / cost 8)
-- **Status**: identified
+- **Status**: converging (2/6 sub-targets achieved)
 - **Discovered**: 2026-04-07
 - **Related**: 🎯T5 (pattern discovery), 🎯T3 (dashboard data)
 - **Census**: `/tmp/field-census.txt` (1.3M entries, 10,766 paths, 3.4 GB)
@@ -214,7 +237,8 @@ Schema version 5.
 - **Value**: 8
 - **Cost**: 3
 - **Weight**: 2.7 (value 8 / cost 3)
-- **Status**: identified
+- **Status**: achieved
+- **Achieved**: 2026-04-07
 - **Parent**: 🎯T9
 - **Gates**: 🎯T9.1
 
@@ -223,6 +247,11 @@ estimates at current pricing. Data comes from `message.usage` fields
 (input_tokens, output_tokens, cache_read, cache_creation). Should
 support: daily totals, per-repo breakdown, per-model breakdown,
 hourly rate detection ("am I spending too fast?").
+
+**Implementation:** `mnemo_usage` tool with filters (repo, model, days)
+and grouping (day, model, repo). Cost estimates use published Anthropic
+pricing for Opus/Sonnet/Haiku families with Sonnet fallback for unknown
+models.
 
 #### 🎯T9.3 Permission prompt analysis (`mnemo_permissions`)
 
@@ -473,7 +502,7 @@ the JSON structure is simple enough.
 - **Status**: identified
 - **Discovered**: 2026-04-07
 - **Related**: 🎯T1 (subsumes "broader memory"), 🎯T9.6 (decision recall becomes a compaction output)
-- **Depends**: jevon `claude.Process` / `manager.Manager` for Claude instance lifecycle
+- **Depends**: claudia (`marcelocantos/claudia`) for Claude instance lifecycle (agent control mechanism)
 
 **Desired state:** mnemo maintains a live compacted context for each
 active session. When a session `/clear`s (or a new session starts in
@@ -481,60 +510,208 @@ the same project), the compacted context is available instantly via
 `mnemo_restore` — no multi-round search/summarize needed. The /clear
 firewall becomes nearly free.
 
-**Architecture:**
+**Architecture — two options under consideration:**
 
-The mnemo daemon spawns a Sonnet summarizer instance (via jevon's
-`Manager`/`Process` API) per active session. The summarizer:
+**Option A: Local model via Ollama (preferred).** The mnemo daemon
+calls a local model via Ollama for compaction. No API cost, no
+network dependency, runs entirely on-device. The daemon manages
+compaction lifecycle directly.
 
-1. Receives fixed-size batches of new transcript lines as they appear.
-2. Maintains a rolling compacted context in its conversation head —
-   decisions made, files touched, reasoning chains, open threads,
-   target progress, blockers.
-3. On `/clear` detection (command message in JSONL), notes the boundary
-   but keeps its accumulated understanding.
-4. When `mnemo_restore` is called, ingests any final increments and
-   emits the compacted context as structured output.
-5. After idle timeout (configurable, e.g. 10 min), the summarizer
-   instance is reaped. On next activity, a new one bootstraps from
-   raw transcript (or a persisted checkpoint).
+**Option B: Online API.** Use a cheap cloud model (Gemini 2.5 Flash,
+GPT-4.1 mini) for sub-second latency at negligible cost (~$1-3/month).
+Requires API key and network.
 
-**Recursion guard:** Summarizer sessions are spawned with a known
-marker (e.g., `--system-prompt` tag or registry metadata). mnemo
-excludes these session IDs from summarizer spawning. The jevon
-`disallow_tools` mechanism strips `Agent`, `TeamCreate`, etc. to
-prevent summarizers from spawning further processes.
+The implementation should support both — Ollama by default, with an
+optional API backend for users who prefer it.
 
-**Session continuity:** `/clear` does not change the session ID —
-the JSONL file and UUID persist. A single summarizer instance tracks
-the full session lifecycle across multiple /clear cycles.
+**Benchmark results (M4 Max, 128 GB, ~550 tok input batch):**
+
+Local models (all Western-origin except qwen3 noted):
+
+| Model | Origin | Size | Wall | Gen speed | Quality |
+|-------|--------|------|------|-----------|---------|
+| phi4:14b | Microsoft | 9.1 GB | **15s** | 44 t/s | **Best Western** — all targets w/ descriptions, 4 decisions |
+| mistral-small | Mistral (FR) | 14 GB | **14s** | 30 t/s | Good — correct, concise |
+| gemma3:4b | Google | 3.3 GB | **9s** | 100 t/s | Good — fast but weaker extraction |
+| gemma4:31b | Google | 19 GB | **45s** | 10 t/s | Richest output but too slow |
+| llama4:scout | Meta | 67 GB | **35s** | 36 t/s | Good quality, ignored "no fences" instruction |
+| phi4-mini | Microsoft | 2.5 GB | **21s** | 115 t/s | Weak — mangled targets, missed files |
+| qwen3:8b* | Alibaba (CN) | 5.2 GB | **7s** | 74 t/s | Best overall (w/ thinking) |
+
+*qwen3 included for reference but may not be preferred due to provenance.
+
+Online models (estimated from published pricing, ~500 tok in / ~300 tok out):
+
+| Model | Provider | Cost/batch | Est. cost/month | Latency |
+|-------|----------|-----------|-----------------|---------|
+| Gemini 2.5 Flash | Google | $0.0003 | ~$1.50 | ~1s |
+| Grok 3 mini | xAI | $0.0003 | ~$1.50 | ~1s |
+| GPT-4.1 mini | OpenAI | $0.0007 | ~$3.30 | ~1s |
+| Haiku 4.5 | Anthropic | $0.002 | ~$9.60 | ~1s |
+| Sonnet 4 | Anthropic | $0.006 | ~$15 | ~2s |
+
+(Monthly estimate: 160 batches/day × 30 days, assuming 8h active work.)
+
+**Recommended approach:** Sonnet 4 via claudia. Best quality,
+sub-second latency. On a Pro Max 20X plan, compaction calls are
+effectively free (a rounding error on the plan's rate limits).
+claudia becomes the single LLM interface for mnemo (compaction
+now, agentic search later for 🎯T16). Local model fallback
+(phi4:14b via Ollama) documented but not the default path.
+
+**Compaction flow:**
+
+1. Daemon watches for new transcript lines (already implemented).
+2. Accumulates a batch (e.g., 2-3 min or N messages, whichever first).
+3. Calls Ollama `/api/chat` with system prompt + batch. Thinking on.
+4. Stores structured JSON output in a `compactions` table (session_id,
+   timestamp, JSON blob).
+5. On `/clear` detection, triggers an immediate compaction of any
+   pending batch.
+6. `mnemo_restore` reads the latest compaction for the session.
 
 **Compaction output structure** (v1):
 ```json
 {
-  "session_id": "...",
-  "project": "...",
-  "repo": "...",
-  "targets_active": ["🎯T3", "🎯T10"],
-  "targets_progressed": {"🎯T10": "target created, architecture designed"},
+  "targets": ["🎯T9.2", "🎯T15"],
   "decisions": [
-    {"what": "Use jevon Process API for summarizer lifecycle", "why": "..."}
+    {"what": "Use OR-by-default for FTS5 search", "why": "Implicit AND too rigid"}
   ],
-  "files_touched": ["docs/targets.md", "internal/tools/tools.go"],
-  "open_threads": ["Need to design checkpoint persistence format"],
-  "next_steps": ["Implement mnemo_restore tool", "Add summarizer spawn logic"],
-  "key_context": "Free-text summary of important reasoning and context"
+  "files": ["internal/store/store.go", "internal/tools/tools.go"],
+  "open_threads": ["Evaluate embedding models for T16"],
+  "summary": "Free-text summary of important reasoning and context"
 }
 ```
 
+**Recursion guard:** Compaction runs inside the daemon process (not
+a spawned agent), so there's no risk of recursive session creation.
+
 **Acceptance criteria:**
-- Summarizer spawns automatically for active sessions (not for its own sessions).
+- Compaction runs automatically for active sessions via local model.
 - Compacted context available within 2s of `mnemo_restore` call.
 - Compaction survives `/clear` boundaries within a session.
-- Idle reaping cleans up summarizer instances.
 - `mnemo_restore` in a fresh post-clear segment returns useful context
   covering the pre-clear work.
-- Token cost of summarizer < 10% of the session it tracks (Sonnet
-  on fixed-size batches keeps this lean).
+- Zero API cost for realtime compaction (local model only).
+
+### 🎯T15 Search resilience
+
+- **Value**: 8
+- **Cost**: 5
+- **Weight**: 1.6 (value 8 / cost 5)
+- **Status**: converging
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T5 (pattern discovery could surface search failures)
+
+**Desired state:** mnemo search reliably finds relevant content even
+when agents use imprecise or over-specific queries. Agents searching
+for "HMS QR code pairing protocol" should find sessions about
+"QR transfer" in the HMS repo, even though the word "pairing" never
+appears.
+
+**Problem observed:** An agent searched 8 times for HMS QR protocol
+design content that was fully indexed (60 FTS hits for "QR" in the
+target session, ranked #1 for "QR transfer"). Every search failed
+because the agent used 4-7 word queries with terms not in the corpus
+("pairing", "ceremony", "bootstrap"). FTS5 implicit AND semantics
+meant zero results for each attempt.
+
+**Implemented (v1 — OR-by-default search):**
+- Plain word queries now use OR semantics — "QR pairing protocol" finds
+  messages with ANY of those words, ranked by BM25 (more/rarer matches
+  rank higher). Explicit operators (AND, OR, NOT, NEAR, quotes) still
+  work for precise control.
+- Tool description explains the fuzzy default and precise alternatives.
+
+**Remaining improvements:**
+- Session-level search: match queries against session metadata (repo,
+  topic, work_type) in addition to message FTS — "HMS QR" could match
+  repo="hms" + message containing "QR"
+- Term suggestion: on 0 results, show the most frequent terms in the
+  FTS index that co-occur with any of the query terms
+- Hybrid ranking: boost results where repo/session metadata matches
+  parts of the query even if the message doesn't contain all terms
+
+**Acceptance criteria:**
+- [x] Agent searching "QR pairing protocol" finds messages containing "QR"
+  even though "pairing" and "protocol" don't appear (OR semantics)
+- [x] Multi-word queries return partial matches ranked by relevance
+- [ ] Session metadata (repo, topic) contributes to search ranking
+
+### 🎯T16 Semantic search
+
+- **Value**: 9
+- **Cost**: 8
+- **Weight**: 1.1 (value 9 / cost 8)
+- **Status**: identified (needs research)
+- **Discovered**: 2026-04-07
+- **Related**: 🎯T15 (search resilience — OR relaxation is a lexical bandaid),
+  🎯T10 (claudia-based agent spawning applies here too)
+
+**Desired state:** mnemo finds relevant content even when the query
+uses completely different vocabulary from the corpus. An agent
+searching for "pairing ceremony" finds sessions about "QR transfer
+handoff" because the concepts are semantically close, not because
+any words overlap.
+
+**Problem:** FTS5 (even with OR relaxation) is purely lexical. It
+can't bridge vocabulary gaps — "pairing" vs "transfer", "bootstrap"
+vs "handoff", "ceremony" vs "flow". These are the hardest search
+failures to debug because the user is sure the content exists and
+the index confirms it does, but the terms don't intersect.
+
+**Approach tiers (research needed):**
+
+1. **Embedding-based retrieval** — compute vector embeddings for
+   messages at ingest time, store in a vector index, query by cosine
+   similarity. Hybrid ranking: combine BM25 score with embedding
+   distance.
+
+   **Architecture:**
+   - **sqlite-vec** for vector storage — SQLite extension, keeps
+     everything in one DB file. Stores embeddings as virtual table
+     columns, supports KNN queries. Go bindings via
+     `github.com/asg017/sqlite-vec-go-bindings`.
+   - **Ollama** for embedding generation — mnemo's daemon calls
+     Ollama's `/api/embed` endpoint at ingest time. Already installed
+     via Homebrew, handles model management (`ollama pull`), GPU
+     acceleration, shared model cache. No API cost, no build
+     complexity. Models like `nomic-embed-text` (768d, ~270MB) or
+     `all-minilm` (384d, ~45MB) run locally.
+   - Embeddings computed in Go application code, not inside SQLite.
+     This gives full control over batching, error handling, and
+     backpressure during ingest. (sqlite-lembed exists for in-SQLite
+     embedding but adds GGUF model dependencies to the SQLite
+     connection for no real benefit — mnemo's search and ingest
+     always go through handler code.)
+
+   **Key questions:**
+   - Embedding model choice: nomic-embed-text (768d, good quality,
+     Matryoshka — can truncate to 256d), all-minilm (384d, smaller/
+     faster), or mxbai-embed-large (1024d, highest quality)?
+   - Ingest cost: ~1M messages × embedding latency. Batch embedding
+     and incremental-only processing make this manageable.
+   - Storage: 768d float32 = 3KB/vector × 1M = ~3GB. Matryoshka
+     truncation to 256d or int8 quantisation can cut this
+     significantly.
+
+2. **Agentic search** — spawn a lightweight agent (via claudia) that
+   reformulates failed queries, tries synonyms, uses session metadata
+   as context, and synthesises results across multiple search passes.
+   Ironic (the user IS an agent) but practical — a search-specialised
+   agent with access to the FTS index can explore the vocabulary space
+   much faster than the calling agent guessing at terms.
+   - Shares architecture with 🎯T10's summarizer: claudia-managed
+     agent, mnemo-scoped tools, recursion guard.
+
+3. **Hybrid** — embeddings for recall, agentic layer for synthesis
+   and drill-down. Embeddings catch the vocabulary gap; the agent
+   interprets and contextualises.
+
+**Acceptance criteria:**
+- Searching "pairing ceremony" finds sessions about "QR transfer handoff"
+- Vocabulary mismatch no longer causes 0-result failures for indexed content
+- Search latency remains under 2s for interactive use
 
 ### 🎯T8 sqldeep integration
 

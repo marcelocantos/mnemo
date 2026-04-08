@@ -180,6 +180,49 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 }
 
+func TestFuzzySearch(t *testing.T) {
+	projectDir := t.TempDir()
+
+	writeJSONL(t, projectDir, "myproject", "sess-fuzzy1", []map[string]any{
+		msg("user", "How does the QR transfer work?", "2026-04-01T10:00:00Z"),
+		msg("assistant", "The QR transfer uses a token-based handoff.", "2026-04-01T10:00:05Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// "QR pairing protocol" — no message contains "pairing" or "protocol",
+	// but with OR semantics, "QR" alone should match.
+	results, err := s.Search("QR pairing protocol", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected fuzzy search to find partial matches via OR")
+	}
+	found := false
+	for _, r := range results {
+		if r.SessionID == "sess-fuzzy1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected sess-fuzzy1 in fuzzy search results")
+	}
+
+	// Explicit AND should still require all terms — this should find nothing.
+	results, err = s.Search("QR AND pairing AND protocol", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results for explicit AND with missing terms, got %d", len(results))
+	}
+}
+
 func TestListSessions(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -1060,5 +1103,163 @@ func TestSchemaVersionRebuild(t *testing.T) {
 	}
 	if len(results) == 0 {
 		t.Fatal("expected search results after re-ingest")
+	}
+}
+
+func TestMemoryIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a memory directory structure mimicking ~/.claude/projects/<project>/memory/
+	memDir := filepath.Join(projectDir, "myproject", "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a memory file with frontmatter.
+	memContent := `---
+name: QR transfer protocol
+description: Design decisions for QR-based session transfer in HMS
+type: project
+---
+
+The QR transfer uses a token-based handoff. The phone scans the QR code
+which contains a transfer token. The server validates the token and
+creates a new session for the mobile device.
+`
+	if err := os.WriteFile(filepath.Join(memDir, "qr_transfer.md"), []byte(memContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a MEMORY.md index file.
+	indexContent := "- [QR transfer](qr_transfer.md) — QR-based session transfer design\n"
+	if err := os.WriteFile(filepath.Join(memDir, "MEMORY.md"), []byte(indexContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also need a JSONL file so the store has a valid project.
+	writeJSONL(t, projectDir, "myproject", "sess-mem1", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestMemories(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "QR transfer" should find the memory.
+	results, err := s.SearchMemories("QR transfer", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected memory search results for 'QR transfer'")
+	}
+	for i, r := range results {
+		t.Logf("result[%d]: name=%q type=%q project=%q path=%q content=%.60q", i, r.Name, r.MemoryType, r.Project, r.FilePath, r.Content)
+	}
+	// Find the actual qr_transfer.md result (MEMORY.md index may also match).
+	found := false
+	for _, r := range results {
+		if r.Name == "QR transfer protocol" {
+			found = true
+			if r.MemoryType != "project" {
+				t.Errorf("expected type 'project', got %q", r.MemoryType)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find memory 'QR transfer protocol'")
+	}
+
+	// Search for "pairing" — not in the memory, but "transfer" is.
+	// With OR semantics, "pairing transfer" should still find it via "transfer".
+	results, err = s.SearchMemories("pairing transfer", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected fuzzy memory search to find partial match")
+	}
+
+	// Filter by type.
+	results, err = s.SearchMemories("", "project", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for type filter 'project'")
+	}
+
+	// Filter by type — no match.
+	results, err = s.SearchMemories("", "reference", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results for type 'reference', got %d", len(results))
+	}
+
+	// Update the memory file and re-ingest.
+	updatedContent := `---
+name: QR transfer protocol (revised)
+description: Updated design for QR-based session transfer
+type: project
+---
+
+The revised protocol uses ECDH key exchange after QR scan.
+`
+	if err := os.WriteFile(filepath.Join(memDir, "qr_transfer.md"), []byte(updatedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestMemories(); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err = s.SearchMemories("ECDH", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for updated content 'ECDH'")
+	}
+	if results[0].Name != "QR transfer protocol (revised)" {
+		t.Errorf("expected updated name, got %q", results[0].Name)
+	}
+}
+
+func TestRelaxQuery(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		// Single word — unchanged.
+		{"hello", "hello"},
+		// Multiple words — OR-joined.
+		{"QR code pairing", "QR OR code OR pairing"},
+		// Explicit OR — unchanged.
+		{"QR OR pairing", "QR OR pairing"},
+		// Explicit AND — unchanged.
+		{"QR AND pairing", "QR AND pairing"},
+		// Explicit NOT — unchanged.
+		{"QR NOT test", "QR NOT test"},
+		// Quoted phrase — unchanged.
+		{`"QR transfer"`, `"QR transfer"`},
+		// NEAR — unchanged.
+		{"NEAR(QR transfer)", "NEAR(QR transfer)"},
+		// Case-insensitive operator detection.
+		{"hello or world", "hello or world"},
+		// Empty — unchanged.
+		{"", ""},
+		// Whitespace only.
+		{"   ", ""},
+	}
+	for _, tt := range tests {
+		got := relaxQuery(tt.input)
+		if got != tt.want {
+			t.Errorf("relaxQuery(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }

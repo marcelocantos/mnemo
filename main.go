@@ -30,7 +30,7 @@ import (
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.10.0"
+const version = "0.11.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -94,6 +94,9 @@ func runServe() {
 		}
 		if stats, err := mem.Stats(); err == nil {
 			slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
+		}
+		if err := mem.IngestMemories(); err != nil {
+			slog.Error("memory ingest failed", "err", err)
 		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
