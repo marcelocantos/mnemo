@@ -158,11 +158,21 @@ type UsageRow struct {
 	CostUSD             float64 `json:"cost_usd"`
 }
 
+// HourlyRate shows token and cost velocity over the queried period.
+type HourlyRate struct {
+	ActiveHours     float64 `json:"active_hours"`
+	InputPerHour    float64 `json:"input_per_hour"`
+	OutputPerHour   float64 `json:"output_per_hour"`
+	CostPerHour     float64 `json:"cost_per_hour"`
+	MessagesPerHour float64 `json:"messages_per_hour"`
+}
+
 // UsageResult holds aggregated token usage with totals.
 type UsageResult struct {
-	Days  int        `json:"days"`
-	Rows  []UsageRow `json:"rows"`
-	Total UsageRow   `json:"total"`
+	Days       int         `json:"days"`
+	Rows       []UsageRow  `json:"rows"`
+	Total      UsageRow    `json:"total"`
+	HourlyRate *HourlyRate `json:"hourly_rate,omitempty"`
 }
 
 // modelCosts maps model slug prefixes to per-token costs in USD.
@@ -2898,7 +2908,97 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 		}
 	}
 	result.Total.Period = "total"
+
+	// Compute hourly rate from the actual time span of assistant messages.
+	activeHours, err := s.activeHours(days, repoFilter, model)
+	if err == nil && activeHours > 0 {
+		result.HourlyRate = &HourlyRate{
+			ActiveHours:     activeHours,
+			InputPerHour:    float64(result.Total.InputTokens) / activeHours,
+			OutputPerHour:   float64(result.Total.OutputTokens) / activeHours,
+			CostPerHour:     result.Total.CostUSD / activeHours,
+			MessagesPerHour: float64(result.Total.Messages) / activeHours,
+		}
+	}
+
 	return result, nil
+}
+
+// activeHours estimates the number of active hours of assistant usage within
+// the given period. It sums intra-session time spans, treating any gap between
+// consecutive messages > 30 minutes as idle time.
+func (s *Store) activeHours(days int, repoFilter, model string) (float64, error) {
+	where := []string{
+		"e.type = 'assistant'",
+		"e.timestamp >= datetime('now', ?)",
+	}
+	args := []any{fmt.Sprintf("-%d days", days)}
+
+	needJoin := repoFilter != ""
+	if repoFilter != "" {
+		where = append(where, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+	if model != "" {
+		where = append(where, "e.model LIKE ?")
+		args = append(args, model+"%")
+	}
+
+	joinClause := ""
+	if needJoin {
+		joinClause = "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
+	}
+
+	q := fmt.Sprintf(`
+		SELECT e.session_id, e.timestamp
+		FROM entries e
+		%s
+		WHERE %s
+		ORDER BY e.session_id, e.timestamp
+	`, joinClause, strings.Join(where, " AND "))
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	const idleThreshold = 30 * time.Minute
+	var totalActive time.Duration
+	var prevSession string
+	var prevTime time.Time
+
+	for rows.Next() {
+		var sessionID, ts string
+		if err := rows.Scan(&sessionID, &ts); err != nil {
+			continue
+		}
+		t, err := time.Parse("2006-01-02 15:04:05", ts)
+		if err != nil {
+			t, err = time.Parse(time.RFC3339, ts)
+			if err != nil {
+				continue
+			}
+		}
+
+		if sessionID == prevSession && !prevTime.IsZero() {
+			gap := t.Sub(prevTime)
+			if gap > 0 && gap <= idleThreshold {
+				totalActive += gap
+			}
+		}
+		prevSession = sessionID
+		prevTime = t
+	}
+
+	hours := totalActive.Hours()
+	// If there's data but all within a single message per session, return a
+	// minimum of the number of distinct sessions × 1 minute as a floor.
+	if hours == 0 {
+		return 0, nil
+	}
+	return hours, nil
 }
 
 // Status returns a rich status report: repos → sessions → truncated message excerpts.

@@ -1866,3 +1866,96 @@ func TestPlanIngest(t *testing.T) {
 		t.Error("expected fuzzy OR results for 'performance architecture'")
 	}
 }
+
+func TestUsageHourlyRate(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a session with multiple assistant messages spread over time.
+	// Messages at T+0, T+10min, T+20min → 20 minutes of active time.
+	writeJSONL(t, projectDir, "myproject", "sess-usage-rate", []map[string]any{
+		{
+			"type":      "system",
+			"timestamp": now(),
+			"cwd":       "/Users/dev/work/github.com/acme/app",
+			"version":   "2.1.81",
+			"message":   map[string]any{"content": "system init"},
+		},
+		assistantWithUsage(now(), "claude-opus-4-6", 50000, 500, 45000, 1000),
+		assistantWithUsage(nowPlus(10), "claude-opus-4-6", 60000, 600, 50000, 2000),
+		assistantWithUsage(nowPlus(20), "claude-opus-4-6", 40000, 400, 35000, 500),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.Usage(30, "", "", "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.HourlyRate == nil {
+		t.Fatal("expected HourlyRate to be populated")
+	}
+
+	hr := result.HourlyRate
+	// 20 minutes ≈ 0.333 hours of active time.
+	if hr.ActiveHours < 0.3 || hr.ActiveHours > 0.4 {
+		t.Errorf("expected ~0.333 active hours, got %f", hr.ActiveHours)
+	}
+
+	// Total input: 150000 tokens over ~0.333h → ~450000/h
+	if hr.InputPerHour < 400000 || hr.InputPerHour > 500000 {
+		t.Errorf("expected input/hour ~450000, got %f", hr.InputPerHour)
+	}
+
+	if hr.CostPerHour <= 0 {
+		t.Error("expected positive cost per hour")
+	}
+
+	if hr.MessagesPerHour <= 0 {
+		t.Error("expected positive messages per hour")
+	}
+}
+
+// assistantWithUsage creates an assistant entry with usage fields at the given timestamp.
+func assistantWithUsage(ts string, model string, input, output, cacheRead, cacheCreate int) map[string]any {
+	return map[string]any{
+		"type":      "assistant",
+		"timestamp": ts,
+		"cwd":       "/Users/dev/work/github.com/acme/app",
+		"version":   "2.1.81",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "Working on it."},
+			},
+			"model":       model,
+			"stop_reason": "end_turn",
+			"usage": map[string]any{
+				"input_tokens":               input,
+				"output_tokens":              output,
+				"cache_read_input_tokens":    cacheRead,
+				"cache_creation_input_tokens": cacheCreate,
+			},
+		},
+	}
+}
+
+// now returns the current time formatted for JSONL timestamps.
+func now() string {
+	return "2026-04-09T10:00:00Z"
+}
+
+// nowPlus returns a timestamp offset by the given minutes.
+func nowPlus(minutes int) string {
+	return "2026-04-09T10:" + padMinutes(minutes) + ":00Z"
+}
+
+func padMinutes(m int) string {
+	if m < 10 {
+		return "0" + string(rune('0'+m))
+	}
+	return string(rune('0'+m/10)) + string(rune('0'+m%10))
+}
