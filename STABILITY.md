@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.10.0.
+Snapshot as of v0.11.0.
 
 ### CLI flags
 
@@ -25,7 +25,7 @@ Snapshot as of v0.10.0.
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `query` | string | yes | FTS5 search query | Stable |
+| `query` | string | yes | Search query — plain words use OR (fuzzy), explicit AND/NOT/NEAR/quotes for precise control | Stable |
 | `limit` | number | no | Max results (default 20) | Stable |
 | `session_type` | string | no | Filter: interactive, subagent, worktree, ephemeral, all (default interactive) | Stable |
 | `repo` | string | no | Repo filter (bare name, org/repo, or path fragment) | Stable |
@@ -77,6 +77,31 @@ values are heuristically extracted and the set may evolve.
 
 **Added in v0.8.0.** Returns hierarchical JSON (repos → sessions → excerpts). **Stability**: Needs review — defaults and output shape may evolve.
 
+#### mnemo_memories
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `type` | string | no | Filter: user, feedback, project, reference | Needs review |
+| `project` | string | no | Project name substring filter | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.11.0.** Searches across auto-memory files from all projects.
+Returns name, description, type, project, content. **Stability**: Needs
+review — first release, output format and filters may evolve.
+
+#### mnemo_usage
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `days` | number | no | Recency window in days (default 30) | Stable |
+| `repo` | string | no | Repo filter (name or path fragment) | Stable |
+| `model` | string | no | Model prefix filter (e.g. "claude-opus-4") | Needs review |
+| `group_by` | string | no | Group by: day (default), model, repo | Needs review |
+
+**Added in v0.11.0.** Returns aggregated token usage with cost estimates.
+**Stability**: Needs review — cost model and grouping options may evolve.
+
 #### mnemo_query
 
 | Parameter | Type | Required | Description | Stability |
@@ -123,6 +148,8 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `sessions` | View joining session_summary + session_meta: session_id, project, session_type, repo, git_branch, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
 | `session_summary` | Trigger-maintained materialised table: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg | Needs review |
 | `session_meta` | Per-session metadata: session_id, repo, cwd, git_branch, work_type, topic | Needs review |
+| `memories` | id, project, file_path (unique), name, description, memory_type, content, updated_at — auto-memory files from ~/.claude/projects/*/memory/*.md | Needs review |
+| `memories_fts` | FTS5 on name, description, content, project — with insert/update/delete triggers | Needs review |
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 
@@ -132,6 +159,9 @@ as JSONB with 15 virtual columns for high-query fields. All entry types
 `messages` gained `entry_id` FK linking content blocks to their source entry.
 v0.10.0 added `snapshot_files` with trigger-based extraction from
 file-history-snapshot entries and FTS5 on file paths.
+v0.11.0 added `memories` table for cross-project auto-memory indexing,
+`mnemo_usage` for token analytics, and changed search to OR-by-default
+with BM25 ranking for fuzzy matching.
 This surface is still evolving. `ingest_state` and `session_nonces` are
 internal implementation details.
 
