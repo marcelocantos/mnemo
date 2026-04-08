@@ -2,29 +2,51 @@
 
 ## Active
 
-### 🎯T1 Broader memory beyond transcripts
+### 🎯T1 Memory indexing
 
 - **Value**: 8
-- **Cost**: 13
-- **Weight**: 0.6 (value 8 / cost 13)
+- **Cost**: 3
+- **Weight**: 2.7 (value 8 / cost 3)
 - **Status**: identified
 - **Discovered**: 2026-04-06
+- **Revised**: 2026-04-08
+- **Related**: 🎯T10 (compaction outputs are also memories)
 
-**Desired state:** mnemo evolves from transcript search into a general
-memory system for Claude Code sessions — remembering decisions,
-preferences, and project context across sessions. Not just "what was
-said" but "what was decided" and "what matters for next time."
+**Desired state:** mnemo indexes Claude Code auto-memory files
+(`~/.claude/projects/*/memory/*.md`) alongside transcripts. Memories
+are searchable cross-project — an agent working in repo A can find
+decisions, preferences, and context captured in repo B.
 
-**Note:** 🎯T10 (live context compaction) addresses the core of this
-target — a summarisation layer that distills sessions into key facts,
-available instantly across /clear boundaries. Once 🎯T10 is achieved,
-reassess whether 🎯T1 has residual scope or should be retired.
+**Corpus:** ~208 memory files across all projects. Each has YAML
+frontmatter (name, description, type: user/feedback/project/reference)
+and markdown content. MEMORY.md files are indexes (pointers to other
+files) — index those too for discoverability.
 
-**Open questions:**
-- What's the data model beyond raw transcript messages?
-- Should it extract and index decisions, action items, code changes?
-- How does it relate to Claude's auto-memory (MEMORY.md files)?
-- Is there a summarisation layer that distills sessions into key facts? → See 🎯T10.
+**Architecture:**
+
+The daemon watches `~/.claude/projects/*/memory/` directories
+(same fsnotify pattern as transcript ingest). On change:
+
+1. Parse frontmatter (name, description, type).
+2. Extract project from directory path.
+3. Store in a `memories` table: id, project, file_path, name,
+   description, memory_type, content, updated_at.
+4. FTS5 index on name + description + content.
+
+**Tools:**
+
+- `mnemo_memories` — search across all project memories. Filters:
+  project, memory_type (user/feedback/project/reference), FTS query.
+  Returns name, description, type, project, content snippet.
+- Also queryable via `mnemo_query` (joins with sessions via project).
+
+**Acceptance criteria:**
+- All memory files across all projects indexed and searchable.
+- Changes detected in realtime (fsnotify).
+- `mnemo_memories "QR pairing"` finds relevant project memories
+  even if the current session is in a different repo.
+- Deletions remove the memory from the index.
+- MEMORY.md index files indexed for discoverability.
 
 ### 🎯T2 Smarter session classification
 
