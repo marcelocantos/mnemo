@@ -529,12 +529,12 @@ Online models (estimated from published pricing, ~500 tok in / ~300 tok out):
 
 (Monthly estimate: 160 batches/day × 30 days, assuming 8h active work.)
 
-**Recommended approach:** Sonnet 4 via claudia. ~$15/month for
-best quality at sub-second latency. claudia becomes the single LLM
-interface for mnemo (compaction now, agentic search later for 🎯T16),
-avoiding the complexity of maintaining a separate Ollama integration.
-Local model support (phi4:14b via Ollama) remains a documented
-fallback for offline/zero-cost use but is not the default path.
+**Recommended approach:** Sonnet 4 via claudia. Best quality,
+sub-second latency. On a Pro Max 20X plan, compaction calls are
+effectively free (a rounding error on the plan's rate limits).
+claudia becomes the single LLM interface for mnemo (compaction
+now, agentic search later for 🎯T16). Local model fallback
+(phi4:14b via Ollama) documented but not the default path.
 
 **Compaction flow:**
 
