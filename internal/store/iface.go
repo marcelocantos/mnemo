@@ -17,4 +17,5 @@ type Backend interface {
 	Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error)
 	Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error)
 	SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error)
+	SearchSkills(query string, limit int) ([]SkillInfo, error)
 }

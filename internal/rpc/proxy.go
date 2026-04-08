@@ -143,6 +143,15 @@ func (p *Proxy) Usage(days int, repoFilter, model, groupBy string) (*store.Usage
 	return &result, json.Unmarshal(raw, &result)
 }
 
+func (p *Proxy) SearchSkills(query string, limit int) ([]store.SkillInfo, error) {
+	raw, err := p.client.Call("SearchSkills", SearchSkillsParams{Query: query, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.SkillInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

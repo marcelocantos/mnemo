@@ -51,6 +51,7 @@ user. Good moments to reach for mnemo:
 - `mnemo_sessions` — List sessions by recency, type, project, repo, work type
 - `mnemo_read_session` — Read messages from a specific session (supports prefix IDs)
 - `mnemo_memories` — Search across auto-memory files from all projects. Filters by type (user/feedback/project/reference), project. Cross-project memory search.
+- `mnemo_skills` — Search across skill files from ~/.claude/skills/. Discover available workflows and reusable procedures.
 - `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with cost estimates. Filters by repo, model, date range. Groups by day, model, or repo.
 - `mnemo_query` — SQL SELECT/WITH or sqldeep nested syntax (FROM ... SELECT { }) against the transcript database
 - `mnemo_recent_activity` — Per-repo summary of recent session activity (counts, recency, work types, topics)

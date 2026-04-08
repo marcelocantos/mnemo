@@ -1263,3 +1263,126 @@ func TestRelaxQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillIngest(t *testing.T) {
+	projectDir := t.TempDir()
+	skillsDir := t.TempDir()
+
+	// Write a skill file with YAML frontmatter.
+	skillContent := `---
+name: release workflow
+description: Steps to publish a new release with CI and Homebrew tap
+---
+
+1. Bump the version constant in main.go.
+2. Run the release CI workflow via GitHub Actions.
+3. Update the Homebrew tap formula with the new sha256 checksums.
+`
+	if err := os.WriteFile(filepath.Join(skillsDir, "release.md"), []byte(skillContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a skill file without frontmatter — name derived from filename.
+	plainContent := `Use this skill to audit the codebase for code quality,
+security issues, and documentation gaps.`
+	if err := os.WriteFile(filepath.Join(skillsDir, "audit-codebase.md"), []byte(plainContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestStore(t, projectDir)
+
+	// Directly ingest from the temp skills dir using ingestSkillFileLocked.
+	s.rwmu.Lock()
+	for _, name := range []string{"release.md", "audit-codebase.md"} {
+		if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, name)); err != nil {
+			s.rwmu.Unlock()
+			t.Fatalf("ingest skill %s: %v", name, err)
+		}
+	}
+	s.rwmu.Unlock()
+
+	// Search for "release" should find the release skill.
+	results, err := s.SearchSkills("release", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for 'release'")
+	}
+	found := false
+	for _, r := range results {
+		t.Logf("result: name=%q description=%.60q", r.Name, r.Description)
+		if r.Name == "release workflow" {
+			found = true
+			if r.Description != "Steps to publish a new release with CI and Homebrew tap" {
+				t.Errorf("unexpected description: %q", r.Description)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find skill 'release workflow'")
+	}
+
+	// Filename-derived name for the plain skill.
+	results, err = s.SearchSkills("audit codebase", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, r := range results {
+		if r.Name == "audit codebase" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find skill 'audit codebase'")
+	}
+
+	// List all (empty query).
+	results, err = s.SearchSkills("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) < 2 {
+		t.Errorf("expected at least 2 skills, got %d", len(results))
+	}
+
+	// Update a skill file and re-ingest.
+	updatedContent := `---
+name: release workflow
+description: Updated release steps including signing
+---
+
+Updated content.
+`
+	if err := os.WriteFile(filepath.Join(skillsDir, "release.md"), []byte(updatedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.rwmu.Lock()
+	if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, "release.md")); err != nil {
+		s.rwmu.Unlock()
+		t.Fatal(err)
+	}
+	s.rwmu.Unlock()
+
+	results, err = s.SearchSkills("signing", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected updated skill to be searchable by new description")
+	}
+
+	// Delete the skill.
+	s.deleteSkillFile(filepath.Join(skillsDir, "release.md"))
+	results, err = s.SearchSkills("release workflow", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.Name == "release workflow" {
+			t.Error("expected deleted skill to be removed from index")
+		}
+	}
+}

@@ -98,6 +98,9 @@ func runServe() {
 		if err := mem.IngestMemories(); err != nil {
 			slog.Error("memory ingest failed", "err", err)
 		}
+		if err := mem.IngestSkills(); err != nil {
+			slog.Error("skill ingest failed", "err", err)
+		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}

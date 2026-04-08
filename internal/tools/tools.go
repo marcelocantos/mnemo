@@ -107,6 +107,9 @@ Tables:
     — auto-memory files from ~/.claude/projects/*/memory/*.md
     — memory_type: user, feedback, project, reference
   memories_fts — FTS5 on name, description, content, project
+  skills (id, file_path, name, description, content, updated_at)
+    — skill files from ~/.claude/skills/*.md
+  skills_fts — FTS5 on name, description, content
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -169,6 +172,11 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
 			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", or "repo"`)),
 		),
+		mcp.NewTool("mnemo_skills",
+			mcp.WithDescription(`Search across Claude Code skill files (~/.claude/skills/). Skills define reusable workflows — release processes, audit procedures, documentation generation, etc. Use this to discover relevant skills or understand what workflows are available.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -204,6 +212,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.stats()
 	case "mnemo_memories":
 		return h.memories(args)
+	case "mnemo_skills":
+		return h.skills(args)
 	case "mnemo_usage":
 		return h.usage(args)
 	case "mnemo_self":
@@ -497,6 +507,28 @@ func (h *Handler) memories(args map[string]any) (string, bool, error) {
 		}
 		fmt.Fprintf(&b, "## %s [%s] (%s)\n%s\n\n%s\n\n",
 			m.Name, m.MemoryType, proj, m.Description, m.Content)
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) skills(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchSkills(query, limit)
+	if err != nil {
+		return fmt.Sprintf("skill search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No skills found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, sk := range results {
+		fmt.Fprintf(&b, "## %s\n%s\n\n%s\n\n", sk.Name, sk.Description, sk.Content)
 	}
 	return b.String(), false, nil
 }

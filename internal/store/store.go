@@ -376,6 +376,14 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS skills (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_path TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -415,6 +423,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_snapshot_files_path ON snapshot_files(file_path);
 		CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
 		CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
+		CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 	`)
 	if err != nil {
 		db.Close()
@@ -451,6 +460,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
 			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+			name, description, content,
+			content=skills,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS skills_ai;
+		CREATE TRIGGER skills_ai AFTER INSERT ON skills
+		BEGIN
+			INSERT INTO skills_fts(rowid, name, description, content)
+			VALUES (new.id, new.name, new.description, new.content);
+		END;
+		DROP TRIGGER IF EXISTS skills_au;
+		CREATE TRIGGER skills_au AFTER UPDATE ON skills
+		BEGIN
+			INSERT INTO skills_fts(skills_fts, rowid, name, description, content)
+			VALUES ('delete', old.id, old.name, old.description, old.content);
+			INSERT INTO skills_fts(rowid, name, description, content)
+			VALUES (new.id, new.name, new.description, new.content);
+		END;
+		DROP TRIGGER IF EXISTS skills_ad;
+		CREATE TRIGGER skills_ad AFTER DELETE ON skills
+		BEGIN
+			INSERT INTO skills_fts(skills_fts, rowid, name, description, content)
+			VALUES ('delete', old.id, old.name, old.description, old.content);
 		END;
 	`)
 	if err != nil {
@@ -773,6 +807,152 @@ func (s *Store) queryMemories(q string, args ...any) ([]MemoryInfo, error) {
 			continue
 		}
 		results = append(results, m)
+	}
+	return results, nil
+}
+
+// SkillInfo holds a single skill record from the index.
+type SkillInfo struct {
+	ID          int    `json:"id"`
+	FilePath    string `json:"file_path"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Content     string `json:"content"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// skillsDir returns the path to ~/.claude/skills/.
+func skillsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "skills"), nil
+}
+
+// IngestSkills scans ~/.claude/skills/*.md and ingests them.
+func (s *Store) IngestSkills() error {
+	dir, err := skillsDir()
+	if err != nil {
+		return err
+	}
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	files, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil {
+		return err
+	}
+
+	count := 0
+	for _, f := range files {
+		if err := s.ingestSkillFileLocked(f); err != nil {
+			slog.Error("ingest skill failed", "file", f, "err", err)
+			continue
+		}
+		count++
+	}
+	slog.Info("ingested skills", "count", count)
+	return nil
+}
+
+// ingestSkillFile ingests a single skill file (acquires write lock).
+func (s *Store) ingestSkillFile(path string) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	return s.ingestSkillFileLocked(path)
+}
+
+// ingestSkillFileLocked ingests a single skill file (caller must hold rwmu write lock).
+func (s *Store) ingestSkillFileLocked(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.db.Exec("DELETE FROM skills WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	content := string(data)
+	name, description, _, body := parseMemoryFrontmatter(content)
+
+	// If no frontmatter, derive name from filename and use first non-blank line as description.
+	if name == "" {
+		base := filepath.Base(path)
+		stem := strings.TrimSuffix(base, ".md")
+		name = strings.NewReplacer("-", " ", "_", " ").Replace(stem)
+	}
+	if description == "" {
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				description = line
+				break
+			}
+		}
+	}
+	if body == "" {
+		body = content
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	_, err = s.db.Exec(`
+		INSERT INTO skills (file_path, name, description, content, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			name = excluded.name,
+			description = excluded.description,
+			content = excluded.content,
+			updated_at = excluded.updated_at
+	`, path, name, description, body, now)
+	return err
+}
+
+// deleteSkillFile removes a skill file from the index (acquires write lock).
+func (s *Store) deleteSkillFile(path string) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	s.db.Exec("DELETE FROM skills WHERE file_path = ?", path)
+}
+
+// SearchSkills searches across all indexed skill files.
+func (s *Store) SearchSkills(query string, limit int) ([]SkillInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	if query == "" {
+		return s.querySkills(`SELECT id, file_path, name, description, content, updated_at
+			FROM skills ORDER BY name ASC LIMIT ?`, limit)
+	}
+
+	ftsQuery := relaxQuery(query)
+	return s.querySkills(`SELECT s.id, s.file_path, s.name, s.description, s.content, s.updated_at
+		FROM skills s
+		JOIN skills_fts f ON f.rowid = s.id
+		WHERE skills_fts MATCH ?
+		ORDER BY rank LIMIT ?`, ftsQuery, limit)
+}
+
+func (s *Store) querySkills(q string, args ...any) ([]SkillInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SkillInfo
+	for rows.Next() {
+		var sk SkillInfo
+		if err := rows.Scan(&sk.ID, &sk.FilePath, &sk.Name, &sk.Description, &sk.Content, &sk.UpdatedAt); err != nil {
+			continue
+		}
+		results = append(results, sk)
 	}
 	return results, nil
 }
@@ -1164,6 +1344,13 @@ func (s *Store) Watch() error {
 		return nil
 	})
 
+	// Also watch the skills directory for .md changes.
+	if sdir, err := skillsDir(); err == nil {
+		if wErr := watcher.Add(sdir); wErr != nil {
+			slog.Warn("failed to watch skills directory", "path", sdir, "err", wErr)
+		}
+	}
+
 	slog.Info("watching for transcript changes", "dir", s.projectDir)
 
 	for {
@@ -1187,6 +1374,17 @@ func (s *Store) Watch() error {
 				}
 				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 					s.deleteMemoryFile(event.Name)
+				}
+			}
+			// Watch skill file changes.
+			if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/.claude/skills/") {
+				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+					if err := s.ingestSkillFile(event.Name); err != nil {
+						slog.Error("ingest skill failed", "file", event.Name, "err", err)
+					}
+				}
+				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+					s.deleteSkillFile(event.Name)
 				}
 			}
 			if event.Has(fsnotify.Create) {
