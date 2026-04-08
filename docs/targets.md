@@ -487,60 +487,68 @@ the same project), the compacted context is available instantly via
 `mnemo_restore` — no multi-round search/summarize needed. The /clear
 firewall becomes nearly free.
 
-**Architecture:**
+**Architecture — two options under consideration:**
 
-The mnemo daemon spawns a Sonnet summarizer instance (via claudia's
-agent control API) per active session. The summarizer:
+**Option A: Local model via Ollama (preferred).** The mnemo daemon
+calls a local model (qwen3:8b via Ollama) for compaction. No API
+cost, no network dependency, runs entirely on-device. The daemon
+manages compaction lifecycle directly — no need for claudia's agent
+control for this path.
 
-1. Receives fixed-size batches of new transcript lines as they appear.
-2. Maintains a rolling compacted context in its conversation head —
-   decisions made, files touched, reasoning chains, open threads,
-   target progress, blockers.
-3. On `/clear` detection (command message in JSONL), notes the boundary
-   but keeps its accumulated understanding.
-4. When `mnemo_restore` is called, ingests any final increments and
-   emits the compacted context as structured output.
-5. After idle timeout (configurable, e.g. 10 min), the summarizer
-   instance is reaped. On next activity, a new one bootstraps from
-   raw transcript (or a persisted checkpoint).
+**Option B: Claude via claudia.** The daemon spawns a Sonnet
+summarizer instance (via claudia's agent control API) per active
+session. Higher quality but incurs API cost. May be worth it for
+deep periodic compaction alongside lightweight local realtime
+compaction.
 
-**Recursion guard:** Summarizer sessions are spawned with a known
-marker (e.g., `--system-prompt` tag or registry metadata). mnemo
-excludes these session IDs from summarizer spawning. The claudia
-`disallow_tools` mechanism strips `Agent`, `TeamCreate`, etc. to
-prevent summarizers from spawning further processes.
+**Benchmark results (M4 Max, 128 GB, ~550 tok input batch):**
 
-**Session continuity:** `/clear` does not change the session ID —
-the JSONL file and UUID persist. A single summarizer instance tracks
-the full session lifecycle across multiple /clear cycles.
+| Model | Size | Think | Wall | Gen speed | Quality |
+|-------|------|-------|------|-----------|---------|
+| qwen3:8b | 5.2 GB | on | **7s** | 74 t/s | **Best balance** — all targets, decisions, files, open threads |
+| qwen3:8b | 5.2 GB | off | 15s | 70 t/s | Good — missed one target |
+| gemma3:4b | 3.3 GB | off | 15s | 97 t/s | Good — missed one target |
+| gemma4:31b | 19 GB | off | 37s | 17 t/s | Richest output but too slow for realtime |
+| phi4-mini | 2.5 GB | off | 21s | 115 t/s | Weak — mangled target names, missed files |
+
+**Recommended approach:** qwen3:8b with thinking for realtime
+compaction (7s per batch, every 2-3 minutes). Optionally gemma4:31b
+or Claude for periodic deep compaction at session boundaries.
+
+**Compaction flow:**
+
+1. Daemon watches for new transcript lines (already implemented).
+2. Accumulates a batch (e.g., 2-3 min or N messages, whichever first).
+3. Calls Ollama `/api/chat` with system prompt + batch. Thinking on.
+4. Stores structured JSON output in a `compactions` table (session_id,
+   timestamp, JSON blob).
+5. On `/clear` detection, triggers an immediate compaction of any
+   pending batch.
+6. `mnemo_restore` reads the latest compaction for the session.
 
 **Compaction output structure** (v1):
 ```json
 {
-  "session_id": "...",
-  "project": "...",
-  "repo": "...",
-  "targets_active": ["🎯T3", "🎯T10"],
-  "targets_progressed": {"🎯T10": "target created, architecture designed"},
+  "targets": ["🎯T9.2", "🎯T15"],
   "decisions": [
-    {"what": "Use jevon Process API for summarizer lifecycle", "why": "..."}
+    {"what": "Use OR-by-default for FTS5 search", "why": "Implicit AND too rigid"}
   ],
-  "files_touched": ["docs/targets.md", "internal/tools/tools.go"],
-  "open_threads": ["Need to design checkpoint persistence format"],
-  "next_steps": ["Implement mnemo_restore tool", "Add summarizer spawn logic"],
-  "key_context": "Free-text summary of important reasoning and context"
+  "files": ["internal/store/store.go", "internal/tools/tools.go"],
+  "open_threads": ["Evaluate embedding models for T16"],
+  "summary": "Free-text summary of important reasoning and context"
 }
 ```
 
+**Recursion guard:** Compaction runs inside the daemon process (not
+a spawned agent), so there's no risk of recursive session creation.
+
 **Acceptance criteria:**
-- Summarizer spawns automatically for active sessions (not for its own sessions).
+- Compaction runs automatically for active sessions via local model.
 - Compacted context available within 2s of `mnemo_restore` call.
 - Compaction survives `/clear` boundaries within a session.
-- Idle reaping cleans up summarizer instances.
 - `mnemo_restore` in a fresh post-clear segment returns useful context
   covering the pre-clear work.
-- Token cost of summarizer < 10% of the session it tracks (Sonnet
-  on fixed-size batches keeps this lean).
+- Zero API cost for realtime compaction (local model only).
 
 ### 🎯T15 Search resilience
 
