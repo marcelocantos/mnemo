@@ -732,3 +732,137 @@ nested JSON queries without hand-rolling `json_group_array`/`json_object`.
 - Plain SQL continues to work unchanged.
 - sqldeep JSON helper functions registered on the SQLite connection.
 - Tool description documents the available syntax.
+
+### 🎯T17 CLAUDE.md indexing
+
+- **Value**: 8
+- **Cost**: 3
+- **Weight**: 2.7 (value 8 / cost 3)
+- **Status**: identified
+- **Discovered**: 2026-04-08
+- **Related**: 🎯T1 (memory indexing — same architecture)
+
+**Desired state:** mnemo indexes CLAUDE.md files from all repos that
+appear in session transcripts. Cross-project search for project
+instructions, conventions, build systems, and configuration.
+
+An agent in repo A can ask "which projects use sqldeep?" or "how does
+the pigeon project handle releases?" without visiting each repo.
+
+**Architecture:** Discover repo paths from `session_meta.cwd`. Scan
+each for CLAUDE.md (project root) and `~/.claude/CLAUDE.md` (global).
+Store in a `claude_configs` table (path, repo, content, updated_at)
+with FTS5 index. Watch for changes via fsnotify on the discovered
+repo directories.
+
+Also index `~/.claude/CLAUDE.md` (global instructions) as a single
+always-present entry.
+
+**Acceptance criteria:**
+- CLAUDE.md files from all known repos indexed and searchable.
+- Global `~/.claude/CLAUDE.md` indexed.
+- Realtime updates when CLAUDE.md files change.
+- Queryable via `mnemo_query` and a dedicated tool.
+
+### 🎯T18 Skills indexing
+
+- **Value**: 7
+- **Cost**: 2
+- **Weight**: 3.5 (value 7 / cost 2)
+- **Status**: identified
+- **Discovered**: 2026-04-08
+- **Related**: 🎯T1 (memory indexing — same architecture),
+  🎯T5 (pattern discovery could leverage skill knowledge)
+
+**Desired state:** mnemo indexes all skill files from
+`~/.claude/skills/` and makes them searchable. Agents can discover
+relevant skills ("is there a skill for releasing?") without the user
+invoking them. Also enables cross-referencing: "which skills have been
+used in recent sessions?" by joining skill names with transcript data.
+
+**Architecture:** Scan `~/.claude/skills/` for .md files. Parse
+frontmatter or header structure. Store in a `skills` table (name,
+file_path, description, content, updated_at) with FTS5. Watch for
+changes. ~40 skill files currently.
+
+**Acceptance criteria:**
+- All skill files indexed and searchable.
+- FTS5 on skill name + description + content.
+- Realtime updates when skills are added/modified.
+- Queryable via `mnemo_query` and a dedicated `mnemo_skills` tool.
+
+### 🎯T19 Audit log indexing
+
+- **Value**: 6
+- **Cost**: 3
+- **Weight**: 2.0 (value 6 / cost 3)
+- **Status**: identified
+- **Discovered**: 2026-04-08
+- **Related**: 🎯T17 (CLAUDE.md indexing — discovers repo paths)
+
+**Desired state:** mnemo indexes `docs/audit-log.md` files from all
+repos. Cross-project maintenance history: "when was mnemo last
+released?", "which projects haven't been audited recently?", "what
+maintenance was done across all repos this week?"
+
+**Architecture:** Discover repos from `session_meta.cwd`. Scan each
+for `docs/audit-log.md`. Parse entries (date, skill, version, outcome).
+Store in an `audit_entries` table (repo, date, skill, version, summary,
+raw_text) with FTS5 on summary + raw_text. Watch for changes.
+
+**Acceptance criteria:**
+- Audit logs from all known repos indexed and searchable.
+- Structured parsing of date, skill, and version from entries.
+- "Which projects were released this month?" answerable via query.
+- Realtime updates when audit logs change.
+
+### 🎯T20 Bullseye target indexing
+
+- **Value**: 7
+- **Cost**: 3
+- **Weight**: 2.3 (value 7 / cost 3)
+- **Status**: identified
+- **Discovered**: 2026-04-08
+- **Related**: 🎯T19 (audit logs — same repo discovery)
+
+**Desired state:** mnemo indexes bullseye `targets.yaml` files from
+all repos. Cross-project target search: "which projects have unachieved
+targets?", "find all targets related to search", "what's the highest-
+weighted unblocked target across all projects?"
+
+**Architecture:** Discover repos from `session_meta.cwd`. Scan each
+for `docs/targets.yaml` (bullseye format) and `docs/targets.md`
+(markdown format). Parse target structure (ID, name, status, weight,
+dependencies). Store in a `targets` table (repo, target_id, name,
+status, weight, description) with FTS5 on name + description.
+
+**Acceptance criteria:**
+- Targets from all known repos indexed and searchable.
+- Status, weight, and dependency data queryable.
+- "Which repos have stale targets?" answerable via query.
+- Realtime updates when target files change.
+
+### 🎯T21 Plan file indexing
+
+- **Value**: 6
+- **Cost**: 3
+- **Weight**: 2.0 (value 6 / cost 3)
+- **Status**: identified
+- **Discovered**: 2026-04-08
+- **Related**: 🎯T19 (audit logs — same repo discovery)
+
+**Desired state:** mnemo indexes `.planning/` directories from all
+repos. Plans contain architectural decisions, implementation reasoning,
+and task breakdowns that don't make it into commits or transcripts.
+Cross-project search: "what was the plan for the auth rewrite?",
+"find plans that mention database migration".
+
+**Architecture:** Discover repos from `session_meta.cwd`. Scan each
+for `.planning/**/*.md` files. Store in a `plans` table (repo,
+file_path, phase, content, updated_at) with FTS5. Watch for changes.
+
+**Acceptance criteria:**
+- Plan files from all repos indexed and searchable.
+- Phase/milestone structure parsed where possible.
+- FTS5 on plan content.
+- Realtime updates when plan files change.
