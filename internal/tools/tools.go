@@ -197,6 +197,19 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("skill", mcp.Description("Filter by skill name (e.g. 'release', 'audit')")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_targets",
+			mcp.WithDescription(`Search across convergence targets (docs/targets.md) from all repos. Targets track desired states — features to build, bugs to fix, quality gaps to close. Use this to find targets across projects, check what's active/achieved, or discover cross-project priorities.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name")),
+			mcp.WithString("status", mcp.Description("Filter by status: identified, converging, achieved")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_plans",
+			mcp.WithDescription(`Search across implementation plans (.planning/ directories) from all repos. Plans contain architectural decisions, task breakdowns, and implementation reasoning from GSD workflows. Use this to find past design decisions or understand how features were planned.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -240,6 +253,10 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.configs(args)
 	case "mnemo_audit":
 		return h.auditLogs(args)
+	case "mnemo_targets":
+		return h.targets(args)
+	case "mnemo_plans":
+		return h.plans(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -627,6 +644,69 @@ func (h *Handler) auditLogs(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *Handler) targets(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	status, _ := args["status"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchTargets(query, repo, status, limit)
+	if err != nil {
+		return fmt.Sprintf("targets search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No targets found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, t := range results {
+		statusStr := t.Status
+		if statusStr == "" {
+			statusStr = "unknown"
+		}
+		weightStr := ""
+		if t.Weight != 0 {
+			weightStr = fmt.Sprintf(" weight=%.1f", t.Weight)
+		}
+		fmt.Fprintf(&b, "## %s %s [%s%s] (%s)\n", t.TargetID, t.Name, statusStr, weightStr, t.Repo)
+		if t.Description != "" {
+			fmt.Fprintf(&b, "%s\n", t.Description)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) plans(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchPlans(query, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("plan search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No plans found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, p := range results {
+		phase := p.Phase
+		if phase == "" {
+			phase = "(root)"
+		}
+		fmt.Fprintf(&b, "## %s [phase: %s] (%s)\n\n%s\n\n", p.FilePath, phase, p.Repo, p.Content)
+	}
+	return b.String(), false, nil
 }
 
 func (h *Handler) self(args map[string]any) (string, bool, error) {

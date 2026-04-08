@@ -20,4 +20,6 @@ type Backend interface {
 	SearchSkills(query string, limit int) ([]SkillInfo, error)
 	SearchClaudeConfigs(query string, repo string, limit int) ([]ClaudeConfigInfo, error)
 	SearchAuditLogs(query string, repo string, skill string, limit int) ([]AuditEntryInfo, error)
+	SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error)
+	SearchPlans(query string, repo string, limit int) ([]PlanInfo, error)
 }

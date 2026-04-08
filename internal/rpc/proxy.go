@@ -173,6 +173,29 @@ func (p *Proxy) SearchAuditLogs(query string, repo string, skill string, limit i
 	var results []store.AuditEntryInfo
 	return results, json.Unmarshal(raw, &results)
 }
+
+func (p *Proxy) SearchTargets(query string, repo string, status string, limit int) ([]store.TargetInfo, error) {
+	raw, err := p.client.Call("SearchTargets", SearchTargetsParams{
+		Query: query, Repo: repo, Status: status, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.TargetInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchPlans(query string, repo string, limit int) ([]store.PlanInfo, error) {
+	raw, err := p.client.Call("SearchPlans", SearchPlansParams{
+		Query: query, Repo: repo, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.PlanInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

@@ -402,6 +402,26 @@ func New(dbPath, projectDir string) (*Store, error) {
 			raw_text TEXT NOT NULL,
 			UNIQUE(file_path, date, skill)
 		);
+		CREATE TABLE IF NOT EXISTS targets (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			target_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			weight REAL NOT NULL DEFAULT 0,
+			description TEXT NOT NULL DEFAULT '',
+			raw_text TEXT NOT NULL,
+			UNIQUE(file_path, target_id)
+		);
+		CREATE TABLE IF NOT EXISTS plans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			phase TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -446,6 +466,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_audit_entries_repo ON audit_entries(repo);
 		CREATE INDEX IF NOT EXISTS idx_audit_entries_date ON audit_entries(date);
 		CREATE INDEX IF NOT EXISTS idx_audit_entries_skill ON audit_entries(skill);
+		CREATE INDEX IF NOT EXISTS idx_targets_repo ON targets(repo);
+		CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status);
+		CREATE INDEX IF NOT EXISTS idx_targets_target_id ON targets(target_id);
+		CREATE INDEX IF NOT EXISTS idx_plans_repo ON plans(repo);
+		CREATE INDEX IF NOT EXISTS idx_plans_phase ON plans(phase);
 	`)
 	if err != nil {
 		db.Close()
@@ -557,6 +582,56 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO claude_configs_fts(claude_configs_fts, rowid, content, repo)
 			VALUES ('delete', old.id, old.content, old.repo);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS targets_fts USING fts5(
+			name, description, raw_text, repo,
+			content=targets,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS targets_ai;
+		CREATE TRIGGER targets_ai AFTER INSERT ON targets
+		BEGIN
+			INSERT INTO targets_fts(rowid, name, description, raw_text, repo)
+			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS targets_au;
+		CREATE TRIGGER targets_au AFTER UPDATE ON targets
+		BEGIN
+			INSERT INTO targets_fts(targets_fts, rowid, name, description, raw_text, repo)
+			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
+			INSERT INTO targets_fts(rowid, name, description, raw_text, repo)
+			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS targets_ad;
+		CREATE TRIGGER targets_ad AFTER DELETE ON targets
+		BEGIN
+			INSERT INTO targets_fts(targets_fts, rowid, name, description, raw_text, repo)
+			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
+			content, repo, phase,
+			content=plans,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS plans_ai;
+		CREATE TRIGGER plans_ai AFTER INSERT ON plans
+		BEGIN
+			INSERT INTO plans_fts(rowid, content, repo, phase)
+			VALUES (new.id, new.content, new.repo, new.phase);
+		END;
+		DROP TRIGGER IF EXISTS plans_au;
+		CREATE TRIGGER plans_au AFTER UPDATE ON plans
+		BEGIN
+			INSERT INTO plans_fts(plans_fts, rowid, content, repo, phase)
+			VALUES ('delete', old.id, old.content, old.repo, old.phase);
+			INSERT INTO plans_fts(rowid, content, repo, phase)
+			VALUES (new.id, new.content, new.repo, new.phase);
+		END;
+		DROP TRIGGER IF EXISTS plans_ad;
+		CREATE TRIGGER plans_ad AFTER DELETE ON plans
+		BEGIN
+			INSERT INTO plans_fts(plans_fts, rowid, content, repo, phase)
+			VALUES ('delete', old.id, old.content, old.repo, old.phase);
 		END;
 	`)
 	if err != nil {
@@ -1203,6 +1278,29 @@ type AuditEntryInfo struct {
 	RawText  string `json:"raw_text"`
 }
 
+// TargetInfo holds a single convergence target from a docs/targets.md file.
+type TargetInfo struct {
+	ID          int     `json:"id"`
+	Repo        string  `json:"repo"`
+	FilePath    string  `json:"file_path"`
+	TargetID    string  `json:"target_id"`
+	Name        string  `json:"name"`
+	Status      string  `json:"status"`
+	Weight      float64 `json:"weight"`
+	Description string  `json:"description"`
+	RawText     string  `json:"raw_text"`
+}
+
+// PlanInfo holds a single indexed plan file.
+type PlanInfo struct {
+	ID        int    `json:"id"`
+	Repo      string `json:"repo"`
+	FilePath  string `json:"file_path"`
+	Phase     string `json:"phase"`
+	Content   string `json:"content"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 // versionPattern matches version strings like v1.2.3.
 var versionPattern = regexp.MustCompile(`v\d+\.\d+\.\d+`)
 
@@ -1446,6 +1544,402 @@ func (s *Store) queryAuditEntries(q string, args ...any) ([]AuditEntryInfo, erro
 			continue
 		}
 		results = append(results, e)
+	}
+	return results, nil
+}
+
+// targetHeading matches a ### 🎯TN or ### 🎯TN.N heading line.
+var targetHeading = regexp.MustCompile(`^### (🎯T[\d]+(?:\.[\d]+)*)\s*(.*)$`)
+
+// parseTargetsFile parses a docs/targets.md file and returns all targets found.
+func parseTargetsFile(repo, filePath string, data []byte) []TargetInfo {
+	lines := strings.Split(string(data), "\n")
+	var targets []TargetInfo
+	var cur *TargetInfo
+	var rawLines []string
+
+	flush := func() {
+		if cur == nil {
+			return
+		}
+		cur.RawText = strings.TrimSpace(strings.Join(rawLines, "\n"))
+		targets = append(targets, *cur)
+		cur = nil
+		rawLines = nil
+	}
+
+	for _, line := range lines {
+		if m := targetHeading.FindStringSubmatch(line); m != nil {
+			flush()
+			cur = &TargetInfo{
+				Repo:     repo,
+				FilePath: filePath,
+				TargetID: m[1],
+				Name:     strings.TrimSpace(m[2]),
+			}
+			rawLines = []string{line}
+			continue
+		}
+		if cur != nil {
+			// Check for next ### heading (non-target) to end the block.
+			if strings.HasPrefix(line, "### ") {
+				flush()
+				continue
+			}
+			rawLines = append(rawLines, line)
+			// Parse metadata lines.
+			if strings.HasPrefix(line, "- **Status**:") {
+				cur.Status = strings.TrimSpace(strings.TrimPrefix(line, "- **Status**:"))
+			} else if strings.HasPrefix(line, "- **Weight**:") {
+				wStr := strings.TrimSpace(strings.TrimPrefix(line, "- **Weight**:"))
+				var w float64
+				fmt.Sscanf(wStr, "%f", &w)
+				cur.Weight = w
+			}
+		}
+	}
+	flush()
+
+	// Extract description: first non-empty, non-metadata paragraph after the metadata lines.
+	for i := range targets {
+		t := &targets[i]
+		bodyLines := strings.Split(t.RawText, "\n")
+		// Skip the heading line and metadata lines.
+		inMeta := true
+		var descLines []string
+		for _, l := range bodyLines[1:] {
+			trimmed := strings.TrimSpace(l)
+			if inMeta {
+				if strings.HasPrefix(trimmed, "- **") || trimmed == "" {
+					continue
+				}
+				inMeta = false
+			}
+			if trimmed == "" && len(descLines) > 0 {
+				break
+			}
+			if trimmed != "" {
+				descLines = append(descLines, trimmed)
+			}
+		}
+		t.Description = strings.Join(descLines, " ")
+	}
+
+	return targets
+}
+
+// IngestTargets scans all repos known from session_meta and ingests their
+// docs/targets.md files. This is run at startup only; no realtime watching.
+func (s *Store) IngestTargets() error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	// Collect unique cwds from session_meta.
+	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	if err != nil {
+		return fmt.Errorf("query cwds: %w", err)
+	}
+	var cwds []string
+	for rows.Next() {
+		var cwd string
+		if rows.Scan(&cwd) == nil && cwd != "" {
+			cwds = append(cwds, cwd)
+		}
+	}
+	rows.Close()
+
+	// Deduplicate repo roots.
+	seen := map[string]bool{}
+	count := 0
+	for _, cwd := range cwds {
+		root := findRepoRoot(cwd)
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+
+		targetsPath := filepath.Join(root, "docs", "targets.md")
+		data, err := os.ReadFile(targetsPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("cannot read targets.md", "path", targetsPath, "err", err)
+			}
+			continue
+		}
+
+		// Derive repo name from root path.
+		repo := filepath.Base(root)
+
+		parsed := parseTargetsFile(repo, targetsPath, data)
+		if len(parsed) == 0 {
+			continue
+		}
+
+		// Delete existing targets for this file and re-insert.
+		if _, err := s.db.Exec("DELETE FROM targets WHERE file_path = ?", targetsPath); err != nil {
+			slog.Warn("delete targets failed", "path", targetsPath, "err", err)
+			continue
+		}
+		for _, t := range parsed {
+			_, err := s.db.Exec(`
+				INSERT INTO targets (repo, file_path, target_id, name, status, weight, description, raw_text)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(file_path, target_id) DO UPDATE SET
+					repo = excluded.repo,
+					name = excluded.name,
+					status = excluded.status,
+					weight = excluded.weight,
+					description = excluded.description,
+					raw_text = excluded.raw_text
+			`, t.Repo, t.FilePath, t.TargetID, t.Name, t.Status, t.Weight, t.Description, t.RawText)
+			if err != nil {
+				slog.Warn("insert target failed", "target_id", t.TargetID, "err", err)
+				continue
+			}
+			count++
+		}
+	}
+	slog.Info("ingested targets", "count", count)
+	return nil
+}
+
+// SearchTargets searches across indexed convergence targets.
+func (s *Store) SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	var q string
+	var args []any
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		q = `SELECT t.id, t.repo, t.file_path, t.target_id, t.name, t.status, t.weight, t.description, t.raw_text
+			FROM targets t
+			JOIN targets_fts f ON f.rowid = t.id
+			WHERE targets_fts MATCH ?`
+		args = []any{ftsQuery}
+		if repo != "" {
+			q += " AND t.repo LIKE ?"
+			args = append(args, "%"+repo+"%")
+		}
+		if status != "" {
+			q += " AND t.status = ?"
+			args = append(args, status)
+		}
+		q += " ORDER BY rank LIMIT ?"
+		args = append(args, limit)
+	} else {
+		where := []string{"1=1"}
+		if repo != "" {
+			where = append(where, "repo LIKE ?")
+			args = append(args, "%"+repo+"%")
+		}
+		if status != "" {
+			where = append(where, "status = ?")
+			args = append(args, status)
+		}
+		q = `SELECT id, repo, file_path, target_id, name, status, weight, description, raw_text
+			FROM targets WHERE ` + strings.Join(where, " AND ") + ` ORDER BY weight DESC, target_id LIMIT ?`
+		args = append(args, limit)
+	}
+
+	return s.queryTargets(q, args...)
+}
+
+func (s *Store) queryTargets(q string, args ...any) ([]TargetInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []TargetInfo
+	for rows.Next() {
+		var t TargetInfo
+		if err := rows.Scan(&t.ID, &t.Repo, &t.FilePath, &t.TargetID, &t.Name,
+			&t.Status, &t.Weight, &t.Description, &t.RawText); err != nil {
+			continue
+		}
+		results = append(results, t)
+	}
+	return results, nil
+}
+
+// IngestPlans scans .planning/ directories in all known repos and indexes them.
+// Plans change during active GSD work but are read-heavy, so startup-only
+// ingestion is sufficient — no realtime watch is registered.
+func (s *Store) IngestPlans() error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	// Collect unique repo roots from all known cwds.
+	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	for rows.Next() {
+		var cwd string
+		if err := rows.Scan(&cwd); err != nil {
+			continue
+		}
+		root := findRepoRoot(cwd)
+		if root != "" && !seen[root] {
+			seen[root] = true
+		}
+	}
+	rows.Close()
+
+	count := 0
+	for root := range seen {
+		planningDir := filepath.Join(root, ".planning")
+		if _, err := os.Stat(planningDir); os.IsNotExist(err) {
+			continue
+		}
+		repo := extractRepo(root)
+
+		// Walk all .md files under .planning/
+		if err := filepath.Walk(planningDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			if strings.ToLower(filepath.Ext(path)) != ".md" {
+				return nil
+			}
+			if err2 := s.ingestPlanFileLocked(path, repo, planningDir); err2 != nil {
+				slog.Error("ingest plan failed", "file", path, "err", err2)
+			} else {
+				count++
+			}
+			return nil
+		}); err != nil {
+			slog.Error("walk planning dir failed", "dir", planningDir, "err", err)
+		}
+	}
+	slog.Info("ingested plans", "count", count)
+	return nil
+}
+
+// ingestPlanFileLocked ingests a single plan file (caller must hold rwmu write lock).
+func (s *Store) ingestPlanFileLocked(path, repo, planningDir string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.db.Exec("DELETE FROM plans WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	// Derive phase from the relative path under .planning/.
+	// e.g. .planning/phase-3/PLAN.md → "3"
+	//      .planning/milestone-v2/phase-1/PLAN.md → "v2/1"
+	//      .planning/PLAN.md → ""
+	rel, err := filepath.Rel(planningDir, path)
+	if err != nil {
+		rel = ""
+	}
+	phase := extractPlanPhase(rel)
+
+	now := time.Now().Format(time.RFC3339)
+	_, err = s.db.Exec(`
+		INSERT INTO plans (repo, file_path, phase, content, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			repo = excluded.repo,
+			phase = excluded.phase,
+			content = excluded.content,
+			updated_at = excluded.updated_at
+	`, repo, path, phase, string(data), now)
+	return err
+}
+
+// extractPlanPhase derives a short phase identifier from a path relative to .planning/.
+// Examples:
+//
+//	"PLAN.md"                        → ""
+//	"phase-3/PLAN.md"                → "3"
+//	"milestone-v2/phase-1/PLAN.md"   → "v2/1"
+//	"codebase/overview.md"           → "codebase"
+func extractPlanPhase(rel string) string {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	// Drop the filename component.
+	if len(parts) <= 1 {
+		return ""
+	}
+	dirs := parts[:len(parts)-1]
+
+	var segments []string
+	for _, d := range dirs {
+		// Strip common prefixes: "phase-", "milestone-" to get the identifier.
+		lower := strings.ToLower(d)
+		for _, prefix := range []string{"phase-", "milestone-"} {
+			if strings.HasPrefix(lower, prefix) {
+				d = d[len(prefix):]
+				break
+			}
+		}
+		segments = append(segments, d)
+	}
+	return strings.Join(segments, "/")
+}
+
+// SearchPlans searches across all indexed plan files.
+func (s *Store) SearchPlans(query string, repo string, limit int) ([]PlanInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	if query == "" {
+		q := `SELECT id, repo, file_path, phase, content, updated_at FROM plans`
+		var args []any
+		if repo != "" {
+			q += ` WHERE repo LIKE ?`
+			args = append(args, "%"+repo+"%")
+		}
+		q += ` ORDER BY updated_at DESC LIMIT ?`
+		args = append(args, limit)
+		return s.queryPlans(q, args...)
+	}
+
+	ftsQuery := relaxQuery(query)
+	q := `SELECT p.id, p.repo, p.file_path, p.phase, p.content, p.updated_at
+		FROM plans p
+		JOIN plans_fts f ON f.rowid = p.id
+		WHERE plans_fts MATCH ?`
+	args := []any{ftsQuery}
+	if repo != "" {
+		q += ` AND p.repo LIKE ?`
+		args = append(args, "%"+repo+"%")
+	}
+	q += ` ORDER BY rank LIMIT ?`
+	args = append(args, limit)
+	return s.queryPlans(q, args...)
+}
+
+func (s *Store) queryPlans(q string, args ...any) ([]PlanInfo, error) {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []PlanInfo
+	for rows.Next() {
+		var p PlanInfo
+		if err := rows.Scan(&p.ID, &p.Repo, &p.FilePath, &p.Phase, &p.Content, &p.UpdatedAt); err != nil {
+			continue
+		}
+		results = append(results, p)
 	}
 	return results, nil
 }

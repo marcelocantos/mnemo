@@ -109,6 +109,12 @@ func runServe() {
 		if err := mem.IngestAuditLogs(); err != nil {
 			slog.Error("audit log ingest failed", "err", err)
 		}
+		if err := mem.IngestTargets(); err != nil {
+			slog.Error("target ingest failed", "err", err)
+		}
+		if err := mem.IngestPlans(); err != nil {
+			slog.Error("plan ingest failed", "err", err)
+		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}

@@ -1626,3 +1626,243 @@ Chronological record of maintenance activities.
 		t.Fatalf("expected 3 audit entries after re-ingest (no duplicates), got %v", rows[0]["cnt"])
 	}
 }
+
+func TestTargetIngest(t *testing.T) {
+	// Create a fake repo with .git and docs/targets.md.
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetsContent := `# Convergence Targets
+
+### 🎯T1 All tests pass on CI
+
+- **Status**: converging
+- **Weight**: 8
+
+The CI pipeline should run all unit and integration tests and report green
+on every pull request before merge.
+
+### 🎯T2 Documentation is complete
+
+- **Status**: identified
+- **Weight**: 5
+
+All public APIs and user-facing features must have documentation.
+
+### 🎯T3 Achieved target example
+
+- **Status**: achieved
+- **Weight**: 3
+
+This target has already been completed.
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "docs", "targets.md"), []byte(targetsContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session that uses this repo as cwd.
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "myproject", "sess-targets", []map[string]any{
+		metaMsg("user", "working on CI", "2026-04-01T10:00:00Z", repoDir, "master"),
+		msg("assistant", "OK, I'll look at CI.", "2026-04-01T10:00:05Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestTargets(); err != nil {
+		t.Fatal(err)
+	}
+
+	// List all targets.
+	results, err := s.SearchTargets("", "", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(results))
+	}
+
+	// Find T1 and verify parsed fields.
+	var t1 *TargetInfo
+	for i := range results {
+		if results[i].TargetID == "🎯T1" {
+			t1 = &results[i]
+			break
+		}
+	}
+	if t1 == nil {
+		t.Fatal("expected to find 🎯T1")
+	}
+	if t1.Name != "All tests pass on CI" {
+		t.Errorf("T1 name = %q, want %q", t1.Name, "All tests pass on CI")
+	}
+	if t1.Status != "converging" {
+		t.Errorf("T1 status = %q, want %q", t1.Status, "converging")
+	}
+	if t1.Weight != 8 {
+		t.Errorf("T1 weight = %v, want 8", t1.Weight)
+	}
+	if t1.Description == "" {
+		t.Error("T1 description should not be empty")
+	}
+	if t1.RawText == "" {
+		t.Error("T1 raw_text should not be empty")
+	}
+	if t1.Repo == "" {
+		t.Error("T1 repo should not be empty")
+	}
+
+	// Filter by status.
+	results, err = s.SearchTargets("", "", "identified", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 target with status=identified, got %d", len(results))
+	}
+	if results[0].TargetID != "🎯T2" {
+		t.Errorf("expected 🎯T2, got %s", results[0].TargetID)
+	}
+
+	// Filter by status=achieved.
+	results, err = s.SearchTargets("", "", "achieved", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].TargetID != "🎯T3" {
+		t.Errorf("expected 🎯T3 with status=achieved, got %v", results)
+	}
+
+	// FTS search.
+	results, err = s.SearchTargets("documentation APIs", "", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected FTS results for 'documentation APIs'")
+	}
+}
+
+func TestPlanIngest(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create a fake repo with a .git directory to make findRepoRoot work.
+	repoRoot := filepath.Join(projectDir, "work", "github.com", "testorg", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .planning/ structure:
+	//   .planning/phase-1/PLAN.md
+	//   .planning/milestone-v2/phase-1/PLAN.md
+	//   .planning/OVERVIEW.md
+	planDir := filepath.Join(repoRoot, ".planning")
+	if err := os.MkdirAll(filepath.Join(planDir, "phase-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(planDir, "milestone-v2", "phase-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(filepath.Join(planDir, "phase-1", "PLAN.md"),
+		"# Phase 1\n\nImplement the widget factory using dependency injection.\n")
+	writeFile(filepath.Join(planDir, "milestone-v2", "phase-1", "PLAN.md"),
+		"# Milestone v2 Phase 1\n\nRefactor widget factory for performance.\n")
+	writeFile(filepath.Join(planDir, "OVERVIEW.md"),
+		"# Overview\n\nHigh-level architecture for the widget system.\n")
+
+	// Seed session_meta so IngestPlans can discover the repo root.
+	writeJSONL(t, projectDir, "testorg-myrepo", "sess-plan1", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually insert a session_meta row pointing at the repo.
+	if _, err := s.db.Exec(
+		"INSERT OR IGNORE INTO session_meta (session_id, cwd) VALUES (?, ?)",
+		"sess-plan1", repoRoot,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.IngestPlans(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "widget factory" — should find phase-1 PLAN.md.
+	results, err := s.SearchPlans("widget factory", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected plan search results for 'widget factory'")
+	}
+	t.Logf("found %d results", len(results))
+
+	// Verify phase parsing.
+	phaseMap := map[string]string{}
+	for _, r := range results {
+		t.Logf("  file=%q phase=%q repo=%q", r.FilePath, r.Phase, r.Repo)
+		phaseMap[r.Phase] = r.FilePath
+	}
+
+	// phase-1/PLAN.md → phase "1"
+	if _, ok := phaseMap["1"]; !ok {
+		t.Errorf("expected phase '1' in results, got: %v", phaseMap)
+	}
+
+	// List all plans (no query).
+	all, err := s.SearchPlans("", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) < 3 {
+		t.Errorf("expected at least 3 plans (3 files), got %d", len(all))
+	}
+
+	// Check milestone-v2/phase-1 → phase "v2/1"
+	foundMilestone := false
+	for _, r := range all {
+		if r.Phase == "v2/1" {
+			foundMilestone = true
+		}
+	}
+	if !foundMilestone {
+		t.Error("expected phase 'v2/1' for milestone-v2/phase-1/PLAN.md")
+	}
+
+	// Filter by repo.
+	filtered, err := s.SearchPlans("", "testorg/myrepo", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) == 0 {
+		t.Error("expected results when filtering by repo 'testorg/myrepo'")
+	}
+
+	// Fuzzy OR search — "performance architecture" should match via OR.
+	fuzzy, err := s.SearchPlans("performance architecture", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fuzzy) == 0 {
+		t.Error("expected fuzzy OR results for 'performance architecture'")
+	}
+}
