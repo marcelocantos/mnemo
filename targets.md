@@ -76,6 +76,22 @@
 - **Status**: Identified
 - **Discovered**: 2026-04-07
 
+### 🎯T15 Windows VM Claude Code transcripts are indexed in realtime alongside macOS sessions
+- **Value**: 8
+- **Cost**: 5
+- **Acceptance**:
+  - ~/.mnemo/config.json supports extra_project_dirs with paths to additional Claude Code project directories
+  - mnemo ingests JSONL transcripts from configured extra dirs at startup
+  - A Windows stub app watches the local Claude projects dir and notifies mnemo of changes via pigeon
+  - mnemo receives pigeon notifications and ingests the corresponding files from the SMB mount path
+  - mnemo_search and mnemo_sessions return results from both macOS and Windows sessions
+  - Graceful degradation when the VM/mount is unavailable — no crashes, warns in log, skips unavailable dirs
+- **Context**: The user runs Claude Code on both macOS and a Parallels Windows 11 VM. The Windows filesystem is accessible via SMB mount at ~/winc/. Currently mnemo only indexes ~/.claude/projects/ (macOS-local). Windows session transcripts at ~/winc/Users/marcelo/.claude/projects/ are invisible to mnemo. A config file (~/.mnemo/config.json) specifies extra project directories. A small Windows stub app watches %USERPROFILE%\.claude\projects\ using ReadDirectoryChangesW and sends change notifications to mnemo via pigeon (marcelocantos/pigeon WebTransport relay). mnemo listens for pigeon notifications and ingests the changed files from the SMB mount. The config must gracefully handle VM unavailability (mount not present). fsnotify does not work over SMB, so native Windows notification + pigeon relay is the chosen approach.
+- **Tags**: ingest, cross-platform, pigeon
+- **Origin**: conversation: user wants unified transcript search across macOS and Windows VM environments
+- **Status**: Identified
+- **Discovered**: 2026-04-09
+
 ### 🎯T5 Self-improving tool discovery
 - **Value**: 9
 - **Cost**: 8
@@ -290,6 +306,7 @@ graph TD
     T11["Git history indexed cross-rep…"]
     T12["GitHub activity (PRs, issues,…"]
     T13["CI/CD run history indexed cro…"]
+    T15["Windows VM Claude Code transc…"]
     T5["Self-improving tool discovery"]
     T7["Agent-defined query templates"]
     T9["Full-fidelity ingest and obse…"]

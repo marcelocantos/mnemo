@@ -23,4 +23,5 @@ type Backend interface {
 	SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error)
 	SearchPlans(query string, repo string, limit int) ([]PlanInfo, error)
 	WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error)
+	Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error)
 }

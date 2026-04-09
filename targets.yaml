@@ -97,6 +97,25 @@ targets:
     origin: user suggestion
     discovered: 2026-04-07
     achieved: 2026-04-07
+  T15:
+    name: Windows VM Claude Code transcripts are indexed in realtime alongside macOS sessions
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - ~/.mnemo/config.json supports extra_project_dirs with paths to additional Claude Code project directories
+    - mnemo ingests JSONL transcripts from configured extra dirs at startup
+    - A Windows stub app watches the local Claude projects dir and notifies mnemo of changes via pigeon
+    - mnemo receives pigeon notifications and ingests the corresponding files from the SMB mount path
+    - mnemo_search and mnemo_sessions return results from both macOS and Windows sessions
+    - Graceful degradation when the VM/mount is unavailable — no crashes, warns in log, skips unavailable dirs
+    context: The user runs Claude Code on both macOS and a Parallels Windows 11 VM. The Windows filesystem is accessible via SMB mount at ~/winc/. Currently mnemo only indexes ~/.claude/projects/ (macOS-local). Windows session transcripts at ~/winc/Users/marcelo/.claude/projects/ are invisible to mnemo. A config file (~/.mnemo/config.json) specifies extra project directories. A small Windows stub app watches %USERPROFILE%\.claude\projects\ using ReadDirectoryChangesW and sends change notifications to mnemo via pigeon (marcelocantos/pigeon WebTransport relay). mnemo listens for pigeon notifications and ingests the changed files from the SMB mount. The config must gracefully handle VM unavailability (mount not present). fsnotify does not work over SMB, so native Windows notification + pigeon relay is the chosen approach.
+    tags:
+    - ingest
+    - cross-platform
+    - pigeon
+    origin: 'conversation: user wants unified transcript search across macOS and Windows VM environments'
+    discovered: 2026-04-09
   T2:
     name: Smarter session classification
     status: achieved

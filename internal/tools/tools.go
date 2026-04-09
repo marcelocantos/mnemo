@@ -217,6 +217,16 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_permissions",
+			mcp.WithDescription(`Analyze tool usage patterns across sessions to suggest allowedTools rules for settings.json.
+
+Returns the most frequently used tools with counts and concrete suggestions for permission rules. Also analyzes Bash command patterns to suggest fine-grained Bash permissions (e.g., "Bash(go *)", "Bash(git *)").
+
+Use this to understand which tools agents use most and to tighten permissions without blocking common workflows.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -266,6 +276,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.plans(args)
 	case "mnemo_who_ran":
 		return h.whoRan(args)
+	case "mnemo_permissions":
+		return h.permissions(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -716,6 +728,32 @@ func (h *Handler) plans(args map[string]any) (string, bool, error) {
 		fmt.Fprintf(&b, "## %s [phase: %s] (%s)\n\n%s\n\n", p.FilePath, phase, p.Repo, p.Content)
 	}
 	return b.String(), false, nil
+}
+
+func (h *Handler) permissions(args map[string]any) (string, bool, error) {
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	result, err := h.mem.Permissions(days, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("permissions analysis failed: %v", err), true, nil
+	}
+	if len(result.TopTools) == 0 {
+		return "No tool usage data found.", false, nil
+	}
+
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }
 
 func (h *Handler) self(args map[string]any) (string, bool, error) {

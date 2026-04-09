@@ -3054,6 +3054,137 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 	return hours, nil
 }
 
+// PermissionSuggestion is a single tool or command pattern with usage count and allowedTools rule.
+type PermissionSuggestion struct {
+	ToolName   string `json:"tool_name"`
+	Count      int    `json:"count"`
+	Suggestion string `json:"suggestion"`
+}
+
+// PermissionsResult holds tool usage analysis with suggested allowedTools rules.
+type PermissionsResult struct {
+	Days         int                    `json:"days"`
+	TopTools     []PermissionSuggestion `json:"top_tools"`
+	BashCommands []PermissionSuggestion `json:"bash_commands,omitempty"`
+}
+
+// Permissions analyzes tool_use patterns to suggest allowedTools rules for settings.json.
+func (s *Store) Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 30
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	daysArg := fmt.Sprintf("-%d days", days)
+
+	// Build optional repo filter clause.
+	repoJoin := ""
+	repoWhere := ""
+	var repoArgs []any
+	if repoFilter != "" {
+		repoJoin = "JOIN session_meta sm ON sm.session_id = m.session_id"
+		repoWhere = "AND (sm.repo LIKE ? OR sm.cwd LIKE ?)"
+		pattern := "%" + repoFilter + "%"
+		repoArgs = []any{pattern, pattern}
+	}
+
+	// Query 1: top tools by usage count.
+	topQuery := fmt.Sprintf(`
+		SELECT m.tool_name, COUNT(*) AS cnt
+		FROM messages m
+		JOIN entries e ON e.id = m.entry_id
+		%s
+		WHERE m.content_type = 'tool_use'
+		  AND m.tool_name IS NOT NULL
+		  AND e.timestamp >= datetime('now', ?)
+		  %s
+		GROUP BY m.tool_name
+		ORDER BY cnt DESC
+		LIMIT ?
+	`, repoJoin, repoWhere)
+
+	topArgs := append([]any{daysArg}, repoArgs...)
+	topArgs = append(topArgs, limit)
+
+	rows, err := s.db.Query(topQuery, topArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("top tools query: %w", err)
+	}
+	defer rows.Close()
+
+	result := &PermissionsResult{Days: days}
+	for rows.Next() {
+		var toolName string
+		var cnt int
+		if err := rows.Scan(&toolName, &cnt); err != nil {
+			continue
+		}
+		result.TopTools = append(result.TopTools, PermissionSuggestion{
+			ToolName:   toolName,
+			Count:      cnt,
+			Suggestion: toolName,
+		})
+	}
+	rows.Close()
+
+	// Query 2: Bash command prefix patterns.
+	bashQuery := fmt.Sprintf(`
+		SELECT
+		  CASE
+		    WHEN m.tool_command LIKE 'go %%' THEN 'go'
+		    WHEN m.tool_command LIKE 'git %%' THEN 'git'
+		    WHEN m.tool_command LIKE 'make%%' THEN 'make'
+		    WHEN m.tool_command LIKE 'npm %%' THEN 'npm'
+		    WHEN m.tool_command LIKE 'cargo %%' THEN 'cargo'
+		    ELSE substr(m.tool_command, 1, instr(m.tool_command || ' ', ' ') - 1)
+		  END AS cmd_prefix,
+		  COUNT(*) AS cnt
+		FROM messages m
+		JOIN entries e ON e.id = m.entry_id
+		%s
+		WHERE m.content_type = 'tool_use'
+		  AND m.tool_name = 'Bash'
+		  AND m.tool_command IS NOT NULL
+		  AND e.timestamp >= datetime('now', ?)
+		  %s
+		GROUP BY cmd_prefix
+		ORDER BY cnt DESC
+		LIMIT ?
+	`, repoJoin, repoWhere)
+
+	bashArgs := append([]any{daysArg}, repoArgs...)
+	bashArgs = append(bashArgs, limit)
+
+	bashRows, err := s.db.Query(bashQuery, bashArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("bash commands query: %w", err)
+	}
+	defer bashRows.Close()
+
+	for bashRows.Next() {
+		var cmdPrefix string
+		var cnt int
+		if err := bashRows.Scan(&cmdPrefix, &cnt); err != nil {
+			continue
+		}
+		if cmdPrefix == "" {
+			continue
+		}
+		result.BashCommands = append(result.BashCommands, PermissionSuggestion{
+			ToolName:   cmdPrefix,
+			Count:      cnt,
+			Suggestion: fmt.Sprintf("Bash(%s *)", cmdPrefix),
+		})
+	}
+
+	return result, nil
+}
+
 // Status returns a rich status report: repos → sessions → truncated message excerpts.
 func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error) {
 	s.rwmu.RLock()

@@ -205,6 +205,15 @@ func (p *Proxy) WhoRan(pattern string, days int, repoFilter string, limit int) (
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) Permissions(days int, repoFilter string, limit int) (*store.PermissionsResult, error) {
+	raw, err := p.client.Call("Permissions", PermissionsParams{Days: days, RepoFilter: repoFilter, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var result store.PermissionsResult
+	return &result, json.Unmarshal(raw, &result)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

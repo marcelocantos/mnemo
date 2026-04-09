@@ -122,6 +122,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 			}
 			return map[string]string{"session_id": sid}, nil
 		}),
+		"Permissions": makeMethod(func(p PermissionsParams) (any, error) {
+			return s.Permissions(p.Days, p.RepoFilter, p.Limit)
+		}),
 	}
 }
 
@@ -254,4 +257,11 @@ type WhoRanParams struct {
 // ResolveNonceParams matches the ResolveNonce method signature.
 type ResolveNonceParams struct {
 	Nonce string `json:"nonce"`
+}
+
+// PermissionsParams matches the Permissions method signature.
+type PermissionsParams struct {
+	Days       int    `json:"days"`
+	RepoFilter string `json:"repo_filter"`
+	Limit      int    `json:"limit"`
 }
