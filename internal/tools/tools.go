@@ -210,6 +210,13 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("repo", mcp.Description("Filter by repo name")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_who_ran",
+			mcp.WithDescription(`Find sessions that ran a specific shell command. Searches Bash tool_use entries by command pattern, returning session ID, repo, matched command, and timestamp. Useful for tracing when and where a command was last executed across all sessions.`),
+			mcp.WithString("pattern", mcp.Required(), mcp.Description("Command substring to match (LIKE match, case-insensitive)")),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -257,6 +264,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.targets(args)
 	case "mnemo_plans":
 		return h.plans(args)
+	case "mnemo_who_ran":
+		return h.whoRan(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -727,4 +736,32 @@ func (h *Handler) self(args map[string]any) (string, bool, error) {
 	}
 
 	return fmt.Sprintf("session_id: %s", sessionID), false, nil
+}
+
+func (h *Handler) whoRan(args map[string]any) (string, bool, error) {
+	pattern, _ := args["pattern"].(string)
+	if pattern == "" {
+		return "pattern is required", true, nil
+	}
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	results, err := h.mem.WhoRan(pattern, days, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("who_ran query failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No matching commands found.", false, nil
+	}
+	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }

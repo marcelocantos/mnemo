@@ -1954,6 +1954,59 @@ func (s *Store) queryPlans(q string, args ...any) ([]PlanInfo, error) {
 	return results, nil
 }
 
+// WhoRanResult holds a single result from a WhoRan query.
+type WhoRanResult struct {
+	SessionID string `json:"session_id"`
+	Repo      string `json:"repo"`
+	Command   string `json:"command"`
+	Timestamp string `json:"timestamp"`
+}
+
+// WhoRan returns sessions and timestamps for Bash tool_use entries matching pattern.
+func (s *Store) WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 30
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	q := `SELECT m.session_id, COALESCE(sm.repo, ''), m.tool_command, m.timestamp
+		FROM messages m
+		LEFT JOIN session_meta sm ON sm.session_id = m.session_id
+		WHERE m.content_type = 'tool_use'
+		  AND m.tool_name = 'Bash'
+		  AND m.tool_command LIKE ?
+		  AND m.timestamp >= datetime('now', ? || ' days')`
+	args := []any{"%" + pattern + "%", fmt.Sprintf("-%d", days)}
+
+	if repoFilter != "" {
+		q += ` AND sm.repo LIKE ?`
+		args = append(args, "%"+repoFilter+"%")
+	}
+	q += ` ORDER BY m.timestamp DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []WhoRanResult
+	for rows.Next() {
+		var r WhoRanResult
+		if err := rows.Scan(&r.SessionID, &r.Repo, &r.Command, &r.Timestamp); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
 // parsedMessage is a single content block ready for insertion.
 type parsedMessage struct {
 	entryIdx    int // index into parsedFile.entries

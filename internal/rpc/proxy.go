@@ -196,6 +196,15 @@ func (p *Proxy) SearchPlans(query string, repo string, limit int) ([]store.PlanI
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) WhoRan(pattern string, days int, repoFilter string, limit int) ([]store.WhoRanResult, error) {
+	raw, err := p.client.Call("WhoRan", WhoRanParams{Pattern: pattern, Days: days, RepoFilter: repoFilter, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.WhoRanResult
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

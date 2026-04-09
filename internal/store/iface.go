@@ -22,4 +22,5 @@ type Backend interface {
 	SearchAuditLogs(query string, repo string, skill string, limit int) ([]AuditEntryInfo, error)
 	SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error)
 	SearchPlans(query string, repo string, limit int) ([]PlanInfo, error)
+	WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error)
 }
