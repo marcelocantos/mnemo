@@ -214,6 +214,15 @@ func (p *Proxy) Permissions(days int, repoFilter string, limit int) (*store.Perm
 	return &result, json.Unmarshal(raw, &result)
 }
 
+func (p *Proxy) SearchCI(query string, repo string, conclusion string, days int, limit int) ([]store.CIRun, error) {
+	raw, err := p.client.Call("SearchCI", SearchCIParams{Query: query, Repo: repo, Conclusion: conclusion, Days: days, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.CIRun
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

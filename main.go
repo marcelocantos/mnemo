@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/marcelocantos/mcpbridge"
 
@@ -117,6 +118,16 @@ func runServe() {
 		}
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
+		}
+	}()
+
+	// Poll CI runs periodically (every 5 minutes).
+	go func() {
+		for {
+			if err := mem.PollCI(); err != nil {
+				slog.Warn("CI poll failed", "err", err)
+			}
+			time.Sleep(5 * time.Minute)
 		}
 	}()
 

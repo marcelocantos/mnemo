@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -234,7 +235,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 8
+const schemaVersion = 9
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -432,6 +433,21 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS ci_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			run_id INTEGER NOT NULL UNIQUE,
+			workflow TEXT NOT NULL,
+			branch TEXT,
+			commit_sha TEXT,
+			status TEXT NOT NULL,
+			conclusion TEXT,
+			started_at TEXT,
+			completed_at TEXT,
+			log_summary TEXT,
+			url TEXT,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -481,6 +497,10 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_targets_target_id ON targets(target_id);
 		CREATE INDEX IF NOT EXISTS idx_plans_repo ON plans(repo);
 		CREATE INDEX IF NOT EXISTS idx_plans_phase ON plans(phase);
+		CREATE INDEX IF NOT EXISTS idx_ci_runs_repo ON ci_runs(repo);
+		CREATE INDEX IF NOT EXISTS idx_ci_runs_status ON ci_runs(status);
+		CREATE INDEX IF NOT EXISTS idx_ci_runs_conclusion ON ci_runs(conclusion);
+		CREATE INDEX IF NOT EXISTS idx_ci_runs_started ON ci_runs(started_at);
 	`)
 	if err != nil {
 		db.Close()
@@ -642,6 +662,24 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO plans_fts(plans_fts, rowid, content, repo, phase)
 			VALUES ('delete', old.id, old.content, old.repo, old.phase);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS ci_runs_fts USING fts5(
+			repo, workflow, branch, log_summary, conclusion,
+			content='ci_runs', content_rowid='id'
+		);
+		DROP TRIGGER IF EXISTS ci_runs_ai;
+		CREATE TRIGGER ci_runs_ai AFTER INSERT ON ci_runs
+		BEGIN
+			INSERT INTO ci_runs_fts(rowid, repo, workflow, branch, log_summary, conclusion)
+			VALUES (new.id, new.repo, new.workflow, COALESCE(new.branch, ''), COALESCE(new.log_summary, ''), COALESCE(new.conclusion, ''));
+		END;
+		DROP TRIGGER IF EXISTS ci_runs_au;
+		CREATE TRIGGER ci_runs_au AFTER UPDATE ON ci_runs
+		BEGIN
+			INSERT INTO ci_runs_fts(ci_runs_fts, rowid, repo, workflow, branch, log_summary, conclusion)
+			VALUES ('delete', old.id, old.repo, old.workflow, COALESCE(old.branch, ''), COALESCE(old.log_summary, ''), COALESCE(old.conclusion, ''));
+			INSERT INTO ci_runs_fts(rowid, repo, workflow, branch, log_summary, conclusion)
+			VALUES (new.id, new.repo, new.workflow, COALESCE(new.branch, ''), COALESCE(new.log_summary, ''), COALESCE(new.conclusion, ''));
 		END;
 	`)
 	if err != nil {
@@ -2005,6 +2043,218 @@ func (s *Store) WhoRan(pattern string, days int, repoFilter string, limit int) (
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// CIRun holds a single CI run record from the index.
+type CIRun struct {
+	ID          int    `json:"id"`
+	Repo        string `json:"repo"`
+	RunID       int64  `json:"run_id"`
+	Workflow    string `json:"workflow"`
+	Branch      string `json:"branch,omitempty"`
+	CommitSHA   string `json:"commit_sha,omitempty"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	LogSummary  string `json:"log_summary,omitempty"`
+	URL         string `json:"url,omitempty"`
+}
+
+// ciRepos returns repos seen in session_meta that look like GitHub repos.
+func (s *Store) ciRepos() ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT repo FROM session_meta WHERE repo != '' AND repo LIKE '%/%'`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var repos []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			continue
+		}
+		repos = append(repos, r)
+	}
+	return repos, nil
+}
+
+// SearchCI searches CI runs with optional FTS query, repo filter, conclusion filter, and recency window.
+func (s *Store) SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 30
+	}
+
+	var q string
+	var args []any
+
+	if query == "" {
+		q = `SELECT id, repo, run_id, workflow, COALESCE(branch,''), COALESCE(commit_sha,''),
+		            status, COALESCE(conclusion,''), COALESCE(started_at,''), COALESCE(completed_at,''),
+		            COALESCE(log_summary,''), COALESCE(url,'')
+		     FROM ci_runs WHERE 1=1`
+	} else {
+		ftsQuery := relaxQuery(query)
+		q = `SELECT c.id, c.repo, c.run_id, c.workflow, COALESCE(c.branch,''), COALESCE(c.commit_sha,''),
+		            c.status, COALESCE(c.conclusion,''), COALESCE(c.started_at,''), COALESCE(c.completed_at,''),
+		            COALESCE(c.log_summary,''), COALESCE(c.url,'')
+		     FROM ci_runs c JOIN ci_runs_fts f ON f.rowid = c.id
+		     WHERE ci_runs_fts MATCH ?`
+		args = append(args, ftsQuery)
+	}
+
+	if repo != "" {
+		if query == "" {
+			q += ` AND repo LIKE ?`
+		} else {
+			q += ` AND c.repo LIKE ?`
+		}
+		args = append(args, "%"+repo+"%")
+	}
+	if conclusion != "" {
+		if query == "" {
+			q += ` AND conclusion = ?`
+		} else {
+			q += ` AND c.conclusion = ?`
+		}
+		args = append(args, conclusion)
+	}
+	if days > 0 {
+		cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
+		if query == "" {
+			q += ` AND (started_at IS NULL OR started_at >= ` + cutoff + `)`
+		} else {
+			q += ` AND (c.started_at IS NULL OR c.started_at >= ` + cutoff + `)`
+		}
+	}
+	if query == "" {
+		q += ` ORDER BY started_at DESC LIMIT ?`
+	} else {
+		q += ` ORDER BY rank LIMIT ?`
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []CIRun
+	for rows.Next() {
+		var r CIRun
+		if err := rows.Scan(&r.ID, &r.Repo, &r.RunID, &r.Workflow, &r.Branch, &r.CommitSHA,
+			&r.Status, &r.Conclusion, &r.StartedAt, &r.CompletedAt, &r.LogSummary, &r.URL); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// ghRunJSON matches the JSON output of `gh run list`.
+type ghRunJSON struct {
+	DatabaseID  int64  `json:"databaseId"`
+	WorkflowName string `json:"workflowName"`
+	HeadBranch  string `json:"headBranch"`
+	HeadSHA     string `json:"headSha"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+	URL         string `json:"url"`
+}
+
+// PollCI fetches recent CI runs from GitHub Actions for all repos seen in session_meta
+// and upserts them into ci_runs. Failed runs have their logs indexed.
+// Silently skips if gh is not installed.
+func (s *Store) PollCI() error {
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		// gh not installed — skip silently.
+		return nil
+	}
+
+	repos, err := s.ciRepos()
+	if err != nil {
+		return fmt.Errorf("ciRepos: %w", err)
+	}
+
+	for _, repo := range repos {
+		if err := s.pollCIForRepo(ghPath, repo); err != nil {
+			slog.Warn("CI poll failed", "repo", repo, "err", err)
+		}
+	}
+	return nil
+}
+
+// pollCIForRepo fetches and upserts CI runs for a single repo.
+func (s *Store) pollCIForRepo(ghPath, repo string) error {
+	out, err := exec.Command(ghPath, "run", "list",
+		"--repo", repo,
+		"--json", "databaseId,workflowName,headBranch,headSha,status,conclusion,createdAt,updatedAt,url",
+		"--limit", "20",
+	).Output()
+	if err != nil {
+		return fmt.Errorf("gh run list: %w", err)
+	}
+
+	var runs []ghRunJSON
+	if err := json.Unmarshal(out, &runs); err != nil {
+		return fmt.Errorf("parse gh output: %w", err)
+	}
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	for _, run := range runs {
+		var logSummary string
+		if run.Conclusion == "failure" {
+			logSummary = s.fetchRunLog(ghPath, repo, run.DatabaseID)
+		}
+
+		_, err := s.db.Exec(`
+			INSERT INTO ci_runs (repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(run_id) DO UPDATE SET
+				status = excluded.status,
+				conclusion = excluded.conclusion,
+				completed_at = excluded.completed_at,
+				log_summary = COALESCE(excluded.log_summary, ci_runs.log_summary),
+				updated_at = datetime('now')
+		`, repo, run.DatabaseID, run.WorkflowName, run.HeadBranch, run.HeadSHA,
+			run.Status, run.Conclusion, run.CreatedAt, run.UpdatedAt, logSummary, run.URL)
+		if err != nil {
+			slog.Warn("upsert ci_run failed", "run_id", run.DatabaseID, "err", err)
+		}
+	}
+	return nil
+}
+
+// fetchRunLog retrieves the last 50 lines of a failed run's log.
+func (s *Store) fetchRunLog(ghPath, repo string, runID int64) string {
+	out, err := exec.Command(ghPath, "run", "view",
+		fmt.Sprintf("%d", runID),
+		"--repo", repo,
+		"--log",
+	).CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	// Keep last 50 lines.
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) > 50 {
+		lines = lines[len(lines)-50:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // parsedMessage is a single content block ready for insertion.

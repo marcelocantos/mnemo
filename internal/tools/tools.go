@@ -117,6 +117,10 @@ Tables:
     — parsed entries from docs/audit-log.md in each repo
     — skill: release, audit, docs, etc. version: vN.N.N if present
   audit_entries_fts — FTS5 on summary, raw_text, repo
+  ci_runs (id, repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
+    — GitHub Actions runs polled from repos seen in session history
+    — status: completed, in_progress, queued; conclusion: success, failure, cancelled, skipped
+  ci_runs_fts — FTS5 on repo, workflow, branch, log_summary, conclusion
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -227,6 +231,22 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
 		),
+		mcp.NewTool("mnemo_ci",
+			mcp.WithDescription(`Search CI/CD run history across repos. Indexes GitHub Actions runs from all repos that appear in session history.
+
+Supports FTS search across workflow names, branches, and failure logs. Use this to:
+- Find recent CI failures across projects
+- Check if a specific repo's CI is green
+- Search failure logs for error patterns
+- Correlate CI runs with development sessions
+
+Runs are polled incrementally from GitHub Actions. Failed run logs are indexed for full-text search.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching against workflow, branch, logs). Omit to list recent runs.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
+			mcp.WithString("conclusion", mcp.Description("Filter by conclusion: success, failure, cancelled, skipped")),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -278,6 +298,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.whoRan(args)
 	case "mnemo_permissions":
 		return h.permissions(args)
+	case "mnemo_ci":
+		return h.ci(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -750,6 +772,32 @@ func (h *Handler) permissions(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) ci(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	conclusion, _ := args["conclusion"].(string)
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	results, err := h.mem.SearchCI(query, repo, conclusion, days, limit)
+	if err != nil {
+		return fmt.Sprintf("CI search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No CI runs found.", false, nil
+	}
+	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
