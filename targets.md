@@ -60,22 +60,6 @@
 - **Status**: Identified
 - **Discovered**: 2026-04-07
 
-### 🎯T13 CI/CD run history indexed cross-repo with failure pattern detection
-- **Value**: 8
-- **Cost**: 3
-- **Acceptance**:
-  - CI runs from repos in session_meta indexed automatically
-  - mnemo_ci supports cross-repo queries with status/conclusion filters
-  - Failed run logs indexed with FTS
-  - Correlated with commits and sessions
-  - Queryable via mnemo_query
-  - Incremental polling
-- **Context**: GitHub Actions logs are ephemeral (90-day retention) and per-repo. mnemo preserves them permanently and makes them searchable across the full corpus. Would have been useful today for diagnosing CI patterns.
-- **Tags**: ingest, observability, ci
-- **Origin**: user suggestion
-- **Status**: Identified
-- **Discovered**: 2026-04-07
-
 ### 🎯T15 Windows VM Claude Code transcripts are indexed in realtime alongside macOS sessions
 - **Value**: 8
 - **Cost**: 5
@@ -134,30 +118,6 @@
 - **Status**: Identified
 - **Discovered**: 2026-04-07
 
-### 🎯T9.3 Permission prompt analysis (mnemo_permissions)
-- **Value**: 5
-- **Cost**: 3
-- **Acceptance**:
-  - Identifies most-used tools and frequent approval patterns
-  - Suggests concrete allowedTools rules for settings.json
-- **Context**: Identify tool approval patterns from tool_use/tool_result pairs. Suggest allowedTools rules. Gates on T9.1.
-- **Depends on**: 🎯T9.1
-- **Origin**: targets.md bootstrap
-- **Status**: Identified
-- **Discovered**: 2026-04-07
-
-### 🎯T9.4 Process attribution (mnemo_who_ran)
-- **Value**: 5
-- **Cost**: 2
-- **Acceptance**:
-  - mnemo_who_ran returns session + repo + timestamp for a command pattern
-  - Matches against tool_command in recent Bash tool_use entries
-- **Context**: Given a command pattern, find which session(s) ran it recently. Gates on T9.1.
-- **Depends on**: 🎯T9.1
-- **Origin**: targets.md bootstrap
-- **Status**: Identified
-- **Discovered**: 2026-04-07
-
 ### 🎯T9.5 System correlation (mnemo_whatsup)
 - **Value**: 5
 - **Cost**: 5
@@ -184,6 +144,52 @@
 - **Discovered**: 2026-04-07
 
 ## Achieved
+
+### 🎯T13 CI/CD run history indexed cross-repo with failure pattern detection
+- **Value**: 8
+- **Cost**: 3
+- **Acceptance**:
+  - CI runs from repos in session_meta indexed automatically
+  - mnemo_ci supports cross-repo queries with status/conclusion filters
+  - Failed run logs indexed with FTS
+  - Correlated with commits and sessions
+  - Queryable via mnemo_query
+  - Incremental polling
+- **Context**: GitHub Actions logs are ephemeral (90-day retention) and per-repo. mnemo preserves them permanently and makes them searchable across the full corpus. Would have been useful today for diagnosing CI patterns.
+- **Tags**: ingest, observability, ci
+- **Origin**: user suggestion
+- **Status**: Achieved
+- **Discovered**: 2026-04-07
+- **Achieved**: 2026-04-10
+- **Actual-cost**: 3
+
+### 🎯T9.3 Permission prompt analysis (mnemo_permissions)
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - Identifies most-used tools and frequent approval patterns
+  - Suggests concrete allowedTools rules for settings.json
+- **Context**: Identify tool approval patterns from tool_use/tool_result pairs. Suggest allowedTools rules. Gates on T9.1.
+- **Depends on**: 🎯T9.1
+- **Origin**: targets.md bootstrap
+- **Status**: Achieved
+- **Discovered**: 2026-04-07
+- **Achieved**: 2026-04-10
+- **Actual-cost**: 3
+
+### 🎯T9.4 Process attribution (mnemo_who_ran)
+- **Value**: 5
+- **Cost**: 2
+- **Acceptance**:
+  - mnemo_who_ran returns session + repo + timestamp for a command pattern
+  - Matches against tool_command in recent Bash tool_use entries
+- **Context**: Given a command pattern, find which session(s) ran it recently. Gates on T9.1.
+- **Depends on**: 🎯T9.1
+- **Origin**: targets.md bootstrap
+- **Status**: Achieved
+- **Discovered**: 2026-04-07
+- **Achieved**: 2026-04-10
+- **Actual-cost**: 2
 
 ### 🎯T9.2 Token usage analytics (mnemo_usage)
 - **Value**: 8
@@ -305,13 +311,10 @@ graph TD
     T10["Live context compaction"]
     T11["Git history indexed cross-rep…"]
     T12["GitHub activity (PRs, issues,…"]
-    T13["CI/CD run history indexed cro…"]
     T15["Windows VM Claude Code transc…"]
     T5["Self-improving tool discovery"]
     T7["Agent-defined query templates"]
     T9["Full-fidelity ingest and obse…"]
-    T9_3["Permission prompt analysis (m…"]
-    T9_4["Process attribution (mnemo_wh…"]
     T9_5["System correlation (mnemo_wha…"]
     T9_6["Cross-session decision recall…"]
 ```
