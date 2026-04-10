@@ -174,6 +174,20 @@ Key tables and columns:
 | `sessions` | View: session_id, project, session_type, repo, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg |
 | `session_summary` | Materialised session stats (trigger-maintained) |
 | `session_meta` | Per-session metadata: repo, cwd, git_branch, work_type, topic |
+| `memories` | id, project, file_path, name, description, memory_type, content |
+| `memories_fts` | FTS5 on name, description, content, project |
+| `skills` | id, file_path, name, description, content |
+| `skills_fts` | FTS5 on name, description, content |
+| `claude_configs` | id, repo, file_path, content |
+| `claude_configs_fts` | FTS5 on content, repo |
+| `audit_entries` | id, repo, file_path, date, skill, version, summary, raw_text |
+| `audit_entries_fts` | FTS5 on summary, raw_text, repo |
+| `targets` | id, repo, file_path, target_id, name, status, weight, description |
+| `targets_fts` | FTS5 on name, description, raw_text, repo |
+| `plans` | id, repo, file_path, phase, content |
+| `plans_fts` | FTS5 on content, repo, phase |
+| `ci_runs` | id, repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url |
+| `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion |
 
 Content types in `content_type`: `text`, `tool_use`, `tool_result`, `thinking`.
 
@@ -230,6 +244,116 @@ The optional `filter` parameter supports:
 
 Index statistics — total sessions and messages broken down by session
 type, with noise vs substantive counts.
+
+### mnemo_memories
+
+Search across Claude Code auto-memory files from all projects. Memories
+are structured notes with frontmatter (name, description, type) that
+agents save across sessions.
+
+Parameters:
+- `query` — search query (fuzzy OR matching). Omit to list all.
+- `type` — filter: "user", "feedback", "project", "reference"
+- `project` — project name substring filter
+- `limit` — max results (default 20)
+
+### mnemo_usage
+
+Token usage analytics across sessions. Aggregates input, output, cache
+read, and cache creation tokens with cost estimates. Returns per-period
+breakdown, totals, and hourly rate detection (tokens/hour, cost/hour).
+
+Parameters:
+- `days` — recency window (default 30)
+- `repo` — repo filter
+- `model` — model prefix filter (e.g. "claude-opus-4")
+- `group_by` — "day" (default), "model", or "repo"
+
+### mnemo_skills
+
+Search across Claude Code skill files (`~/.claude/skills/`). Discover
+available workflows and reusable procedures.
+
+Parameters:
+- `query` — search query (fuzzy OR matching). Omit to list all.
+- `limit` — max results (default 20)
+
+### mnemo_configs
+
+Search across CLAUDE.md project instruction files from all repos. Find
+build instructions, conventions, and delivery definitions.
+
+Parameters:
+- `query` — search query (fuzzy OR matching). Omit to list all.
+- `repo` — repo filter
+- `limit` — max results (default 20)
+
+### mnemo_audit
+
+Search across audit logs (docs/audit-log.md) from all repos. Find
+when projects were last released or review maintenance patterns.
+
+Parameters:
+- `query` — search query (fuzzy OR matching). Omit to list all.
+- `repo` — repo filter
+- `skill` — skill name filter (e.g. "release", "audit")
+- `limit` — max results (default 20)
+
+### mnemo_targets
+
+Search across convergence targets (docs/targets.md) from all repos.
+Find targets across projects, check active/achieved status.
+
+Parameters:
+- `query` — search query (fuzzy OR matching). Omit to list all.
+- `repo` — repo filter
+- `status` — filter: identified, converging, achieved
+- `limit` — max results (default 20)
+
+### mnemo_plans
+
+Search across implementation plans (.planning/ directories) from all
+repos. Find past design decisions or understand how features were planned.
+
+Parameters:
+- `query` — search query (fuzzy OR matching). Omit to list all.
+- `repo` — repo filter
+- `limit` — max results (default 20)
+
+### mnemo_who_ran
+
+Find sessions that ran a specific shell command. Searches Bash tool_use
+entries by command pattern, returning session ID, repo, matched command,
+and timestamp.
+
+Parameters:
+- `pattern` (required) — command substring to match (LIKE)
+- `days` — recency window (default 30)
+- `repo` — repo filter
+- `limit` — max results (default 20)
+
+### mnemo_permissions
+
+Analyze tool usage patterns across sessions to suggest allowedTools
+rules for settings.json. Returns most frequently used tools with counts
+and Bash command prefix analysis with suggested permission rules.
+
+Parameters:
+- `days` — recency window (default 30)
+- `repo` — repo filter
+- `limit` — max results per category (default 20)
+
+### mnemo_ci
+
+Search CI/CD run history across repos. Indexes GitHub Actions runs from
+repos in session history. Failed run logs indexed for full-text search.
+
+Parameters:
+- `query` — search query (fuzzy OR matching against workflow, branch, logs). Omit to list recent runs.
+- `repo` — repo filter
+- `conclusion` — filter: success, failure, cancelled, skipped
+- `days` — recency window (default 30)
+- `limit` — max results (default 20)
 
 ### mnemo_self
 

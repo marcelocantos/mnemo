@@ -31,7 +31,7 @@ import (
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.12.0"
+const version = "0.13.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")

@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.12.0.
+Snapshot as of v0.13.0.
 
 ### CLI flags
 
@@ -153,6 +153,39 @@ review — first release, output format and filters may evolve.
 
 **Added in v0.12.0.** Searches `.planning/` directories from all repos. **Stability**: Needs review.
 
+#### mnemo_who_ran
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `pattern` | string | yes | Command substring to match (LIKE) | Needs review |
+| `days` | number | no | Recency window in days (default 30) | Stable |
+| `repo` | string | no | Repo filter | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.13.0.** Searches Bash tool_use entries by command pattern. **Stability**: Needs review.
+
+#### mnemo_permissions
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `days` | number | no | Recency window in days (default 30) | Stable |
+| `repo` | string | no | Repo filter | Needs review |
+| `limit` | number | no | Max results per category (default 20) | Stable |
+
+**Added in v0.13.0.** Analyzes tool_use patterns to suggest allowedTools rules. **Stability**: Needs review.
+
+#### mnemo_ci
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `conclusion` | string | no | Filter: success, failure, cancelled, skipped | Needs review |
+| `days` | number | no | Recency window in days (default 30) | Stable |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.13.0.** Indexes GitHub Actions runs from repos in session history. Failed run logs indexed for FTS. **Stability**: Needs review.
+
 #### mnemo_query
 
 | Parameter | Type | Required | Description | Stability |
@@ -211,6 +244,8 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `targets_fts` | FTS5 on name, description, raw_text, repo | Needs review |
 | `plans` | id, repo, file_path (unique), phase, content, updated_at — .planning/**/*.md | Needs review |
 | `plans_fts` | FTS5 on content, repo, phase | Needs review |
+| `ci_runs` | id, repo, run_id (unique), workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url | Needs review |
+| `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion | Needs review |
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 
@@ -227,6 +262,10 @@ v0.12.0 added five context source tables: `skills`, `claude_configs`,
 `audit_entries`, `targets`, `plans` — each with FTS5 indexes. These
 index non-transcript sources (skill files, CLAUDE.md configs, audit
 logs, convergence targets, implementation plans) from all known repos.
+v0.13.0 added three observability tools: `mnemo_who_ran` (process
+attribution), `mnemo_permissions` (permission analysis), `mnemo_ci`
+(CI/CD run history). Added `ci_runs` table with FTS5 for GitHub Actions
+indexing. `mnemo_usage` gained hourly rate detection.
 This surface is still evolving. `ingest_state` and `session_nonces` are
 internal implementation details.
 
