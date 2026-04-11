@@ -62,3 +62,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `f599813`
 - **Outcome**: Released v0.13.0 (darwin-arm64, linux-amd64, linux-arm64). Three new observability tools: mnemo_who_ran (process attribution), mnemo_permissions (tool usage analysis), mnemo_ci (CI/CD run history with FTS). mnemo_usage gained hourly rate detection. Schema v9. Homebrew formula updated.
+
+## 2026-04-11 — /release v0.14.0
+
+- **Commit**: `ac93bc6`
+- **Outcome**: Released v0.14.0 (darwin-arm64, linux-amd64, linux-arm64). Real-time file watching for all context sources (CLAUDE.md, audit logs, targets, plans). Homebrew formula updated.
