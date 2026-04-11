@@ -105,8 +105,6 @@ func runServe() {
 		if err := mem.IngestClaudeConfigs(); err != nil {
 			slog.Error("claude config ingest failed", "err", err)
 		}
-		// Audit logs change rarely — startup-only ingest is sufficient.
-		// No file watcher needed for docs/audit-log.md files.
 		if err := mem.IngestAuditLogs(); err != nil {
 			slog.Error("audit log ingest failed", "err", err)
 		}

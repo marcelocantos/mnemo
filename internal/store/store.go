@@ -1215,6 +1215,39 @@ func (s *Store) IngestClaudeConfigs() error {
 	return nil
 }
 
+type repoRoot struct {
+	root string
+	repo string
+}
+
+// knownRepoRoots returns deduplicated repo roots from session_meta.
+func (s *Store) knownRepoRoots() []repoRoot {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	var roots []repoRoot
+	for rows.Next() {
+		var cwd string
+		if rows.Scan(&cwd) != nil {
+			continue
+		}
+		root := findRepoRoot(cwd)
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		roots = append(roots, repoRoot{root: root, repo: extractRepo(cwd)})
+	}
+	return roots
+}
+
 // findRepoRoot walks up from dir to find the nearest directory containing .git.
 // Returns "" if no .git ancestor is found.
 func findRepoRoot(dir string) string {
@@ -1230,6 +1263,13 @@ func findRepoRoot(dir string) string {
 		dir = parent
 	}
 	return ""
+}
+
+// ingestClaudeConfigFile ingests a single CLAUDE.md file (acquires write lock).
+func (s *Store) ingestClaudeConfigFile(path, repo string) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	return s.ingestClaudeConfigFileLocked(path, repo)
 }
 
 // ingestClaudeConfigFileLocked ingests a single CLAUDE.md file (caller must hold rwmu write lock).
@@ -1751,6 +1791,45 @@ func (s *Store) IngestTargets() error {
 	return nil
 }
 
+// ingestTargetFile ingests a single targets.md file (acquires write lock).
+func (s *Store) ingestTargetFile(path, repo string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.rwmu.Lock()
+			defer s.rwmu.Unlock()
+			s.db.Exec("DELETE FROM targets WHERE file_path = ?", path)
+			return nil
+		}
+		return err
+	}
+
+	parsed := parseTargetsFile(repo, path, data)
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	if _, err := s.db.Exec("DELETE FROM targets WHERE file_path = ?", path); err != nil {
+		return fmt.Errorf("delete targets: %w", err)
+	}
+	for _, t := range parsed {
+		if _, err := s.db.Exec(`
+			INSERT INTO targets (repo, file_path, target_id, name, status, weight, description, raw_text)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(file_path, target_id) DO UPDATE SET
+				repo = excluded.repo,
+				name = excluded.name,
+				status = excluded.status,
+				weight = excluded.weight,
+				description = excluded.description,
+				raw_text = excluded.raw_text
+		`, t.Repo, t.FilePath, t.TargetID, t.Name, t.Status, t.Weight, t.Description, t.RawText); err != nil {
+			slog.Warn("insert target failed", "target_id", t.TargetID, "err", err)
+		}
+	}
+	return nil
+}
+
 // SearchTargets searches across indexed convergence targets.
 func (s *Store) SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error) {
 	s.rwmu.RLock()
@@ -1872,6 +1951,13 @@ func (s *Store) IngestPlans() error {
 	}
 	slog.Info("ingested plans", "count", count)
 	return nil
+}
+
+// ingestPlanFile ingests a single plan file (acquires write lock).
+func (s *Store) ingestPlanFile(path, repo, planningDir string) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	return s.ingestPlanFileLocked(path, repo, planningDir)
 }
 
 // ingestPlanFileLocked ingests a single plan file (caller must hold rwmu write lock).
@@ -2651,11 +2737,42 @@ func (s *Store) Watch() error {
 		}
 	}
 
-	slog.Info("watching for transcript changes", "dir", s.projectDir)
-	// NOTE: Realtime watching of repo CLAUDE.md files is deferred.
-	// CLAUDE.md files live in repo roots (not under projectDir), and they change
-	// rarely enough that restart-based refresh (via IngestClaudeConfigs at startup)
-	// is acceptable for now.
+	// Watch repo-level context source files (CLAUDE.md, docs/, .planning/).
+	repoRoots := s.knownRepoRoots()
+	repoForRoot := map[string]string{} // root path → repo name
+	watchedDirs := map[string]bool{}
+	for _, rr := range repoRoots {
+		repoForRoot[rr.root] = rr.repo
+		// Watch the repo root itself (for CLAUDE.md changes).
+		if !watchedDirs[rr.root] {
+			watchedDirs[rr.root] = true
+			if wErr := watcher.Add(rr.root); wErr != nil {
+				slog.Warn("failed to watch repo root", "path", rr.root, "err", wErr)
+			}
+		}
+		// Watch docs/ for audit-log.md and targets.md.
+		docsDir := filepath.Join(rr.root, "docs")
+		if info, err := os.Stat(docsDir); err == nil && info.IsDir() && !watchedDirs[docsDir] {
+			watchedDirs[docsDir] = true
+			if wErr := watcher.Add(docsDir); wErr != nil {
+				slog.Warn("failed to watch docs dir", "path", docsDir, "err", wErr)
+			}
+		}
+		// Watch .planning/ recursively for plan files.
+		planDir := filepath.Join(rr.root, ".planning")
+		if info, err := os.Stat(planDir); err == nil && info.IsDir() {
+			filepath.Walk(planDir, func(path string, fi os.FileInfo, err error) error {
+				if err == nil && fi.IsDir() && !watchedDirs[path] {
+					watchedDirs[path] = true
+					if wErr := watcher.Add(path); wErr != nil {
+						slog.Warn("failed to watch planning dir", "path", path, "err", wErr)
+					}
+				}
+				return nil
+			})
+		}
+	}
+	slog.Info("watching for changes", "transcripts", s.projectDir, "repos", len(repoRoots))
 
 	for {
 		select {
@@ -2678,6 +2795,53 @@ func (s *Store) Watch() error {
 				}
 				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 					s.deleteMemoryFile(event.Name)
+				}
+			}
+			// Watch repo-level context source changes.
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+				base := filepath.Base(event.Name)
+				dir := filepath.Dir(event.Name)
+
+				// CLAUDE.md at repo root.
+				if base == "CLAUDE.md" {
+					if repo, ok := repoForRoot[dir]; ok {
+						if err := s.ingestClaudeConfigFile(event.Name, repo); err != nil {
+							slog.Error("ingest claude config failed", "file", event.Name, "err", err)
+						}
+					}
+				}
+
+				// docs/audit-log.md
+				if base == "audit-log.md" && filepath.Base(dir) == "docs" {
+					repoRoot := filepath.Dir(dir)
+					if repo, ok := repoForRoot[repoRoot]; ok {
+						if err := s.ingestAuditLogFile(event.Name, repo); err != nil {
+							slog.Error("ingest audit log failed", "file", event.Name, "err", err)
+						}
+					}
+				}
+
+				// docs/targets.md
+				if base == "targets.md" && filepath.Base(dir) == "docs" {
+					repoRoot := filepath.Dir(dir)
+					if repo, ok := repoForRoot[repoRoot]; ok {
+						if err := s.ingestTargetFile(event.Name, repo); err != nil {
+							slog.Error("ingest targets failed", "file", event.Name, "err", err)
+						}
+					}
+				}
+
+				// .planning/**/*.md
+				if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/.planning/") {
+					for root, repo := range repoForRoot {
+						planDir := filepath.Join(root, ".planning")
+						if strings.HasPrefix(event.Name, planDir+"/") {
+							if err := s.ingestPlanFile(event.Name, repo, planDir); err != nil {
+								slog.Error("ingest plan failed", "file", event.Name, "err", err)
+							}
+							break
+						}
+					}
 				}
 			}
 			// Watch skill file changes.
