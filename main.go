@@ -31,7 +31,7 @@ import (
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.14.0"
+const version = "0.15.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -86,6 +86,16 @@ func runServe() {
 		os.Exit(1)
 	}
 	defer mem.Close()
+
+	// Load ~/.mnemo/config.json and configure workspace roots for
+	// repo-level ingest streams. Falls back to defaults when absent.
+	cfg, cfgErr := store.LoadConfig()
+	if cfgErr != nil {
+		slog.Warn("config load failed, using defaults", "err", cfgErr)
+	}
+	workspaceRoots := cfg.ResolvedWorkspaceRoots()
+	mem.SetWorkspaceRoots(workspaceRoots)
+	slog.Info("workspace roots configured", "roots", workspaceRoots)
 
 	// Ingest and watch in the background.
 	go func() {

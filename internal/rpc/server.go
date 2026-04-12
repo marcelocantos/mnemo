@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/marcelocantos/mcpbridge"
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
@@ -234,6 +234,7 @@ type SearchAuditLogsParams struct {
 	Skill string `json:"skill"`
 	Limit int    `json:"limit"`
 }
+
 // SearchTargetsParams matches the SearchTargets method signature.
 type SearchTargetsParams struct {
 	Query  string `json:"query"`

@@ -602,7 +602,7 @@ func TestToolUseIngest(t *testing.T) {
 				"role": "assistant",
 				"content": []any{
 					map[string]any{
-						"type":    "thinking",
+						"type":     "thinking",
 						"thinking": "I need to edit store.go to fix the bug.",
 					},
 					map[string]any{
@@ -876,8 +876,8 @@ func TestEntriesTable(t *testing.T) {
 				"usage": map[string]any{
 					"input_tokens":                50000,
 					"output_tokens":               500,
-					"cache_read_input_tokens":      45000,
-					"cache_creation_input_tokens":  1000,
+					"cache_read_input_tokens":     45000,
+					"cache_creation_input_tokens": 1000,
 				},
 			},
 		},
@@ -1934,9 +1934,9 @@ func assistantWithUsage(ts string, model string, input, output, cacheRead, cache
 			"model":       model,
 			"stop_reason": "end_turn",
 			"usage": map[string]any{
-				"input_tokens":               input,
-				"output_tokens":              output,
-				"cache_read_input_tokens":    cacheRead,
+				"input_tokens":                input,
+				"output_tokens":               output,
+				"cache_read_input_tokens":     cacheRead,
 				"cache_creation_input_tokens": cacheCreate,
 			},
 		},

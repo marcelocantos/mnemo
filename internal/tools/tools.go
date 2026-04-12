@@ -529,7 +529,7 @@ func (h *Handler) status(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("status failed: %v", err), true, nil
 	}
-	if len(result.Repos) == 0 {
+	if len(result.Repos) == 0 && len(result.Streams) == 0 {
 		return "No recent activity found.", false, nil
 	}
 
@@ -639,7 +639,6 @@ func (h *Handler) configs(args map[string]any) (string, bool, error) {
 	}
 	return b.String(), false, nil
 }
-
 
 func (h *Handler) usage(args map[string]any) (string, bool, error) {
 	days := 30
