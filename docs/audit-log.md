@@ -70,5 +70,5 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-12 — /release v0.15.0
 
-- **Commit**: pending
+- **Commit**: `3112ab2`
 - **Outcome**: Released v0.15.0 (darwin-arm64, linux-amd64, linux-arm64). Self-healing repo-level ingest (🎯T17): workspace-root filesystem walk discovers repos independently of session metadata. New ~/.mnemo/config.json with workspace_roots. Per-stream backfill status in mnemo_status/mnemo_stats. Schema v10. 15 new tests. Homebrew formula updated.
