@@ -503,6 +503,17 @@ func (h *Handler) stats() (string, bool, error) {
 		fmt.Fprintf(&b, "%-12s %8d %10d %12d %8d\n",
 			ts.SessionType, ts.Sessions, ts.TotalMsgs, ts.SubstantiveMsgs, ts.NoiseMsgs)
 	}
+
+	if len(stats.Streams) > 0 {
+		fmt.Fprintf(&b, "\n%-16s %8s %8s %6s  %s\n", "Stream", "Indexed", "On Disk", "Drift", "Last Backfill")
+		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 70))
+		for _, st := range stats.Streams {
+			drift := st.FilesOnDisk - st.FilesIndexed
+			fmt.Fprintf(&b, "%-16s %8d %8d %6d  %s\n",
+				st.Stream, st.FilesIndexed, st.FilesOnDisk, drift, st.LastBackfill)
+		}
+	}
+
 	return b.String(), false, nil
 }
 
