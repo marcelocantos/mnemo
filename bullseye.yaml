@@ -34,6 +34,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - Commits from repos in session_meta indexed automatically
     - mnemo_commits supports cross-repo queries (repo glob, date range)
@@ -51,6 +52,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - PRs and issues from repos in session_meta indexed automatically
     - mnemo_prs supports cross-repo queries with FTS on title/body
@@ -107,6 +109,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - ~/.mnemo/config.json supports extra_project_dirs with paths to additional Claude Code project directories
     - mnemo ingests JSONL transcripts from configured extra dirs at startup
@@ -126,6 +129,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - 'Schema: session_chains(successor_id PK, predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at) with index on predecessor_id'
     - 'Ingest-time detection: when a new JSONL''s first non-meta user event contains <command-name>/clear</command-name>, look for a predecessor in the same project directory whose last event precedes the new file''s first event; insert the link with confidence bucketed as high (<2s), medium (2-5s), or none (>5s, no link recorded but boundary noted)'
@@ -234,6 +238,7 @@ targets:
     status: identified
     value: 9.0
     cost: 8.0
+    observable: true
     acceptance:
     - mnemo_discover_patterns tool identifies workaround sessions
     - Detects direct JSONL reads, grep over transcript dirs, repeated query shapes
@@ -259,6 +264,7 @@ targets:
     status: identified
     value: 7.0
     cost: 8.0
+    observable: true
     acceptance:
     - mnemo_define stores named parameterised query template
     - mnemo_evaluate executes template by name with parameters
@@ -363,6 +369,7 @@ targets:
     status: identified
     value: 5.0
     cost: 3.0
+    observable: true
     acceptance:
     - For each live session (as identified by 🎯T9.5.1), mnemo can report current CPU, RSS, and IO metrics for the owning claude process
     - System load (system-wide CPU, memory pressure, disk I/O) is reported alongside per-session metrics so the user can see whether a slow session is caused by the session itself or by contention
@@ -379,6 +386,7 @@ targets:
     status: identified
     value: 8.0
     cost: 2.0
+    observable: true
     acceptance:
     - mnemo can report, for any given session ID, whether a Claude Code process currently has its transcript JSONL file open
     - Liveness is surfaced as an annotation on session listings (mnemo_sessions, mnemo_status) and/or a dedicated lookup tool
@@ -397,6 +405,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - mnemo_decisions searches decisions table by keyword
     - Decision detection heuristic identifies proposal + user confirmation pairs
