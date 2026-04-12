@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.14.0.
+Snapshot as of v0.15.0.
 
 ### CLI flags
 
