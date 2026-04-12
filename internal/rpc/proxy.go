@@ -223,6 +223,18 @@ func (p *Proxy) SearchCI(query string, repo string, conclusion string, days int,
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) LiveSessions() map[string]int {
+	raw, err := p.client.Call("LiveSessions", nil)
+	if err != nil {
+		return nil
+	}
+	var result map[string]int
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil
+	}
+	return result
+}
+
 func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	raw, err := p.client.Call("ResolveNonce", ResolveNonceParams{Nonce: nonce})
 	if err != nil {

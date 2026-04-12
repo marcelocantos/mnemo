@@ -128,6 +128,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Permissions": makeMethod(func(p PermissionsParams) (any, error) {
 			return s.Permissions(p.Days, p.RepoFilter, p.Limit)
 		}),
+		"LiveSessions": func(_ json.RawMessage) (any, error) {
+			return s.LiveSessions(), nil
+		},
 	}
 }
 

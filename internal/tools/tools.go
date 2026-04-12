@@ -380,6 +380,8 @@ func (h *Handler) sessions(args map[string]any) (string, bool, error) {
 		return "No sessions found.", false, nil
 	}
 
+	live := h.mem.LiveSessions()
+
 	var b strings.Builder
 	for _, si := range sessions {
 		sid := si.SessionID
@@ -402,8 +404,12 @@ func (h *Handler) sessions(args map[string]any) (string, bool, error) {
 		if len(topic) > 80 {
 			topic = topic[:77] + "..."
 		}
-		fmt.Fprintf(&b, "%s  %s  %s  %s  %d/%d msgs  %s\n",
-			sid, repo, workType, lastMsg, si.SubstantiveMsgs, si.TotalMsgs, topic)
+		liveness := ""
+		if pid, ok := live[si.SessionID]; ok {
+			liveness = fmt.Sprintf("  [LIVE pid=%d]", pid)
+		}
+		fmt.Fprintf(&b, "%s  %s  %s  %s  %d/%d msgs  %s%s\n",
+			sid, repo, workType, lastMsg, si.SubstantiveMsgs, si.TotalMsgs, topic, liveness)
 	}
 	return b.String(), false, nil
 }

@@ -45,6 +45,11 @@ type Store struct {
 	// streams discover repos. Mutated only via SetWorkspaceRoots, read
 	// under rwmu.RLock by the repoRoots walker.
 	workspaceRoots []string
+
+	// liveness cache
+	liveMu        sync.Mutex
+	liveCache     map[string]int // sessionID → PID
+	liveCacheTime time.Time
 }
 
 // SetWorkspaceRoots configures the filesystem roots under which repo-
@@ -3966,6 +3971,69 @@ func (s *Store) ResolveNonce(nonce string) (string, error) {
 		return "", fmt.Errorf("nonce not found — transcript may not be ingested yet")
 	}
 	return sessionID, nil
+}
+
+// liveSessionsTTL is how long to cache lsof results.
+const liveSessionsTTL = 5 * time.Second
+
+// LiveSessions returns a map of session ID → PID for all Claude Code sessions
+// that currently have their transcript JSONL file open. Uses lsof for liveness
+// detection and caches results for liveSessionsTTL to avoid hammering the OS.
+func (s *Store) LiveSessions() map[string]int {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if time.Since(s.liveCacheTime) < liveSessionsTTL {
+		return s.liveCache
+	}
+	home, _ := os.UserHomeDir()
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	result := parseLsofOutput(runLsof(projectsDir))
+	s.liveCache = result
+	s.liveCacheTime = time.Now()
+	return result
+}
+
+// runLsof runs lsof to find JSONL files open by any claude process under dir.
+// Returns the raw output lines. Exported for testing via a seam — in tests,
+// the actual lsof binary is not required; parseLsofOutput is tested directly.
+func runLsof(projectsDir string) []byte {
+	out, _ := exec.Command("lsof", "-c", "claude", "-a", "+D", projectsDir).Output()
+	return out
+}
+
+// parseLsofOutput parses lsof output into a sessionID → PID map.
+// Each JSONL filename stem (without .jsonl) is treated as a session ID.
+func parseLsofOutput(data []byte) map[string]int {
+	result := make(map[string]int)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		// lsof output columns: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+		// We need at least PID (index 1) and NAME (last field, index >= 8).
+		if len(fields) < 9 {
+			continue
+		}
+		name := fields[len(fields)-1]
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		pid := 0
+		for _, ch := range fields[1] {
+			if ch < '0' || ch > '9' {
+				pid = -1
+				break
+			}
+			pid = pid*10 + int(ch-'0')
+		}
+		if pid <= 0 {
+			continue
+		}
+		base := filepath.Base(name)
+		sessionID := strings.TrimSuffix(base, ".jsonl")
+		if sessionID != "" {
+			result[sessionID] = pid
+		}
+	}
+	return result
 }
 
 // isSqldeep returns true if the query uses sqldeep nested syntax.

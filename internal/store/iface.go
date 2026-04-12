@@ -25,4 +25,5 @@ type Backend interface {
 	WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error)
 	Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error)
 	SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error)
+	LiveSessions() map[string]int
 }
