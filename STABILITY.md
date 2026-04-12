@@ -209,6 +209,14 @@ activity. Filter matching uses SQL LIKE with `*` mapped to `%`.
 
 No parameters. Returns session/message counts by type. **Stability**: Stable.
 
+#### mnemo_chain
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `session_id` | string | yes | Any session ID in the chain (or a prefix) | Needs review |
+
+**Added in v0.16.0.** Resolves the full /clear-bounded session chain for a given session. Returns an ordered list of ChainLinks (oldest → newest) with per-session summaries and gap/confidence for each link. Single-element result if no chain is found. **Stability**: Needs review — first release, output format may evolve.
+
 #### mnemo_self
 
 | Parameter | Type | Required | Description | Stability |
@@ -246,6 +254,7 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `plans_fts` | FTS5 on content, repo, phase | Needs review |
 | `ci_runs` | id, repo, run_id (unique), workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url | Needs review |
 | `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion | Needs review |
+| `session_chains` | successor_id (PK), predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at — /clear-bounded chain links | Fluid |
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 | `ingest_status` | stream, last_backfill, files_indexed, files_on_disk — per-stream backfill state | Fluid |
@@ -267,6 +276,12 @@ v0.13.0 added three observability tools: `mnemo_who_ran` (process
 attribution), `mnemo_permissions` (permission analysis), `mnemo_ci`
 (CI/CD run history). Added `ci_runs` table with FTS5 for GitHub Actions
 indexing. `mnemo_usage` gained hourly rate detection.
+v0.16.0 (🎯T16) added session chain detection. `session_chains` table
+links /clear-bounded JSONL sessions into work spans via a time-gap
+heuristic (≤5s, same cwd, /clear marker in successor's first message).
+Chain detection runs at ingest time and on startup (backfill). Added
+`Predecessor`, `Successor`, `Chain` store methods and the `mnemo_chain`
+MCP tool.
 v0.15.0 (🎯T17) made every repo-level stream self-heal on startup:
 targets, audit logs, plans, CLAUDE.md, and CI polling discover repos
 via filesystem walk of configured workspace roots in addition to

@@ -481,6 +481,15 @@ func New(dbPath, projectDir string) (*Store, error) {
 			url TEXT,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		CREATE TABLE IF NOT EXISTS session_chains (
+			successor_id TEXT PRIMARY KEY,
+			predecessor_id TEXT NOT NULL,
+			boundary TEXT NOT NULL DEFAULT 'clear',
+			gap_ms INTEGER NOT NULL,
+			confidence TEXT NOT NULL CHECK(confidence IN ('high', 'medium')),
+			mechanism TEXT NOT NULL DEFAULT 'time_heuristic',
+			detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -534,6 +543,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_ci_runs_status ON ci_runs(status);
 		CREATE INDEX IF NOT EXISTS idx_ci_runs_conclusion ON ci_runs(conclusion);
 		CREATE INDEX IF NOT EXISTS idx_ci_runs_started ON ci_runs(started_at);
+		CREATE INDEX IF NOT EXISTS idx_session_chains_predecessor ON session_chains(predecessor_id);
 	`)
 	if err != nil {
 		db.Close()
@@ -2228,6 +2238,18 @@ type CIRun struct {
 	URL         string `json:"url,omitempty"`
 }
 
+// ChainLink holds a single entry in a session chain.
+type ChainLink struct {
+	SessionID  string `json:"session_id"`
+	Project    string `json:"project"`
+	FirstMsg   string `json:"first_msg"`
+	LastMsg    string `json:"last_msg"`
+	Topic      string `json:"topic,omitempty"`
+	Repo       string `json:"repo,omitempty"`
+	Confidence string `json:"confidence,omitempty"` // "high", "medium", or "" for the tail
+	GapMs      int64  `json:"gap_ms,omitempty"`
+}
+
 // ciRepos returns "org/repo" identifiers for every GitHub repository
 // reachable through knownRepoRoots. This is the union of
 // workspace-walked repos (default ~/work) and session_meta-known repos,
@@ -2562,6 +2584,10 @@ func (s *Store) IngestAll() error {
 	if err := s.runWriter(parsedCh); err != nil {
 		return err
 	}
+
+	// Detect /clear-bounded chain links for any newly ingested sessions.
+	// INSERT OR IGNORE makes this idempotent across restarts.
+	backfillSessionChains(s.db)
 
 	// FTS5 optimize (segment merging) is skipped intentionally.
 	// On a fresh 577k-message database it takes 10+ minutes of solid
@@ -4581,5 +4607,249 @@ func (s *Store) ingestFile(path string) error {
 	if count > 0 {
 		slog.Debug("ingested", "file", filepath.Base(path), "messages", count)
 	}
+
+	// Detect chain link for this session (no-op if not a /clear rollover).
+	detectChainForSession(s.db, sessionID)
+
 	return nil
+}
+
+// clearMarkerRE matches the /clear command marker in user messages.
+var clearMarkerRE = regexp.MustCompile(`<command-name>/clear</command-name>`)
+
+// detectChainForSession checks if sessionID is the successor in a /clear
+// rollover chain and inserts a session_chains row if so.
+// It is idempotent — uses INSERT OR IGNORE.
+func detectChainForSession(db *sql.DB, sessionID string) {
+	// Check if this session's first user message contains the /clear marker.
+	// The /clear message is flagged as noise by isNoise, so we must include
+	// is_noise = 1 here, but we specifically look for the command-name marker.
+	var firstText string
+	var firstTS string
+	err := db.QueryRow(`
+		SELECT m.text, m.timestamp
+		FROM messages m
+		WHERE m.session_id = ?
+		  AND m.role = 'user'
+		ORDER BY m.id ASC
+		LIMIT 1`, sessionID).Scan(&firstText, &firstTS)
+	if err != nil {
+		return // no user messages yet
+	}
+	if !clearMarkerRE.MatchString(firstText) {
+		return // not a /clear rollover
+	}
+
+	// Parse successor's first event timestamp.
+	succTime, err := time.Parse(time.RFC3339, firstTS)
+	if err != nil {
+		return
+	}
+
+	// Find this session's project (cwd) for scoping predecessor search.
+	var cwd string
+	db.QueryRow("SELECT cwd FROM session_meta WHERE session_id = ?", sessionID).Scan(&cwd)
+	if cwd == "" {
+		return // can't scope without a cwd
+	}
+
+	// Find the predecessor: same cwd, last_msg closest before successor's
+	// first event, within 5 seconds.
+	const maxGapMs = 5000
+	windowStart := succTime.Add(-5 * time.Second).Format(time.RFC3339)
+
+	rows, err := db.Query(`
+		SELECT ss.session_id, ss.last_msg
+		FROM session_summary ss
+		JOIN session_meta sm ON sm.session_id = ss.session_id
+		WHERE sm.cwd = ?
+		  AND ss.session_id != ?
+		  AND ss.last_msg >= ?
+		  AND ss.last_msg <= ?
+		ORDER BY ss.last_msg DESC
+		LIMIT 5`,
+		cwd, sessionID, windowStart, firstTS)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	bestPredID := ""
+	var bestGapMs int64 = maxGapMs + 1
+
+	for rows.Next() {
+		var predID, predLastMsg string
+		if rows.Scan(&predID, &predLastMsg) != nil {
+			continue
+		}
+		predTime, err := time.Parse(time.RFC3339, predLastMsg)
+		if err != nil {
+			continue
+		}
+		gapMs := succTime.Sub(predTime).Milliseconds()
+		if gapMs < 0 || gapMs > maxGapMs {
+			continue
+		}
+		if gapMs < bestGapMs {
+			bestGapMs = gapMs
+			bestPredID = predID
+		}
+	}
+
+	if bestPredID == "" {
+		return
+	}
+
+	confidence := "medium"
+	if bestGapMs < 2000 {
+		confidence = "high"
+	}
+
+	db.Exec(`INSERT OR IGNORE INTO session_chains
+		(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
+		VALUES (?, ?, 'clear', ?, ?, 'time_heuristic')`,
+		sessionID, bestPredID, bestGapMs, confidence)
+}
+
+// backfillSessionChains runs detectChainForSession for all ingested sessions
+// that have a /clear marker but no chain entry yet. Safe to call on every startup.
+func backfillSessionChains(db *sql.DB) {
+	// Find sessions whose first user message (including noise) contains the /clear
+	// marker and that don't yet have a session_chains entry.
+	rows, err := db.Query(`
+		SELECT m.session_id
+		FROM messages m
+		WHERE m.role = 'user'
+		  AND m.text LIKE '%<command-name>/clear</command-name>%'
+		  AND m.id = (
+			SELECT MIN(m2.id) FROM messages m2
+			WHERE m2.session_id = m.session_id AND m2.role = 'user'
+		  )
+		  AND NOT EXISTS (SELECT 1 FROM session_chains sc WHERE sc.successor_id = m.session_id)`)
+	if err != nil {
+		slog.Warn("backfill session chains query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	var sessionIDs []string
+	for rows.Next() {
+		var sid string
+		if rows.Scan(&sid) == nil {
+			sessionIDs = append(sessionIDs, sid)
+		}
+	}
+	rows.Close()
+
+	for _, sid := range sessionIDs {
+		detectChainForSession(db, sid)
+	}
+	if len(sessionIDs) > 0 {
+		slog.Info("backfilled session chains", "count", len(sessionIDs))
+	}
+}
+
+// Predecessor returns the predecessor session ID for the given session,
+// or "" if none exists.
+func (s *Store) Predecessor(sessionID string) (string, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	var predID string
+	err := s.db.QueryRow(
+		"SELECT predecessor_id FROM session_chains WHERE successor_id = ?", sessionID,
+	).Scan(&predID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return predID, err
+}
+
+// Successor returns the successor session ID for the given session,
+// or "" if none exists.
+func (s *Store) Successor(sessionID string) (string, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	var succID string
+	err := s.db.QueryRow(
+		"SELECT successor_id FROM session_chains WHERE predecessor_id = ?", sessionID,
+	).Scan(&succID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return succID, err
+}
+
+// Chain returns the full ordered chain of ChainLinks from oldest to newest,
+// given any session ID in the chain. If the session has no chain links,
+// returns a single-element slice with that session's info.
+func (s *Store) Chain(sessionID string) ([]ChainLink, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	return s.chainLocked(sessionID)
+}
+
+func (s *Store) chainLocked(sessionID string) ([]ChainLink, error) {
+	// Walk backwards to find the head (oldest) of the chain.
+	head := sessionID
+	visited := map[string]bool{head: true}
+	for {
+		var pred string
+		err := s.db.QueryRow(
+			"SELECT predecessor_id FROM session_chains WHERE successor_id = ?", head,
+		).Scan(&pred)
+		if errors.Is(err, sql.ErrNoRows) {
+			break // head found
+		}
+		if err != nil {
+			return nil, err
+		}
+		if visited[pred] {
+			break // cycle guard
+		}
+		visited[pred] = true
+		head = pred
+	}
+
+	// Walk forwards to build the ordered chain, annotating each link with the
+	// gap/confidence of its connection to the next session.
+	var chain []ChainLink
+	cur := head
+	for cur != "" {
+		link, err := s.sessionChainLink(cur)
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, link)
+
+		var succ string
+		var gapMs int64
+		var confidence string
+		err = s.db.QueryRow(
+			"SELECT successor_id, gap_ms, confidence FROM session_chains WHERE predecessor_id = ?", cur,
+		).Scan(&succ, &gapMs, &confidence)
+		if errors.Is(err, sql.ErrNoRows) {
+			break // end of chain
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Annotate current link with its connection info to the next session.
+		chain[len(chain)-1].GapMs = gapMs
+		chain[len(chain)-1].Confidence = confidence
+		cur = succ
+	}
+	return chain, nil
+}
+
+func (s *Store) sessionChainLink(sessionID string) (ChainLink, error) {
+	var link ChainLink
+	link.SessionID = sessionID
+	s.db.QueryRow(`
+		SELECT ss.project, COALESCE(ss.first_msg, ''), COALESCE(ss.last_msg, ''),
+		       COALESCE(sm.topic, ''), COALESCE(sm.repo, '')
+		FROM session_summary ss
+		LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
+		WHERE ss.session_id = ?`, sessionID,
+	).Scan(&link.Project, &link.FirstMsg, &link.LastMsg, &link.Topic, &link.Repo)
+	return link, nil
 }

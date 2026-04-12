@@ -250,3 +250,38 @@ func (p *Proxy) ResolveNonce(nonce string) (string, error) {
 	}
 	return sid, nil
 }
+
+func (p *Proxy) Chain(sessionID string) ([]store.ChainLink, error) {
+	raw, err := p.client.Call("Chain", ChainParams{SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.ChainLink
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) Predecessor(sessionID string) (string, error) {
+	chain, err := p.Chain(sessionID)
+	if err != nil {
+		return "", err
+	}
+	for i, link := range chain {
+		if link.SessionID == sessionID && i > 0 {
+			return chain[i-1].SessionID, nil
+		}
+	}
+	return "", nil
+}
+
+func (p *Proxy) Successor(sessionID string) (string, error) {
+	chain, err := p.Chain(sessionID)
+	if err != nil {
+		return "", err
+	}
+	for i, link := range chain {
+		if link.SessionID == sessionID && i < len(chain)-1 {
+			return chain[i+1].SessionID, nil
+		}
+	}
+	return "", nil
+}

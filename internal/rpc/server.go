@@ -131,6 +131,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"LiveSessions": func(_ json.RawMessage) (any, error) {
 			return s.LiveSessions(), nil
 		},
+		"Chain": makeMethod(func(p ChainParams) (any, error) {
+			return s.Chain(p.SessionID)
+		}),
 	}
 }
 
@@ -280,4 +283,9 @@ type PermissionsParams struct {
 	Days       int    `json:"days"`
 	RepoFilter string `json:"repo_filter"`
 	Limit      int    `json:"limit"`
+}
+
+// ChainParams matches the Chain method signature.
+type ChainParams struct {
+	SessionID string `json:"session_id"`
 }

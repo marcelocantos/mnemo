@@ -247,6 +247,16 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_chain",
+			mcp.WithDescription(`Retrieve the full /clear-bounded session chain for any session ID.
+
+When a user types /clear in Claude Code, the current JSONL transcript ends and a new one begins within ~300ms. mnemo detects these rollovers by looking for a <command-name>/clear</command-name> marker in the first user message of a successor session combined with a ≤5s gap between the predecessor's last event and the successor's first event.
+
+Given any session ID in a chain, this tool returns the complete ordered chain from oldest to newest, with per-session summaries (topic, timestamps, repo) and the gap/confidence for each link.
+
+If the session has no chain links, a single-element result is returned.`),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix)")),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -300,6 +310,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.permissions(args)
 	case "mnemo_ci":
 		return h.ci(args)
+	case "mnemo_chain":
+		return h.chain(args)
 	case "mnemo_self":
 		return h.self(args)
 	default:
@@ -866,4 +878,58 @@ func (h *Handler) whoRan(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *Handler) chain(args map[string]any) (string, bool, error) {
+	sessionID, _ := args["session_id"].(string)
+	if sessionID == "" {
+		return "session_id is required", true, nil
+	}
+
+	links, err := h.mem.Chain(sessionID)
+	if err != nil {
+		return fmt.Sprintf("chain lookup failed: %v", err), true, nil
+	}
+	if len(links) == 0 {
+		return fmt.Sprintf("No session found for ID %s", sessionID), true, nil
+	}
+
+	var b strings.Builder
+	if len(links) == 1 {
+		fmt.Fprintf(&b, "Single session (no chain links detected):\n")
+	} else {
+		fmt.Fprintf(&b, "Chain of %d sessions (oldest → newest):\n", len(links))
+	}
+	for i, link := range links {
+		sid := link.SessionID
+		if len(sid) > 10 {
+			sid = sid[:10]
+		}
+		repo := link.Repo
+		if repo == "" {
+			repo = link.Project
+		}
+		topic := link.Topic
+		if len(topic) > 80 {
+			topic = topic[:77] + "..."
+		}
+		first := link.FirstMsg
+		if len(first) > 19 {
+			first = first[:19]
+		}
+		last := link.LastMsg
+		if len(last) > 19 {
+			last = last[:19]
+		}
+		marker := "  "
+		if link.SessionID == sessionID {
+			marker = ">>"
+		}
+		fmt.Fprintf(&b, "%s [%d] %s  %s  %s→%s  %s\n",
+			marker, i+1, sid, repo, first, last, topic)
+		if i < len(links)-1 && link.Confidence != "" {
+			fmt.Fprintf(&b, "       ↓ gap=%dms confidence=%s\n", link.GapMs, link.Confidence)
+		}
+	}
+	return b.String(), false, nil
 }

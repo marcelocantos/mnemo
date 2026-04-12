@@ -26,4 +26,7 @@ type Backend interface {
 	Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error)
 	SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error)
 	LiveSessions() map[string]int
+	Predecessor(sessionID string) (string, error)
+	Successor(sessionID string) (string, error)
+	Chain(sessionID string) ([]ChainLink, error)
 }
