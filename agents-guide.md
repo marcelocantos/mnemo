@@ -366,6 +366,48 @@ The nonce appears in your transcript and is detected during ingestion.
 Use the resolved session ID with `mnemo_read_session` to read your own
 transcript.
 
+## Index freshness
+
+**Invariant: `mnemo_*` tools reflect the full on-disk corpus at the time
+of the last query.** Agents do not need to reason about whether the
+index is stale, which repos mnemo has seen, or whether a given stream
+has been kept in sync with the filesystem.
+
+On daemon startup, every repo-level stream (`targets`, `audit`, `plans`,
+`claude_configs`, CI) performs a filesystem-walk backfill rather than
+enumerating repos from session history alone. Sources are:
+
+1. **Workspace roots** — configured via `~/.mnemo/config.json`
+   (`workspace_roots: ["/path/to/work"]`). Defaults to `~/work`. Each
+   root is walked for `.git` entries to discover repos.
+2. **Session metadata** — any repo reached through a Claude Code
+   session's `cwd` is also included, so repos outside the workspace
+   roots are not lost.
+
+The union is the discovery set. While the daemon is stopped, any
+changes to `docs/targets.md`, `docs/audit-log.md`, `CLAUDE.md`,
+`.planning/**/*.md`, or new repos created under a workspace root are
+picked up automatically on the next startup — no manual re-index.
+
+Per-stream coverage is surfaced via `mnemo_status` and `mnemo_stats`
+under the `streams` key:
+
+```json
+{
+  "streams": [
+    {"stream": "audit",          "files_indexed": 38, "files_on_disk": 38, "last_backfill": "2026-04-12T11:55:59Z"},
+    {"stream": "claude_configs", "files_indexed": 52, "files_on_disk": 52, "last_backfill": "2026-04-12T11:55:59Z"},
+    {"stream": "plans",          "files_indexed": 10, "files_on_disk": 10, "last_backfill": "2026-04-12T11:55:59Z"},
+    {"stream": "targets",        "files_indexed": 10, "files_on_disk": 18, "last_backfill": "2026-04-12T11:55:59Z"}
+  ]
+}
+```
+
+`files_on_disk` counts the artefacts discovered under the workspace
+roots; `files_indexed` counts how many actually landed in the index.
+Non-zero drift (on_disk > indexed) typically indicates a parse error or
+an empty source and is surfaced, not hidden.
+
 ## Common Patterns
 
 - **What's been happening?**: `mnemo_status` — repos, sessions, and conversation excerpts from the last 7 days

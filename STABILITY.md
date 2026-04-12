@@ -248,6 +248,7 @@ stored in indexed `session_nonces` table. The mechanism may evolve.
 | `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion | Needs review |
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
+| `ingest_status` | stream, last_backfill, files_indexed, files_on_disk — per-stream backfill state | Fluid |
 
 **Notes**: v0.9.0 added the `entries` table which stores every JSONL line
 as JSONB with 15 virtual columns for high-query fields. All entry types
@@ -266,8 +267,16 @@ v0.13.0 added three observability tools: `mnemo_who_ran` (process
 attribution), `mnemo_permissions` (permission analysis), `mnemo_ci`
 (CI/CD run history). Added `ci_runs` table with FTS5 for GitHub Actions
 indexing. `mnemo_usage` gained hourly rate detection.
-This surface is still evolving. `ingest_state` and `session_nonces` are
-internal implementation details.
+v0.15.0 (🎯T17) made every repo-level stream self-heal on startup:
+targets, audit logs, plans, CLAUDE.md, and CI polling discover repos
+via filesystem walk of configured workspace roots in addition to
+session_meta. Added `ingest_status` table, `streams` field on
+`StatusResult` and `StatsResult`, `Config` / `LoadConfig` /
+`SetWorkspaceRoots` public API, and `~/.mnemo/config.json` optional
+config file with `workspace_roots` (default `[~/work]`) and
+`extra_project_dirs` keys.
+This surface is still evolving. `ingest_state`, `ingest_status`, and
+`session_nonces` are internal implementation details.
 
 Entry types: `user`, `assistant`, `progress`, `system`, `file-history-snapshot`.
 Content types (messages): `text`, `tool_use`, `tool_result`, `thinking`.
@@ -280,7 +289,25 @@ be added or replace text output before 1.0.
 
 ### Configuration
 
-No config files. All configuration is via CLI flags. **Stability**: Stable.
+Optional config file at `~/.mnemo/config.json` (since v0.15.0):
+
+```json
+{
+  "workspace_roots": ["/Users/you/work"],
+  "extra_project_dirs": []
+}
+```
+
+- `workspace_roots` — filesystem roots walked for `.git` entries to
+  discover repos. Defaults to `[~/work]` when absent. The workspace
+  walker skips `node_modules`, `.venv`, `venv`, `target`, `build`,
+  `.build`, `dist`, `.next`, `.cache`, `__pycache__`, `.tox`,
+  `.mypy_cache`, and `.pytest_cache`.
+- `extra_project_dirs` — reserved for cross-platform transcript ingest
+  (🎯T15).
+
+All other configuration is via CLI flags. **Stability**: Fluid — the
+config file is new and its schema may grow before 1.0.
 
 ### Data storage
 

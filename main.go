@@ -87,6 +87,16 @@ func runServe() {
 	}
 	defer mem.Close()
 
+	// Load ~/.mnemo/config.json and configure workspace roots for
+	// repo-level ingest streams. Falls back to defaults when absent.
+	cfg, cfgErr := store.LoadConfig()
+	if cfgErr != nil {
+		slog.Warn("config load failed, using defaults", "err", cfgErr)
+	}
+	workspaceRoots := cfg.ResolvedWorkspaceRoots()
+	mem.SetWorkspaceRoots(workspaceRoots)
+	slog.Info("workspace roots configured", "roots", workspaceRoots)
+
 	// Ingest and watch in the background.
 	go func() {
 		slog.Info("ingesting transcripts", "dir", projectDir)

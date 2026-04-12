@@ -40,6 +40,26 @@ type Store struct {
 	offsets map[string]int64 // file path → last read offset
 
 	rwmu sync.RWMutex // protects db access: writers (ingest), readers (queries)
+
+	// workspaceRoots is the set of filesystem roots under which repo-level
+	// streams discover repos. Mutated only via SetWorkspaceRoots, read
+	// under rwmu.RLock by the repoRoots walker.
+	workspaceRoots []string
+}
+
+// SetWorkspaceRoots configures the filesystem roots under which repo-
+// level ingest streams discover repositories. Call this once after
+// Store.New and before any Ingest* call. Tests inject a temp directory;
+// production loads from ~/.mnemo/config.json.
+func (s *Store) SetWorkspaceRoots(roots []string) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	// Copy to detach from caller slice.
+	if len(roots) == 0 {
+		s.workspaceRoots = nil
+		return
+	}
+	s.workspaceRoots = append(s.workspaceRoots[:0:0], roots...)
 }
 
 // ContextMessage is a message surrounding a search hit.
@@ -99,8 +119,9 @@ type RecentActivityInfo struct {
 
 // StatusResult is the top-level response from Status.
 type StatusResult struct {
-	Days  int          `json:"days"`
-	Repos []RepoStatus `json:"repos"`
+	Days    int              `json:"days"`
+	Repos   []RepoStatus     `json:"repos"`
+	Streams []BackfillStatus `json:"streams,omitempty"`
 }
 
 // RepoStatus summarises recent activity for a single repo.
@@ -141,9 +162,10 @@ type TypeStats struct {
 
 // StatsResult holds full memory statistics.
 type StatsResult struct {
-	TotalSessions int         `json:"total_sessions"`
-	TotalMessages int         `json:"total_messages"`
-	ByType        []TypeStats `json:"by_type"`
+	TotalSessions int              `json:"total_sessions"`
+	TotalMessages int              `json:"total_messages"`
+	ByType        []TypeStats      `json:"by_type"`
+	Streams       []BackfillStatus `json:"streams,omitempty"`
 }
 
 // UsageRow holds aggregated token usage for a single group (date, model, repo).
@@ -235,7 +257,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 9
+const schemaVersion = 10
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -346,6 +368,12 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE TABLE IF NOT EXISTS ingest_state (
 			path TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS ingest_status (
+			stream TEXT PRIMARY KEY,
+			last_backfill TEXT NOT NULL,
+			files_indexed INTEGER NOT NULL,
+			files_on_disk INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS session_meta (
 			session_id TEXT PRIMARY KEY,
@@ -1161,57 +1189,48 @@ type ClaudeConfigInfo struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-// IngestClaudeConfigs scans all repo roots discovered via session_meta and ingests CLAUDE.md files.
-// It also checks ~/.claude/CLAUDE.md and ~/CLAUDE.md.
+// IngestClaudeConfigs discovers every repo under the configured
+// workspace roots (and session_meta) and ingests its CLAUDE.md file.
+// Also checks ~/.claude/CLAUDE.md and ~/CLAUDE.md.
 func (s *Store) IngestClaudeConfigs() error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	// Gather unique cwd values from session_meta.
-	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
-	if err != nil {
-		return fmt.Errorf("query session_meta: %w", err)
-	}
-	var cwds []string
-	for rows.Next() {
-		var cwd string
-		if err := rows.Scan(&cwd); err == nil && cwd != "" {
-			cwds = append(cwds, cwd)
+	roots := s.knownRepoRootsLocked()
+	indexed, onDisk := 0, 0
+	for _, rr := range roots {
+		claudePath := filepath.Join(rr.root, "CLAUDE.md")
+		if _, err := os.Stat(claudePath); err != nil {
+			continue
 		}
-	}
-	rows.Close()
-
-	// Find repo roots for each cwd by walking up to a .git directory.
-	seen := map[string]bool{}
-	for _, cwd := range cwds {
-		root := findRepoRoot(cwd)
-		if root != "" && !seen[root] {
-			seen[root] = true
-			claudePath := filepath.Join(root, "CLAUDE.md")
-			repo := extractRepo(cwd)
-			if err := s.ingestClaudeConfigFileLocked(claudePath, repo); err != nil && !os.IsNotExist(err) {
-				slog.Error("ingest claude config failed", "file", claudePath, "err", err)
-			}
+		onDisk++
+		if err := s.ingestClaudeConfigFileLocked(claudePath, rr.repo); err != nil && !os.IsNotExist(err) {
+			slog.Error("ingest claude config failed", "file", claudePath, "err", err)
+			continue
 		}
+		indexed++
 	}
 
 	// Also check ~/.claude/CLAUDE.md and ~/CLAUDE.md.
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
+	if homeDir, err := os.UserHomeDir(); err == nil {
 		for _, extra := range []struct{ path, repo string }{
 			{filepath.Join(homeDir, ".claude", "CLAUDE.md"), "global"},
 			{filepath.Join(homeDir, "CLAUDE.md"), "home"},
 		} {
-			if !seen[extra.path] {
-				seen[extra.path] = true
-				if err := s.ingestClaudeConfigFileLocked(extra.path, extra.repo); err != nil && !os.IsNotExist(err) {
-					slog.Error("ingest claude config failed", "file", extra.path, "err", err)
-				}
+			if _, err := os.Stat(extra.path); err != nil {
+				continue
 			}
+			onDisk++
+			if err := s.ingestClaudeConfigFileLocked(extra.path, extra.repo); err != nil && !os.IsNotExist(err) {
+				slog.Error("ingest claude config failed", "file", extra.path, "err", err)
+				continue
+			}
+			indexed++
 		}
 	}
 
-	slog.Info("ingested claude configs", "repos", len(seen))
+	s.recordBackfillStatusLocked("claude_configs", indexed, onDisk)
+	slog.Info("ingested claude configs", "indexed", indexed, "on_disk", onDisk)
 	return nil
 }
 
@@ -1220,19 +1239,113 @@ type repoRoot struct {
 	repo string
 }
 
-// knownRepoRoots returns deduplicated repo roots from session_meta.
-func (s *Store) knownRepoRoots() []repoRoot {
+// BackfillStatus summarises the most recent backfill pass for a single
+// repo-level stream. files_on_disk counts artefacts discovered on disk
+// across all workspace roots; files_indexed counts how many of those
+// actually landed in the index. A non-zero drift (on_disk - indexed)
+// indicates partial coverage — typically an unreadable file, a parse
+// error, or an empty source.
+type BackfillStatus struct {
+	Stream       string `json:"stream"`
+	LastBackfill string `json:"last_backfill"`
+	FilesIndexed int    `json:"files_indexed"`
+	FilesOnDisk  int    `json:"files_on_disk"`
+}
+
+// Drift returns files_on_disk - files_indexed. Zero means full coverage.
+func (b BackfillStatus) Drift() int { return b.FilesOnDisk - b.FilesIndexed }
+
+// recordBackfillStatusLocked upserts a row into ingest_status. Caller
+// must hold s.rwmu.Lock.
+func (s *Store) recordBackfillStatusLocked(stream string, indexed, onDisk int) {
+	_, err := s.db.Exec(`
+		INSERT INTO ingest_status (stream, last_backfill, files_indexed, files_on_disk)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(stream) DO UPDATE SET
+			last_backfill = excluded.last_backfill,
+			files_indexed = excluded.files_indexed,
+			files_on_disk = excluded.files_on_disk
+	`, stream, time.Now().UTC().Format(time.RFC3339), indexed, onDisk)
+	if err != nil {
+		slog.Warn("record backfill status failed", "stream", stream, "err", err)
+	}
+}
+
+// BackfillStatuses returns the latest backfill status for every
+// repo-level stream, ordered by stream name. Streams that have never
+// run a backfill are omitted.
+func (s *Store) BackfillStatuses() []BackfillStatus {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	rows, err := s.db.Query(`
+		SELECT stream, last_backfill, files_indexed, files_on_disk
+		FROM ingest_status
+		ORDER BY stream
+	`)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 
+	var out []BackfillStatus
+	for rows.Next() {
+		var b BackfillStatus
+		if err := rows.Scan(&b.Stream, &b.LastBackfill, &b.FilesIndexed, &b.FilesOnDisk); err == nil {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// knownRepoRoots returns deduplicated repo roots from the union of
+// (a) the configured workspace roots walked for .git entries, and
+// (b) session_meta.cwd resolved via findRepoRoot. Either source alone
+// would be incomplete: workspace-walk misses repos that live outside
+// the configured roots, session_meta misses repos that haven't been
+// touched by a Claude Code session. The union self-heals both.
+//
+// This is the single choke point for repo-level ingest discovery —
+// every repo-level stream (targets, audit logs, plans, CLAUDE.md, CI
+// watchers) flows through here, so extending coverage cascades to
+// every stream at once.
+func (s *Store) knownRepoRoots() []repoRoot {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	return s.knownRepoRootsLocked()
+}
+
+// knownRepoRootsLocked is the shared implementation. Caller must hold
+// s.rwmu for read or write.
+func (s *Store) knownRepoRootsLocked() []repoRoot {
 	seen := map[string]bool{}
 	var roots []repoRoot
+
+	// 1. Workspace-root discovery via filesystem walk. Workspace roots
+	// must be configured explicitly via SetWorkspaceRoots (production
+	// does this from ~/.mnemo/config.json with a sensible default);
+	// no implicit walk, so tests stay isolated.
+	for _, root := range discoverRepos(s.workspaceRoots) {
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		repo := extractRepo(root)
+		if repo == "" {
+			repo = repoNameFromPath(root)
+		}
+		roots = append(roots, repoRoot{root: root, repo: repo})
+	}
+
+	// 2. session_meta.cwd → findRepoRoot. Captures repos outside any
+	// configured workspace root (e.g., transient clones in /tmp).
+	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	if err != nil {
+		return roots
+	}
+	defer rows.Close()
+
 	for rows.Next() {
 		var cwd string
 		if rows.Scan(&cwd) != nil {
@@ -1243,7 +1356,11 @@ func (s *Store) knownRepoRoots() []repoRoot {
 			continue
 		}
 		seen[root] = true
-		roots = append(roots, repoRoot{root: root, repo: extractRepo(cwd)})
+		repo := extractRepo(cwd)
+		if repo == "" {
+			repo = repoNameFromPath(root)
+		}
+		roots = append(roots, repoRoot{root: root, repo: repo})
 	}
 	return roots
 }
@@ -1472,44 +1589,27 @@ func (s *Store) IngestAuditLogs() error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	// Collect distinct cwd values from session metadata.
-	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
-	if err != nil {
-		return err
-	}
-	cwds := make([]string, 0)
-	for rows.Next() {
-		var cwd string
-		if rows.Scan(&cwd) == nil {
-			cwds = append(cwds, cwd)
-		}
-	}
-	rows.Close()
-
-	// Walk up each cwd to find the repo root (contains .git).
-	seen := make(map[string]bool)
-	count := 0
-	for _, cwd := range cwds {
-		root := findRepoRoot(cwd)
-		if root == "" || seen[root] {
+	roots := s.knownRepoRootsLocked()
+	indexed, onDisk := 0, 0
+	for _, rr := range roots {
+		auditPath := filepath.Join(rr.root, "docs", "audit-log.md")
+		if _, err := os.Stat(auditPath); err != nil {
 			continue
 		}
-		seen[root] = true
+		onDisk++
 
-		auditPath := filepath.Join(root, "docs", "audit-log.md")
-		if _, err := os.Stat(auditPath); os.IsNotExist(err) {
-			continue
-		}
-
-		// Derive repo name from the root path (last two path components).
-		repo := repoNameFromPath(root)
+		// Prefer the two-segment repoNameFromPath for audit logs — the
+		// existing audit_entries schema uses "org/repo" rather than the
+		// bare basename that extractRepo returns.
+		repo := repoNameFromPath(rr.root)
 		if err := s.ingestAuditLogFileLocked(auditPath, repo); err != nil {
 			slog.Error("ingest audit log failed", "file", auditPath, "err", err)
 			continue
 		}
-		count++
+		indexed++
 	}
-	slog.Info("ingested audit logs", "count", count)
+	s.recordBackfillStatusLocked("audit", indexed, onDisk)
+	slog.Info("ingested audit logs", "indexed", indexed, "on_disk", onDisk)
 	return nil
 }
 
@@ -1715,37 +1815,17 @@ func parseTargetsFile(repo, filePath string, data []byte) []TargetInfo {
 	return targets
 }
 
-// IngestTargets scans all repos known from session_meta and ingests their
-// docs/targets.md files. This is run at startup only; no realtime watching.
+// IngestTargets discovers every repo under the configured workspace
+// roots (and session_meta) and ingests its docs/targets.md file. Runs
+// at startup; realtime updates flow through Watch().
 func (s *Store) IngestTargets() error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	// Collect unique cwds from session_meta.
-	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
-	if err != nil {
-		return fmt.Errorf("query cwds: %w", err)
-	}
-	var cwds []string
-	for rows.Next() {
-		var cwd string
-		if rows.Scan(&cwd) == nil && cwd != "" {
-			cwds = append(cwds, cwd)
-		}
-	}
-	rows.Close()
-
-	// Deduplicate repo roots.
-	seen := map[string]bool{}
-	count := 0
-	for _, cwd := range cwds {
-		root := findRepoRoot(cwd)
-		if root == "" || seen[root] {
-			continue
-		}
-		seen[root] = true
-
-		targetsPath := filepath.Join(root, "docs", "targets.md")
+	roots := s.knownRepoRootsLocked()
+	indexed, onDisk, targetCount := 0, 0, 0
+	for _, rr := range roots {
+		targetsPath := filepath.Join(rr.root, "docs", "targets.md")
 		data, err := os.ReadFile(targetsPath)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -1753,9 +1833,12 @@ func (s *Store) IngestTargets() error {
 			}
 			continue
 		}
+		onDisk++
 
-		// Derive repo name from root path.
-		repo := filepath.Base(root)
+		repo := rr.repo
+		if repo == "" {
+			repo = filepath.Base(rr.root)
+		}
 
 		parsed := parseTargetsFile(repo, targetsPath, data)
 		if len(parsed) == 0 {
@@ -1767,6 +1850,7 @@ func (s *Store) IngestTargets() error {
 			slog.Warn("delete targets failed", "path", targetsPath, "err", err)
 			continue
 		}
+		inserted := false
 		for _, t := range parsed {
 			_, err := s.db.Exec(`
 				INSERT INTO targets (repo, file_path, target_id, name, status, weight, description, raw_text)
@@ -1783,10 +1867,15 @@ func (s *Store) IngestTargets() error {
 				slog.Warn("insert target failed", "target_id", t.TargetID, "err", err)
 				continue
 			}
-			count++
+			targetCount++
+			inserted = true
+		}
+		if inserted {
+			indexed++
 		}
 	}
-	slog.Info("ingested targets", "count", count)
+	s.recordBackfillStatusLocked("targets", indexed, onDisk)
+	slog.Info("ingested targets", "files", indexed, "on_disk", onDisk, "rows", targetCount)
 	return nil
 }
 
@@ -1902,33 +1991,19 @@ func (s *Store) IngestPlans() error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	// Collect unique repo roots from all known cwds.
-	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	seen := map[string]bool{}
-	for rows.Next() {
-		var cwd string
-		if err := rows.Scan(&cwd); err != nil {
+	roots := s.knownRepoRootsLocked()
+	indexed, onDisk := 0, 0
+	reposWithPlans := 0
+	for _, rr := range roots {
+		planningDir := filepath.Join(rr.root, ".planning")
+		if _, err := os.Stat(planningDir); err != nil {
 			continue
 		}
-		root := findRepoRoot(cwd)
-		if root != "" && !seen[root] {
-			seen[root] = true
+		reposWithPlans++
+		repo := rr.repo
+		if repo == "" {
+			repo = extractRepo(rr.root)
 		}
-	}
-	rows.Close()
-
-	count := 0
-	for root := range seen {
-		planningDir := filepath.Join(root, ".planning")
-		if _, err := os.Stat(planningDir); os.IsNotExist(err) {
-			continue
-		}
-		repo := extractRepo(root)
 
 		// Walk all .md files under .planning/
 		if err := filepath.Walk(planningDir, func(path string, info os.FileInfo, err error) error {
@@ -1938,17 +2013,19 @@ func (s *Store) IngestPlans() error {
 			if strings.ToLower(filepath.Ext(path)) != ".md" {
 				return nil
 			}
+			onDisk++
 			if err2 := s.ingestPlanFileLocked(path, repo, planningDir); err2 != nil {
 				slog.Error("ingest plan failed", "file", path, "err", err2)
-			} else {
-				count++
+				return nil
 			}
+			indexed++
 			return nil
 		}); err != nil {
 			slog.Error("walk planning dir failed", "dir", planningDir, "err", err)
 		}
 	}
-	slog.Info("ingested plans", "count", count)
+	s.recordBackfillStatusLocked("plans", indexed, onDisk)
+	slog.Info("ingested plans", "files", indexed, "on_disk", onDisk, "repos", reposWithPlans)
 	return nil
 }
 
@@ -2146,22 +2223,45 @@ type CIRun struct {
 	URL         string `json:"url,omitempty"`
 }
 
-// ciRepos returns repos seen in session_meta that look like GitHub repos.
+// ciRepos returns "org/repo" identifiers for every GitHub repository
+// reachable through knownRepoRoots. This is the union of
+// workspace-walked repos (default ~/work) and session_meta-known repos,
+// so CI polling works even for projects mnemo hasn't seen through a
+// session yet. Non-GitHub paths are filtered out.
 func (s *Store) ciRepos() ([]string, error) {
+	seen := map[string]bool{}
+	var repos []string
+
+	// Workspace + session_meta union via the central choke point.
+	// knownRepoRoots acquires rwmu.RLock internally.
+	for _, rr := range s.knownRepoRoots() {
+		repo := extractRepo(rr.root)
+		if repo == "" || !strings.Contains(repo, "/") || seen[repo] {
+			continue
+		}
+		seen[repo] = true
+		repos = append(repos, repo)
+	}
+
+	// Fallback: session_meta.repo column may carry a normalised
+	// "org/repo" for repos outside any workspace root (e.g., clones in
+	// /tmp). Include anything we haven't already captured.
 	rows, err := s.db.Query(
 		`SELECT DISTINCT repo FROM session_meta WHERE repo != '' AND repo LIKE '%/%'`,
 	)
 	if err != nil {
-		return nil, err
+		return repos, nil
 	}
 	defer rows.Close()
-	var repos []string
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {
 			continue
 		}
-		repos = append(repos, r)
+		if !seen[r] {
+			seen[r] = true
+			repos = append(repos, r)
+		}
 	}
 	return repos, nil
 }
@@ -3125,6 +3225,22 @@ func (s *Store) Stats() (*StatsResult, error) {
 		result.TotalMessages += ts.TotalMsgs
 		result.ByType = append(result.ByType, ts)
 	}
+
+	// Per-stream backfill status — inlined while rwmu.RLock is held.
+	if strRows, strErr := s.db.Query(`
+		SELECT stream, last_backfill, files_indexed, files_on_disk
+		FROM ingest_status
+		ORDER BY stream
+	`); strErr == nil {
+		for strRows.Next() {
+			var b BackfillStatus
+			if scanErr := strRows.Scan(&b.Stream, &b.LastBackfill, &b.FilesIndexed, &b.FilesOnDisk); scanErr == nil {
+				result.Streams = append(result.Streams, b)
+			}
+		}
+		strRows.Close()
+	}
+
 	return &result, nil
 }
 
@@ -3723,7 +3839,24 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 		}
 	}
 
-	return &StatusResult{Days: days, Repos: repos}, nil
+	// Per-stream backfill status. Inlined rather than calling the
+	// public BackfillStatuses() because we already hold rwmu.RLock.
+	var streams []BackfillStatus
+	if strRows, strErr := s.db.Query(`
+		SELECT stream, last_backfill, files_indexed, files_on_disk
+		FROM ingest_status
+		ORDER BY stream
+	`); strErr == nil {
+		for strRows.Next() {
+			var b BackfillStatus
+			if scanErr := strRows.Scan(&b.Stream, &b.LastBackfill, &b.FilesIndexed, &b.FilesOnDisk); scanErr == nil {
+				streams = append(streams, b)
+			}
+		}
+		strRows.Close()
+	}
+
+	return &StatusResult{Days: days, Repos: repos, Streams: streams}, nil
 }
 
 // SessionMessage is a single message from a session transcript.

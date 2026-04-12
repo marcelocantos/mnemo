@@ -189,6 +189,37 @@ Scope is linkage only. Downstream consumers (summarisation, restore, cross-span 
 
 ## Achieved
 
+### 🎯T17 ⦿ Every mnemo stream self-heals on startup — no agent should need to know whether a given mnemo_* tool has seen the whole corpus
+- **Value**: 8
+- **Cost**: 5
+- **Observable**: true
+- **Acceptance**:
+  - Every repo-level stream (targets, audit logs, plans, CI runs) performs a filesystem-walk backfill on daemon startup, not a session_meta-seeded scan
+  - Backfill discovers repos from a configurable set of workspace roots (default: ~/work) plus any repos already known from session_meta — the union, not just one
+  - On daemon startup after a period of being down, mnemo re-scans every stream's corpus and ingests anything that changed while it was stopped (mtime > last_ingest, or content-hash mismatch)
+  - mnemo_status reports, per stream, a 'last full backfill' timestamp and a 'coverage' count so agents can see at a glance whether the stream is complete
+  - A new mnemo_stats-style breakdown shows, for each stream, how many files are indexed vs how many exist on disk under the configured roots — non-zero drift is surfaced, not hidden
+  - Documentation in agents-guide.md states the invariant plainly: 'mnemo_* tools reflect the full on-disk corpus at the time of the last query; agents do not need to reason about whether the index is stale'
+  - Tests: for each repo-level stream, a regression test that creates a repo with the relevant artefact on disk, starts a fresh store (no session_meta), runs backfill, and asserts the artefact is searchable
+- **Context**: Discovered 2026-04-12 from a parallel bullseye session that ran a cross-repo targets report and got only 5 repos back. Root cause: mnemo_targets — like mnemo_audit, mnemo_plans, and mnemo_ci — uses `IngestTargets`, which enumerates repos from session_meta (store.go:1718). Any repo with a targets.yaml on disk but no recent indexed session is invisible to the tool. Transcripts, memories, and skills do not have this problem because IngestAll / IngestMemories / IngestSkills walk the filesystem directly.
+
+The user's principle: "agents shouldn't have to figure out when mnemo can and can't be relied on". Right now, every agent that uses mnemo_targets / mnemo_audit / mnemo_plans / mnemo_ci has to know that these tools silently omit repos they haven't seen via sessions, and has to fall back to Glob + filesystem walks. This is exactly the kind of correctness footgun that burns agent-hours and erodes trust in the tool.
+
+The fix has two halves:
+
+1. **Startup backfill**: each repo-level stream needs a filesystem walker that discovers artefacts under a configured workspace root (default ~/work), independent of session_meta. Session_meta can still contribute (for repos outside the root), but it is no longer the sole source of truth. The walker should use the same incremental-by-mtime logic that transcript ingest already uses so that restart-after-downtime is cheap.
+
+2. **Downtime catchup**: commit ac93bc6 added fsnotify watchers for these paths, but only for repos the daemon already knows about. If mnemo is stopped, a targets.yaml is edited, and mnemo restarts, the fsnotify-based path misses the change. The backfill walker closes this gap because it runs on every startup.
+
+Scope covers: IngestTargets (targets), IngestAuditLogs (audit), IngestPlans (plans), the CI ingest path, and any future repo-level stream. Out of scope: transcript/memory/skill streams (already correct). Also out of scope: real-time discovery of brand-new repos created while mnemo is running — fsnotify on the workspace root would handle that, but it's a separate target.
+
+This target is marked observable because the coverage drift metric in mnemo_status is the human-visible checkpoint.
+- **Tags**: ingest, correctness, cross-repo
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+- **Actual-cost**: 5
+
 ### 🎯T13 CI/CD run history indexed cross-repo with failure pattern detection
 - **Value**: 8
 - **Cost**: 3
