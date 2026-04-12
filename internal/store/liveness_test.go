@@ -19,7 +19,7 @@ func TestParseLsofOutput(t *testing.T) {
 			want:  map[string]int{},
 		},
 		{
-			name: "header only",
+			name:  "header only",
 			input: "COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n",
 			want:  map[string]int{},
 		},

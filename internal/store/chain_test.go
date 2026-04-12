@@ -54,8 +54,8 @@ func ingestChainPair(t *testing.T, predLastTS, succFirstTS, cwd string) (*Store,
 // TestChainHighConfidence verifies that a gap < 2s produces a high-confidence link.
 func TestChainHighConfidence(t *testing.T) {
 	s, predID, succID := ingestChainPair(t,
-		"2026-04-10T10:00:10Z",  // pred last message
-		"2026-04-10T10:00:11Z",  // succ first message (1s gap)
+		"2026-04-10T10:00:10Z", // pred last message
+		"2026-04-10T10:00:11Z", // succ first message (1s gap)
 		"/Users/dev/work/myrepo",
 	)
 
