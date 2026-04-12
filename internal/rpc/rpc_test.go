@@ -517,4 +517,3 @@ func TestRPCPerformance(t *testing.T) {
 		})
 	}
 }
-

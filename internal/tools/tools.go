@@ -640,7 +640,6 @@ func (h *Handler) configs(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-
 func (h *Handler) usage(args map[string]any) (string, bool, error) {
 	days := 30
 	if d, ok := args["days"].(float64); ok && d > 0 {

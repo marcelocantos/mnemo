@@ -113,12 +113,12 @@ type RepoStatus struct {
 
 // SessionStatus summarises a single session with conversation excerpts.
 type SessionStatus struct {
-	SessionID  string          `json:"session_id"`
-	LastMsg    string          `json:"last_msg"`
-	Messages   int             `json:"messages"`
-	WorkType   string          `json:"work_type,omitempty"`
-	Topic      string          `json:"topic,omitempty"`
-	Excerpts   []MessageExcerpt `json:"excerpts"`
+	SessionID string           `json:"session_id"`
+	LastMsg   string           `json:"last_msg"`
+	Messages  int              `json:"messages"`
+	WorkType  string           `json:"work_type,omitempty"`
+	Topic     string           `json:"topic,omitempty"`
+	Excerpts  []MessageExcerpt `json:"excerpts"`
 }
 
 // MessageExcerpt is a possibly-truncated message with its database ID for drill-down.
@@ -1353,7 +1353,6 @@ func (s *Store) queryClaudeConfigs(q string, args ...any) ([]ClaudeConfigInfo, e
 	return results, nil
 }
 
-
 // AuditEntryInfo holds a single audit log entry from the index.
 type AuditEntryInfo struct {
 	ID       int    `json:"id"`
@@ -2248,15 +2247,15 @@ func (s *Store) SearchCI(query string, repo string, conclusion string, days int,
 
 // ghRunJSON matches the JSON output of `gh run list`.
 type ghRunJSON struct {
-	DatabaseID  int64  `json:"databaseId"`
+	DatabaseID   int64  `json:"databaseId"`
 	WorkflowName string `json:"workflowName"`
-	HeadBranch  string `json:"headBranch"`
-	HeadSHA     string `json:"headSha"`
-	Status      string `json:"status"`
-	Conclusion  string `json:"conclusion"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
-	URL         string `json:"url"`
+	HeadBranch   string `json:"headBranch"`
+	HeadSHA      string `json:"headSha"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+	URL          string `json:"url"`
 }
 
 // PollCI fetches recent CI runs from GitHub Actions for all repos seen in session_meta
@@ -2480,7 +2479,7 @@ const (
 
 // writerState holds prepared statements for the two-table insert.
 type writerState struct {
-	tx       *sql.Tx
+	tx        *sql.Tx
 	entryStmt *sql.Stmt
 	msgStmt   *sql.Stmt
 }
