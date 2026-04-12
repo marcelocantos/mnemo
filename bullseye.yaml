@@ -126,7 +126,7 @@ targets:
     discovered: 2026-04-09
   T16:
     name: Session chains link /clear-bounded transcripts into work spans
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
@@ -156,6 +156,7 @@ targets:
     - claude-code
     origin: manual
     discovered: 2026-04-12
+    achieved: 2026-04-12
   T17:
     name: Every mnemo stream self-heals on startup — no agent should need to know whether a given mnemo_* tool has seen the whole corpus
     status: achieved
@@ -383,7 +384,7 @@ targets:
     discovered: 2026-04-07
   T9.5.1:
     name: Session liveness is detectable — mnemo can report which session IDs have an active Claude Code process running them
-    status: identified
+    status: achieved
     value: 8.0
     cost: 2.0
     observable: true
@@ -400,6 +401,7 @@ targets:
     - sessions
     origin: forked from T9.5 during scope refinement 2026-04-11
     discovered: 2026-04-11
+    achieved: 2026-04-12
   T9.6:
     name: Cross-session decision recall (mnemo_decisions)
     status: identified
