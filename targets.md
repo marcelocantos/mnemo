@@ -25,6 +25,7 @@
   - mnemo_restore in fresh post-clear segment returns useful context
   - Token cost of summarizer < 10% of the session it tracks
 - **Context**: mnemo maintains a live compacted context for each active session. When a session /clears, the compacted context is available instantly via mnemo_restore. Depends on jevon claude.Process / manager.Manager for Claude instance lifecycle.
+- **Depends on**: 🎯T16
 - **Origin**: targets.md bootstrap
 - **Status**: Identified
 - **Discovered**: 2026-04-07
@@ -76,6 +77,32 @@
 - **Status**: Identified
 - **Discovered**: 2026-04-09
 
+### 🎯T16 Session chains link /clear-bounded transcripts into work spans
+- **Value**: 8
+- **Cost**: 5
+- **Acceptance**:
+  - Schema: session_chains(successor_id PK, predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at) with index on predecessor_id
+  - Ingest-time detection: when a new JSONL's first non-meta user event contains <command-name>/clear</command-name>, look for a predecessor in the same project directory whose last event precedes the new file's first event; insert the link with confidence bucketed as high (<2s), medium (2-5s), or none (>5s, no link recorded but boundary noted)
+  - Retroactive backfill: a one-shot routine runs the same detection against all already-ingested sessions on first startup after the schema change
+  - Query API on Store: Predecessor(sid), Successor(sid), Chain(sid) []string (oldest to newest)
+  - RPC exposure: Chain method reachable via the daemon socket
+  - MCP tool mnemo_chain: given any session ID in a chain, returns the full chain with per-session previews
+  - agents-guide.md: new section documenting /clear rollover behaviour and how to traverse session chains
+  - STABILITY.md: new table, methods, and MCP tool catalogued
+  - Tests: unit coverage for detection (clean rollover, gap too large, no predecessor, same cwd with multiple candidates) plus a fixture-based integration test against sample JSONLs
+- **Context**: Claude Code's /clear command creates a brand-new JSONL file with a fresh session UUID rather than preserving the current session ID. Verified 2026-04-12 against claude v2.1.101: successor-session first event was 331ms after predecessor last event, same physical claude process, new JSONL path. This also matches an earlier cworkers empirical check from March 2026 — the rollover behaviour has been consistent across releases. A later (April 2026) investigation wrongly concluded the opposite; that finding is superseded and a claudia-side reference memory now captures the correct behaviour.
+
+Mnemo's shipped code is unaffected because its ingest is already session-ID-agnostic — each .jsonl file is a distinct session, fsnotify picks up new files via directory watches, and nothing depends on session-ID stability across /clear. But any higher-level concept of "a work span" (summarisation, context restoration, recent-activity narratives, mnemo_restore) needs to traverse the chain of /clear-bounded sessions that together make up a conceptual work unit. This target establishes session_chains as the mnemo-level primitive for that traversal.
+
+The linkage heuristic is time-based: same project directory, first non-meta user event is a /clear command marker, gap to the predecessor's last event <= 5 seconds. Verified against 12 post-/clear sessions in the doit project dir: 4 of 12 had rollover gaps under 2s (unambiguous links), the rest were fresh Claude Code sessions where the user habitually typed /clear at the start (gap ranges from 8s to 6+ hours). The 2s/5s threshold cleanly separates the two cases in observed data.
+
+The heuristic works retroactively because mnemo captures everything it needs (per-session first/last timestamps, project dir, first user event content) — backfill just iterates existing rows. No real-time PID tracking required; the lsof-based approach was considered and rejected (lsof is a snapshot tool, Claude Code doesn't keep the JSONL open between writes, so lsof polling can't observe the transition). If deterministic PID-anchored linkage is needed later, the schema's `mechanism` column accommodates it without breaking existing rows.
+
+Scope is linkage only. Downstream consumers (summarisation, restore, cross-span search) build on top and are separate targets — in particular T10 "Live context compaction" depends on this because its current acceptance criteria assume a session's identity survives /clear, which it doesn't. T10 should be reframed to use session_chains as its traversal mechanism once this target is achieved.
+- **Tags**: ingest, schema, claude-code
+- **Status**: Identified
+- **Discovered**: 2026-04-12
+
 ### 🎯T5 Self-improving tool discovery
 - **Value**: 9
 - **Cost**: 8
@@ -120,15 +147,32 @@
 
 ### 🎯T9.5 System correlation (mnemo_whatsup)
 - **Value**: 5
-- **Cost**: 5
+- **Cost**: 3
 - **Acceptance**:
-  - Correlates current system state with active mnemo sessions
+  - For each live session (as identified by 🎯T9.5.1), mnemo can report current CPU, RSS, and IO metrics for the owning claude process
+  - System load (system-wide CPU, memory pressure, disk I/O) is reported alongside per-session metrics so the user can see whether a slow session is caused by the session itself or by contention
+  - Results are surfaced as a mnemo_whatsup tool that answers "which of my active sessions is doing expensive work right now"
   - Cross-references PIDs and command patterns against recent session activity
-- **Context**: Correlate system load (CPU, disk I/O) with active sessions. Gates on T9.1.
-- **Depends on**: 🎯T9.1
+- **Context**: Correlate system load (CPU, RSS, disk I/O) with live sessions. Answers "which of my active sessions is hogging resources right now". Depends on 🎯T9.5.1 (session liveness detection) to identify which sessions are alive; this target then layers per-process and per-system metrics onto that. On macOS: `ps -o pid,rss,%cpu,time -p <pid>` for per-process, `vm_stat` / `iostat` for system-wide. On Linux: /proc/<pid>/stat, /proc/loadavg. Gates on 🎯T9.1 (full-fidelity ingest) for session data and 🎯T9.5.1 (session liveness) for the "which sessions are live" question. Scope was narrowed on 2026-04-11: the liveness detection portion was forked out to 🎯T9.5.1 since it's independently useful.
+- **Depends on**: 🎯T9.1, 🎯T9.5.1
 - **Origin**: targets.md bootstrap
 - **Status**: Identified
 - **Discovered**: 2026-04-07
+
+### 🎯T9.5.1 Session liveness is detectable — mnemo can report which session IDs have an active Claude Code process running them
+- **Value**: 8
+- **Cost**: 2
+- **Acceptance**:
+  - mnemo can report, for any given session ID, whether a Claude Code process currently has its transcript JSONL file open
+  - Liveness is surfaced as an annotation on session listings (mnemo_sessions, mnemo_status) and/or a dedicated lookup tool
+  - A single lsof invocation can annotate many sessions at once, for acceptable cost on listings with dozens of sessions
+  - Correctly distinguishes idle-but-alive sessions (user AFK) from dead sessions (process exited)
+- **Context**: Claude Code keeps the transcript JSONL file (~/.claude/projects/<project>/<session-id>.jsonl) open for writing throughout a session's lifetime, even when idle. `lsof` on the file path is therefore an authoritative liveness signal. Batch form: `lsof -c claude -a +D ~/.claude/projects/` lists every JSONL opened by any claude process in one call, which can be parsed into a sessionID→PID map and cached briefly for annotation of listings. Prerequisite for T9.5 (system correlation / mnemo_whatsup). Also independently valuable on its own — "which sessions are running right now" is a frequent standalone question.
+- **Depends on**: 🎯T9.1
+- **Tags**: observability, sessions
+- **Origin**: forked from T9.5 during scope refinement 2026-04-11
+- **Status**: Identified
+- **Discovered**: 2026-04-11
 
 ### 🎯T9.6 Cross-session decision recall (mnemo_decisions)
 - **Value**: 8
@@ -312,9 +356,13 @@ graph TD
     T11["Git history indexed cross-rep…"]
     T12["GitHub activity (PRs, issues,…"]
     T15["Windows VM Claude Code transc…"]
+    T16["Session chains link /clear-bo…"]
     T5["Self-improving tool discovery"]
     T7["Agent-defined query templates"]
     T9["Full-fidelity ingest and obse…"]
     T9_5["System correlation (mnemo_wha…"]
+    T9_5_1["Session liveness is detectabl…"]
     T9_6["Cross-session decision recall…"]
+    T10 -.->|needs| T16
+    T9_5 -.->|needs| T9_5_1
 ```
