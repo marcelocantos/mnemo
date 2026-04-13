@@ -136,7 +136,9 @@ File history — which sessions touched a file:
 
 Session types (derived from project path): interactive, subagent, worktree, ephemeral.
 is_noise = 1 for interrupts, compaction summaries, tool-loaded markers, slash command markup.
-Results capped at 100 rows.`),
+Results capped at 100 rows.
+
+Tip: If you find yourself running the same complex query pattern repeatedly, save it as a template with mnemo_define for reuse.`),
 			mcp.WithString("query", mcp.Required(), mcp.Description("SQL SELECT/WITH query, or sqldeep nested syntax (FROM ... SELECT { ... })")),
 		),
 		mcp.NewTool("mnemo_repos",
@@ -280,6 +282,21 @@ Phase 2: Call again with the nonce. mnemo searches for the session containing it
 Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonce "mnemo:abc123" → get your session ID. Then use mnemo_read_session to read your own transcript.`),
 			mcp.WithString("nonce", mcp.Description("The nonce returned by a previous mnemo_self call. Omit on first call to generate a new nonce.")),
 		),
+		mcp.NewTool("mnemo_define",
+			mcp.WithDescription(`Define a reusable parameterised query template. Templates persist across sessions in SQLite. Use {{param_name}} placeholders in the query. If a template with the same name exists, it is updated.`),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Template name (unique identifier)")),
+			mcp.WithString("description", mcp.Description("What this template does")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("SQL query with {{param}} placeholders")),
+			mcp.WithArray("params", mcp.Description("List of parameter names referenced in the query (e.g. [\"days\", \"repo\"])")),
+		),
+		mcp.NewTool("mnemo_evaluate",
+			mcp.WithDescription(`Execute a named query template with parameters. Returns results in the same format as mnemo_query.`),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Template name")),
+			mcp.WithObject("params", mcp.Description(`Parameter values as key-value pairs (e.g. {"days": "7", "repo": "mnemo"})`)),
+		),
+		mcp.NewTool("mnemo_list_templates",
+			mcp.WithDescription(`List all saved query templates with their names, descriptions, and parameter definitions.`),
+		),
 	}
 }
 
@@ -332,6 +349,12 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.self(args)
 	case "mnemo_whatsup":
 		return h.whatsup()
+	case "mnemo_define":
+		return h.defineTemplate(args)
+	case "mnemo_evaluate":
+		return h.evaluateTemplate(args)
+	case "mnemo_list_templates":
+		return h.listTemplates()
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1028,4 +1051,83 @@ func (h *Handler) whatsup() (string, bool, error) {
 	}
 
 	return b.String(), false, nil
+}
+
+func (h *Handler) defineTemplate(args map[string]any) (string, bool, error) {
+	name, _ := args["name"].(string)
+	if name == "" {
+		return "name is required", true, nil
+	}
+	query, _ := args["query"].(string)
+	if query == "" {
+		return "query is required", true, nil
+	}
+	description, _ := args["description"].(string)
+
+	var paramNames []string
+	if raw, ok := args["params"]; ok && raw != nil {
+		switch v := raw.(type) {
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					paramNames = append(paramNames, s)
+				}
+			}
+		case []string:
+			paramNames = v
+		}
+	}
+
+	if err := h.mem.DefineTemplate(name, description, query, paramNames); err != nil {
+		return fmt.Sprintf("define template failed: %v", err), true, nil
+	}
+	return fmt.Sprintf("Template %q saved.", name), false, nil
+}
+
+func (h *Handler) evaluateTemplate(args map[string]any) (string, bool, error) {
+	name, _ := args["name"].(string)
+	if name == "" {
+		return "name is required", true, nil
+	}
+
+	params := make(map[string]string)
+	if raw, ok := args["params"]; ok && raw != nil {
+		if m, ok := raw.(map[string]any); ok {
+			for k, v := range m {
+				params[k] = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+
+	rows, err := h.mem.EvaluateTemplate(name, params)
+	if err != nil {
+		return fmt.Sprintf("evaluate template failed: %v", err), true, nil
+	}
+	if len(rows) == 0 {
+		return "No rows returned.", false, nil
+	}
+
+	var b strings.Builder
+	for _, row := range rows {
+		for k, v := range row {
+			fmt.Fprintf(&b, "%s: %v  ", k, v)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) listTemplates() (string, bool, error) {
+	templates, err := h.mem.ListTemplates()
+	if err != nil {
+		return fmt.Sprintf("list templates failed: %v", err), true, nil
+	}
+	if len(templates) == 0 {
+		return "No templates defined.", false, nil
+	}
+	out, err := json.MarshalIndent(templates, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }

@@ -25,6 +25,9 @@ type Backend interface {
 	WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error)
 	Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error)
 	SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error)
+	DefineTemplate(name, description, queryText string, paramNames []string) error
+	EvaluateTemplate(name string, params map[string]string) ([]map[string]any, error)
+	ListTemplates() ([]QueryTemplate, error)
 	LiveSessions() map[string]int
 	Predecessor(sessionID string) (string, error)
 	Successor(sessionID string) (string, error)

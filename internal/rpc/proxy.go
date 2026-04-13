@@ -280,6 +280,37 @@ func (p *Proxy) Whatsup() (*store.WhatsupResult, error) {
 	return &result, json.Unmarshal(raw, &result)
 }
 
+func (p *Proxy) DefineTemplate(name, description, queryText string, paramNames []string) error {
+	_, err := p.client.Call("DefineTemplate", DefineTemplateParams{
+		Name:        name,
+		Description: description,
+		QueryText:   queryText,
+		ParamNames:  paramNames,
+	})
+	return err
+}
+
+func (p *Proxy) EvaluateTemplate(name string, params map[string]string) ([]map[string]any, error) {
+	raw, err := p.client.Call("EvaluateTemplate", EvaluateTemplateParams{
+		Name:   name,
+		Params: params,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []map[string]any
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) ListTemplates() ([]store.QueryTemplate, error) {
+	raw, err := p.client.Call("ListTemplates", nil)
+	if err != nil {
+		return nil, err
+	}
+	var results []store.QueryTemplate
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) Predecessor(sessionID string) (string, error) {
 	chain, err := p.Chain(sessionID)
 	if err != nil {

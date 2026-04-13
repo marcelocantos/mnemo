@@ -140,6 +140,15 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Whatsup": func(_ json.RawMessage) (any, error) {
 			return s.Whatsup()
 		},
+		"DefineTemplate": makeMethod(func(p DefineTemplateParams) (any, error) {
+			return nil, s.DefineTemplate(p.Name, p.Description, p.QueryText, p.ParamNames)
+		}),
+		"EvaluateTemplate": makeMethod(func(p EvaluateTemplateParams) (any, error) {
+			return s.EvaluateTemplate(p.Name, p.Params)
+		}),
+		"ListTemplates": func(_ json.RawMessage) (any, error) {
+			return s.ListTemplates()
+		},
 	}
 }
 
@@ -302,4 +311,18 @@ type SearchDecisionsParams struct {
 	Repo  string `json:"repo"`
 	Days  int    `json:"days"`
 	Limit int    `json:"limit"`
+}
+
+// DefineTemplateParams matches the DefineTemplate method signature.
+type DefineTemplateParams struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	QueryText   string   `json:"query_text"`
+	ParamNames  []string `json:"param_names"`
+}
+
+// EvaluateTemplateParams matches the EvaluateTemplate method signature.
+type EvaluateTemplateParams struct {
+	Name   string            `json:"name"`
+	Params map[string]string `json:"params"`
 }

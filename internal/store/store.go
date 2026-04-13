@@ -222,6 +222,17 @@ type WhatsupResult struct {
 	System   SystemMetrics    `json:"system"`
 }
 
+// QueryTemplate is a named, parameterised query template stored in the database.
+type QueryTemplate struct {
+	ID          int      `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	QueryText   string   `json:"query_text"`
+	ParamNames  []string `json:"param_names"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
 // UsageResult holds aggregated token usage with totals.
 type UsageResult struct {
 	Days       int         `json:"days"`
@@ -289,7 +300,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 12
+const schemaVersion = 13
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -526,6 +537,15 @@ func New(dbPath, projectDir string) (*Store, error) {
 			confirmation_text TEXT NOT NULL,
 			repo TEXT NOT NULL DEFAULT '',
 			timestamp TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS query_templates (
+			id INTEGER PRIMARY KEY,
+			name TEXT UNIQUE NOT NULL,
+			description TEXT,
+			query_text TEXT NOT NULL,
+			param_names TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 	`)
 	if err != nil {
@@ -2827,6 +2847,11 @@ func (s *Store) IngestAll() error {
 	// INSERT OR IGNORE makes this idempotent across restarts.
 	backfillSessionChains(s.db)
 
+	// Detect decision pairs (proposal + confirmation) in sessions that
+	// haven't been scanned yet (e.g. sessions ingested before decisions
+	// table existed).
+	backfillDecisions(s.db)
+
 	// FTS5 optimize (segment merging) is skipped intentionally.
 	// On a fresh 577k-message database it takes 10+ minutes of solid
 	// CPU at 100%, blocking all reads. FTS5 works fine with multiple
@@ -5103,8 +5128,8 @@ func (s *Store) Whatsup() (*WhatsupResult, error) {
 	}
 
 	type psRow struct {
-		rss    int64
-		cpuPct float64
+		rss     int64
+		cpuPct  float64
 		cpuTime string
 	}
 	pidMetrics := make(map[int]psRow)
@@ -5278,4 +5303,132 @@ func (s *Store) sessionChainLink(sessionID string) (ChainLink, error) {
 		WHERE ss.session_id = ?`, sessionID,
 	).Scan(&link.Project, &link.FirstMsg, &link.LastMsg, &link.Topic, &link.Repo)
 	return link, nil
+}
+
+// DefineTemplate upserts a named query template.
+func (s *Store) DefineTemplate(name, description, queryText string, paramNames []string) error {
+	if paramNames == nil {
+		paramNames = []string{}
+	}
+	paramJSON, err := json.Marshal(paramNames)
+	if err != nil {
+		return fmt.Errorf("marshal param_names: %w", err)
+	}
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	_, err = s.db.Exec(`
+		INSERT INTO query_templates (name, description, query_text, param_names, updated_at)
+		VALUES (?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(name) DO UPDATE SET
+			description = excluded.description,
+			query_text = excluded.query_text,
+			param_names = excluded.param_names,
+			updated_at = datetime('now')
+	`, name, description, queryText, string(paramJSON))
+	return err
+}
+
+// EvaluateTemplate looks up a template by name, substitutes parameters, and executes it.
+func (s *Store) EvaluateTemplate(name string, params map[string]string) ([]map[string]any, error) {
+	s.rwmu.RLock()
+	var paramNamesJSON, queryText string
+	err := s.db.QueryRow(
+		`SELECT query_text, param_names FROM query_templates WHERE name = ?`, name,
+	).Scan(&queryText, &paramNamesJSON)
+	s.rwmu.RUnlock()
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("template %q not found", name)
+		}
+		return nil, err
+	}
+
+	var paramNames []string
+	if err := json.Unmarshal([]byte(paramNamesJSON), &paramNames); err != nil {
+		return nil, fmt.Errorf("parse param_names: %w", err)
+	}
+
+	// Validate all required params are provided.
+	for _, p := range paramNames {
+		if _, ok := params[p]; !ok {
+			return nil, fmt.Errorf("missing parameter %q", p)
+		}
+	}
+
+	// Substitute {{param}} placeholders.
+	q := queryText
+	for k, v := range params {
+		q = strings.ReplaceAll(q, "{{"+k+"}}", v)
+	}
+
+	return s.Query(q)
+}
+
+// ListTemplates returns all stored query templates.
+func (s *Store) ListTemplates() ([]QueryTemplate, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, name, COALESCE(description, ''), query_text, param_names, created_at, updated_at
+		FROM query_templates
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var templates []QueryTemplate
+	for rows.Next() {
+		var t QueryTemplate
+		var paramNamesJSON string
+		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.QueryText, &paramNamesJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			continue
+		}
+		if err := json.Unmarshal([]byte(paramNamesJSON), &t.ParamNames); err != nil {
+			t.ParamNames = []string{}
+		}
+		templates = append(templates, t)
+	}
+	return templates, nil
+}
+
+// backfillDecisions runs detectDecisions for all ingested sessions
+// that don't yet have any decisions entries. Safe to call on every startup.
+func backfillDecisions(db *sql.DB) {
+	rows, err := db.Query(`
+		SELECT DISTINCT sm.session_id, COALESCE(sm.repo, '')
+		FROM session_meta sm
+		WHERE NOT EXISTS (SELECT 1 FROM decisions d WHERE d.session_id = sm.session_id)`)
+	if err != nil {
+		slog.Warn("backfill decisions query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	type sessionRepo struct {
+		id   string
+		repo string
+	}
+	var sessions []sessionRepo
+	for rows.Next() {
+		var sr sessionRepo
+		if rows.Scan(&sr.id, &sr.repo) == nil {
+			sessions = append(sessions, sr)
+		}
+	}
+	rows.Close()
+
+	found := 0
+	for _, sr := range sessions {
+		detectDecisions(db, sr.id, sr.repo)
+	}
+	// Count total decisions found.
+	db.QueryRow("SELECT COUNT(*) FROM decisions").Scan(&found)
+	if found > 0 {
+		slog.Info("backfilled decisions", "sessions_scanned", len(sessions), "decisions_found", found)
+	}
 }
