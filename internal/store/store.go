@@ -195,6 +195,33 @@ type HourlyRate struct {
 	MessagesPerHour float64 `json:"messages_per_hour"`
 }
 
+// WhatsupSession holds per-session process metrics alongside session metadata.
+type WhatsupSession struct {
+	SessionID string  `json:"session_id"`
+	PID       int     `json:"pid"`
+	Repo      string  `json:"repo,omitempty"`
+	Topic     string  `json:"topic,omitempty"`
+	WorkType  string  `json:"work_type,omitempty"`
+	CPUPct    float64 `json:"cpu_pct"`
+	RSSBytes  int64   `json:"rss_bytes"`
+	CPUTime   string  `json:"cpu_time"`
+}
+
+// SystemMetrics holds system-wide resource metrics.
+type SystemMetrics struct {
+	MemPagesFree     int64   `json:"mem_pages_free"`
+	MemPagesActive   int64   `json:"mem_pages_active"`
+	MemPagesInactive int64   `json:"mem_pages_inactive"`
+	MemPagesWired    int64   `json:"mem_pages_wired"`
+	MemPressurePct   float64 `json:"mem_pressure_pct"` // (active+wired)/(active+inactive+wired+free)
+}
+
+// WhatsupResult holds the combined per-session and system metrics.
+type WhatsupResult struct {
+	Sessions []WhatsupSession `json:"sessions"`
+	System   SystemMetrics    `json:"system"`
+}
+
 // UsageResult holds aggregated token usage with totals.
 type UsageResult struct {
 	Days       int         `json:"days"`
@@ -262,7 +289,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 11
+const schemaVersion = 12
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -490,6 +517,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 			mechanism TEXT NOT NULL DEFAULT 'time_heuristic',
 			detected_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		CREATE TABLE IF NOT EXISTS decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			proposal_msg_id INTEGER REFERENCES messages(id),
+			confirmation_msg_id INTEGER REFERENCES messages(id),
+			proposal_text TEXT NOT NULL,
+			confirmation_text TEXT NOT NULL,
+			repo TEXT NOT NULL DEFAULT '',
+			timestamp TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -544,6 +581,9 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_ci_runs_conclusion ON ci_runs(conclusion);
 		CREATE INDEX IF NOT EXISTS idx_ci_runs_started ON ci_runs(started_at);
 		CREATE INDEX IF NOT EXISTS idx_session_chains_predecessor ON session_chains(predecessor_id);
+		CREATE INDEX IF NOT EXISTS idx_decisions_session ON decisions(session_id);
+		CREATE INDEX IF NOT EXISTS idx_decisions_repo ON decisions(repo);
+		CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp);
 	`)
 	if err != nil {
 		db.Close()
@@ -723,6 +763,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 			VALUES ('delete', old.id, old.repo, old.workflow, COALESCE(old.branch, ''), COALESCE(old.log_summary, ''), COALESCE(old.conclusion, ''));
 			INSERT INTO ci_runs_fts(rowid, repo, workflow, branch, log_summary, conclusion)
 			VALUES (new.id, new.repo, new.workflow, COALESCE(new.branch, ''), COALESCE(new.log_summary, ''), COALESCE(new.conclusion, ''));
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
+			proposal_text, confirmation_text, repo,
+			content=decisions,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS decisions_ai;
+		CREATE TRIGGER decisions_ai AFTER INSERT ON decisions
+		BEGIN
+			INSERT INTO decisions_fts(rowid, proposal_text, confirmation_text, repo)
+			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS decisions_au;
+		CREATE TRIGGER decisions_au AFTER UPDATE ON decisions
+		BEGIN
+			INSERT INTO decisions_fts(decisions_fts, rowid, proposal_text, confirmation_text, repo)
+			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
+			INSERT INTO decisions_fts(rowid, proposal_text, confirmation_text, repo)
+			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
+		END;
+		DROP TRIGGER IF EXISTS decisions_ad;
+		CREATE TRIGGER decisions_ad AFTER DELETE ON decisions
+		BEGIN
+			INSERT INTO decisions_fts(decisions_fts, rowid, proposal_text, confirmation_text, repo)
+			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
 		END;
 	`)
 	if err != nil {
@@ -4839,6 +4904,190 @@ func (s *Store) chainLocked(sessionID string) ([]ChainLink, error) {
 		cur = succ
 	}
 	return chain, nil
+}
+
+// Whatsup returns per-session process metrics for all live Claude sessions,
+// alongside system-wide memory pressure. On non-macOS platforms it returns
+// best-effort data (RSS/CPU via ps where available, zeroed system metrics).
+func (s *Store) Whatsup() (*WhatsupResult, error) {
+	sessions := s.LiveSessions()
+	result := &WhatsupResult{}
+
+	if len(sessions) == 0 {
+		return result, nil
+	}
+
+	// Build PID list for a single batched ps invocation.
+	pidList := make([]string, 0, len(sessions))
+	pidToSession := make(map[int]string, len(sessions))
+	for sid, pid := range sessions {
+		pidList = append(pidList, fmt.Sprintf("%d", pid))
+		pidToSession[pid] = sid
+	}
+
+	type psRow struct {
+		rss    int64
+		cpuPct float64
+		cpuTime string
+	}
+	pidMetrics := make(map[int]psRow)
+
+	// ps -o pid=,rss=,%cpu=,time= -p <pid,...>
+	args := append([]string{"-o", "pid=,rss=,%cpu=,time=", "-p"}, strings.Join(pidList, ","))
+	out, err := exec.Command("ps", args...).Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue
+			}
+			pid := 0
+			for _, ch := range fields[0] {
+				if ch < '0' || ch > '9' {
+					pid = -1
+					break
+				}
+				pid = pid*10 + int(ch-'0')
+			}
+			if pid <= 0 {
+				continue
+			}
+			rss := int64(0)
+			for _, ch := range fields[1] {
+				if ch >= '0' && ch <= '9' {
+					rss = rss*10 + int64(ch-'0')
+				}
+			}
+			cpuPct := 0.0
+			fmt.Sscanf(fields[2], "%f", &cpuPct)
+			pidMetrics[pid] = psRow{
+				rss:     rss * 1024, // ps reports RSS in KB
+				cpuPct:  cpuPct,
+				cpuTime: fields[3],
+			}
+		}
+	}
+
+	// Query session_meta for each session to get repo/topic/work_type.
+	type metaRow struct {
+		repo     string
+		topic    string
+		workType string
+	}
+	sessionMeta := make(map[string]metaRow, len(sessions))
+	rows, err := s.db.Query(`
+		SELECT session_id, COALESCE(repo, ''), COALESCE(topic, ''), COALESCE(work_type, '')
+		FROM session_meta
+		WHERE session_id IN (`+placeholders(len(pidList))+`)`,
+		stringsToAny(func() []string {
+			ids := make([]string, 0, len(sessions))
+			for id := range sessions {
+				ids = append(ids, id)
+			}
+			return ids
+		}())...,
+	)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var sid, repo, topic, workType string
+			if rows.Scan(&sid, &repo, &topic, &workType) == nil {
+				sessionMeta[sid] = metaRow{repo: repo, topic: topic, workType: workType}
+			}
+		}
+	}
+
+	for sid, pid := range sessions {
+		m := pidMetrics[pid]
+		meta := sessionMeta[sid]
+		result.Sessions = append(result.Sessions, WhatsupSession{
+			SessionID: sid,
+			PID:       pid,
+			Repo:      meta.repo,
+			Topic:     meta.topic,
+			WorkType:  meta.workType,
+			CPUPct:    m.cpuPct,
+			RSSBytes:  m.rss,
+			CPUTime:   m.cpuTime,
+		})
+	}
+
+	// Sort by CPU% descending so the busiest session is first.
+	sort.Slice(result.Sessions, func(i, j int) bool {
+		if result.Sessions[i].CPUPct != result.Sessions[j].CPUPct {
+			return result.Sessions[i].CPUPct > result.Sessions[j].CPUPct
+		}
+		return result.Sessions[i].RSSBytes > result.Sessions[j].RSSBytes
+	})
+
+	// Collect system memory pressure (macOS only).
+	if runtime.GOOS == "darwin" {
+		result.System = collectVMStat()
+	}
+
+	return result, nil
+}
+
+// collectVMStat parses vm_stat output to compute macOS memory pressure.
+func collectVMStat() SystemMetrics {
+	out, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return SystemMetrics{}
+	}
+	vals := make(map[string]int64)
+	for _, line := range strings.Split(string(out), "\n") {
+		// Lines look like: "Pages free:                               12345."
+		if !strings.Contains(line, ":") {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		key := strings.TrimSpace(parts[0])
+		valStr := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[1]), "."))
+		var v int64
+		fmt.Sscanf(valStr, "%d", &v)
+		vals[key] = v
+	}
+	free := vals["Pages free"]
+	active := vals["Pages active"]
+	inactive := vals["Pages inactive"]
+	wired := vals["Pages wired down"]
+	total := free + active + inactive + wired
+	pressure := 0.0
+	if total > 0 {
+		pressure = float64(active+wired) / float64(total) * 100
+	}
+	return SystemMetrics{
+		MemPagesFree:     free,
+		MemPagesActive:   active,
+		MemPagesInactive: inactive,
+		MemPagesWired:    wired,
+		MemPressurePct:   pressure,
+	}
+}
+
+// placeholders returns a comma-separated list of n SQL placeholder '?'s.
+func placeholders(n int) string {
+	if n == 0 {
+		return ""
+	}
+	b := make([]byte, 0, n*2-1)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b = append(b, ',', '?')
+		} else {
+			b = append(b, '?')
+		}
+	}
+	return string(b)
+}
+
+// stringsToAny converts a []string to []any for use as variadic SQL args.
+func stringsToAny(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
 func (s *Store) sessionChainLink(sessionID string) (ChainLink, error) {

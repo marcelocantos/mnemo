@@ -29,4 +29,5 @@ type Backend interface {
 	Predecessor(sessionID string) (string, error)
 	Successor(sessionID string) (string, error)
 	Chain(sessionID string) ([]ChainLink, error)
+	Whatsup() (*WhatsupResult, error)
 }

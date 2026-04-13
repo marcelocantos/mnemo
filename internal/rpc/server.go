@@ -134,6 +134,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Chain": makeMethod(func(p ChainParams) (any, error) {
 			return s.Chain(p.SessionID)
 		}),
+		"Whatsup": func(_ json.RawMessage) (any, error) {
+			return s.Whatsup()
+		},
 	}
 }
 

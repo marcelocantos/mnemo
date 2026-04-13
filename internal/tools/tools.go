@@ -257,6 +257,13 @@ Given any session ID in a chain, this tool returns the complete ordered chain fr
 If the session has no chain links, a single-element result is returned.`),
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix)")),
 		),
+		mcp.NewTool("mnemo_whatsup",
+			mcp.WithDescription(`Report which active Claude Code sessions are doing expensive work right now.
+
+Shows per-session CPU%, RSS memory, and CPU time alongside system-wide memory pressure. Cross-references live session PIDs with session metadata (repo, topic, work type). Results are sorted by CPU% descending so the busiest session appears first.
+
+Use this to answer "what is Claude doing right now?" — especially useful when the machine is hot or fans are spinning.`),
+		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
 
@@ -314,6 +321,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.chain(args)
 	case "mnemo_self":
 		return h.self(args)
+	case "mnemo_whatsup":
+		return h.whatsup()
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -931,5 +940,58 @@ func (h *Handler) chain(args map[string]any) (string, bool, error) {
 			fmt.Fprintf(&b, "       ↓ gap=%dms confidence=%s\n", link.GapMs, link.Confidence)
 		}
 	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) whatsup() (string, bool, error) {
+	result, err := h.mem.Whatsup()
+	if err != nil {
+		return fmt.Sprintf("whatsup failed: %v", err), true, nil
+	}
+
+	var b strings.Builder
+
+	if len(result.Sessions) == 0 {
+		fmt.Fprintf(&b, "No live Claude Code sessions detected.\n")
+	} else {
+		fmt.Fprintf(&b, "%-12s %-6s %7s %10s %-12s %-20s %s\n",
+			"Session", "PID", "CPU%", "RSS", "WorkType", "Repo", "Topic")
+		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 90))
+		for _, s := range result.Sessions {
+			sid := s.SessionID
+			if len(sid) > 12 {
+				sid = sid[:12]
+			}
+			rss := fmt.Sprintf("%dMB", s.RSSBytes/1024/1024)
+			repo := s.Repo
+			if len(repo) > 20 {
+				repo = repo[:17] + "..."
+			}
+			topic := s.Topic
+			if len(topic) > 40 {
+				topic = topic[:37] + "..."
+			}
+			workType := s.WorkType
+			if workType == "" {
+				workType = "-"
+			}
+			fmt.Fprintf(&b, "%-12s %-6d %6.1f%% %10s %-12s %-20s %s\n",
+				sid, s.PID, s.CPUPct, rss, workType, repo, topic)
+		}
+	}
+
+	// System metrics section.
+	sys := result.System
+	if sys.MemPagesFree+sys.MemPagesActive+sys.MemPagesInactive+sys.MemPagesWired > 0 {
+		total := sys.MemPagesFree + sys.MemPagesActive + sys.MemPagesInactive + sys.MemPagesWired
+		pageSize := int64(4096) // macOS default page size
+		fmt.Fprintf(&b, "\nSystem memory (4K pages, pressure=%.1f%%):\n", sys.MemPressurePct)
+		fmt.Fprintf(&b, "  Free:     %d pages (%dMB)\n", sys.MemPagesFree, sys.MemPagesFree*pageSize/1024/1024)
+		fmt.Fprintf(&b, "  Active:   %d pages (%dMB)\n", sys.MemPagesActive, sys.MemPagesActive*pageSize/1024/1024)
+		fmt.Fprintf(&b, "  Inactive: %d pages (%dMB)\n", sys.MemPagesInactive, sys.MemPagesInactive*pageSize/1024/1024)
+		fmt.Fprintf(&b, "  Wired:    %d pages (%dMB)\n", sys.MemPagesWired, sys.MemPagesWired*pageSize/1024/1024)
+		fmt.Fprintf(&b, "  Total:    %d pages (%dMB)\n", total, total*pageSize/1024/1024)
+	}
+
 	return b.String(), false, nil
 }

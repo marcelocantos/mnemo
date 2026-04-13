@@ -260,6 +260,15 @@ func (p *Proxy) Chain(sessionID string) ([]store.ChainLink, error) {
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) Whatsup() (*store.WhatsupResult, error) {
+	raw, err := p.client.Call("Whatsup", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result store.WhatsupResult
+	return &result, json.Unmarshal(raw, &result)
+}
+
 func (p *Proxy) Predecessor(sessionID string) (string, error) {
 	chain, err := p.Chain(sessionID)
 	if err != nil {
