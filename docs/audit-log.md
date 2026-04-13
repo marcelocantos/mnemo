@@ -72,3 +72,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `3112ab2`
 - **Outcome**: Released v0.15.0 (darwin-arm64, linux-amd64, linux-arm64). Self-healing repo-level ingest (🎯T17): workspace-root filesystem walk discovers repos independently of session metadata. New ~/.mnemo/config.json with workspace_roots. Per-stream backfill status in mnemo_status/mnemo_stats. Schema v10. 15 new tests. Homebrew formula updated.
+
+## 2026-04-13 — /release v0.16.0
+
+- **Commit**: pending
+- **Outcome**: Released v0.16.0 (darwin-arm64, linux-amd64, linux-arm64). Session chains (🎯T16): new session_chains table and mnemo_chain tool link /clear-bounded transcripts into work spans via time-gap heuristic. Session liveness (🎯T9.5.1): mnemo_sessions annotates live sessions with [LIVE pid=NNNNN] via lsof detection. Stats streams rendering in mnemo_stats text output. Schema v11. 15 new tests. Homebrew formula updated.

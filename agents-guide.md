@@ -125,6 +125,8 @@ List sessions sorted by recency. Filter by `project`, `repo`
 (org/name substring), or `work_type` (development, feature, bugfix,
 refactor, chore, docs, test, ci, release, review, branch-work).
 Defaults to interactive sessions with at least 6 substantive messages.
+Live sessions (with an active Claude Code process) are annotated with
+`[LIVE pid=NNNNN]` in the output.
 
 ### mnemo_read_session
 
@@ -188,6 +190,7 @@ Key tables and columns:
 | `plans_fts` | FTS5 on content, repo, phase |
 | `ci_runs` | id, repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url |
 | `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion |
+| `session_chains` | successor_id (PK), predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at |
 
 Content types in `content_type`: `text`, `tool_use`, `tool_result`, `thinking`.
 
@@ -355,6 +358,25 @@ Parameters:
 - `days` — recency window (default 30)
 - `limit` — max results (default 20)
 
+### mnemo_chain
+
+Retrieve the full `/clear`-bounded session chain for any session ID.
+When a user types `/clear` in Claude Code, the current JSONL transcript
+ends and a new one begins within ~300ms. mnemo detects these rollovers
+and links successive sessions into chains.
+
+Given any session ID in a chain, returns the complete ordered chain from
+oldest to newest, with per-session summaries (topic, timestamps, repo)
+and the gap/confidence for each link. Single-element result if no chain
+is found.
+
+Parameters:
+- `session_id` (required) — any session ID in the chain (or a prefix)
+
+Use this when you need to understand a work span that crossed `/clear`
+boundaries — e.g., to reconstruct the full context of a multi-session
+task.
+
 ### mnemo_self
 
 Discover the calling session's ID. Two-phase nonce protocol:
@@ -419,4 +441,6 @@ an empty source and is surfaced, not hidden.
 - **What files were edited**: `mnemo_query` with `SELECT DISTINCT tool_file_path FROM messages WHERE tool_name = 'Edit'`
 - **What commands were run**: `mnemo_query` with `SELECT tool_command FROM messages WHERE tool_name = 'Bash'`
 - **Search within a repo**: `mnemo_search` with `repo: "mnemo"` and a query term
+- **Trace a work span across /clear**: `mnemo_chain` with any session ID — returns the full chain of linked sessions
+- **Which sessions are live?**: `mnemo_sessions` — live sessions are annotated with `[LIVE pid=NNNNN]`
 - **Custom analytics**: `mnemo_query` with SQL — e.g., message volume by day, most active projects
