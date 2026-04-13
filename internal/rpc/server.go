@@ -155,6 +155,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"ListTemplates": func(_ json.RawMessage) (any, error) {
 			return s.ListTemplates()
 		},
+		"DiscoverPatterns": makeMethod(func(p DiscoverPatternsParams) (any, error) {
+			return s.DiscoverPatterns(p.Days, p.RepoFilter, p.MinOccurrences)
+		}),
 	}
 }
 
@@ -351,4 +354,11 @@ type SearchCommitsParams struct {
 	Author string `json:"author"`
 	Days   int    `json:"days"`
 	Limit  int    `json:"limit"`
+}
+
+// DiscoverPatternsParams matches the DiscoverPatterns method signature.
+type DiscoverPatternsParams struct {
+	Days           int    `json:"days"`
+	RepoFilter     string `json:"repo_filter"`
+	MinOccurrences int    `json:"min_occurrences"`
 }

@@ -941,6 +941,32 @@ func (h *Handler) ci(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
+func (h *Handler) commits(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	author, _ := args["author"].(string)
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	results, err := h.mem.SearchCommits(query, repo, author, days, limit)
+	if err != nil {
+		return fmt.Sprintf("commits search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No commits found.", false, nil
+	}
+	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
 func (h *Handler) decisions(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
@@ -1198,4 +1224,44 @@ func (h *Handler) listTemplates() (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *Handler) discoverPatterns(args map[string]any) (string, bool, error) {
+	days := 90
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	repoFilter, _ := args["repo"].(string)
+	minOccurrences := 3
+	if m, ok := args["min_occurrences"].(float64); ok && m > 0 {
+		minOccurrences = int(m)
+	}
+
+	candidates, err := h.mem.DiscoverPatterns(days, repoFilter, minOccurrences)
+	if err != nil {
+		return fmt.Sprintf("discover patterns failed: %v", err), true, nil
+	}
+	if len(candidates) == 0 {
+		return fmt.Sprintf("No workaround patterns found in the last %d days (min_occurrences=%d). The transcript index may not have enough data yet, or agents are already using mnemo tools effectively.", days, minOccurrences), false, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Discovered Workaround Patterns (%d days, min_occurrences=%d)\n\n", days, minOccurrences)
+	for _, c := range candidates {
+		fmt.Fprintf(&b, "## %s (%d sessions)\n", c.PatternType, c.Occurrences)
+		fmt.Fprintf(&b, "**Description:** %s\n\n", c.Description)
+		fmt.Fprintf(&b, "**Suggestion:** %s\n\n", c.Suggestion)
+		if c.Evidence != "" {
+			fmt.Fprintf(&b, "**Example evidence:**\n```\n%s\n```\n\n", c.Evidence)
+		}
+		if len(c.Sessions) > 0 {
+			shown := c.Sessions
+			if len(shown) > 5 {
+				shown = shown[:5]
+			}
+			fmt.Fprintf(&b, "**Sessions (showing %d of %d):** %s\n\n", len(shown), len(c.Sessions), strings.Join(shown, ", "))
+		}
+		b.WriteString("---\n\n")
+	}
+	return b.String(), false, nil
 }

@@ -364,3 +364,16 @@ func (p *Proxy) Successor(sessionID string) (string, error) {
 	}
 	return "", nil
 }
+
+func (p *Proxy) DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]store.PatternCandidate, error) {
+	raw, err := p.client.Call("DiscoverPatterns", DiscoverPatternsParams{
+		Days:           days,
+		RepoFilter:     repoFilter,
+		MinOccurrences: minOccurrences,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.PatternCandidate
+	return results, json.Unmarshal(raw, &results)
+}
