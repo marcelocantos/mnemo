@@ -311,6 +311,34 @@ func (p *Proxy) ListTemplates() ([]store.QueryTemplate, error) {
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]store.GitHubActivityResult, error) {
+	raw, err := p.client.Call("SearchGitHubActivity", SearchGitHubActivityParams{
+		Query:        query,
+		Repo:         repo,
+		State:        state,
+		Author:       author,
+		ActivityType: activityType,
+		Days:         days,
+		Limit:        limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.GitHubActivityResult
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchCommits(query string, repo string, author string, days int, limit int) ([]store.GitCommit, error) {
+	raw, err := p.client.Call("SearchCommits", SearchCommitsParams{
+		Query: query, Repo: repo, Author: author, Days: days, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.GitCommit
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) Predecessor(sessionID string) (string, error) {
 	chain, err := p.Chain(sessionID)
 	if err != nil {

@@ -140,6 +140,12 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Whatsup": func(_ json.RawMessage) (any, error) {
 			return s.Whatsup()
 		},
+		"SearchGitHubActivity": makeMethod(func(p SearchGitHubActivityParams) (any, error) {
+			return s.SearchGitHubActivity(p.Query, p.Repo, p.State, p.Author, p.ActivityType, p.Days, p.Limit)
+		}),
+		"SearchCommits": makeMethod(func(p SearchCommitsParams) (any, error) {
+			return s.SearchCommits(p.Query, p.Repo, p.Author, p.Days, p.Limit)
+		}),
 		"DefineTemplate": makeMethod(func(p DefineTemplateParams) (any, error) {
 			return nil, s.DefineTemplate(p.Name, p.Description, p.QueryText, p.ParamNames)
 		}),
@@ -325,4 +331,24 @@ type DefineTemplateParams struct {
 type EvaluateTemplateParams struct {
 	Name   string            `json:"name"`
 	Params map[string]string `json:"params"`
+}
+
+// SearchGitHubActivityParams matches the SearchGitHubActivity method signature.
+type SearchGitHubActivityParams struct {
+	Query        string `json:"query"`
+	Repo         string `json:"repo"`
+	State        string `json:"state"`
+	Author       string `json:"author"`
+	ActivityType string `json:"activity_type"`
+	Days         int    `json:"days"`
+	Limit        int    `json:"limit"`
+}
+
+// SearchCommitsParams matches the SearchCommits method signature.
+type SearchCommitsParams struct {
+	Query  string `json:"query"`
+	Repo   string `json:"repo"`
+	Author string `json:"author"`
+	Days   int    `json:"days"`
+	Limit  int    `json:"limit"`
 }

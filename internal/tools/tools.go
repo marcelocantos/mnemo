@@ -233,6 +233,18 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
 		),
+		mcp.NewTool("mnemo_prs",
+			mcp.WithDescription(`Search GitHub PRs and issues across all indexed repos. Uses FTS5 for keyword search on titles and bodies. Data is polled from GitHub repos that appear in session history and backfilled at startup.
+
+Supports filtering by state, author, and recency. Results include both PRs and issues unless filtered by type.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching on title/body). Omit to list recent.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
+			mcp.WithString("state", mcp.Description("Filter by state: open, closed, merged (PRs only), all (default)")),
+			mcp.WithString("author", mcp.Description("Filter by author username")),
+			mcp.WithString("type", mcp.Description("Filter by type: pr, issue, all (default)")),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_ci",
 			mcp.WithDescription(`Search CI/CD run history across repos. Indexes GitHub Actions runs from all repos that appear in session history.
 
@@ -246,6 +258,14 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching against workflow, branch, logs). Omit to list recent runs.")),
 			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
 			mcp.WithString("conclusion", mcp.Description("Filter by conclusion: success, failure, cancelled, skipped")),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
+		mcp.NewTool("mnemo_commits",
+			mcp.WithDescription(`Search git commits across all indexed repos. Uses FTS5 for keyword search on commit messages. Commits are indexed automatically from repos that appear in session history. Supports cross-repo queries with date range filtering.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching on subject/body). Omit to list recent.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
+			mcp.WithString("author", mcp.Description("Filter by author name or email substring")),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
@@ -297,6 +317,20 @@ Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonc
 		mcp.NewTool("mnemo_list_templates",
 			mcp.WithDescription(`List all saved query templates with their names, descriptions, and parameter definitions.`),
 		),
+		mcp.NewTool("mnemo_discover_patterns",
+			mcp.WithDescription(`Analyze transcript history to discover workaround patterns that suggest missing mnemo features.
+
+Detects:
+- direct_jsonl_read: Bash commands that read JSONL transcript files directly (bypassing mnemo)
+- transcript_grep: grep/rg over transcript directories instead of using mnemo_search
+- repeated_query: mnemo_query shapes repeated across 3+ sessions (candidates for templates)
+- repeated_search: mnemo_search patterns repeated across 3+ sessions (may warrant dedicated tools)
+
+Returns candidate features with evidence counts, example sessions, and suggested actions.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 90)")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("min_occurrences", mcp.Description("Minimum pattern occurrences to report (default 3)")),
+		),
 	}
 }
 
@@ -339,8 +373,12 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.whoRan(args)
 	case "mnemo_permissions":
 		return h.permissions(args)
+	case "mnemo_prs":
+		return h.prs(args)
 	case "mnemo_ci":
 		return h.ci(args)
+	case "mnemo_commits":
+		return h.commits(args)
 	case "mnemo_decisions":
 		return h.decisions(args)
 	case "mnemo_chain":
@@ -355,6 +393,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.evaluateTemplate(args)
 	case "mnemo_list_templates":
 		return h.listTemplates()
+	case "mnemo_discover_patterns":
+		return h.discoverPatterns(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -841,6 +881,34 @@ func (h *Handler) permissions(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) prs(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	state, _ := args["state"].(string)
+	author, _ := args["author"].(string)
+	activityType, _ := args["type"].(string)
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	results, err := h.mem.SearchGitHubActivity(query, repo, state, author, activityType, days, limit)
+	if err != nil {
+		return fmt.Sprintf("GitHub activity search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No PRs or issues found.", false, nil
+	}
+	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

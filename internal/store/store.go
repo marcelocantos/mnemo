@@ -300,7 +300,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 13
+const schemaVersion = 14
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -547,6 +547,45 @@ func New(dbPath, projectDir string) (*Store, error) {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		CREATE TABLE IF NOT EXISTS git_commits (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			commit_hash TEXT NOT NULL,
+			author_name TEXT NOT NULL,
+			author_email TEXT NOT NULL,
+			commit_date TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			UNIQUE(repo, commit_hash)
+		);
+		CREATE TABLE IF NOT EXISTS github_prs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			pr_number INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL,
+			author TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			merged_at TEXT,
+			url TEXT NOT NULL,
+			UNIQUE(repo, pr_number)
+		);
+		CREATE TABLE IF NOT EXISTS github_issues (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			issue_number INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL,
+			author TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			url TEXT NOT NULL,
+			labels TEXT NOT NULL DEFAULT '[]',
+			UNIQUE(repo, issue_number)
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -604,6 +643,17 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_decisions_session ON decisions(session_id);
 		CREATE INDEX IF NOT EXISTS idx_decisions_repo ON decisions(repo);
 		CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_git_commits_repo ON git_commits(repo);
+		CREATE INDEX IF NOT EXISTS idx_git_commits_date ON git_commits(commit_date);
+		CREATE INDEX IF NOT EXISTS idx_git_commits_hash ON git_commits(commit_hash);
+		CREATE INDEX IF NOT EXISTS idx_github_prs_repo ON github_prs(repo);
+		CREATE INDEX IF NOT EXISTS idx_github_prs_state ON github_prs(state);
+		CREATE INDEX IF NOT EXISTS idx_github_prs_created ON github_prs(created_at);
+		CREATE INDEX IF NOT EXISTS idx_github_prs_updated ON github_prs(updated_at);
+		CREATE INDEX IF NOT EXISTS idx_github_issues_repo ON github_issues(repo);
+		CREATE INDEX IF NOT EXISTS idx_github_issues_state ON github_issues(state);
+		CREATE INDEX IF NOT EXISTS idx_github_issues_created ON github_issues(created_at);
+		CREATE INDEX IF NOT EXISTS idx_github_issues_updated ON github_issues(updated_at);
 	`)
 	if err != nil {
 		db.Close()
@@ -808,6 +858,78 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO decisions_fts(decisions_fts, rowid, proposal_text, confirmation_text, repo)
 			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS git_commits_fts USING fts5(
+			subject, body, repo, author_name,
+			content=git_commits, content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS git_commits_ai;
+		CREATE TRIGGER git_commits_ai AFTER INSERT ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts(rowid, subject, body, repo, author_name)
+			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
+		END;
+		DROP TRIGGER IF EXISTS git_commits_au;
+		CREATE TRIGGER git_commits_au AFTER UPDATE ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts(git_commits_fts, rowid, subject, body, repo, author_name)
+			VALUES ('delete', old.id, old.subject, old.body, old.repo, old.author_name);
+			INSERT INTO git_commits_fts(rowid, subject, body, repo, author_name)
+			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
+		END;
+		DROP TRIGGER IF EXISTS git_commits_ad;
+		CREATE TRIGGER git_commits_ad AFTER DELETE ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts(git_commits_fts, rowid, subject, body, repo, author_name)
+			VALUES ('delete', old.id, old.subject, old.body, old.repo, old.author_name);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS github_prs_fts USING fts5(
+			title, body, repo, author,
+			content=github_prs, content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS github_prs_ai;
+		CREATE TRIGGER github_prs_ai AFTER INSERT ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+		DROP TRIGGER IF EXISTS github_prs_au;
+		CREATE TRIGGER github_prs_au AFTER UPDATE ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts(github_prs_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+			INSERT INTO github_prs_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+		DROP TRIGGER IF EXISTS github_prs_ad;
+		CREATE TRIGGER github_prs_ad AFTER DELETE ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts(github_prs_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS github_issues_fts USING fts5(
+			title, body, repo, author,
+			content=github_issues, content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS github_issues_ai;
+		CREATE TRIGGER github_issues_ai AFTER INSERT ON github_issues
+		BEGIN
+			INSERT INTO github_issues_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+		DROP TRIGGER IF EXISTS github_issues_au;
+		CREATE TRIGGER github_issues_au AFTER UPDATE ON github_issues
+		BEGIN
+			INSERT INTO github_issues_fts(github_issues_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+			INSERT INTO github_issues_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+		DROP TRIGGER IF EXISTS github_issues_ad;
+		CREATE TRIGGER github_issues_ad AFTER DELETE ON github_issues
+		BEGIN
+			INSERT INTO github_issues_fts(github_issues_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
 		END;
 	`)
 	if err != nil {
@@ -2852,6 +2974,10 @@ func (s *Store) IngestAll() error {
 	// table existed).
 	backfillDecisions(s.db)
 
+	// Index GitHub PRs and issues from all known repos.
+	// Runs in a goroutine so it doesn't block startup (API calls are slow).
+	go backfillGitHubActivity(s)
+
 	// FTS5 optimize (segment merging) is skipped intentionally.
 	// On a fresh 577k-message database it takes 10+ minutes of solid
 	// CPU at 100%, blocking all reads. FTS5 works fine with multiple
@@ -4006,6 +4132,344 @@ func (s *Store) Permissions(days int, repoFilter string, limit int) (*Permission
 	}
 
 	return result, nil
+}
+
+// PatternCandidate is a detected workaround pattern suggesting a missing feature.
+type PatternCandidate struct {
+	PatternType string   `json:"pattern_type"` // "direct_jsonl_read", "transcript_grep", "repeated_query", "repeated_search"
+	Description string   `json:"description"`
+	Occurrences int      `json:"occurrences"`
+	Sessions    []string `json:"sessions"`   // session IDs truncated to 8 chars
+	Evidence    string   `json:"evidence"`   // example command or query
+	Suggestion  string   `json:"suggestion"` // what to build
+}
+
+// DiscoverPatterns mines the transcript index for workaround patterns that
+// suggest missing mnemo features. It runs entirely at query time — no new
+// tables are required.
+func (s *Store) DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if days <= 0 {
+		days = 90
+	}
+	if minOccurrences <= 0 {
+		minOccurrences = 3
+	}
+
+	daysArg := fmt.Sprintf("-%d days", days)
+
+	// Build optional repo filter.
+	repoJoin := ""
+	repoWhere := ""
+	var repoBaseArgs []any
+	if repoFilter != "" {
+		repoJoin = "JOIN session_meta sm ON sm.session_id = m.session_id"
+		repoWhere = "AND (sm.repo LIKE ? OR sm.cwd LIKE ?)"
+		pat := "%" + repoFilter + "%"
+		repoBaseArgs = []any{pat, pat}
+	}
+
+	var candidates []PatternCandidate
+
+	// --- Pattern 1: Direct JSONL reads via Bash ---
+	{
+		q := fmt.Sprintf(`
+			SELECT m.session_id, m.tool_command
+			FROM messages m
+			JOIN entries e ON e.id = m.entry_id
+			%s
+			WHERE m.content_type = 'tool_use'
+			  AND m.tool_name = 'Bash'
+			  AND m.tool_command IS NOT NULL
+			  AND (m.tool_command LIKE '%%/.claude/projects/%%' OR m.tool_command LIKE '%%/.claude/sessions/%%')
+			  AND m.tool_command LIKE '%%.jsonl%%'
+			  AND e.timestamp >= datetime('now', ?)
+			  %s
+		`, repoJoin, repoWhere)
+
+		args := append([]any{daysArg}, repoBaseArgs...)
+		rows, err := s.db.Query(q, args...)
+		if err == nil {
+			sessions, evidence := discoverCollectRows(rows)
+			rows.Close()
+			if len(sessions) >= minOccurrences {
+				candidates = append(candidates, PatternCandidate{
+					PatternType: "direct_jsonl_read",
+					Description: "Bash commands reading JSONL transcript files directly instead of using mnemo tools",
+					Occurrences: len(sessions),
+					Sessions:    sessions,
+					Evidence:    evidence,
+					Suggestion:  "Use mnemo_search or mnemo_read_session instead of reading JSONL files directly.",
+				})
+			}
+		}
+	}
+
+	// --- Pattern 2: Grep/rg over transcript directories ---
+	{
+		q := fmt.Sprintf(`
+			SELECT m.session_id,
+			       COALESCE(m.tool_command, m.tool_pattern) AS cmd
+			FROM messages m
+			JOIN entries e ON e.id = m.entry_id
+			%s
+			WHERE m.content_type = 'tool_use'
+			  AND m.tool_name IN ('Bash', 'Grep')
+			  AND (
+			    m.tool_command LIKE '%%/.claude/projects/%%'
+			    OR m.tool_command LIKE '%%/.claude/sessions/%%'
+			    OR m.tool_pattern LIKE '%%/.claude/projects/%%'
+			    OR m.tool_pattern LIKE '%%/.claude/sessions/%%'
+			  )
+			  AND e.timestamp >= datetime('now', ?)
+			  %s
+		`, repoJoin, repoWhere)
+
+		args := append([]any{daysArg}, repoBaseArgs...)
+		rows, err := s.db.Query(q, args...)
+		if err == nil {
+			sessions, evidence := discoverCollectRows(rows)
+			rows.Close()
+			if len(sessions) >= minOccurrences {
+				candidates = append(candidates, PatternCandidate{
+					PatternType: "transcript_grep",
+					Description: "Grep/rg commands targeting transcript directories instead of using mnemo_search",
+					Occurrences: len(sessions),
+					Sessions:    sessions,
+					Evidence:    evidence,
+					Suggestion:  "Use mnemo_search with appropriate query terms instead of grep over transcript dirs.",
+				})
+			}
+		}
+	}
+
+	// --- Pattern 3: Repeated mnemo_query shapes ---
+	{
+		q := fmt.Sprintf(`
+			SELECT m.session_id, m.tool_query AS query
+			FROM messages m
+			JOIN entries e ON e.id = m.entry_id
+			%s
+			WHERE m.content_type = 'tool_use'
+			  AND m.tool_name = 'mnemo_query'
+			  AND m.tool_query IS NOT NULL
+			  AND e.timestamp >= datetime('now', ?)
+			  %s
+		`, repoJoin, repoWhere)
+
+		args := append([]any{daysArg}, repoBaseArgs...)
+		rows, err := s.db.Query(q, args...)
+		if err == nil {
+			type qrow struct {
+				sessionID string
+				query     string
+			}
+			var allRows []qrow
+			for rows.Next() {
+				var r qrow
+				if rows.Scan(&r.sessionID, &r.query) == nil {
+					allRows = append(allRows, r)
+				}
+			}
+			rows.Close()
+
+			type shapeGroup struct {
+				sessions map[string]struct{}
+				example  string
+			}
+			shapes := map[string]*shapeGroup{}
+			for _, r := range allRows {
+				shape := discoverNormalizeSQL(r.query)
+				sg, ok := shapes[shape]
+				if !ok {
+					sg = &shapeGroup{sessions: map[string]struct{}{}, example: r.query}
+					shapes[shape] = sg
+				}
+				sg.sessions[r.sessionID] = struct{}{}
+			}
+
+			for _, sg := range shapes {
+				if len(sg.sessions) >= minOccurrences {
+					sessions := discoverSessionSet(sg.sessions)
+					evidence := sg.example
+					if len(evidence) > 200 {
+						evidence = evidence[:200] + "..."
+					}
+					candidates = append(candidates, PatternCandidate{
+						PatternType: "repeated_query",
+						Description: fmt.Sprintf("The same mnemo_query shape was run across %d sessions — candidate for a template", len(sessions)),
+						Occurrences: len(sessions),
+						Sessions:    sessions,
+						Evidence:    evidence,
+						Suggestion:  "Save this query as a template with mnemo_define for reuse.",
+					})
+				}
+			}
+		}
+	}
+
+	// --- Pattern 4: Repeated mnemo_search patterns ---
+	{
+		q := fmt.Sprintf(`
+			SELECT m.session_id, m.tool_query AS query
+			FROM messages m
+			JOIN entries e ON e.id = m.entry_id
+			%s
+			WHERE m.content_type = 'tool_use'
+			  AND m.tool_name = 'mnemo_search'
+			  AND m.tool_query IS NOT NULL
+			  AND e.timestamp >= datetime('now', ?)
+			  %s
+		`, repoJoin, repoWhere)
+
+		args := append([]any{daysArg}, repoBaseArgs...)
+		rows, err := s.db.Query(q, args...)
+		if err == nil {
+			type srow struct {
+				sessionID string
+				query     string
+			}
+			var allRows []srow
+			for rows.Next() {
+				var r srow
+				if rows.Scan(&r.sessionID, &r.query) == nil {
+					allRows = append(allRows, r)
+				}
+			}
+			rows.Close()
+
+			type searchGroup struct {
+				sessions map[string]struct{}
+				example  string
+			}
+			groups := map[string]*searchGroup{}
+			for _, r := range allRows {
+				norm := discoverNormalizeSearch(r.query)
+				sg, ok := groups[norm]
+				if !ok {
+					sg = &searchGroup{sessions: map[string]struct{}{}, example: r.query}
+					groups[norm] = sg
+				}
+				sg.sessions[r.sessionID] = struct{}{}
+			}
+
+			for norm, sg := range groups {
+				if len(sg.sessions) >= minOccurrences {
+					sessions := discoverSessionSet(sg.sessions)
+					candidates = append(candidates, PatternCandidate{
+						PatternType: "repeated_search",
+						Description: fmt.Sprintf("Search pattern %q repeated across %d sessions — may warrant a dedicated tool", norm, len(sessions)),
+						Occurrences: len(sessions),
+						Sessions:    sessions,
+						Evidence:    sg.example,
+						Suggestion:  "Consider adding a dedicated mnemo tool for this recurring search need.",
+					})
+				}
+			}
+		}
+	}
+
+	return candidates, nil
+}
+
+// discoverCollectRows scans rows of (session_id, cmd) and returns
+// a deduplicated slice of session IDs (truncated to 8 chars) and the first evidence value.
+func discoverCollectRows(rows interface {
+	Next() bool
+	Scan(...any) error
+}) ([]string, string) {
+	seen := map[string]struct{}{}
+	evidence := ""
+	for rows.Next() {
+		var sid, cmd string
+		if rows.Scan(&sid, &cmd) != nil {
+			continue
+		}
+		if evidence == "" && cmd != "" {
+			if len(cmd) > 200 {
+				cmd = cmd[:200] + "..."
+			}
+			evidence = cmd
+		}
+		key := sid
+		if len(key) > 8 {
+			key = key[:8]
+		}
+		seen[key] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	return out, evidence
+}
+
+// discoverSessionSet converts a set of session IDs to a slice, truncating each to 8 chars.
+func discoverSessionSet(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for sid := range m {
+		key := sid
+		if len(key) > 8 {
+			key = key[:8]
+		}
+		out = append(out, key)
+	}
+	return out
+}
+
+// discoverNormalizeSQL strips string literals and numbers from a SQL query
+// and collapses whitespace to produce a structural shape for grouping.
+func discoverNormalizeSQL(q string) string {
+	var b strings.Builder
+	inStr := false
+	for i := 0; i < len(q); i++ {
+		c := q[i]
+		if c == '\'' {
+			if !inStr {
+				inStr = true
+			} else {
+				inStr = false
+				b.WriteString("?")
+			}
+			continue
+		}
+		if inStr {
+			continue
+		}
+		b.WriteByte(c)
+	}
+	s := b.String()
+
+	result := make([]byte, 0, len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] >= '0' && s[i] <= '9' {
+			result = append(result, '?')
+			for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+				i++
+			}
+		} else {
+			result = append(result, s[i])
+			i++
+		}
+	}
+
+	return strings.Join(strings.Fields(strings.ToLower(string(result))), " ")
+}
+
+// discoverNormalizeSearch lowercases and sorts words for canonical grouping.
+func discoverNormalizeSearch(q string) string {
+	words := strings.Fields(strings.ToLower(q))
+	for i := 0; i < len(words)-1; i++ {
+		for j := i + 1; j < len(words); j++ {
+			if words[j] < words[i] {
+				words[i], words[j] = words[j], words[i]
+			}
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // Status returns a rich status report: repos → sessions → truncated message excerpts.
@@ -5396,6 +5860,332 @@ func (s *Store) ListTemplates() ([]QueryTemplate, error) {
 	return templates, nil
 }
 
+// GitHubActivityResult holds a single PR or issue record for MCP tool output.
+type GitHubActivityResult struct {
+	Type      string `json:"type"`
+	Repo      string `json:"repo"`
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	Body      string `json:"body,omitempty"`
+	State     string `json:"state"`
+	Author    string `json:"author"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	MergedAt  string `json:"merged_at,omitempty"`
+	URL       string `json:"url"`
+}
+
+// ghPRJSON matches the JSON output of `gh pr list`.
+type ghPRJSON struct {
+	Number    int                    `json:"number"`
+	Title     string                 `json:"title"`
+	Body      string                 `json:"body"`
+	State     string                 `json:"state"`
+	Author    struct{ Login string } `json:"author"`
+	CreatedAt string                 `json:"createdAt"`
+	UpdatedAt string                 `json:"updatedAt"`
+	MergedAt  string                 `json:"mergedAt"`
+	URL       string                 `json:"url"`
+}
+
+// ghIssueJSON matches the JSON output of `gh issue list`.
+type ghIssueJSON struct {
+	Number    int                     `json:"number"`
+	Title     string                  `json:"title"`
+	Body      string                  `json:"body"`
+	State     string                  `json:"state"`
+	Author    struct{ Login string }  `json:"author"`
+	CreatedAt string                  `json:"createdAt"`
+	UpdatedAt string                  `json:"updatedAt"`
+	URL       string                  `json:"url"`
+	Labels    []struct{ Name string } `json:"labels"`
+}
+
+// SearchGitHubActivity searches GitHub PRs and issues with optional filters.
+func (s *Store) SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]GitHubActivityResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 30
+	}
+
+	cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
+	var results []GitHubActivityResult
+
+	// Helper to build and execute query for one table.
+	fetchTable := func(table, ftsTable, itemType string, cols string) error {
+		// state filtering: "merged" only applies to PRs.
+		if itemType == "issue" && state == "merged" {
+			return nil
+		}
+
+		var q string
+		var args []any
+
+		if query != "" {
+			ftsQuery := relaxQuery(query)
+			q = fmt.Sprintf(`SELECT %s FROM %s t JOIN %s f ON f.rowid = t.id WHERE %s MATCH ?`,
+				cols, table, ftsTable, ftsTable)
+			args = append(args, ftsQuery)
+			q += ` AND t.updated_at >= ` + cutoff
+		} else {
+			q = fmt.Sprintf(`SELECT %s FROM %s t WHERE t.updated_at >= `+cutoff, cols, table)
+		}
+
+		if repo != "" {
+			q += ` AND t.repo LIKE ?`
+			args = append(args, "%"+repo+"%")
+		}
+		if author != "" {
+			q += ` AND t.author LIKE ?`
+			args = append(args, "%"+author+"%")
+		}
+		if state != "" && state != "all" {
+			if itemType == "pr" && state == "merged" {
+				q += ` AND t.merged_at IS NOT NULL AND t.merged_at != ''`
+			} else if state != "merged" {
+				q += ` AND t.state = ?`
+				args = append(args, state)
+			}
+		}
+
+		if query != "" {
+			q += ` ORDER BY rank`
+		} else {
+			q += ` ORDER BY t.updated_at DESC`
+		}
+		q += ` LIMIT ?`
+		args = append(args, limit)
+
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r GitHubActivityResult
+			r.Type = itemType
+			var mergedAt sql.NullString
+			if itemType == "pr" {
+				if err := rows.Scan(&r.Repo, &r.Number, &r.Title, &r.Body, &r.State,
+					&r.Author, &r.CreatedAt, &r.UpdatedAt, &mergedAt, &r.URL); err != nil {
+					continue
+				}
+				if mergedAt.Valid {
+					r.MergedAt = mergedAt.String
+				}
+			} else {
+				if err := rows.Scan(&r.Repo, &r.Number, &r.Title, &r.Body, &r.State,
+					&r.Author, &r.CreatedAt, &r.UpdatedAt, &r.URL); err != nil {
+					continue
+				}
+			}
+			results = append(results, r)
+		}
+		return nil
+	}
+
+	prCols := `t.repo, t.pr_number, t.title, t.body, t.state, t.author, t.created_at, t.updated_at, t.merged_at, t.url`
+	issueCols := `t.repo, t.issue_number, t.title, t.body, t.state, t.author, t.created_at, t.updated_at, t.url`
+
+	if activityType == "" || activityType == "all" || activityType == "pr" {
+		if err := fetchTable("github_prs", "github_prs_fts", "pr", prCols); err != nil {
+			slog.Warn("github_prs search failed", "err", err)
+		}
+	}
+	if activityType == "" || activityType == "all" || activityType == "issue" {
+		if err := fetchTable("github_issues", "github_issues_fts", "issue", issueCols); err != nil {
+			slog.Warn("github_issues search failed", "err", err)
+		}
+	}
+
+	// Sort merged results by updated_at descending.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].UpdatedAt > results[j].UpdatedAt
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+// PollGitHubActivity fetches recent PRs and issues for all known repos.
+// Silently skips if gh is not installed.
+func (s *Store) PollGitHubActivity() error {
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		return nil // gh not installed
+	}
+
+	repos, err := s.ciRepos()
+	if err != nil {
+		return fmt.Errorf("ciRepos: %w", err)
+	}
+
+	for _, repo := range repos {
+		if err := s.pollGitHubForRepo(ghPath, repo); err != nil {
+			slog.Warn("GitHub activity poll failed", "repo", repo, "err", err)
+		}
+	}
+	return nil
+}
+
+// pollGitHubForRepo fetches and upserts PRs and issues for a single repo.
+func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
+	// Find the most recent updated_at for incremental fetches.
+	s.rwmu.RLock()
+	var lastPR, lastIssue string
+	s.db.QueryRow(`SELECT MAX(updated_at) FROM github_prs WHERE repo = ?`, repo).Scan(&lastPR)
+	s.db.QueryRow(`SELECT MAX(updated_at) FROM github_issues WHERE repo = ?`, repo).Scan(&lastIssue)
+	s.rwmu.RUnlock()
+
+	if err := s.fetchAndUpsertPRs(ghPath, repo, lastPR); err != nil {
+		slog.Warn("PR fetch failed", "repo", repo, "err", err)
+	}
+	if err := s.fetchAndUpsertIssues(ghPath, repo, lastIssue); err != nil {
+		slog.Warn("issue fetch failed", "repo", repo, "err", err)
+	}
+	return nil
+}
+
+// fetchAndUpsertPRs fetches PRs from GitHub and upserts into github_prs.
+func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
+	out, err := exec.Command(ghPath, "pr", "list",
+		"--repo", repo,
+		"--state", "all",
+		"--json", "number,title,body,state,author,createdAt,updatedAt,mergedAt,url",
+		"--limit", "100",
+	).Output()
+	if err != nil {
+		return fmt.Errorf("gh pr list: %w", err)
+	}
+
+	var prs []ghPRJSON
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return fmt.Errorf("parse gh pr output: %w", err)
+	}
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	for _, pr := range prs {
+		// Skip if not newer than our last known update (incremental).
+		if lastUpdated != "" && pr.UpdatedAt <= lastUpdated {
+			continue
+		}
+		body := pr.Body
+		if len(body) > 5000 {
+			body = body[:4997] + "..."
+		}
+		state := strings.ToLower(pr.State)
+		if pr.MergedAt != "" {
+			state = "merged"
+		}
+		var mergedAt *string
+		if pr.MergedAt != "" {
+			mergedAt = &pr.MergedAt
+		}
+		_, err := s.db.Exec(`
+			INSERT INTO github_prs (repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(repo, pr_number) DO UPDATE SET
+				title = excluded.title,
+				body = excluded.body,
+				state = excluded.state,
+				merged_at = excluded.merged_at,
+				updated_at = excluded.updated_at
+		`, repo, pr.Number, pr.Title, body, state, pr.Author.Login,
+			pr.CreatedAt, pr.UpdatedAt, mergedAt, pr.URL)
+		if err != nil {
+			slog.Warn("upsert github_pr failed", "repo", repo, "pr", pr.Number, "err", err)
+		}
+	}
+	return nil
+}
+
+// fetchAndUpsertIssues fetches issues from GitHub and upserts into github_issues.
+func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
+	out, err := exec.Command(ghPath, "issue", "list",
+		"--repo", repo,
+		"--state", "all",
+		"--json", "number,title,body,state,author,createdAt,updatedAt,url,labels",
+		"--limit", "100",
+	).Output()
+	if err != nil {
+		return fmt.Errorf("gh issue list: %w", err)
+	}
+
+	var issues []ghIssueJSON
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return fmt.Errorf("parse gh issue output: %w", err)
+	}
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+
+	for _, issue := range issues {
+		// Skip if not newer than our last known update (incremental).
+		if lastUpdated != "" && issue.UpdatedAt <= lastUpdated {
+			continue
+		}
+		body := issue.Body
+		if len(body) > 5000 {
+			body = body[:4997] + "..."
+		}
+		// Build labels JSON array.
+		labelNames := make([]string, 0, len(issue.Labels))
+		for _, l := range issue.Labels {
+			labelNames = append(labelNames, l.Name)
+		}
+		labelsJSON, _ := json.Marshal(labelNames)
+
+		_, err := s.db.Exec(`
+			INSERT INTO github_issues (repo, issue_number, title, body, state, author, created_at, updated_at, url, labels)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(repo, issue_number) DO UPDATE SET
+				title = excluded.title,
+				body = excluded.body,
+				state = excluded.state,
+				updated_at = excluded.updated_at,
+				labels = excluded.labels
+		`, repo, issue.Number, issue.Title, body, strings.ToLower(issue.State),
+			issue.Author.Login, issue.CreatedAt, issue.UpdatedAt, issue.URL, string(labelsJSON))
+		if err != nil {
+			slog.Warn("upsert github_issue failed", "repo", repo, "issue", issue.Number, "err", err)
+		}
+	}
+	return nil
+}
+
+// backfillGitHubActivity polls PRs and issues for all known repos at startup.
+// Designed to run in a goroutine — does not block ingest.
+func backfillGitHubActivity(s *Store) {
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		slog.Info("gh not found; skipping GitHub activity backfill")
+		return
+	}
+
+	repos, err := s.ciRepos()
+	if err != nil {
+		slog.Warn("backfillGitHubActivity: ciRepos failed", "err", err)
+		return
+	}
+
+	slog.Info("backfilling GitHub activity", "repos", len(repos))
+	for _, repo := range repos {
+		if err := s.pollGitHubForRepo(ghPath, repo); err != nil {
+			slog.Warn("GitHub backfill failed", "repo", repo, "err", err)
+		}
+	}
+	slog.Info("GitHub activity backfill complete", "repos", len(repos))
+}
+
 // backfillDecisions runs detectDecisions for all ingested sessions
 // that don't yet have any decisions entries. Safe to call on every startup.
 func backfillDecisions(db *sql.DB) {
@@ -5430,5 +6220,200 @@ func backfillDecisions(db *sql.DB) {
 	db.QueryRow("SELECT COUNT(*) FROM decisions").Scan(&found)
 	if found > 0 {
 		slog.Info("backfilled decisions", "sessions_scanned", len(sessions), "decisions_found", found)
+	}
+}
+
+// GitCommit holds a single indexed git commit.
+type GitCommit struct {
+	ID          int    `json:"id"`
+	Repo        string `json:"repo"`
+	CommitHash  string `json:"commit_hash"`
+	AuthorName  string `json:"author_name"`
+	AuthorEmail string `json:"author_email"`
+	CommitDate  string `json:"commit_date"`
+	Subject     string `json:"subject"`
+	Body        string `json:"body,omitempty"`
+}
+
+// SearchCommits searches indexed git commits by keyword with optional repo, author, and days filters.
+func (s *Store) SearchCommits(query string, repo string, author string, days int, limit int) ([]GitCommit, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 30
+	}
+
+	var q string
+	var args []any
+	cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		q = `SELECT c.id, c.repo, c.commit_hash, c.author_name, c.author_email, c.commit_date, c.subject, c.body
+			FROM git_commits c
+			JOIN git_commits_fts f ON f.rowid = c.id
+			WHERE git_commits_fts MATCH ?`
+		args = append(args, ftsQuery)
+		q += ` AND c.commit_date >= ` + cutoff
+		if repo != "" {
+			q += ` AND c.repo LIKE ?`
+			args = append(args, "%"+repo+"%")
+		}
+		if author != "" {
+			q += ` AND (c.author_name LIKE ? OR c.author_email LIKE ?)`
+			args = append(args, "%"+author+"%", "%"+author+"%")
+		}
+		q += ` ORDER BY rank LIMIT ?`
+	} else {
+		q = `SELECT id, repo, commit_hash, author_name, author_email, commit_date, subject, body
+			FROM git_commits WHERE commit_date >= ` + cutoff
+		if repo != "" {
+			q += ` AND repo LIKE ?`
+			args = append(args, "%"+repo+"%")
+		}
+		if author != "" {
+			q += ` AND (author_name LIKE ? OR author_email LIKE ?)`
+			args = append(args, "%"+author+"%", "%"+author+"%")
+		}
+		q += ` ORDER BY commit_date DESC LIMIT ?`
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []GitCommit
+	for rows.Next() {
+		var c GitCommit
+		if err := rows.Scan(&c.ID, &c.Repo, &c.CommitHash, &c.AuthorName, &c.AuthorEmail, &c.CommitDate, &c.Subject, &c.Body); err != nil {
+			continue
+		}
+		results = append(results, c)
+	}
+	return results, nil
+}
+
+// ingestGitCommits fetches and indexes commits for a single repo root.
+// If afterDate is non-empty, only commits after that date are fetched (incremental).
+// If afterDate is empty, fetches the last 365 days (initial backfill).
+func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) int {
+	// Verify this is actually a git repo.
+	checkCmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir")
+	if err := checkCmd.Run(); err != nil {
+		return 0
+	}
+
+	var after string
+	if afterDate != "" {
+		after = afterDate
+	} else {
+		after = time.Now().AddDate(-1, 0, 0).Format(time.RFC3339)
+	}
+
+	// Use NUL as field separator, RS (0x1e) as record separator.
+	// Format: hash NUL author_name NUL author_email NUL iso_date NUL subject NUL body RS
+	gitArgs := []string{
+		"-C", repoPath, "log",
+		"--format=%H%x00%an%x00%ae%x00%aI%x00%s%x00%b%x1e",
+		"--after=" + after,
+	}
+	cmd := exec.Command("git", gitArgs...)
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Warn("git log failed", "repo", repoName, "err", err)
+		return 0
+	}
+
+	if len(out) == 0 {
+		return 0
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		slog.Warn("git commits tx begin failed", "repo", repoName, "err", err)
+		return 0
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO git_commits
+		(repo, commit_hash, author_name, author_email, commit_date, subject, body)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		slog.Warn("git commits prepare failed", "repo", repoName, "err", err)
+		return 0
+	}
+	defer stmt.Close()
+
+	count := 0
+	// Split on record separator (0x1e).
+	records := strings.Split(string(out), "\x1e")
+	for _, record := range records {
+		record = strings.TrimSpace(record)
+		if record == "" {
+			continue
+		}
+		fields := strings.SplitN(record, "\x00", 6)
+		if len(fields) < 5 {
+			continue
+		}
+		hash := strings.TrimSpace(fields[0])
+		authorName := strings.TrimSpace(fields[1])
+		authorEmail := strings.TrimSpace(fields[2])
+		commitDate := strings.TrimSpace(fields[3])
+		subject := strings.TrimSpace(fields[4])
+		body := ""
+		if len(fields) == 6 {
+			body = strings.TrimSpace(fields[5])
+		}
+		if hash == "" || subject == "" {
+			continue
+		}
+		if _, err := stmt.Exec(repoName, hash, authorName, authorEmail, commitDate, subject, body); err != nil {
+			slog.Warn("git commit insert failed", "repo", repoName, "hash", hash, "err", err)
+			continue
+		}
+		count++
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Warn("git commits tx commit failed", "repo", repoName, "err", err)
+		return 0
+	}
+	return count
+}
+
+// backfillGitCommits indexes git commit history for all known repos.
+// For repos already partially indexed, it does an incremental fetch.
+// For new repos, it fetches the last 365 days.
+func backfillGitCommits(s *Store) {
+	roots := s.knownRepoRoots()
+	if len(roots) == 0 {
+		return
+	}
+
+	totalNew := 0
+	for _, rr := range roots {
+		// Look up the most recent commit already indexed for this repo.
+		var lastDate string
+		s.db.QueryRow(
+			`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`,
+			rr.repo,
+		).Scan(&lastDate) //nolint:errcheck
+
+		// For incremental runs, pass the last indexed date.
+		// For initial backfill, pass empty (ingestGitCommits will use 365 days ago).
+		n := ingestGitCommits(s.db, rr.root, rr.repo, lastDate)
+		totalNew += n
+	}
+
+	if totalNew > 0 {
+		slog.Info("backfilled git commits", "new_commits", totalNew)
 	}
 }
