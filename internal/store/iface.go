@@ -29,5 +29,6 @@ type Backend interface {
 	Predecessor(sessionID string) (string, error)
 	Successor(sessionID string) (string, error)
 	Chain(sessionID string) ([]ChainLink, error)
+	SearchDecisions(query string, repo string, days int, limit int) ([]DecisionInfo, error)
 	Whatsup() (*WhatsupResult, error)
 }

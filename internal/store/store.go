@@ -2315,6 +2315,179 @@ type ChainLink struct {
 	GapMs      int64  `json:"gap_ms,omitempty"`
 }
 
+// DecisionInfo holds a single detected decision record.
+type DecisionInfo struct {
+	ID               int    `json:"id"`
+	SessionID        string `json:"session_id"`
+	ProposalText     string `json:"proposal_text"`
+	ConfirmationText string `json:"confirmation_text"`
+	Repo             string `json:"repo,omitempty"`
+	Timestamp        string `json:"timestamp"`
+}
+
+// SearchDecisions searches the decisions table by keyword with optional repo and days filters.
+func (s *Store) SearchDecisions(query string, repo string, days int, limit int) ([]DecisionInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 30
+	}
+
+	var q string
+	var args []any
+	cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		q = `SELECT d.id, d.session_id, d.proposal_text, d.confirmation_text, d.repo, d.timestamp
+			FROM decisions d
+			JOIN decisions_fts f ON f.rowid = d.id
+			WHERE decisions_fts MATCH ?`
+		args = append(args, ftsQuery)
+		q += ` AND d.timestamp >= ` + cutoff
+		if repo != "" {
+			q += ` AND d.repo LIKE ?`
+			args = append(args, "%"+repo+"%")
+		}
+		q += ` ORDER BY rank LIMIT ?`
+	} else {
+		q = `SELECT id, session_id, proposal_text, confirmation_text, repo, timestamp
+			FROM decisions WHERE timestamp >= ` + cutoff
+		if repo != "" {
+			q += ` AND repo LIKE ?`
+			args = append(args, "%"+repo+"%")
+		}
+		q += ` ORDER BY timestamp DESC LIMIT ?`
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []DecisionInfo
+	for rows.Next() {
+		var d DecisionInfo
+		if err := rows.Scan(&d.ID, &d.SessionID, &d.ProposalText, &d.ConfirmationText, &d.Repo, &d.Timestamp); err != nil {
+			continue
+		}
+		results = append(results, d)
+	}
+	return results, nil
+}
+
+// proposalPhrases are patterns that indicate an assistant is proposing a course of action.
+var proposalPhrases = []string{
+	"i'll ", "i will ", "let me ", "i propose ", "i suggest ", "should we ",
+	"i recommend ", "the approach is ", "i'm going to ", "i am going to ",
+	"my plan is ", "here's what i'll ", "here's my plan", "the plan is ",
+	"i intend to ", "we should ", "i'd like to ",
+}
+
+// confirmationPhrases are patterns that indicate a user is confirming a proposal.
+var confirmationPhrases = []string{
+	"yes", "yeah", "yep", "go ahead", "sounds good", "perfect", "do it",
+	"approved", "lgtm", "looks good", "that works", "correct", "right",
+	"exactly", "proceed", "ship it", "merge it", "ok", "okay", "sure",
+	"great", "good", "please do", "please proceed", "make it so",
+	"sounds right", "agreed", "agree", "done", "let's do it", "let's go",
+}
+
+// isProposal returns true if the assistant text contains a substantive proposal phrase.
+func isProposal(text string) bool {
+	lower := strings.ToLower(text)
+	// Must be reasonably long to be substantive (not just a greeting).
+	if len(text) < 50 {
+		return false
+	}
+	for _, phrase := range proposalPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// isConfirmation returns true if the user text is a clear confirmation.
+// Conservative: require the confirmation to be short and match closely.
+func isConfirmation(text string) bool {
+	// Strip common punctuation and whitespace for matching.
+	trimmed := strings.TrimRight(strings.TrimSpace(strings.ToLower(text)), ".!?,")
+	// Confirmation messages should be short (under 60 chars after trim).
+	if len(trimmed) > 60 {
+		return false
+	}
+	for _, phrase := range confirmationPhrases {
+		if trimmed == phrase || strings.HasPrefix(trimmed, phrase+" ") || strings.HasSuffix(trimmed, " "+phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectDecisions scans consecutive assistant→user message pairs in a session
+// and inserts detected proposal+confirmation pairs into the decisions table.
+// Uses INSERT OR IGNORE so re-running on the same session is safe.
+func detectDecisions(db *sql.DB, sessionID string, repo string) {
+	// Load all text-content messages for this session in order.
+	rows, err := db.Query(`
+		SELECT id, role, text, timestamp
+		FROM messages
+		WHERE session_id = ?
+		  AND content_type = 'text'
+		  AND is_noise = 0
+		ORDER BY id ASC`, sessionID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type msg struct {
+		id        int
+		role      string
+		text      string
+		timestamp string
+	}
+
+	var msgs []msg
+	for rows.Next() {
+		var m msg
+		if err := rows.Scan(&m.id, &m.role, &m.text, &m.timestamp); err != nil {
+			continue
+		}
+		msgs = append(msgs, m)
+	}
+	rows.Close()
+
+	// Scan for assistant→user consecutive pairs.
+	for i := 0; i+1 < len(msgs); i++ {
+		a := msgs[i]
+		u := msgs[i+1]
+		if a.role != "assistant" || u.role != "user" {
+			continue
+		}
+		if !isProposal(a.text) || !isConfirmation(u.text) {
+			continue
+		}
+		// Truncate proposal text to avoid huge rows.
+		proposal := a.text
+		if len(proposal) > 2000 {
+			proposal = proposal[:1997] + "..."
+		}
+		db.Exec(`
+			INSERT OR IGNORE INTO decisions
+				(session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, a.id, u.id, proposal, u.text, repo, u.timestamp)
+	}
+}
+
 // ciRepos returns "org/repo" identifiers for every GitHub repository
 // reachable through knownRepoRoots. This is the union of
 // workspace-walked repos (default ~/work) and session_meta-known repos,
@@ -4675,6 +4848,10 @@ func (s *Store) ingestFile(path string) error {
 
 	// Detect chain link for this session (no-op if not a /clear rollover).
 	detectChainForSession(s.db, sessionID)
+
+	// Detect decision pairs (proposal + confirmation) in this session.
+	repo := extractRepo(metaCwd)
+	detectDecisions(s.db, sessionID, repo)
 
 	return nil
 }

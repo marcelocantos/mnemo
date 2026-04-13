@@ -134,6 +134,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Chain": makeMethod(func(p ChainParams) (any, error) {
 			return s.Chain(p.SessionID)
 		}),
+		"SearchDecisions": makeMethod(func(p SearchDecisionsParams) (any, error) {
+			return s.SearchDecisions(p.Query, p.Repo, p.Days, p.Limit)
+		}),
 		"Whatsup": func(_ json.RawMessage) (any, error) {
 			return s.Whatsup()
 		},
@@ -291,4 +294,12 @@ type PermissionsParams struct {
 // ChainParams matches the Chain method signature.
 type ChainParams struct {
 	SessionID string `json:"session_id"`
+}
+
+// SearchDecisionsParams matches the SearchDecisions method signature.
+type SearchDecisionsParams struct {
+	Query string `json:"query"`
+	Repo  string `json:"repo"`
+	Days  int    `json:"days"`
+	Limit int    `json:"limit"`
 }

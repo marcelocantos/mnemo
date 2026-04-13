@@ -260,6 +260,17 @@ func (p *Proxy) Chain(sessionID string) ([]store.ChainLink, error) {
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) SearchDecisions(query string, repo string, days int, limit int) ([]store.DecisionInfo, error) {
+	raw, err := p.client.Call("SearchDecisions", SearchDecisionsParams{
+		Query: query, Repo: repo, Days: days, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.DecisionInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) Whatsup() (*store.WhatsupResult, error) {
 	raw, err := p.client.Call("Whatsup", nil)
 	if err != nil {

@@ -247,6 +247,13 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_decisions",
+			mcp.WithDescription(`Search past decisions across all sessions. Decisions are automatically detected from proposal + confirmation patterns in conversations (e.g., assistant proposes an approach, user confirms with "yes", "go ahead", "lgtm"). Use this to recall what was decided and why.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_chain",
 			mcp.WithDescription(`Retrieve the full /clear-bounded session chain for any session ID.
 
@@ -317,6 +324,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.permissions(args)
 	case "mnemo_ci":
 		return h.ci(args)
+	case "mnemo_decisions":
+		return h.decisions(args)
 	case "mnemo_chain":
 		return h.chain(args)
 	case "mnemo_self":
@@ -833,6 +842,31 @@ func (h *Handler) ci(args map[string]any) (string, bool, error) {
 	}
 	if len(results) == 0 {
 		return "No CI runs found.", false, nil
+	}
+	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *Handler) decisions(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	days := 30
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	results, err := h.mem.SearchDecisions(query, repo, days, limit)
+	if err != nil {
+		return fmt.Sprintf("decisions search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No decisions found.", false, nil
 	}
 	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
