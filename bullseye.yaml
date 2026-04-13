@@ -262,10 +262,11 @@ targets:
     achieved: 2026-04-07
   T7:
     name: Agent-defined query templates
-    status: identified
+    status: achieved
     value: 7.0
     cost: 8.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - mnemo_define stores named parameterised query template
     - mnemo_evaluate executes template by name with parameters
@@ -275,6 +276,7 @@ targets:
     context: Agents can define reusable parameterised query templates that persist across sessions.
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-13
   T8:
     name: sqldeep integration
     status: achieved
@@ -291,9 +293,10 @@ targets:
     achieved: 2026-04-07
   T9:
     name: Full-fidelity ingest and observability tools
-    status: identified
+    status: achieved
     value: 9.0
     cost: 8.0
+    actual_cost: 13.0
     acceptance:
     - Field census shows 0 unindexed high-frequency fields (> 1% of entries)
     - mnemo_usage returns daily token breakdown with cost estimates
@@ -304,6 +307,7 @@ targets:
     context: mnemo ingests all JSONL fields (not just user/assistant message content) and exposes observability tools built on the full data. Currently discards ~70% of JSONL data.
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-13
   T9.1:
     name: Full-fidelity ingest
     status: achieved
@@ -367,10 +371,11 @@ targets:
     achieved: 2026-04-10
   T9.5:
     name: System correlation (mnemo_whatsup)
-    status: identified
+    status: achieved
     value: 5.0
     cost: 3.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - For each live session (as identified by 🎯T9.5.1), mnemo can report current CPU, RSS, and IO metrics for the owning claude process
     - System load (system-wide CPU, memory pressure, disk I/O) is reported alongside per-session metrics so the user can see whether a slow session is caused by the session itself or by contention
@@ -382,6 +387,7 @@ targets:
     - T9.5.1
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-13
   T9.5.1:
     name: Session liveness is detectable — mnemo can report which session IDs have an active Claude Code process running them
     status: achieved
@@ -404,10 +410,11 @@ targets:
     achieved: 2026-04-12
   T9.6:
     name: Cross-session decision recall (mnemo_decisions)
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - mnemo_decisions searches decisions table by keyword
     - Decision detection heuristic identifies proposal + user confirmation pairs
@@ -417,3 +424,4 @@ targets:
     - T9.1
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-13
