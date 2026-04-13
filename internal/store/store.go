@@ -2974,6 +2974,9 @@ func (s *Store) IngestAll() error {
 	// table existed).
 	backfillDecisions(s.db)
 
+	// Index git commit history from all known repos.
+	backfillGitCommits(s)
+
 	// Index GitHub PRs and issues from all known repos.
 	// Runs in a goroutine so it doesn't block startup (API calls are slow).
 	go backfillGitHubActivity(s)
