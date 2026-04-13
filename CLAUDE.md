@@ -72,6 +72,9 @@ user. Good moments to reach for mnemo:
 - `mnemo_define` — Define a reusable parameterised query template with {{param}} placeholders. Templates persist in SQLite across sessions.
 - `mnemo_evaluate` — Execute a named query template with parameter values. Returns results like mnemo_query.
 - `mnemo_list_templates` — List all saved query templates.
+- `mnemo_commits` — Search git commits across all indexed repos. FTS5 on commit messages. Supports repo, author, date range filters. Retroactive: indexes full history from all known repos at startup.
+- `mnemo_prs` — Search GitHub PRs and issues across all indexed repos. FTS5 on title/body. Supports state, author, type (pr/issue) filters. Retroactive: backfills from GitHub API at startup.
+- `mnemo_discover_patterns` — Analyze transcript history to find workaround patterns suggesting missing features. Detects direct JSONL reads, transcript dir greps, repeated query shapes, and recurring searches.
 
 ## Code Structure
 
