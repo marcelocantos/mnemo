@@ -67,6 +67,11 @@ user. Good moments to reach for mnemo:
 - `mnemo_stats` — Index statistics
 - `mnemo_chain` — Retrieve the full /clear-bounded session chain for any session ID. Returns ordered chain from oldest to newest with per-session summaries and gap/confidence annotations.
 - `mnemo_self` — Session self-identification via nonce protocol
+- `mnemo_decisions` — Search past decisions (proposal + confirmation pairs) across all sessions. Decisions detected automatically during ingest and backfilled for existing sessions.
+- `mnemo_whatsup` — Live session resource monitor: per-session CPU%, RSS, CPU time correlated with session metadata (repo, topic, work type), plus system memory pressure.
+- `mnemo_define` — Define a reusable parameterised query template with {{param}} placeholders. Templates persist in SQLite across sessions.
+- `mnemo_evaluate` — Execute a named query template with parameter values. Returns results like mnemo_query.
+- `mnemo_list_templates` — List all saved query templates.
 
 ## Code Structure
 
