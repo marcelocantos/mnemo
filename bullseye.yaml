@@ -31,10 +31,11 @@ targets:
     discovered: 2026-04-07
   T11:
     name: Git history indexed cross-repo with FTS and session correlation
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - Commits from repos in session_meta indexed automatically
     - mnemo_commits supports cross-repo queries (repo glob, date range)
@@ -47,12 +48,14 @@ targets:
     - observability
     origin: user suggestion
     discovered: 2026-04-07
+    achieved: 2026-04-13
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - PRs and issues from repos in session_meta indexed automatically
     - mnemo_prs supports cross-repo queries with FTS on title/body
@@ -67,6 +70,7 @@ targets:
     - github
     origin: user suggestion
     discovered: 2026-04-07
+    achieved: 2026-04-13
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
@@ -236,10 +240,11 @@ targets:
     achieved: 2026-04-07
   T5:
     name: Self-improving tool discovery
-    status: identified
+    status: achieved
     value: 9.0
     cost: 8.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - mnemo_discover_patterns tool identifies workaround sessions
     - Detects direct JSONL reads, grep over transcript dirs, repeated query shapes
@@ -248,6 +253,7 @@ targets:
     context: mnemo mines its own transcript index to discover patterns suggesting missing features. Feeds the feedback loop.
     origin: targets.md bootstrap
     discovered: 2026-04-07
+    achieved: 2026-04-13
   T6:
     name: Session self-identification
     status: achieved
