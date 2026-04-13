@@ -65,6 +65,7 @@ user. Good moments to reach for mnemo:
 - `mnemo_status` — Rich status report: repos → sessions → truncated conversation excerpts with drill-down offsets
 - `mnemo_repos` — List repos with paths, session counts, last activity. Supports globs.
 - `mnemo_stats` — Index statistics
+- `mnemo_chain` — Retrieve the full /clear-bounded session chain for any session ID. Returns ordered chain from oldest to newest with per-session summaries and gap/confidence annotations.
 - `mnemo_self` — Session self-identification via nonce protocol
 
 ## Code Structure

@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.15.0.
+Snapshot as of v0.16.0.
 
 ### CLI flags
 
@@ -45,7 +45,9 @@ Snapshot as of v0.15.0.
 | `work_type` | string | no | Work type filter | Needs review |
 
 **Notes**: `min_messages` default of 6 may need tuning. `work_type`
-values are heuristically extracted and the set may evolve.
+values are heuristically extracted and the set may evolve. As of v0.16.0,
+live sessions (detected via `lsof` with a 5-second cache) are annotated
+with `[LIVE pid=NNNNN]` in the output.
 
 #### mnemo_read_session
 
@@ -207,7 +209,8 @@ activity. Filter matching uses SQL LIKE with `*` mapped to `%`.
 
 #### mnemo_stats
 
-No parameters. Returns session/message counts by type. **Stability**: Stable.
+No parameters. Returns session/message counts by type, including a Streams
+table showing per-stream ingest state (added in v0.16.0). **Stability**: Stable.
 
 #### mnemo_chain
 
@@ -225,6 +228,23 @@ No parameters. Returns session/message counts by type. **Stability**: Stable.
 
 **Notes**: Two-phase nonce protocol. Nonces detected during ingest and
 stored in indexed `session_nonces` table. The mechanism may evolve.
+
+### Store / Backend interface methods
+
+These methods are part of the `Backend` interface used by both the local `Store`
+and the RPC proxy. Breaking changes here would require a protocol version bump.
+
+| Method | Signature | Added | Stability |
+|---|---|---|---|
+| `LiveSessions` | `() map[string]int` | v0.16.0 | Needs review |
+| `Predecessor` | `(sessionID string) (string, error)` | v0.16.0 | Needs review |
+| `Successor` | `(sessionID string) (string, error)` | v0.16.0 | Needs review |
+| `Chain` | `(sessionID string) ([]ChainLink, error)` | v0.16.0 | Needs review |
+
+**Notes**: `LiveSessions` uses `lsof` to detect active Claude Code processes
+and maps session IDs to PIDs, with a 5-second in-process cache. The lsof
+dependency and cache TTL are implementation details and may change.
+`Predecessor`/`Successor`/`Chain` traverse the `session_chains` table.
 
 ### Database schema (exposed via mnemo_query)
 
