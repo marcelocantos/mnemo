@@ -2,14 +2,14 @@ schema_version: 1
 targets:
   T1:
     name: Broader memory beyond transcripts
-    status: identified
+    status: converging
     value: 8.0
     cost: 13.0
     acceptance:
     - Data model extends beyond raw transcript messages
     - Decisions, preferences, and project context tracked across sessions
     - Summarisation layer distills sessions into key facts
-    context: mnemo evolves from transcript search into a general memory system. T10 (live context compaction) addresses the core. Once T10 achieved, reassess residual scope.
+    context: 'mnemo evolves from transcript search into a general memory system. T10 (live context compaction) addresses the core. Once T10 achieved, reassess residual scope. As of 2026-04-13: data model now indexes git commits, GitHub PRs/issues, audit logs, targets, plans, configs, skills, and memories — far beyond raw transcripts. Decisions tracked via mnemo_decisions (T9.6). Only the summarisation layer (T10) remains.'
     origin: targets.md bootstrap
     discovered: 2026-04-07
   T10:
