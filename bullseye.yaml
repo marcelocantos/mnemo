@@ -197,6 +197,32 @@ targets:
     origin: manual
     discovered: 2026-04-12
     achieved: 2026-04-12
+  T18:
+    name: Images in transcripts are described and indexed for FTS search
+    status: identified
+    value: 5.0
+    cost: 8.0
+    observable: true
+    acceptance:
+    - 'Inline base64 images (type: image content blocks) are detected during ingest and descriptions generated'
+    - Image file path references in tool_use params (.png/.jpg/.jpeg/.gif/.webp) are resolved against the filesystem and described if reachable
+    - Descriptions are produced by an Opus agent (Claude API) using sonnet pricing-equivalent or lower when quality allows
+    - Images exceeding a pixel-count threshold are downscaled before submission to cap token cost
+    - Descriptions stored in a dedicated image_descriptions table with FTS5 index, joined back to originating entry/message and session
+    - backfillImageDescriptions runs at startup to retroactively process all existing images (both inline base64 in entries.raw and reachable file-path references in indexed messages)
+    - Processing runs in a background goroutine with rate limiting so it does not block startup or saturate the API
+    - mnemo_images MCP tool exposes search over descriptions with repo, session, and date filters
+    - Failed/skipped images (unreachable path, API error, policy refusal) are recorded so retry/diagnosis is possible
+    - Token and cost impact is observable via mnemo_usage or a dedicated counter
+    context: |-
+      mnemo currently drops image content on the floor. extractBlocks() at internal/store/store.go:5075+ handles text/thinking/tool_use/tool_result but has no case for "image" — inline base64 images in entries.raw never surface into messages. File-path references in tool_use inputs (Read, Write, Bash with screenshot paths) are indexed as tool_file_path but the actual image content is not described. Roughly 912 image blocks across ~128 of ~960 transcript files exist today, so retroactive backfill is meaningful. Design considerations: (1) call the Anthropic API via the ANTHROPIC_API_KEY the user already uses (Pro Max 20X plan — effectively free, per user_anthropic_plan.md); (2) downscale images above a pixel threshold (e.g. 1568×1568 — Anthropic's recommended max) using Go's image/jpeg + image/png + golang.org/x/image/draw before submission; (3) store descriptions in a dedicated image_descriptions table (id, entry_id, message_id, session_id, source_type [inline|path], source_path, content_hash, description, model, created_at) with FTS5 on description; (4) detect file-path references by scanning messages.tool_file_path for image extensions and reading the file if it still exists; (5) backfill in a background goroutine with conservative concurrency (2-4 workers) and per-image retries; (6) hash content to dedupe — the same screenshot appearing in multiple sessions should only be described once, with per-occurrence foreign-key rows linking back. The feature produces an observable capability: "find the session where I looked at that diagram of X" becomes answerable.</context>
+      </invoke>
+    tags:
+    - ingest
+    - observability
+    - ai
+    origin: manual
+    discovered: 2026-04-14
   T2:
     name: Smarter session classification
     status: achieved
