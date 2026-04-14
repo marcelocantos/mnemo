@@ -244,6 +244,28 @@ targets:
     origin: manual
     discovered: 2026-04-14
     achieved: 2026-04-14
+  T19:
+    name: Image OCR extracted and indexed alongside AI descriptions
+    status: identified
+    value: 5.0
+    cost: 5.0
+    observable: true
+    acceptance:
+    - Every image in the images table has an OCR pass (or recorded error); descriptions remain untouched — OCR is additive
+    - 'On macOS: Apple Vision framework used (via Swift helper binary or shortcuts run) for ~100ms/image local extraction'
+    - 'On Linux: Tesseract CLI used as fallback when Apple Vision unavailable'
+    - 'image_ocr table stores: image_id, text, backend (''apple_vision''|''tesseract''), confidence (nullable), error (nullable), created_at'
+    - image_ocr_fts FTS5 virtual table with ai/au/ad triggers for searchability
+    - mnemo_images search queries BOTH description FTS and OCR FTS and merges results (ranking by combined relevance)
+    - 'Retroactive backfill: all existing images get an OCR pass at startup via a background worker'
+    - 'Graceful fallback: if neither Apple Vision helper nor tesseract is installed, images still stored, OCR skipped with clear log'
+    context: 'Complements 🎯T18 (AI descriptions). Claude descriptions paraphrase — good for semantic content, useless for exact string match. For mnemo''s corpus (screenshots of code, terminals, error messages, logs, browser devtools), OCR preserves exact strings (error codes, commit hashes, file paths, line numbers, URLs, function names) that FTS over descriptions cannot recover. Apple Vision is free, local, ~100ms/image on M4. Tesseract is cross-platform fallback. Storage cost is negligible (~2-10KB text per screenshot). Schema addition: bump to 17 (T18 is at 16). Implementation path: use a small Swift binary that reads image bytes on stdin and emits JSON on stdout for macOS; shell out to tesseract for Linux. The macOS helper can live in `tools/ocr-macos/` as a Swift package.'
+    tags:
+    - ingest
+    - observability
+    - images
+    origin: manual
+    discovered: 2026-04-14
   T2:
     name: Smarter session classification
     status: achieved
@@ -258,6 +280,30 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-07
+  T20:
+    name: Image embeddings enable semantic and visual similarity search
+    status: identified
+    value: 5.0
+    cost: 8.0
+    observable: true
+    acceptance:
+    - Every image in the images table has a CLIP/SigLIP-family embedding (or recorded error); additive to descriptions and OCR
+    - Local SigLIP or MetaCLIP model used for inference (no remote API, no per-image cost)
+    - 'image_embeddings table stores: image_id, model, dim, vector (float32 BLOB), error, created_at'
+    - mnemo_images supports semantic text search mode (query → embed text → k-NN against image embeddings)
+    - mnemo_images supports visual similarity mode (image_id input → k-NN against other images by embedding cosine distance)
+    - 'Retroactive backfill: all existing images get embeddings at startup via a background worker'
+    - k-NN search is brute-force in Go (sufficient for the current corpus size ~1000 images; SIMD-friendly cosine similarity); sqlite-vec can be added later if corpus grows past ~100k images
+    - 'Graceful fallback: if the embedding helper (Python script or binary) is unavailable, images still stored, embeddings skipped with clear log'
+    - mnemo_images search mode selectable via a 'mode' parameter ('text'|'semantic'|'similar') with 'text' (FTS over description+OCR) as default
+    context: 'Complements 🎯T18 (AI descriptions) and OCR. Descriptions + OCR rely on string-match via FTS5. CLIP-family embeddings add semantic search (''architecture diagram'' matches ''block diagram'' matches ''system layout drawing'') and visual similarity (''find images like this one''). For mnemo''s small corpus (~1000 images, growing slowly), brute-force cosine similarity in Go is fine — 1000 * 768 float32 = 3MB, single pass in <1ms. sqlite-vec extension is available if we want to scale but not needed yet. Implementation path: Python helper script using `open_clip_torch` or `sentence-transformers` with SigLIP 2 (siglip2-base-patch16-224 or similar). Python is already the user''s tool of choice (uv-managed venv). The script takes an image path and emits JSON {model, dim, vector} on stdout. Go shells out. For text embedding (query side of semantic search), same script with --mode=text. Store embeddings as little-endian float32 BLOBs for compact storage and fast decode. Schema addition assumes T19 (OCR) lands first, bumping to 18.'
+    tags:
+    - ingest
+    - observability
+    - images
+    - ai
+    origin: manual
+    discovered: 2026-04-14
   T3:
     name: Active work dashboard data
     status: achieved
