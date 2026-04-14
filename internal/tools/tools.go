@@ -331,6 +331,14 @@ Returns candidate features with evidence counts, example sessions, and suggested
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("min_occurrences", mcp.Description("Minimum pattern occurrences to report (default 3)")),
 		),
+		mcp.NewTool("mnemo_images",
+			mcp.WithDescription(`Search images captured from Claude Code transcripts. Images are detected during ingest (inline base64 and file-path references), stored as BLOBs with metadata, and described by an AI model grounded in the surrounding conversation context. Use this to find screenshots, diagrams, or any visual content from past sessions.`),
+			mcp.WithString("query", mcp.Description("Search query against image descriptions (FTS5 fuzzy OR). Omit to list recent.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo (session's repo)")),
+			mcp.WithString("session", mcp.Description("Filter by session ID prefix")),
+			mcp.WithNumber("days", mcp.Description("Recency window (default 90)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 	}
 }
 
@@ -395,6 +403,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.listTemplates()
 	case "mnemo_discover_patterns":
 		return h.discoverPatterns(args)
+	case "mnemo_images":
+		return h.images(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1262,6 +1272,67 @@ func (h *Handler) discoverPatterns(args map[string]any) (string, bool, error) {
 			fmt.Fprintf(&b, "**Sessions (showing %d of %d):** %s\n\n", len(shown), len(c.Sessions), strings.Join(shown, ", "))
 		}
 		b.WriteString("---\n\n")
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) images(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repo, _ := args["repo"].(string)
+	session, _ := args["session"].(string)
+	days := 90
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		days = int(d)
+	}
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchImages(query, repo, session, days, limit)
+	if err != nil {
+		return fmt.Sprintf("search images failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		if query != "" {
+			return "No images found matching query. Images require AI descriptions — check that ANTHROPIC_API_KEY is set.", false, nil
+		}
+		return "No images indexed yet. Images are extracted from transcripts during ingest.", false, nil
+	}
+
+	var b strings.Builder
+	for _, r := range results {
+		img := r.Image
+		sid := ""
+		if len(r.Occurrences) > 0 {
+			sid = r.Occurrences[0].SessionID
+			if len(sid) > 8 {
+				sid = sid[:8]
+			}
+		}
+		fmt.Fprintf(&b, "[image id=%d] %s %dx%d %s (%.1f KB)",
+			img.ID, img.MimeType, img.Width, img.Height, img.PixelFormat,
+			float64(img.ByteSize)/1024)
+		if img.OriginalPath != "" {
+			fmt.Fprintf(&b, " path=%s", img.OriginalPath)
+		}
+		if sid != "" {
+			fmt.Fprintf(&b, " session=%s", sid)
+		}
+		b.WriteByte('\n')
+		if r.Description != "" {
+			fmt.Fprintf(&b, "  %s\n", r.Description)
+		} else {
+			b.WriteString("  (description pending)\n")
+		}
+		for _, occ := range r.Occurrences {
+			occSID := occ.SessionID
+			if len(occSID) > 8 {
+				occSID = occSID[:8]
+			}
+			fmt.Fprintf(&b, "  seen in %s (%s) at %s\n", occSID, occ.SourceType, occ.OccurredAt)
+		}
+		b.WriteByte('\n')
 	}
 	return b.String(), false, nil
 }

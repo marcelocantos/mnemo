@@ -300,7 +300,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 15
+const schemaVersion = 16
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -586,6 +586,39 @@ func New(dbPath, projectDir string) (*Store, error) {
 			labels TEXT NOT NULL DEFAULT '[]',
 			UNIQUE(repo, issue_number)
 		);
+		CREATE TABLE IF NOT EXISTS images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			content_hash TEXT UNIQUE NOT NULL,
+			bytes BLOB NOT NULL,
+			original_path TEXT,
+			mime_type TEXT NOT NULL,
+			width INTEGER NOT NULL,
+			height INTEGER NOT NULL,
+			pixel_format TEXT NOT NULL,
+			byte_size INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE IF NOT EXISTS image_occurrences (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+			entry_id INTEGER REFERENCES entries(id),
+			message_id INTEGER REFERENCES messages(id),
+			session_id TEXT NOT NULL,
+			source_type TEXT NOT NULL CHECK(source_type IN ('inline','path')),
+			occurred_at TEXT NOT NULL,
+			UNIQUE(image_id, entry_id, message_id, source_type)
+		);
+		CREATE TABLE IF NOT EXISTS image_descriptions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+			description TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(image_id)
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -654,6 +687,10 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_github_issues_state ON github_issues(state);
 		CREATE INDEX IF NOT EXISTS idx_github_issues_created ON github_issues(created_at);
 		CREATE INDEX IF NOT EXISTS idx_github_issues_updated ON github_issues(updated_at);
+		CREATE INDEX IF NOT EXISTS idx_images_content_hash ON images(content_hash);
+		CREATE INDEX IF NOT EXISTS idx_image_occurrences_session ON image_occurrences(session_id);
+		CREATE INDEX IF NOT EXISTS idx_image_occurrences_image ON image_occurrences(image_id);
+		CREATE INDEX IF NOT EXISTS idx_image_descriptions_image ON image_descriptions(image_id);
 	`)
 	if err != nil {
 		db.Close()
@@ -930,6 +967,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO github_issues_fts(github_issues_fts, rowid, title, body, repo, author)
 			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS image_descriptions_fts USING fts5(
+			description,
+			content=image_descriptions,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS image_descriptions_ai;
+		CREATE TRIGGER image_descriptions_ai AFTER INSERT ON image_descriptions
+		BEGIN
+			INSERT INTO image_descriptions_fts(rowid, description)
+			VALUES (new.id, new.description);
+		END;
+		DROP TRIGGER IF EXISTS image_descriptions_au;
+		CREATE TRIGGER image_descriptions_au AFTER UPDATE ON image_descriptions
+		BEGIN
+			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, description)
+			VALUES ('delete', old.id, old.description);
+			INSERT INTO image_descriptions_fts(rowid, description)
+			VALUES (new.id, new.description);
+		END;
+		DROP TRIGGER IF EXISTS image_descriptions_ad;
+		CREATE TRIGGER image_descriptions_ad AFTER DELETE ON image_descriptions
+		BEGIN
+			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, description)
+			VALUES ('delete', old.id, old.description);
 		END;
 	`)
 	if err != nil {
@@ -2973,6 +3035,11 @@ func (s *Store) IngestAll() error {
 	// haven't been scanned yet (e.g. sessions ingested before decisions
 	// table existed).
 	backfillDecisions(s.db)
+
+	// Extract and store images from all ingested entries and messages.
+	// Runs synchronously (fast — no API calls). Description generation
+	// happens separately in the background worker started by StartImageDescriber.
+	backfillImages(s)
 
 	// Index git commit history from all known repos.
 	backfillGitCommits(s)
@@ -5345,6 +5412,28 @@ func (s *Store) ingestFile(path string) error {
 	repo := extractRepo(metaCwd)
 	detectDecisions(s.db, sessionID, repo)
 
+	// Extract and store any images from newly ingested entries.
+	// Uses a targeted query so only new entries need scanning.
+	go func() {
+		rows, err := s.db.Query(`
+			SELECT e.id, e.raw, COALESCE(e.timestamp, datetime('now'))
+			FROM entries e
+			WHERE e.session_id = ? AND e.raw LIKE '%"type":"image"%'
+			ORDER BY e.id DESC LIMIT 100`, sessionID)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var raw []byte
+			var ts string
+			if rows.Scan(&id, &raw, &ts) == nil {
+				ingestImagesForEntry(s.db, id, sessionID, raw, ts)
+			}
+		}
+	}()
+
 	return nil
 }
 
@@ -6419,4 +6508,145 @@ func backfillGitCommits(s *Store) {
 	if totalNew > 0 {
 		slog.Info("backfilled git commits", "new_commits", totalNew)
 	}
+}
+
+// --- Image indexing ---
+
+// ImageInfo holds metadata for a stored image.
+type ImageInfo struct {
+	ID           int    `json:"id"`
+	ContentHash  string `json:"content_hash"`
+	OriginalPath string `json:"original_path,omitempty"`
+	MimeType     string `json:"mime_type"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	PixelFormat  string `json:"pixel_format"`
+	ByteSize     int64  `json:"byte_size"`
+	CreatedAt    string `json:"created_at"`
+}
+
+// ImageOccurrence links an image to a specific session/entry.
+type ImageOccurrence struct {
+	SessionID  string `json:"session_id"`
+	SourceType string `json:"source_type"`
+	OccurredAt string `json:"occurred_at"`
+}
+
+// ImageSearchResult is a single image search hit.
+type ImageSearchResult struct {
+	Image       ImageInfo         `json:"image"`
+	Description string            `json:"description,omitempty"`
+	Occurrences []ImageOccurrence `json:"occurrences,omitempty"`
+}
+
+// SearchImages searches image descriptions using FTS5 and returns matching images
+// with their metadata and occurrence info.
+func (s *Store) SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 90
+	}
+
+	cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
+
+	// Build main query.
+	var q string
+	var qArgs []any
+
+	if query != "" {
+		ftsQuery := relaxQuery(query)
+		q = `SELECT DISTINCT img.id, img.content_hash, COALESCE(img.original_path,''), img.mime_type,
+				img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
+				COALESCE(d.description,'')
+			FROM images img
+			JOIN image_descriptions_fts f ON f.rowid = (
+				SELECT id FROM image_descriptions WHERE image_id = img.id LIMIT 1
+			)
+			JOIN image_descriptions d ON d.image_id = img.id
+			JOIN image_occurrences io ON io.image_id = img.id
+			WHERE image_descriptions_fts MATCH ?
+			AND io.occurred_at >= ` + cutoff
+		qArgs = append(qArgs, ftsQuery)
+	} else {
+		q = `SELECT DISTINCT img.id, img.content_hash, COALESCE(img.original_path,''), img.mime_type,
+				img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
+				COALESCE(d.description,'')
+			FROM images img
+			LEFT JOIN image_descriptions d ON d.image_id = img.id
+			JOIN image_occurrences io ON io.image_id = img.id
+			WHERE io.occurred_at >= ` + cutoff
+	}
+
+	if repo != "" {
+		q += ` AND EXISTS (
+			SELECT 1 FROM image_occurrences io2
+			JOIN session_meta sm ON sm.session_id = io2.session_id
+			WHERE io2.image_id = img.id AND sm.repo LIKE ?
+		)`
+		qArgs = append(qArgs, "%"+repo+"%")
+	}
+	if session != "" {
+		q += ` AND EXISTS (
+			SELECT 1 FROM image_occurrences io3
+			WHERE io3.image_id = img.id AND io3.session_id LIKE ?
+		)`
+		qArgs = append(qArgs, session+"%")
+	}
+	q += ` ORDER BY img.created_at DESC LIMIT ?`
+	qArgs = append(qArgs, limit)
+
+	rows, err := s.db.Query(q, qArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("search images: %w", err)
+	}
+	defer rows.Close()
+
+	var results []ImageSearchResult
+	var imageIDs []int64
+	for rows.Next() {
+		var r ImageSearchResult
+		var id int64
+		if err := rows.Scan(
+			&id, &r.Image.ContentHash, &r.Image.OriginalPath, &r.Image.MimeType,
+			&r.Image.Width, &r.Image.Height, &r.Image.PixelFormat, &r.Image.ByteSize,
+			&r.Image.CreatedAt, &r.Description,
+		); err != nil {
+			continue
+		}
+		r.Image.ID = int(id)
+		results = append(results, r)
+		imageIDs = append(imageIDs, id)
+	}
+	rows.Close()
+
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	// Fetch up to 3 occurrences per image.
+	for i, id := range imageIDs {
+		occRows, err := s.db.Query(`
+			SELECT io.session_id, io.source_type, io.occurred_at
+			FROM image_occurrences io
+			WHERE io.image_id = ?
+			ORDER BY io.occurred_at DESC
+			LIMIT 3`, id)
+		if err != nil {
+			continue
+		}
+		for occRows.Next() {
+			var occ ImageOccurrence
+			if occRows.Scan(&occ.SessionID, &occ.SourceType, &occ.OccurredAt) == nil {
+				results[i].Occurrences = append(results[i].Occurrences, occ)
+			}
+		}
+		occRows.Close()
+	}
+
+	return results, nil
 }

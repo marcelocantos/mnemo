@@ -37,4 +37,5 @@ type Backend interface {
 	SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]GitHubActivityResult, error)
 	SearchCommits(query string, repo string, author string, days int, limit int) ([]GitCommit, error)
 	DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)
+	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 }

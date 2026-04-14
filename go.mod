@@ -10,6 +10,8 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.41
 )
 
+require golang.org/x/image v0.39.0 // indirect
+
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/marcelocantos/sqldeep/go/sqldeep v0.19.0

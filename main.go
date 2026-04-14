@@ -106,6 +106,8 @@ func runServe() {
 		if stats, err := mem.Stats(); err == nil {
 			slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
 		}
+		// Start background image description workers (no-op if no API key).
+		mem.StartImageDescriber()
 		if err := mem.IngestMemories(); err != nil {
 			slog.Error("memory ingest failed", "err", err)
 		}
