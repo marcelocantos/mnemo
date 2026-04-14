@@ -6802,3 +6802,162 @@ func (s *Store) SearchImagesFiltered(query string, repo string, session string, 
 
 	return results, nil
 }
+
+// SearchImagesSemantic embeds the query text and runs k-NN against stored CLIP vectors,
+// applying repo/session/days filters.
+func (s *Store) SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 90
+	}
+
+	_, _, queryVec, err := runEmbedText(query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query text: %w", err)
+	}
+
+	return s.knnImageSearch(queryVec, -1, repo, session, days, limit, "semantic")
+}
+
+// SearchImagesSimilar loads the embedding for the given imageID and finds visually similar images.
+func (s *Store) SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]ImageSearchResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if days <= 0 {
+		days = 90
+	}
+
+	s.rwmu.RLock()
+	var blob []byte
+	err := s.db.QueryRow(`SELECT vector FROM image_embeddings WHERE image_id = ? AND error IS NULL`, similarTo).Scan(&blob)
+	s.rwmu.RUnlock()
+	if err != nil {
+		return nil, fmt.Errorf("load embedding for image %d: %w", similarTo, err)
+	}
+
+	refVec := decodeVector(blob)
+	return s.knnImageSearch(refVec, int64(similarTo), repo, session, days, limit, "similar")
+}
+
+// knnImageSearch performs brute-force k-NN over stored embeddings with filters.
+// excludeID of -1 means no exclusion; a positive value excludes that image ID from results.
+func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string, session string, days int, limit int, matchSource string) ([]ImageSearchResult, error) {
+	cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
+
+	// First collect candidate image IDs via SQL filters.
+	var filterArgs []any
+	filterQ := `SELECT DISTINCT img.id FROM images img
+		JOIN image_occurrences io ON io.image_id = img.id
+		WHERE io.occurred_at >= ` + cutoff
+
+	if repo != "" {
+		filterQ += ` AND EXISTS (
+			SELECT 1 FROM image_occurrences io2
+			JOIN session_meta sm ON sm.session_id = io2.session_id
+			WHERE io2.image_id = img.id AND sm.repo LIKE ?
+		)`
+		filterArgs = append(filterArgs, "%"+repo+"%")
+	}
+	if session != "" {
+		filterQ += ` AND EXISTS (
+			SELECT 1 FROM image_occurrences io3
+			WHERE io3.image_id = img.id AND io3.session_id LIKE ?
+		)`
+		filterArgs = append(filterArgs, session+"%")
+	}
+	if excludeID > 0 {
+		filterQ += ` AND img.id != ?`
+		filterArgs = append(filterArgs, excludeID)
+	}
+
+	s.rwmu.RLock()
+	rows, err := s.db.Query(filterQ, filterArgs...)
+	if err != nil {
+		s.rwmu.RUnlock()
+		return nil, fmt.Errorf("filter images for k-NN: %w", err)
+	}
+	var candidateIDs []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			candidateIDs = append(candidateIDs, id)
+		}
+	}
+	rows.Close()
+
+	// Determine the model to use: pick the most common model in the embeddings table.
+	var model string
+	s.db.QueryRow(`SELECT model FROM image_embeddings WHERE error IS NULL GROUP BY model ORDER BY COUNT(*) DESC LIMIT 1`).Scan(&model) //nolint:errcheck
+
+	candidates, err := loadCandidateEmbeddings(s.db, model, candidateIDs)
+	s.rwmu.RUnlock()
+	if err != nil {
+		return nil, fmt.Errorf("load embeddings: %w", err)
+	}
+
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// k-NN ranking.
+	topIDs := knnSearch(queryVec, candidates, limit)
+
+	// Build a score map for the results.
+	scoreMap := make(map[int64]float32, len(candidates))
+	for _, c := range candidates {
+		scoreMap[c.imageID] = cosineSimilarity(queryVec, c.vector)
+	}
+
+	// Fetch full metadata for the top results.
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	var results []ImageSearchResult
+	for _, id := range topIDs {
+		var r ImageSearchResult
+		var origPath sql.NullString
+		if err := s.db.QueryRow(`
+			SELECT img.id, img.content_hash, img.original_path, img.mime_type,
+			       img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
+			       COALESCE(d.description,''), COALESCE(o.text,'')
+			FROM images img
+			LEFT JOIN image_descriptions d ON d.image_id = img.id
+			LEFT JOIN image_ocr o ON o.image_id = img.id
+			WHERE img.id = ?`, id).Scan(
+			&r.Image.ID, &r.Image.ContentHash, &origPath, &r.Image.MimeType,
+			&r.Image.Width, &r.Image.Height, &r.Image.PixelFormat, &r.Image.ByteSize,
+			&r.Image.CreatedAt, &r.Description, &r.OCRText,
+		); err != nil {
+			continue
+		}
+		if origPath.Valid {
+			r.Image.OriginalPath = origPath.String
+		}
+		r.MatchSource = matchSource
+		r.Score = float64(scoreMap[id])
+
+		// Fetch up to 3 occurrences.
+		occRows, err := s.db.Query(`
+			SELECT io.session_id, io.source_type, io.occurred_at
+			FROM image_occurrences io
+			WHERE io.image_id = ?
+			ORDER BY io.occurred_at DESC
+			LIMIT 3`, id)
+		if err == nil {
+			for occRows.Next() {
+				var occ ImageOccurrence
+				if occRows.Scan(&occ.SessionID, &occ.SourceType, &occ.OccurredAt) == nil {
+					r.Occurrences = append(r.Occurrences, occ)
+				}
+			}
+			occRows.Close()
+		}
+
+		results = append(results, r)
+	}
+
+	return results, nil
+}

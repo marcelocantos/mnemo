@@ -397,3 +397,33 @@ func (p *Proxy) SearchImagesFiltered(query string, repo string, session string, 
 	var results []store.ImageSearchResult
 	return results, json.Unmarshal(raw, &results)
 }
+
+func (p *Proxy) SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
+	raw, err := p.client.Call("SearchImagesSemantic", SearchImagesSemanticParams{
+		Query:   query,
+		Repo:    repo,
+		Session: session,
+		Days:    days,
+		Limit:   limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.ImageSearchResult
+	return results, json.Unmarshal(raw, &results)
+}
+
+func (p *Proxy) SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
+	raw, err := p.client.Call("SearchImagesSimilar", SearchImagesSimilarParams{
+		SimilarTo: similarTo,
+		Repo:      repo,
+		Session:   session,
+		Days:      days,
+		Limit:     limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.ImageSearchResult
+	return results, json.Unmarshal(raw, &results)
+}

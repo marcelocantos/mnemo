@@ -332,13 +332,15 @@ Returns candidate features with evidence counts, example sessions, and suggested
 			mcp.WithNumber("min_occurrences", mcp.Description("Minimum pattern occurrences to report (default 3)")),
 		),
 		mcp.NewTool("mnemo_images",
-			mcp.WithDescription(`Search images captured from Claude Code transcripts. Images are indexed two ways: (1) AI descriptions (Claude paraphrases content — "terminal showing an error") and (2) OCR text (Apple Vision or tesseract extracts exact strings — "ECONNREFUSED 127.0.0.1:5432"). Both indexes are searched by default. Use this to find screenshots, diagrams, code, logs, or any visual content from past sessions.`),
-			mcp.WithString("query", mcp.Description("Search query over image descriptions and/or OCR text (FTS5 fuzzy OR). Omit to list recent.")),
+			mcp.WithDescription(`Search images captured from Claude Code transcripts. Three search modes: (1) text (default) — FTS5 over AI descriptions and OCR text; (2) semantic — embed the query text and find images by meaning using CLIP k-NN (requires embed backend); (3) similar — find visually similar images given an image ID. Use 'text' to find images by paraphrase, 'semantic' for conceptual matches like "architecture diagram", and 'similar' to browse related screenshots.`),
+			mcp.WithString("query", mcp.Description("Search query. Used in 'text' and 'semantic' modes. Omit to list recent (text mode).")),
+			mcp.WithString("mode", mcp.Description(`Search mode: "text" (FTS5 over descriptions + OCR, default), "semantic" (embed query, k-NN on CLIP vectors), or "similar" (visual similarity to another image, requires similar_to).`)),
+			mcp.WithNumber("similar_to", mcp.Description("Image ID to find visually similar images (used with mode='similar').")),
 			mcp.WithString("repo", mcp.Description("Filter by repo (session's repo)")),
 			mcp.WithString("session", mcp.Description("Filter by session ID prefix")),
 			mcp.WithNumber("days", mcp.Description("Recency window (default 90)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-			mcp.WithString("search_fields", mcp.Description(`Which indexes to search: "both" (default), "description" (AI descriptions only), or "ocr" (extracted text only).`)),
+			mcp.WithString("search_fields", mcp.Description(`For text mode: which indexes to search: "both" (default), "description" (AI descriptions only), or "ocr" (extracted text only).`)),
 		),
 	}
 }
@@ -1279,6 +1281,7 @@ func (h *Handler) discoverPatterns(args map[string]any) (string, bool, error) {
 
 func (h *Handler) images(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
+	mode, _ := args["mode"].(string)
 	repo, _ := args["repo"].(string)
 	session, _ := args["session"].(string)
 	searchFields, _ := args["search_fields"].(string)
@@ -1290,16 +1293,54 @@ func (h *Handler) images(args map[string]any) (string, bool, error) {
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
 	}
-
-	results, err := h.mem.SearchImagesFiltered(query, repo, session, days, limit, searchFields)
-	if err != nil {
-		return fmt.Sprintf("search images failed: %v", err), true, nil
+	similarTo := 0
+	if st, ok := args["similar_to"].(float64); ok && st > 0 {
+		similarTo = int(st)
 	}
-	if len(results) == 0 {
-		if query != "" {
-			return "No images found matching query. Descriptions require ANTHROPIC_API_KEY; OCR requires Apple Vision (macOS) or tesseract.", false, nil
+
+	if mode == "" {
+		mode = "text"
+	}
+
+	var results []store.ImageSearchResult
+	var err error
+
+	switch mode {
+	case "semantic":
+		if query == "" {
+			return "query is required for semantic mode", true, nil
 		}
-		return "No images indexed yet. Images are extracted from transcripts during ingest.", false, nil
+		results, err = h.mem.SearchImagesSemantic(query, repo, session, days, limit)
+		if err != nil {
+			return fmt.Sprintf("semantic image search failed: %v", err), true, nil
+		}
+	case "similar":
+		if similarTo <= 0 {
+			return "similar_to (image ID) is required for similar mode", true, nil
+		}
+		results, err = h.mem.SearchImagesSimilar(similarTo, repo, session, days, limit)
+		if err != nil {
+			return fmt.Sprintf("similar image search failed: %v", err), true, nil
+		}
+	default: // "text"
+		results, err = h.mem.SearchImagesFiltered(query, repo, session, days, limit, searchFields)
+		if err != nil {
+			return fmt.Sprintf("search images failed: %v", err), true, nil
+		}
+	}
+
+	if len(results) == 0 {
+		switch mode {
+		case "semantic":
+			return "No images found via semantic search. Ensure embeddings are populated (embed backend requires uv + sentence-transformers).", false, nil
+		case "similar":
+			return fmt.Sprintf("No similar images found for image ID %d. The image may not have an embedding yet.", similarTo), false, nil
+		default:
+			if query != "" {
+				return "No images found matching query. Descriptions require ANTHROPIC_API_KEY; OCR requires Apple Vision (macOS) or tesseract.", false, nil
+			}
+			return "No images indexed yet. Images are extracted from transcripts during ingest.", false, nil
+		}
 	}
 
 	var b strings.Builder
@@ -1323,6 +1364,9 @@ func (h *Handler) images(args map[string]any) (string, bool, error) {
 		}
 		if r.MatchSource != "" {
 			fmt.Fprintf(&b, " match=%s", r.MatchSource)
+		}
+		if r.Score > 0 {
+			fmt.Fprintf(&b, " score=%.3f", r.Score)
 		}
 		b.WriteByte('\n')
 		if r.Description != "" {

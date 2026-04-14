@@ -39,4 +39,6 @@ type Backend interface {
 	DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)
 	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
+	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
+	SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 }

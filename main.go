@@ -110,6 +110,8 @@ func runServe() {
 		mem.StartImageDescriber()
 		// Start background image OCR workers (no-op if no backend available).
 		mem.StartImageOCR()
+		// Start background image embedding workers (no-op if uv/embed script not found).
+		mem.StartImageEmbedder()
 		if err := mem.IngestMemories(); err != nil {
 			slog.Error("memory ingest failed", "err", err)
 		}

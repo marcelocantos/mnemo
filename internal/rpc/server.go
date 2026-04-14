@@ -161,6 +161,12 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"SearchImages": makeMethod(func(p SearchImagesParams) (any, error) {
 			return s.SearchImagesFiltered(p.Query, p.Repo, p.Session, p.Days, p.Limit, p.SearchFields)
 		}),
+		"SearchImagesSemantic": makeMethod(func(p SearchImagesSemanticParams) (any, error) {
+			return s.SearchImagesSemantic(p.Query, p.Repo, p.Session, p.Days, p.Limit)
+		}),
+		"SearchImagesSimilar": makeMethod(func(p SearchImagesSimilarParams) (any, error) {
+			return s.SearchImagesSimilar(p.SimilarTo, p.Repo, p.Session, p.Days, p.Limit)
+		}),
 	}
 }
 
@@ -374,4 +380,22 @@ type SearchImagesParams struct {
 	Days         int    `json:"days"`
 	Limit        int    `json:"limit"`
 	SearchFields string `json:"search_fields"`
+}
+
+// SearchImagesSemanticParams matches the SearchImagesSemantic method signature.
+type SearchImagesSemanticParams struct {
+	Query   string `json:"query"`
+	Repo    string `json:"repo"`
+	Session string `json:"session"`
+	Days    int    `json:"days"`
+	Limit   int    `json:"limit"`
+}
+
+// SearchImagesSimilarParams matches the SearchImagesSimilar method signature.
+type SearchImagesSimilarParams struct {
+	SimilarTo int    `json:"similar_to"`
+	Repo      string `json:"repo"`
+	Session   string `json:"session"`
+	Days      int    `json:"days"`
+	Limit     int    `json:"limit"`
 }
