@@ -308,6 +308,20 @@ targets:
     origin: manual
     discovered: 2026-04-14
     achieved: 2026-04-14
+  T21:
+    name: mnemo indexes docs/ content (markdown and PDF) across tracked repos with md/pdf dedup
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - mnemo indexes `docs/*.md` content across all tracked repos, with results rankable alongside session transcripts
+    - mnemo indexes `docs/*.pdf` content via text extraction, scoped to the same repos
+    - When a `.md` and `.pdf` share the same stem in the same directory, only one is indexed (prefer `.md`; fall back to `.pdf` only if `.md` is absent)
+    - Re-indexing is incremental — unchanged files are not re-processed
+    - pageflip meeting-artifact markdown written into a tracked repo's docs/ becomes searchable without any pageflip-specific integration code in mnemo
+    context: 'pageflip will emit structured meeting artifacts into a configurable docs/ folder (see pageflip 🎯T12). For the contradiction detector (pageflip 🎯T14), dejargoniser (🎯T16), and weekly digest (🎯T17) to work, mnemo must treat docs/*.md and docs/*.pdf as first-class indexable content alongside Claude Code session transcripts. Many projects also already keep hand-written docs, TODOs, design notes, and release notes in docs/; indexing those gives the entire corpus a single searchable surface. Dedup rule: when a `.md` and `.pdf` exist for the same stem (e.g., `report.md` and `report.pdf` generated from it), index only one — prefer `.md` for searchability and fall back to `.pdf` when markdown is absent. Extraction for PDFs goes through whatever text-extraction tool is already available on the host.'
+    origin: pageflip artifact pipeline — meeting outputs need to be searchable alongside session transcripts
+    discovered: 2026-04-14
   T3:
     name: Active work dashboard data
     status: achieved
