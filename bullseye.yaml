@@ -284,10 +284,11 @@ targets:
     achieved: 2026-04-07
   T20:
     name: Image embeddings enable semantic and visual similarity search
-    status: identified
+    status: achieved
     value: 5.0
     cost: 8.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - Every image in the images table has a CLIP/SigLIP-family embedding (or recorded error); additive to descriptions and OCR
     - Local SigLIP or MetaCLIP model used for inference (no remote API, no per-image cost)
@@ -306,6 +307,7 @@ targets:
     - ai
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-14
   T3:
     name: Active work dashboard data
     status: achieved
