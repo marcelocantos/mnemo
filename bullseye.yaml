@@ -199,10 +199,11 @@ targets:
     achieved: 2026-04-12
   T18:
     name: Images in transcripts are described and indexed for FTS search
-    status: identified
+    status: achieved
     value: 5.0
     cost: 8.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - 'Inline base64 images (type: image content blocks) are detected during ingest; base64 decoded and stored as binary BLOB in a dedicated images table'
     - Image file path references in tool_use params (.png/.jpg/.jpeg/.gif/.webp) are resolved against the filesystem; reachable files read and stored as BLOB
@@ -242,6 +243,7 @@ targets:
     - ai
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-14
   T2:
     name: Smarter session classification
     status: achieved
