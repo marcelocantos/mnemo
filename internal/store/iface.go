@@ -38,4 +38,5 @@ type Backend interface {
 	SearchCommits(query string, repo string, author string, days int, limit int) ([]GitCommit, error)
 	DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)
 	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
+	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
 }

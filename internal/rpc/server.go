@@ -159,7 +159,7 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 			return s.DiscoverPatterns(p.Days, p.RepoFilter, p.MinOccurrences)
 		}),
 		"SearchImages": makeMethod(func(p SearchImagesParams) (any, error) {
-			return s.SearchImages(p.Query, p.Repo, p.Session, p.Days, p.Limit)
+			return s.SearchImagesFiltered(p.Query, p.Repo, p.Session, p.Days, p.Limit, p.SearchFields)
 		}),
 	}
 }
@@ -368,9 +368,10 @@ type DiscoverPatternsParams struct {
 
 // SearchImagesParams matches the SearchImages method signature.
 type SearchImagesParams struct {
-	Query   string `json:"query"`
-	Repo    string `json:"repo"`
-	Session string `json:"session"`
-	Days    int    `json:"days"`
-	Limit   int    `json:"limit"`
+	Query        string `json:"query"`
+	Repo         string `json:"repo"`
+	Session      string `json:"session"`
+	Days         int    `json:"days"`
+	Limit        int    `json:"limit"`
+	SearchFields string `json:"search_fields"`
 }

@@ -332,12 +332,13 @@ Returns candidate features with evidence counts, example sessions, and suggested
 			mcp.WithNumber("min_occurrences", mcp.Description("Minimum pattern occurrences to report (default 3)")),
 		),
 		mcp.NewTool("mnemo_images",
-			mcp.WithDescription(`Search images captured from Claude Code transcripts. Images are detected during ingest (inline base64 and file-path references), stored as BLOBs with metadata, and described by an AI model grounded in the surrounding conversation context. Use this to find screenshots, diagrams, or any visual content from past sessions.`),
-			mcp.WithString("query", mcp.Description("Search query against image descriptions (FTS5 fuzzy OR). Omit to list recent.")),
+			mcp.WithDescription(`Search images captured from Claude Code transcripts. Images are indexed two ways: (1) AI descriptions (Claude paraphrases content — "terminal showing an error") and (2) OCR text (Apple Vision or tesseract extracts exact strings — "ECONNREFUSED 127.0.0.1:5432"). Both indexes are searched by default. Use this to find screenshots, diagrams, code, logs, or any visual content from past sessions.`),
+			mcp.WithString("query", mcp.Description("Search query over image descriptions and/or OCR text (FTS5 fuzzy OR). Omit to list recent.")),
 			mcp.WithString("repo", mcp.Description("Filter by repo (session's repo)")),
 			mcp.WithString("session", mcp.Description("Filter by session ID prefix")),
 			mcp.WithNumber("days", mcp.Description("Recency window (default 90)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+			mcp.WithString("search_fields", mcp.Description(`Which indexes to search: "both" (default), "description" (AI descriptions only), or "ocr" (extracted text only).`)),
 		),
 	}
 }
@@ -1280,6 +1281,7 @@ func (h *Handler) images(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	session, _ := args["session"].(string)
+	searchFields, _ := args["search_fields"].(string)
 	days := 90
 	if d, ok := args["days"].(float64); ok && d > 0 {
 		days = int(d)
@@ -1289,13 +1291,13 @@ func (h *Handler) images(args map[string]any) (string, bool, error) {
 		limit = int(l)
 	}
 
-	results, err := h.mem.SearchImages(query, repo, session, days, limit)
+	results, err := h.mem.SearchImagesFiltered(query, repo, session, days, limit, searchFields)
 	if err != nil {
 		return fmt.Sprintf("search images failed: %v", err), true, nil
 	}
 	if len(results) == 0 {
 		if query != "" {
-			return "No images found matching query. Images require AI descriptions — check that ANTHROPIC_API_KEY is set.", false, nil
+			return "No images found matching query. Descriptions require ANTHROPIC_API_KEY; OCR requires Apple Vision (macOS) or tesseract.", false, nil
 		}
 		return "No images indexed yet. Images are extracted from transcripts during ingest.", false, nil
 	}
@@ -1319,11 +1321,22 @@ func (h *Handler) images(args map[string]any) (string, bool, error) {
 		if sid != "" {
 			fmt.Fprintf(&b, " session=%s", sid)
 		}
+		if r.MatchSource != "" {
+			fmt.Fprintf(&b, " match=%s", r.MatchSource)
+		}
 		b.WriteByte('\n')
 		if r.Description != "" {
-			fmt.Fprintf(&b, "  %s\n", r.Description)
+			fmt.Fprintf(&b, "  [desc] %s\n", r.Description)
 		} else {
-			b.WriteString("  (description pending)\n")
+			b.WriteString("  [desc] (pending)\n")
+		}
+		if r.OCRText != "" {
+			// Truncate long OCR text for display.
+			ocrDisplay := r.OCRText
+			if len(ocrDisplay) > 300 {
+				ocrDisplay = ocrDisplay[:300] + "…"
+			}
+			fmt.Fprintf(&b, "  [ocr]  %s\n", ocrDisplay)
 		}
 		for _, occ := range r.Occurrences {
 			occSID := occ.SessionID

@@ -108,6 +108,8 @@ func runServe() {
 		}
 		// Start background image description workers (no-op if no API key).
 		mem.StartImageDescriber()
+		// Start background image OCR workers (no-op if no backend available).
+		mem.StartImageOCR()
 		if err := mem.IngestMemories(); err != nil {
 			slog.Error("memory ingest failed", "err", err)
 		}

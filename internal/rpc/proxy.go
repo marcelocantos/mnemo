@@ -379,12 +379,17 @@ func (p *Proxy) DiscoverPatterns(days int, repoFilter string, minOccurrences int
 }
 
 func (p *Proxy) SearchImages(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
+	return p.SearchImagesFiltered(query, repo, session, days, limit, "both")
+}
+
+func (p *Proxy) SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]store.ImageSearchResult, error) {
 	raw, err := p.client.Call("SearchImages", SearchImagesParams{
-		Query:   query,
-		Repo:    repo,
-		Session: session,
-		Days:    days,
-		Limit:   limit,
+		Query:        query,
+		Repo:         repo,
+		Session:      session,
+		Days:         days,
+		Limit:        limit,
+		SearchFields: searchFields,
 	})
 	if err != nil {
 		return nil, err

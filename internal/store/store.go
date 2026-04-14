@@ -300,7 +300,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 16
+const schemaVersion = 17
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -619,6 +619,22 @@ func New(dbPath, projectDir string) (*Store, error) {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			UNIQUE(image_id)
 		);
+		CREATE TABLE IF NOT EXISTS image_ocr (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			text TEXT NOT NULL DEFAULT '',
+			backend TEXT NOT NULL,
+			confidence REAL,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE IF NOT EXISTS image_embeddings (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			dim INTEGER NOT NULL,
+			vector BLOB NOT NULL,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -691,6 +707,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_image_occurrences_session ON image_occurrences(session_id);
 		CREATE INDEX IF NOT EXISTS idx_image_occurrences_image ON image_occurrences(image_id);
 		CREATE INDEX IF NOT EXISTS idx_image_descriptions_image ON image_descriptions(image_id);
+		CREATE INDEX IF NOT EXISTS idx_image_ocr_backend ON image_ocr(backend);
+		CREATE INDEX IF NOT EXISTS idx_image_embeddings_model ON image_embeddings(model);
 	`)
 	if err != nil {
 		db.Close()
@@ -992,6 +1010,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, description)
 			VALUES ('delete', old.id, old.description);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS image_ocr_fts USING fts5(
+			text,
+			content=image_ocr,
+			content_rowid=image_id
+		);
+		DROP TRIGGER IF EXISTS image_ocr_ai;
+		CREATE TRIGGER image_ocr_ai AFTER INSERT ON image_ocr
+		BEGIN
+			INSERT INTO image_ocr_fts(rowid, text)
+			VALUES (new.image_id, new.text);
+		END;
+		DROP TRIGGER IF EXISTS image_ocr_au;
+		CREATE TRIGGER image_ocr_au AFTER UPDATE ON image_ocr
+		BEGIN
+			INSERT INTO image_ocr_fts(image_ocr_fts, rowid, text)
+			VALUES ('delete', old.image_id, old.text);
+			INSERT INTO image_ocr_fts(rowid, text)
+			VALUES (new.image_id, new.text);
+		END;
+		DROP TRIGGER IF EXISTS image_ocr_ad;
+		CREATE TRIGGER image_ocr_ad AFTER DELETE ON image_ocr
+		BEGIN
+			INSERT INTO image_ocr_fts(image_ocr_fts, rowid, text)
+			VALUES ('delete', old.image_id, old.text);
 		END;
 	`)
 	if err != nil {
@@ -6536,12 +6579,21 @@ type ImageOccurrence struct {
 type ImageSearchResult struct {
 	Image       ImageInfo         `json:"image"`
 	Description string            `json:"description,omitempty"`
+	OCRText     string            `json:"ocr_text,omitempty"`
+	MatchSource string            `json:"match_source,omitempty"` // "description", "ocr", "both", "semantic", "similar"
+	Score       float64           `json:"score,omitempty"`        // cosine similarity for semantic/similar modes
 	Occurrences []ImageOccurrence `json:"occurrences,omitempty"`
 }
 
-// SearchImages searches image descriptions using FTS5 and returns matching images
-// with their metadata and occurrence info.
+// SearchImages searches image descriptions and OCR text using FTS5, returning
+// matching images with metadata and occurrence info.
+// searchFields controls which indexes to query: "both" (default), "description", or "ocr".
 func (s *Store) SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error) {
+	return s.SearchImagesFiltered(query, repo, session, days, limit, "both")
+}
+
+// SearchImagesFiltered is SearchImages with an explicit searchFields parameter.
+func (s *Store) SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
@@ -6551,85 +6603,185 @@ func (s *Store) SearchImages(query string, repo string, session string, days int
 	if days <= 0 {
 		days = 90
 	}
+	if searchFields == "" {
+		searchFields = "both"
+	}
 
 	cutoff := fmt.Sprintf("datetime('now', '-%d days')", days)
 
-	// Build main query.
-	var q string
-	var qArgs []any
-
-	if query != "" {
-		ftsQuery := relaxQuery(query)
-		q = `SELECT DISTINCT img.id, img.content_hash, COALESCE(img.original_path,''), img.mime_type,
-				img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
-				COALESCE(d.description,'')
-			FROM images img
-			JOIN image_descriptions_fts f ON f.rowid = (
-				SELECT id FROM image_descriptions WHERE image_id = img.id LIMIT 1
-			)
-			JOIN image_descriptions d ON d.image_id = img.id
-			JOIN image_occurrences io ON io.image_id = img.id
-			WHERE image_descriptions_fts MATCH ?
-			AND io.occurred_at >= ` + cutoff
-		qArgs = append(qArgs, ftsQuery)
-	} else {
-		q = `SELECT DISTINCT img.id, img.content_hash, COALESCE(img.original_path,''), img.mime_type,
-				img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
-				COALESCE(d.description,'')
-			FROM images img
-			LEFT JOIN image_descriptions d ON d.image_id = img.id
-			JOIN image_occurrences io ON io.image_id = img.id
-			WHERE io.occurred_at >= ` + cutoff
-	}
-
+	var repoFilter, sessionFilter string
 	if repo != "" {
-		q += ` AND EXISTS (
+		repoFilter = `AND EXISTS (
 			SELECT 1 FROM image_occurrences io2
 			JOIN session_meta sm ON sm.session_id = io2.session_id
 			WHERE io2.image_id = img.id AND sm.repo LIKE ?
 		)`
-		qArgs = append(qArgs, "%"+repo+"%")
 	}
 	if session != "" {
-		q += ` AND EXISTS (
+		sessionFilter = `AND EXISTS (
 			SELECT 1 FROM image_occurrences io3
 			WHERE io3.image_id = img.id AND io3.session_id LIKE ?
 		)`
-		qArgs = append(qArgs, session+"%")
 	}
-	q += ` ORDER BY img.created_at DESC LIMIT ?`
-	qArgs = append(qArgs, limit)
 
-	rows, err := s.db.Query(q, qArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("search images: %w", err)
+	type imageHit struct {
+		id       int64
+		fromDesc bool
+		fromOCR  bool
 	}
-	defer rows.Close()
 
+	hitMap := make(map[int64]*imageHit)
+	var orderedIDs []int64
+
+	// Helper to collect hits from a given FTS table.
+	runFTS := func(ftsTable, ftsCol, joinTable, joinCol string, fromDesc, fromOCR bool) error {
+		if query == "" {
+			return nil
+		}
+		ftsQuery := relaxQuery(query)
+		q := fmt.Sprintf(`
+			SELECT DISTINCT img.id
+			FROM images img
+			JOIN %s f ON f.rowid = (
+				SELECT %s FROM %s WHERE %s = img.id LIMIT 1
+			)
+			JOIN image_occurrences io ON io.image_id = img.id
+			WHERE %s MATCH ?
+			AND io.occurred_at >= %s
+			%s %s`,
+			joinTable, joinCol, joinTable, "image_id",
+			ftsTable,
+			cutoff,
+			repoFilter, sessionFilter,
+		)
+		var args []any
+		args = append(args, ftsQuery)
+		if repo != "" {
+			args = append(args, "%"+repo+"%")
+		}
+		if session != "" {
+			args = append(args, session+"%")
+		}
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) != nil {
+				continue
+			}
+			if h, ok := hitMap[id]; ok {
+				if fromDesc {
+					h.fromDesc = true
+				}
+				if fromOCR {
+					h.fromOCR = true
+				}
+			} else {
+				hitMap[id] = &imageHit{id: id, fromDesc: fromDesc, fromOCR: fromOCR}
+				orderedIDs = append(orderedIDs, id)
+			}
+		}
+		return nil
+	}
+
+	if query != "" {
+		// Query each enabled FTS index.
+		if searchFields == "both" || searchFields == "description" {
+			if err := runFTS("image_descriptions_fts", "id", "image_descriptions", "image_descriptions_fts", true, false); err != nil {
+				slog.Warn("image description FTS query failed", "err", err)
+			}
+		}
+		if searchFields == "both" || searchFields == "ocr" {
+			if err := runFTS("image_ocr_fts", "image_id", "image_ocr", "image_ocr_fts", false, true); err != nil {
+				slog.Warn("image OCR FTS query failed", "err", err)
+			}
+		}
+	} else {
+		// No query — list recent images.
+		q := `SELECT DISTINCT img.id FROM images img
+			JOIN image_occurrences io ON io.image_id = img.id
+			WHERE io.occurred_at >= ` + cutoff
+		var args []any
+		if repo != "" {
+			q += " " + repoFilter
+			args = append(args, "%"+repo+"%")
+		}
+		if session != "" {
+			q += " " + sessionFilter
+			args = append(args, session+"%")
+		}
+		q += " ORDER BY img.created_at DESC LIMIT ?"
+		args = append(args, limit)
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list images: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				hitMap[id] = &imageHit{id: id}
+				orderedIDs = append(orderedIDs, id)
+			}
+		}
+	}
+
+	if len(orderedIDs) == 0 {
+		return nil, nil
+	}
+
+	// Cap at limit.
+	if len(orderedIDs) > limit {
+		orderedIDs = orderedIDs[:limit]
+	}
+
+	// Fetch full image metadata + description + OCR text for each hit.
 	var results []ImageSearchResult
-	var imageIDs []int64
-	for rows.Next() {
+	for _, id := range orderedIDs {
+		hit := hitMap[id]
 		var r ImageSearchResult
-		var id int64
-		if err := rows.Scan(
-			&id, &r.Image.ContentHash, &r.Image.OriginalPath, &r.Image.MimeType,
+		var origPath sql.NullString
+		if err := s.db.QueryRow(`
+			SELECT img.id, img.content_hash, img.original_path, img.mime_type,
+			       img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
+			       COALESCE(d.description,''), COALESCE(o.text,'')
+			FROM images img
+			LEFT JOIN image_descriptions d ON d.image_id = img.id
+			LEFT JOIN image_ocr o ON o.image_id = img.id
+			WHERE img.id = ?`, id).Scan(
+			&r.Image.ID, &r.Image.ContentHash, &origPath, &r.Image.MimeType,
 			&r.Image.Width, &r.Image.Height, &r.Image.PixelFormat, &r.Image.ByteSize,
-			&r.Image.CreatedAt, &r.Description,
+			&r.Image.CreatedAt, &r.Description, &r.OCRText,
 		); err != nil {
 			continue
 		}
-		r.Image.ID = int(id)
+		if origPath.Valid {
+			r.Image.OriginalPath = origPath.String
+		}
+		// Determine match source.
+		switch {
+		case query == "":
+			r.MatchSource = ""
+		case hit.fromDesc && hit.fromOCR:
+			r.MatchSource = "both"
+		case hit.fromDesc:
+			r.MatchSource = "description"
+		case hit.fromOCR:
+			r.MatchSource = "ocr"
+		}
 		results = append(results, r)
-		imageIDs = append(imageIDs, id)
 	}
-	rows.Close()
 
 	if len(results) == 0 {
 		return nil, nil
 	}
 
 	// Fetch up to 3 occurrences per image.
-	for i, id := range imageIDs {
+	for i, r := range results {
+		id := int64(r.Image.ID)
 		occRows, err := s.db.Query(`
 			SELECT io.session_id, io.source_type, io.occurred_at
 			FROM image_occurrences io
