@@ -246,10 +246,11 @@ targets:
     achieved: 2026-04-14
   T19:
     name: Image OCR extracted and indexed alongside AI descriptions
-    status: identified
+    status: achieved
     value: 5.0
     cost: 5.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - Every image in the images table has an OCR pass (or recorded error); descriptions remain untouched — OCR is additive
     - 'On macOS: Apple Vision framework used (via Swift helper binary or shortcuts run) for ~100ms/image local extraction'
@@ -266,6 +267,7 @@ targets:
     - images
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-14
   T2:
     name: Smarter session classification
     status: achieved
