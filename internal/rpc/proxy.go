@@ -196,6 +196,17 @@ func (p *Proxy) SearchPlans(query string, repo string, limit int) ([]store.PlanI
 	return results, json.Unmarshal(raw, &results)
 }
 
+func (p *Proxy) SearchDocs(query string, repo string, kind string, limit int) ([]store.DocInfo, error) {
+	raw, err := p.client.Call("SearchDocs", SearchDocsParams{
+		Query: query, Repo: repo, Kind: kind, Limit: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.DocInfo
+	return results, json.Unmarshal(raw, &results)
+}
+
 func (p *Proxy) WhoRan(pattern string, days int, repoFilter string, limit int) ([]store.WhoRanResult, error) {
 	raw, err := p.client.Call("WhoRan", WhoRanParams{Pattern: pattern, Days: days, RepoFilter: repoFilter, Limit: limit})
 	if err != nil {

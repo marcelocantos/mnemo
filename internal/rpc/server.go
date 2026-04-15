@@ -112,6 +112,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"SearchPlans": makeMethod(func(p SearchPlansParams) (any, error) {
 			return s.SearchPlans(p.Query, p.Repo, p.Limit)
 		}),
+		"SearchDocs": makeMethod(func(p SearchDocsParams) (any, error) {
+			return s.SearchDocs(p.Query, p.Repo, p.Kind, p.Limit)
+		}),
 		"WhoRan": makeMethod(func(p WhoRanParams) (any, error) {
 			return s.WhoRan(p.Pattern, p.Days, p.RepoFilter, p.Limit)
 		}),
@@ -286,6 +289,14 @@ type SearchTargetsParams struct {
 type SearchPlansParams struct {
 	Query string `json:"query"`
 	Repo  string `json:"repo"`
+	Limit int    `json:"limit"`
+}
+
+// SearchDocsParams matches the SearchDocs method signature.
+type SearchDocsParams struct {
+	Query string `json:"query"`
+	Repo  string `json:"repo"`
+	Kind  string `json:"kind"`
 	Limit int    `json:"limit"`
 }
 

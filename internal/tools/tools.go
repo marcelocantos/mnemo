@@ -7,6 +7,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -216,6 +217,13 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("repo", mcp.Description("Filter by repo name")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_docs",
+			mcp.WithDescription(`Search across project documentation files (markdown, plain-text, PDF) indexed from all tracked repos. Covers README, CHANGELOG, design notes, and any files under docs/, design/, notes/, papers/ directories. Deduplicates .md/.pdf pairs with same stem — always prefers .md. Use this to find project documentation, design decisions, and release notes across repos.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithString("kind", mcp.Description("Filter by file kind: md, txt, pdf")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_who_ran",
 			mcp.WithDescription(`Find sessions that ran a specific shell command. Searches Bash tool_use entries by command pattern, returning session ID, repo, matched command, and timestamp. Useful for tracing when and where a command was last executed across all sessions.`),
 			mcp.WithString("pattern", mcp.Required(), mcp.Description("Command substring to match (LIKE match, case-insensitive)")),
@@ -383,6 +391,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.targets(args)
 	case "mnemo_plans":
 		return h.plans(args)
+	case "mnemo_docs":
+		return h.docs(args)
 	case "mnemo_who_ran":
 		return h.whoRan(args)
 	case "mnemo_permissions":
@@ -873,6 +883,41 @@ func (h *Handler) plans(args map[string]any) (string, bool, error) {
 			phase = "(root)"
 		}
 		fmt.Fprintf(&b, "## %s [phase: %s] (%s)\n\n%s\n\n", p.FilePath, phase, p.Repo, p.Content)
+	}
+	return b.String(), false, nil
+}
+
+func (h *Handler) docs(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	repoFilter, _ := args["repo"].(string)
+	kind, _ := args["kind"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchDocs(query, repoFilter, kind, limit)
+	if err != nil {
+		return fmt.Sprintf("doc search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No docs found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, d := range results {
+		title := d.Title
+		if title == "" {
+			title = filepath.Base(d.FilePath)
+		}
+		fmt.Fprintf(&b, "## %s [%s] (%s)\n", title, d.Kind, d.Repo)
+		fmt.Fprintf(&b, "**Path**: %s\n\n", d.FilePath)
+		// Truncate very long content for display.
+		content := d.Content
+		if len(content) > 2000 {
+			content = content[:2000] + "\n…(truncated)"
+		}
+		fmt.Fprintf(&b, "%s\n\n", content)
 	}
 	return b.String(), false, nil
 }

@@ -705,6 +705,18 @@ func New(dbPath, projectDir string) (*Store, error) {
 			error TEXT,
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		CREATE TABLE IF NOT EXISTS docs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			kind TEXT NOT NULL DEFAULT 'md',
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			size INTEGER NOT NULL DEFAULT 0,
+			mtime TEXT NOT NULL DEFAULT '',
+			indexed_at TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -1107,6 +1119,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 		BEGIN
 			INSERT INTO image_ocr_fts(image_ocr_fts, rowid, text)
 			VALUES ('delete', old.image_id, old.text);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
+			title, content, repo, kind,
+			content=docs,
+			content_rowid=id
+		);
+		DROP TRIGGER IF EXISTS docs_ai;
+		CREATE TRIGGER docs_ai AFTER INSERT ON docs
+		BEGIN
+			INSERT INTO docs_fts(rowid, title, content, repo, kind)
+			VALUES (new.id, new.title, new.content, new.repo, new.kind);
+		END;
+		DROP TRIGGER IF EXISTS docs_au;
+		CREATE TRIGGER docs_au AFTER UPDATE ON docs
+		BEGIN
+			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind)
+			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind);
+			INSERT INTO docs_fts(rowid, title, content, repo, kind)
+			VALUES (new.id, new.title, new.content, new.repo, new.kind);
+		END;
+		DROP TRIGGER IF EXISTS docs_ad;
+		CREATE TRIGGER docs_ad AFTER DELETE ON docs
+		BEGIN
+			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind)
+			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind);
 		END;
 	`)
 	if err != nil {
