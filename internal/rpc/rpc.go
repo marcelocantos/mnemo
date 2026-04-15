@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/marcelocantos/mcpbridge"
+	"github.com/marcelocantos/mnemo/internal/bridge"
 )
 
 // SocketPath returns the default Unix domain socket path for mnemo.

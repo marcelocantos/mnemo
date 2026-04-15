@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/marcelocantos/mcpbridge"
+	"github.com/marcelocantos/mnemo/internal/bridge"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/marcelocantos/mnemo/internal/store"

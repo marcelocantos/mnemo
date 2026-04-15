@@ -5,14 +5,10 @@ go 1.26.1
 require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
-	github.com/marcelocantos/mcpbridge v0.0.0-20260406154701-a16a2c102bf2
+	github.com/marcelocantos/claudia v0.6.0
 	github.com/mark3labs/mcp-go v0.47.0
 	github.com/mattn/go-sqlite3 v1.14.41
-)
-
-require (
-	github.com/marcelocantos/claudia v0.6.0 // indirect
-	golang.org/x/image v0.39.0 // indirect
+	golang.org/x/image v0.39.0
 )
 
 require (

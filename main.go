@@ -22,7 +22,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/marcelocantos/mcpbridge"
+	"github.com/marcelocantos/mnemo/internal/bridge"
 
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/rpc"
