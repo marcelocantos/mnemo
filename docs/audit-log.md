@@ -85,7 +85,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-16 — /release v0.18.0
 
-- **Commit**: `pending`
+- **Commit**: `226b3b7`
 - **Outcome**: Released v0.18.0. Live context compaction lands
   (🎯T10): per-connection background summariser + mnemo_restore +
   /c skill + token budget guard. MCP connection identity across
