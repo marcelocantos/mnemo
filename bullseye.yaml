@@ -483,9 +483,10 @@ targets:
     discovered: 2026-04-15
   T25.1:
     name: Connection identity plumbing — vendor bridge, thread ConnContext through handlers
-    status: identified
+    status: achieved
     value: 5.0
     cost: 3.0
+    actual_cost: 3.0
     acceptance:
     - internal/bridge/ contains the vendored fork of the pinned mcpbridge library (pre-rewrite commit a16a2c1); the external github.com/marcelocantos/mcpbridge dependency is removed from go.mod.
     - Handshake gains a ProxyPID field; the proxy populates it at startup.
@@ -509,6 +510,7 @@ targets:
     - connection-identity
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T25.2:
     name: Compactor and /c reworked around connection identity, with ctrl-c + continue recovery
     status: identified
