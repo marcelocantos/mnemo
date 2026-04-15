@@ -441,6 +441,127 @@ targets:
     origin: manual
     discovered: 2026-04-15
     achieved: 2026-04-15
+  T25:
+    name: Compactor and chain detection anchor to MCP connection identity, not heuristics
+    status: identified
+    value: 8.0
+    cost: 8.0
+    acceptance:
+    - All three sub-targets (T25.1, T25.2, T25.3) are retired.
+    - '10-second before/after /clear empirical test run and recorded: proxy PID is observed to be continuous across /clear, closing the last 5% of the validation gap.'
+    - The compactor and /c behave identically to the cwd-heuristic version from the user's perspective for the common case (sane cwd, no concurrent tabs), but remain correct in the edge cases the heuristic fails on (long delays before /clear, multiple tabs in the same cwd, cross-day continuations).
+    - STABILITY.md surface catalogue updated to reflect the new connection-anchored mechanism and the demoted heuristic fallback.
+    - v0.18.0 release ships with the pivot in place — no 'experimental' or 'fluid' label on /c, mnemo_restore, or the chain mechanism that depends on this.
+    context: |-
+      **Reframed 2026-04-15.** The original T10 compactor scopes context to session_id, and session chain detection relies on a cwd + timestamp heuristic. Both are flawed: /clear mints a new session_id (so session-scoped compactions don't survive the user's actual mental model of "continuing the same work"), and the chain heuristic breaks on any realistic time gap or multi-tab scenario.
+
+      The better anchor is **MCP connection identity**. The proxy subprocess (and its UDS connection to the daemon) persists across /clear — Claude Code doesn't restart MCP subprocesses. Empirically confirmed with ~95% confidence (three live Claude Code tabs, all with 3h-old proxy etimes matching their parents; mcpbridge server handles connections via a long-lived loop; macOS UDS exposes peer PID via LOCAL_PEERPID). A 10-second before/after /clear PID check at the start of implementation closes the last 5%.
+
+      **Under this model:**
+      - Compacted context accumulates inside the process (per-connection), saved to SQLite so ctrl-c + `claude --continue` recovers it.
+      - `/c` after /clear dumps in the connection's prior compacted context — no chain inference needed at call time.
+      - Session-chain linkages become a side product: whenever a connection's observed session_id changes, that transition is a /clear boundary by construction, and a session_chains row is inserted with mechanism='mcp_connection', confidence='definitive'.
+      - The existing cwd-based heuristic stays, demoted to a fallback for pre-upgrade transcripts (sessions whose tool calls were never seen by the daemon).
+
+      **This target is the umbrella.** Decomposed into three sub-targets:
+
+      - 🎯T25.1 — Connection identity plumbing. Vendor the pinned mcpbridge commit into internal/bridge/, extend Handshake with ProxyPID, mint connection_id at accept, recover peer PID via LOCAL_PEERPID (macOS) / SO_PEERCRED (Linux), thread ConnContext through the ToolHandler and MethodFunc signatures. Prerequisite for T25.2 and T25.3.
+
+      - 🎯T25.2 — Compactor, /c, and mnemo_restore reworked around connection_id. Compactions table gains connection_id column. Watcher spawns compactor per connection, not per session. mnemo_restore (and the /c skill) resolve "what to restore" via the connection's session history, not via a chain heuristic.
+
+      - 🎯T25.3 — session_chains gains mechanism='mcp_connection' inserts on observed session transitions. Downstream consumer: mnemo_chain gets definitive linkage for sessions observed under the new model; the cwd heuristic stays as the pre-upgrade fallback.
+
+      Discovered 2026-04-15 while finishing 🎯T10. The user flagged the /clear-survival property of MCP subprocesses; validation confirmed it at the architectural level, leaving only a trivial empirical sanity check for the implementer.
+
+      **Release plan:** v0.18.0 is held pending this pivot. The v0.17 users are not broken; there is no external deadline. Shipping the heuristic-based compactor and then reworking in v0.19 would invalidate any user workflow built on /c.
+    tags:
+    - chain
+    - compactor
+    - connection-identity
+    - determinism
+    origin: discovered while hardening the chain heuristic for /c + mnemo_restore
+    discovered: 2026-04-15
+  T25.1:
+    name: Connection identity plumbing — vendor bridge, thread ConnContext through handlers
+    status: identified
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - internal/bridge/ contains the vendored fork of the pinned mcpbridge library (pre-rewrite commit a16a2c1); the external github.com/marcelocantos/mcpbridge dependency is removed from go.mod.
+    - Handshake gains a ProxyPID field; the proxy populates it at startup.
+    - Server handleConn mints a connection_id (UUID) at accept and recovers peer PID via LOCAL_PEERPID (macOS) / SO_PEERCRED (Linux). Peer PID is cross-checked against the handshake-reported PID and logged on mismatch but not rejected.
+    - A ConnContext type carries (ConnectionID, PID, AcceptedAt) through the request dispatch path.
+    - ToolHandler.Call and MethodFunc signatures are extended to receive ConnContext. mnemo's tools.Handler and rpc/server.go extraMethods are updated accordingly.
+    - Connection lifecycle is logged at accept and close.
+    - A new daemon_connections table records (connection_id PK, pid, accepted_at, closed_at) and is populated at accept / close.
+    - Existing tests pass; a new rpc-level test exercises ConnContext propagation via an extra method that echoes its connection_id.
+    context: |-
+      Prerequisite plumbing for 🎯T25. Load-bearing for T25.2 (compactor) and T25.3 (chain detection), so this lands first.
+
+      Scope: inside mnemo only. The pinned mcpbridge commit is vendored rather than extended in the upstream repo because upstream has since been rewritten into a different product (a multi-MCP-server daemon), so there is no meaningful shared codebase to extend. Vendoring owns the library inside the project where it is actually used.
+
+      Effort estimate: 3 cost. Four Go files copied, one signature chain extended, one sockopt wired, one table added. The bulk of the churn is mechanical — renaming imports and threading ConnContext through existing handler call sites.
+
+      Budget risk: if LOCAL_PEERPID turns out to need a raw-fd path that's awkward from a net.Conn, fall back to trusting the handshake-reported PID. Not a blocker.
+    tags:
+    - plumbing
+    - bridge
+    - connection-identity
+    origin: manual
+    discovered: 2026-04-15
+  T25.2:
+    name: Compactor and /c reworked around connection identity, with ctrl-c + continue recovery
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - compactions table gains a connection_id column (nullable for pre-upgrade rows) alongside the existing session_id.
+    - compact.Watcher spawns one compactor goroutine per live connection (not per session); idle reaping moves from 'absent from LiveSessions' to 'connection closed'.
+    - A new connection_sessions table records (connection_id, session_id, first_seen_at, last_seen_at) PK (connection_id, session_id) and is populated whenever a request resolves a session ID for its connection (initially via mnemo_self; later via any request-bound session identity).
+    - mnemo_restore(session_id=X) resolves X's connection_id via connection_sessions and returns the compactions tagged to that connection's prior session spans — oldest first — plus any across-restart recovery compactions whose session_id matches X (for ctrl-c + `claude --continue` recovery).
+    - '/c, as a user-visible skill, behaves unchanged for the user: after /clear, the compacted context from the prior span is inserted. The mechanism underneath is connection-scoped, not chain-scoped.'
+    - After a ctrl-c of Claude Code followed by `claude --continue`, the reopened session's subsequent /c call dumps in the compacted context that was accumulated in the previous process run. Recovery relies on session_id persistence (which `--continue` provides) to find the prior connection's compactions.
+    - Token-budget guard (T10 AC6) continues to function — the ratio is now measured per-connection rather than per-session.
+    context: |-
+      The user-facing promise of /c is unchanged: after /clear, get the prior span's context back. Under this target the underlying mechanism shifts to be robust against long-delay /clears, concurrent tabs, and ctrl-c recovery scenarios the heuristic-based T10 implementation cannot handle.
+
+      **Key design decisions:**
+
+      - Compactions are keyed by connection_id primarily, with session_id retained as a secondary key for recovery. A single compaction row may be written during one session span but retrieved later by either key.
+      - Ctrl-c + `claude --continue` re-uses the same session_id on disk (Claude Code's documented behaviour). A new process gets a new proxy and new connection_id, but mnemo_restore can still reach compactions via session_id.
+      - The session_id → connection_id binding is discovered lazily: when a connection makes its first call that resolves a session ID (e.g. mnemo_self), the daemon writes the binding. No proactive handshake about session identity is required.
+      - Token budget (compaction tokens < 10% of session tokens) is measured per-connection now; the maths is the same.
+
+      **Interaction with T10 tests:** existing compact/watcher tests use a fake session source. They will need a fake connection source (or a more general fake that provides both) to exercise the new scoping. Expected churn: medium.
+    depends_on:
+    - T25.1
+    tags:
+    - compactor
+    - restore
+    - user-facing
+    origin: manual
+    discovered: 2026-04-15
+  T25.3:
+    name: Session chain detection gains definitive MCP-connection mechanism; cwd heuristic demoted to fallback
+    status: identified
+    value: 3.0
+    cost: 2.0
+    acceptance:
+    - When a new connection_sessions row is inserted where the connection already had a different session_id with an earlier first_seen_at, a session_chains row is inserted with mechanism='mcp_connection' and confidence='definitive'. No cwd match, no time-gap math.
+    - The existing cwd-based detectChainForSession remains as a fallback, running only for sessions that have no connection_sessions binding (pre-upgrade transcripts, or sessions that made no MCP tool calls to mnemo). Its confidence tier caps at the existing 'high' — 'definitive' is reserved for the connection mechanism.
+    - mnemo_chain tool output attributes each link to its mechanism so the user can see whether a given link is definitive or heuristic.
+    - 'Tests exercise: (a) a new session on an existing connection — expect mechanism=''mcp_connection'', (b) pre-upgrade data with no connection trace — expect fallback to cwd heuristic.'
+    context: |-
+      Side product of T25.1 and T25.2, not the primary motivator. Chain linkage under the new model is essentially free — the connection_sessions table already carries every signal needed. Writing a session_chains row on transition is bookkeeping.
+
+      The cwd heuristic stays because backfill of pre-upgrade transcripts will always need a non-connection path — those sessions never went through a connection-tracked daemon. Keeping it honest: label its rows with mechanism='cwd_most_recent' and let mnemo_chain surface that provenance so the user can see which links are definitive vs heuristic.
+    depends_on:
+    - T25.1
+    tags:
+    - chain
+    - side-product
+    origin: manual
+    discovered: 2026-04-15
   T3:
     name: Active work dashboard data
     status: achieved
