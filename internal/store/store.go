@@ -51,13 +51,12 @@ type Store struct {
 	liveCache     map[string]int // sessionID → PID
 	liveCacheTime time.Time
 
-	// Image-sidecar concurrency limits: each new image fires one
-	// goroutine per pipeline (OCR, describer, embedder); the semaphores
-	// cap fanout so the system isn't swamped when many images arrive at
-	// once. Initialized in New; nil-safe reads via acquireSidecarSlot.
-	ocrSem       chan struct{}
-	describerSem chan struct{}
-	embedderSem  chan struct{}
+	// imageSem caps the total number of image-sidecar goroutines
+	// (OCR + description + embedding, across all images) running at
+	// once. Sized at runtime.NumCPU(). A burst of images fans out
+	// goroutines freely; the semaphore absorbs them without overrunning
+	// the machine with concurrent claude-p / Python subprocesses.
+	imageSem chan struct{}
 }
 
 // SetWorkspaceRoots configures the filesystem roots under which repo-
@@ -1141,9 +1140,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		db:           db,
 		projectDir:   projectDir,
 		offsets:      make(map[string]int64),
-		ocrSem:       make(chan struct{}, n),
-		describerSem: make(chan struct{}, n),
-		embedderSem:  make(chan struct{}, n),
+		imageSem: make(chan struct{}, n),
 	}
 
 	rows, err := db.Query("SELECT path, offset FROM ingest_state")

@@ -191,39 +191,26 @@ func ingestImageFromPath(s *Store, path string, entryID int64, messageID int64, 
 }
 
 // triggerImageSidecars spawns one goroutine per sidecar pipeline (OCR,
-// description, embedding) for a single image. Each goroutine acquires a
-// semaphore slot (capped at runtime.NumCPU() per pipeline) so that a burst
-// of new images cannot swamp the system with concurrent claude-p and
-// Python subprocesses. If the backend for a given pipeline is unavailable
-// (no tesseract, no ANTHROPIC auth, no uv) the goroutine is a cheap no-op.
+// description, embedding) for a single image. All three share a single
+// store-wide semaphore (sized at runtime.NumCPU()) so the total amount
+// of image-processing work in flight is bounded regardless of arrival
+// pattern. Each helper is idempotent and a cheap no-op if its backend
+// is unavailable.
 func (s *Store) triggerImageSidecars(imageID int64, data []byte, mimeType string) {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || s.imageSem == nil {
 		return
 	}
-	// OCR.
-	if s.ocrSem != nil {
-		go func() {
-			s.ocrSem <- struct{}{}
-			defer func() { <-s.ocrSem }()
-			ocrOneImage(s.db, imageID, data)
-		}()
-	}
-	// Description.
-	if s.describerSem != nil {
-		go func() {
-			s.describerSem <- struct{}{}
-			defer func() { <-s.describerSem }()
-			describeOneImage(s.db, imageID, data, mimeType)
-		}()
-	}
-	// Embedding.
-	if s.embedderSem != nil {
-		go func() {
-			s.embedderSem <- struct{}{}
-			defer func() { <-s.embedderSem }()
-			embedOneImage(s.db, imageID, data, mimeType)
-		}()
-	}
+	go s.runSidecar(func() { ocrOneImage(s.db, imageID, data) })
+	go s.runSidecar(func() { describeOneImage(s.db, imageID, data, mimeType) })
+	go s.runSidecar(func() { embedOneImage(s.db, imageID, data, mimeType) })
+}
+
+// runSidecar acquires a slot on the shared image semaphore, runs fn,
+// then releases.
+func (s *Store) runSidecar(fn func()) {
+	s.imageSem <- struct{}{}
+	defer func() { <-s.imageSem }()
+	fn()
 }
 
 // extToMime maps common image extensions to MIME types.
