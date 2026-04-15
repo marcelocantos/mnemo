@@ -6,6 +6,8 @@ package mcpbridge
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -19,8 +21,8 @@ import (
 
 // DaemonConfig configures a daemon RPC server.
 type DaemonConfig struct {
-	SocketPath string     // Required. Unix domain socket path.
-	Tools      []mcp.Tool // MCP tool definitions to serve via ListTools.
+	SocketPath string      // Required. Unix domain socket path.
+	Tools      []mcp.Tool  // MCP tool definitions to serve via ListTools.
 	Handler    ToolHandler // Handles CallTool RPCs.
 
 	// ExtraMethods registers additional RPC methods beyond ListTools
@@ -35,6 +37,7 @@ type Server struct {
 	handler      ToolHandler
 	extraMethods map[string]MethodFunc
 	listener     net.Listener
+	observer     ConnObserver
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -101,6 +104,21 @@ func (s *Server) trackConn(conn net.Conn) {
 	s.mu.Unlock()
 }
 
+// ConnObserver is notified about connection lifecycle events. Daemons
+// implement this to track connections in persistent storage or keep
+// running compaction workers per connection.
+type ConnObserver interface {
+	OnConnect(cc ConnContext)
+	OnDisconnect(cc ConnContext)
+}
+
+// SetConnObserver registers an observer for connection lifecycle
+// events. Call once after NewServer and before Serve. Nil is allowed
+// and disables observation.
+func (s *Server) SetConnObserver(o ConnObserver) {
+	s.observer = o
+}
+
 func (s *Server) handleConn(conn net.Conn) {
 	s.trackConn(conn)
 	defer conn.Close()
@@ -123,6 +141,33 @@ func (s *Server) handleConn(conn net.Conn) {
 			hs.ProtocolVersion, ProtocolVersion)})
 		return
 	}
+
+	// Build the per-connection context. Peer PID via kernel sockopt is
+	// authoritative; the handshake-reported PID is a cross-check only.
+	cc := ConnContext{
+		ID:         newConnID(),
+		PID:        hs.ProxyPID,
+		AcceptedAt: time.Now(),
+	}
+	if pid, err := peerPID(conn); err == nil && pid != 0 {
+		if hs.ProxyPID != 0 && hs.ProxyPID != pid {
+			slog.Warn("rpc: peer PID mismatch (trusting kernel)",
+				"conn", cc.ID, "kernel_pid", pid, "handshake_pid", hs.ProxyPID)
+		}
+		cc.PID = pid
+	}
+
+	slog.Info("rpc: connection accepted", "conn", cc.ID, "pid", cc.PID)
+	if s.observer != nil {
+		s.observer.OnConnect(cc)
+	}
+	defer func() {
+		if s.observer != nil {
+			s.observer.OnDisconnect(cc)
+		}
+		slog.Info("rpc: connection closed", "conn", cc.ID, "pid", cc.PID)
+	}()
+
 	enc.Encode(Response{Result: []byte(`"ok"`)})
 
 	for scanner.Scan() {
@@ -133,11 +178,11 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 
 		start := time.Now()
-		result, err := s.dispatch(req)
+		result, err := s.dispatch(cc, req)
 		dur := time.Since(start)
 
 		if err != nil {
-			slog.Warn("rpc", "method", req.Method, "dur", dur, "err", err)
+			slog.Warn("rpc", "conn", cc.ID, "method", req.Method, "dur", dur, "err", err)
 			enc.Encode(Response{Error: err.Error()})
 			continue
 		}
@@ -149,7 +194,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if dur >= time.Second {
 			logLevel = slog.LevelWarn
 		}
-		slog.Log(context.Background(), logLevel, "rpc", "method", req.Method, "dur", dur)
+		slog.Log(context.Background(), logLevel, "rpc", "conn", cc.ID, "method", req.Method, "dur", dur)
 
 		resultJSON, err := json.Marshal(result)
 		if err != nil {
@@ -160,7 +205,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) dispatch(req Request) (any, error) {
+func (s *Server) dispatch(cc ConnContext, req Request) (any, error) {
 	switch req.Method {
 	case "ListTools":
 		return s.tools, nil
@@ -170,7 +215,7 @@ func (s *Server) dispatch(req Request) (any, error) {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		text, isErr, err := s.handler.Call(p.Name, p.Args)
+		text, isErr, err := s.handler.Call(cc, p.Name, p.Args)
 		if err != nil {
 			return nil, err
 		}
@@ -178,8 +223,19 @@ func (s *Server) dispatch(req Request) (any, error) {
 
 	default:
 		if fn, ok := s.extraMethods[req.Method]; ok {
-			return fn(req.Params)
+			return fn(cc, req.Params)
 		}
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
+}
+
+// newConnID mints a 96-bit random identifier rendered as 24 hex chars.
+func newConnID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Should not happen on any real OS; fall back to a time-based
+		// ID so the daemon can still function.
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/marcelocantos/mnemo/internal/bridge"
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
@@ -367,7 +368,12 @@ Returns candidate features with evidence counts, example sessions, and suggested
 // Call executes a tool by name with the given arguments.
 // Returns (text, isError, err) where isError means a tool-level error
 // (returned to the user) vs err which is a transport/system error.
-func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
+//
+// The connection context is accepted on every call so that tools which
+// care about per-connection identity (currently: none; future:
+// mnemo_self/mnemo_restore/compactor hooks) can use it. Most tools
+// ignore it.
+func (h *Handler) Call(_ mcpbridge.ConnContext, name string, args map[string]any) (string, bool, error) {
 	switch name {
 	case "mnemo_search":
 		return h.search(args)

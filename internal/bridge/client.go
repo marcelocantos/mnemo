@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"syscall"
 )
@@ -41,8 +42,14 @@ func (c *Client) connect() error {
 	scanner.Buffer(make([]byte, 4<<20), 4<<20) // 4MB line buffer
 	enc := json.NewEncoder(conn)
 
-	// Send handshake with protocol version.
-	if err := enc.Encode(Handshake{ProtocolVersion: ProtocolVersion}); err != nil {
+	// Send handshake with protocol version + proxy PID. The PID is a
+	// cross-check — the daemon authoritatively recovers it via peer
+	// creds (LOCAL_PEERPID / SO_PEERCRED) but logs a mismatch if the
+	// self-reported value differs.
+	if err := enc.Encode(Handshake{
+		ProtocolVersion: ProtocolVersion,
+		ProxyPID:        os.Getpid(),
+	}); err != nil {
 		conn.Close()
 		return fmt.Errorf("handshake send: %w", err)
 	}

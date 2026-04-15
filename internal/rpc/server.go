@@ -79,7 +79,7 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Query": makeMethod(func(p QueryParams) (any, error) {
 			return s.Query(p.Query)
 		}),
-		"Stats": func(_ json.RawMessage) (any, error) {
+		"Stats": func(_ mcpbridge.ConnContext, _ json.RawMessage) (any, error) {
 			return s.Stats()
 		},
 		"ListRepos": makeMethod(func(p ListReposParams) (any, error) {
@@ -131,7 +131,7 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"Permissions": makeMethod(func(p PermissionsParams) (any, error) {
 			return s.Permissions(p.Days, p.RepoFilter, p.Limit)
 		}),
-		"LiveSessions": func(_ json.RawMessage) (any, error) {
+		"LiveSessions": func(_ mcpbridge.ConnContext, _ json.RawMessage) (any, error) {
 			return s.LiveSessions(), nil
 		},
 		"Chain": makeMethod(func(p ChainParams) (any, error) {
@@ -155,7 +155,7 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"EvaluateTemplate": makeMethod(func(p EvaluateTemplateParams) (any, error) {
 			return s.EvaluateTemplate(p.Name, p.Params)
 		}),
-		"ListTemplates": func(_ json.RawMessage) (any, error) {
+		"ListTemplates": func(_ mcpbridge.ConnContext, _ json.RawMessage) (any, error) {
 			return s.ListTemplates()
 		},
 		"DiscoverPatterns": makeMethod(func(p DiscoverPatternsParams) (any, error) {
@@ -185,8 +185,11 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 }
 
 // makeMethod creates a MethodFunc that unmarshals params into type P.
+// The connection context is accepted but ignored by the vast majority
+// of typed methods; methods that need connection identity use
+// makeMethodCC below.
 func makeMethod[P any](fn func(P) (any, error)) mcpbridge.MethodFunc {
-	return func(raw json.RawMessage) (any, error) {
+	return func(_ mcpbridge.ConnContext, raw json.RawMessage) (any, error) {
 		var p P
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
