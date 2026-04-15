@@ -56,6 +56,76 @@ func TestConnectionLifecycle(t *testing.T) {
 	}
 }
 
+// TestConnectionSessionBinding verifies the upsert semantics of
+// RecordConnectionSession: first-seen is preserved, last-seen is
+// bumped on repeat observations, and SessionsForConnection /
+// ConnectionsForSession both reflect the recorded bindings.
+func TestConnectionSessionBinding(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	t0 := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	t1 := t0.Add(5 * time.Minute)
+	t2 := t0.Add(30 * time.Minute)
+
+	// Connection C1 sees session A, then session B (after a /clear).
+	// Connection C2 sees session A too (cross-connection recovery,
+	// e.g. ctrl-c + claude --continue reopening the same session in
+	// a new proxy process).
+	s.RecordConnectionSessionAt("C1", "A", t0)
+	s.RecordConnectionSessionAt("C1", "A", t1) // repeat bumps last_seen
+	s.RecordConnectionSessionAt("C1", "B", t2)
+	s.RecordConnectionSessionAt("C2", "A", t2.Add(time.Hour))
+
+	// All sessions for C1, oldest first.
+	c1Sessions, err := s.SessionsForConnection("C1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c1Sessions) != 2 {
+		t.Fatalf("C1 should have 2 sessions, got %d", len(c1Sessions))
+	}
+	if c1Sessions[0].SessionID != "A" {
+		t.Errorf("first session should be A, got %q", c1Sessions[0].SessionID)
+	}
+	if c1Sessions[1].SessionID != "B" {
+		t.Errorf("second session should be B, got %q", c1Sessions[1].SessionID)
+	}
+	if !c1Sessions[0].FirstSeenAt.Equal(t0) {
+		t.Errorf("C1/A first_seen should equal t0, got %v", c1Sessions[0].FirstSeenAt)
+	}
+	if !c1Sessions[0].LastSeenAt.Equal(t1) {
+		t.Errorf("C1/A last_seen should bump to t1, got %v", c1Sessions[0].LastSeenAt)
+	}
+
+	// All connections that saw session A (both C1 and C2).
+	aConns, err := s.ConnectionsForSession("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aConns) != 2 {
+		t.Fatalf("session A should have 2 owning connections, got %d", len(aConns))
+	}
+	if aConns[0].ConnectionID != "C1" || aConns[1].ConnectionID != "C2" {
+		t.Errorf("wrong owners for A: %+v", aConns)
+	}
+}
+
+// TestConnectionSessionEmptyInputs verifies that empty connection_id
+// or session_id is silently ignored — the binding recorder is called
+// from hot paths (every tool call) and must never fail loudly.
+func TestConnectionSessionEmptyInputs(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	s.RecordConnectionSession("", "A")  // ignored
+	s.RecordConnectionSession("C1", "") // ignored
+	got, err := s.SessionsForConnection("C1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("empty inputs should record nothing, got %+v", got)
+	}
+}
+
 // TestConnectionCloseIdempotent verifies that closing an already-
 // closed or unknown connection does not error.
 func TestConnectionCloseIdempotent(t *testing.T) {

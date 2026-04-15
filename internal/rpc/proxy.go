@@ -465,6 +465,12 @@ func (p *Proxy) SessionTokens(sessionID string) (int64, int64, error) {
 	return r.Input, r.Output, nil
 }
 
+// RecordConnectionSession is a no-op on the proxy side. Connection
+// tracking is a daemon-local concern — the daemon sees connections
+// directly via its observer, so the proxy never drives this path.
+// Present only to satisfy the Backend interface.
+func (p *Proxy) RecordConnectionSession(connectionID, sessionID string) {}
+
 func (p *Proxy) CompactionTokens(sessionID string) (int64, int64, error) {
 	raw, err := p.client.Call("CompactionTokens", ChainCompactionsParams{SessionID: sessionID})
 	if err != nil {

@@ -45,4 +45,5 @@ type Backend interface {
 	ChainCompactions(sessionID string) ([]Compaction, error)
 	SessionTokens(sessionID string) (int64, int64, error)
 	CompactionTokens(sessionID string) (int64, int64, error)
+	RecordConnectionSession(connectionID, sessionID string)
 }

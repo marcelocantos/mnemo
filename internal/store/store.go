@@ -617,6 +617,15 @@ func New(dbPath, projectDir string) (*Store, error) {
 		);
 		CREATE INDEX IF NOT EXISTS idx_daemon_connections_pid ON daemon_connections(pid);
 		CREATE INDEX IF NOT EXISTS idx_daemon_connections_open ON daemon_connections(closed_at) WHERE closed_at IS NULL;
+		CREATE TABLE IF NOT EXISTS connection_sessions (
+			connection_id TEXT NOT NULL,
+			session_id   TEXT NOT NULL,
+			first_seen_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			PRIMARY KEY (connection_id, session_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_connection_sessions_session ON connection_sessions(session_id);
+		CREATE INDEX IF NOT EXISTS idx_connection_sessions_connection_last ON connection_sessions(connection_id, last_seen_at DESC);
 		CREATE TABLE IF NOT EXISTS query_templates (
 			id INTEGER PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
