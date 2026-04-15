@@ -235,16 +235,31 @@ type HourlyRate struct {
 	MessagesPerHour float64 `json:"messages_per_hour"`
 }
 
+// WhatsupTranscript holds metadata about a candidate transcript file for a live session.
+type WhatsupTranscript struct {
+	Path  string    `json:"path"`
+	MTime time.Time `json:"mtime"`
+	Size  int64     `json:"size"`
+}
+
 // WhatsupSession holds per-session process metrics alongside session metadata.
 type WhatsupSession struct {
-	SessionID string  `json:"session_id"`
-	PID       int     `json:"pid"`
-	Repo      string  `json:"repo,omitempty"`
-	Topic     string  `json:"topic,omitempty"`
-	WorkType  string  `json:"work_type,omitempty"`
-	CPUPct    float64 `json:"cpu_pct"`
-	RSSBytes  int64   `json:"rss_bytes"`
-	CPUTime   string  `json:"cpu_time"`
+	SessionID   string              `json:"session_id"`
+	PID         int                 `json:"pid"`
+	Cwd         string              `json:"cwd,omitempty"`
+	Transcripts []WhatsupTranscript `json:"transcripts,omitempty"`
+	Repo        string              `json:"repo,omitempty"`
+	Topic       string              `json:"topic,omitempty"`
+	WorkType    string              `json:"work_type,omitempty"`
+	CPUPct      float64             `json:"cpu_pct"`
+	RSSBytes    int64               `json:"rss_bytes"`
+	CPUTime     string              `json:"cpu_time"`
+}
+
+// WhatsupPostmortemEntry is a cwd that had recent claude activity but no live process.
+type WhatsupPostmortemEntry struct {
+	Cwd         string              `json:"cwd"`
+	Transcripts []WhatsupTranscript `json:"transcripts"`
 }
 
 // SystemMetrics holds system-wide resource metrics.
@@ -258,8 +273,9 @@ type SystemMetrics struct {
 
 // WhatsupResult holds the combined per-session and system metrics.
 type WhatsupResult struct {
-	Sessions []WhatsupSession `json:"sessions"`
-	System   SystemMetrics    `json:"system"`
+	Sessions   []WhatsupSession         `json:"sessions"`
+	Postmortem []WhatsupPostmortemEntry `json:"postmortem,omitempty"`
+	System     SystemMetrics            `json:"system"`
 }
 
 // QueryTemplate is a named, parameterised query template stored in the database.
@@ -5813,14 +5829,103 @@ func (s *Store) chainLocked(sessionID string) ([]ChainLink, error) {
 	return chain, nil
 }
 
+// runPsEnv is a test seam: in production it invokes ps to get PID→env output.
+// Tests replace it with a function that returns synthetic output.
+var runPsEnv = func(pids []string) []byte {
+	// ps -wwEo pid,command shows env vars appended after the command line.
+	args := append([]string{"-wwEo", "pid,command", "-p"}, strings.Join(pids, ","))
+	out, _ := exec.Command("ps", args...).Output()
+	return out
+}
+
+// parsePsEnvOutput parses the output of `ps -wwEo pid,command -p <pids>`
+// and returns a map of PID → PWD value. Lines that lack a PWD entry are
+// silently skipped (graceful degradation per AC5).
+func parsePsEnvOutput(data []byte) map[int]string {
+	result := make(map[int]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid := 0
+		for _, ch := range fields[0] {
+			if ch < '0' || ch > '9' {
+				pid = -1
+				break
+			}
+			pid = pid*10 + int(ch-'0')
+		}
+		if pid <= 0 {
+			continue
+		}
+		// Environment variables follow the command in the same line,
+		// separated by spaces. Find the PWD=... entry.
+		rest := line[strings.Index(line, fields[0])+len(fields[0]):]
+		for _, tok := range strings.Fields(rest) {
+			if strings.HasPrefix(tok, "PWD=") {
+				result[pid] = tok[len("PWD="):]
+				break
+			}
+		}
+	}
+	return result
+}
+
+// cwdToTranscripts maps a working directory path to candidate transcript files
+// under ~/.claude/projects/<encoded-cwd>/.  The encoded name replaces each '/'
+// with '-'.  Files are returned sorted newest-mtime first.
+func cwdToTranscripts(cwd string) []WhatsupTranscript {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	// Encode cwd: replace all '/' with '-'.
+	encoded := strings.ReplaceAll(cwd, "/", "-")
+	dir := filepath.Join(home, ".claude", "projects", encoded)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []WhatsupTranscript
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, WhatsupTranscript{
+			Path:  filepath.Join(dir, e.Name()),
+			MTime: info.ModTime(),
+			Size:  info.Size(),
+		})
+	}
+	// Sort newest-mtime first.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].MTime.After(out[j].MTime)
+	})
+	return out
+}
+
 // Whatsup returns per-session process metrics for all live Claude sessions,
 // alongside system-wide memory pressure. On non-macOS platforms it returns
 // best-effort data (RSS/CPU via ps where available, zeroed system metrics).
-func (s *Store) Whatsup() (*WhatsupResult, error) {
+//
+// When postmortem is true and no live sessions are found, it scans recent
+// transcript files (modified within postmortemWindow) grouped by cwd and
+// returns them as WhatsupPostmortemEntry values.
+func (s *Store) Whatsup(postmortem bool) (*WhatsupResult, error) {
+	const postmortemWindow = 24 * time.Hour
+
 	sessions := s.LiveSessions()
 	result := &WhatsupResult{}
 
 	if len(sessions) == 0 {
+		if postmortem {
+			result.Postmortem = collectPostmortem(postmortemWindow)
+		}
 		return result, nil
 	}
 
@@ -5875,6 +5980,9 @@ func (s *Store) Whatsup() (*WhatsupResult, error) {
 		}
 	}
 
+	// Collect cwd for each PID via ps -E (graceful: missing PWD is skipped).
+	pidCwd := parsePsEnvOutput(runPsEnv(pidList))
+
 	// Query session_meta for each session to get repo/topic/work_type.
 	type metaRow struct {
 		repo     string
@@ -5907,15 +6015,22 @@ func (s *Store) Whatsup() (*WhatsupResult, error) {
 	for sid, pid := range sessions {
 		m := pidMetrics[pid]
 		meta := sessionMeta[sid]
+		cwd := pidCwd[pid]
+		var transcripts []WhatsupTranscript
+		if cwd != "" {
+			transcripts = cwdToTranscripts(cwd)
+		}
 		result.Sessions = append(result.Sessions, WhatsupSession{
-			SessionID: sid,
-			PID:       pid,
-			Repo:      meta.repo,
-			Topic:     meta.topic,
-			WorkType:  meta.workType,
-			CPUPct:    m.cpuPct,
-			RSSBytes:  m.rss,
-			CPUTime:   m.cpuTime,
+			SessionID:   sid,
+			PID:         pid,
+			Cwd:         cwd,
+			Transcripts: transcripts,
+			Repo:        meta.repo,
+			Topic:       meta.topic,
+			WorkType:    meta.workType,
+			CPUPct:      m.cpuPct,
+			RSSBytes:    m.rss,
+			CPUTime:     m.cpuTime,
 		})
 	}
 
@@ -5933,6 +6048,68 @@ func (s *Store) Whatsup() (*WhatsupResult, error) {
 	}
 
 	return result, nil
+}
+
+// collectPostmortem scans ~/.claude/projects/ for transcript files modified
+// within the recency window and groups them by decoded cwd.
+func collectPostmortem(window time.Duration) []WhatsupPostmortemEntry {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	dirEntries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return nil
+	}
+	cutoff := time.Now().Add(-window)
+	// Map encoded-cwd → candidates.
+	byDir := make(map[string][]WhatsupTranscript)
+	for _, de := range dirEntries {
+		if !de.IsDir() {
+			continue
+		}
+		subdir := filepath.Join(projectsDir, de.Name())
+		files, err := os.ReadDir(subdir)
+		if err != nil {
+			continue
+		}
+		for _, fe := range files {
+			if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".jsonl") {
+				continue
+			}
+			info, err := fe.Info()
+			if err != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+			byDir[de.Name()] = append(byDir[de.Name()], WhatsupTranscript{
+				Path:  filepath.Join(subdir, fe.Name()),
+				MTime: info.ModTime(),
+				Size:  info.Size(),
+			})
+		}
+	}
+	var out []WhatsupPostmortemEntry
+	for encoded, transcripts := range byDir {
+		// Decode: replace '-' with '/'. The encoded name starts with '-' because
+		// absolute paths begin with '/'.
+		cwd := strings.ReplaceAll(encoded, "-", "/")
+		sort.Slice(transcripts, func(i, j int) bool {
+			return transcripts[i].MTime.After(transcripts[j].MTime)
+		})
+		out = append(out, WhatsupPostmortemEntry{Cwd: cwd, Transcripts: transcripts})
+	}
+	// Sort by most-recent transcript mtime descending.
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i].Transcripts) == 0 {
+			return false
+		}
+		if len(out[j].Transcripts) == 0 {
+			return true
+		}
+		return out[i].Transcripts[0].MTime.After(out[j].Transcripts[0].MTime)
+	})
+	return out
 }
 
 // collectVMStat parses vm_stat output to compute macOS memory pressure.

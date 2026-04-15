@@ -289,9 +289,12 @@ If the session has no chain links, a single-element result is returned.`),
 		mcp.NewTool("mnemo_whatsup",
 			mcp.WithDescription(`Report which active Claude Code sessions are doing expensive work right now.
 
-Shows per-session CPU%, RSS memory, and CPU time alongside system-wide memory pressure. Cross-references live session PIDs with session metadata (repo, topic, work type). Results are sorted by CPU% descending so the busiest session appears first.
+Shows per-session CPU%, RSS memory, CPU time, cwd, and resolved transcript path alongside system-wide memory pressure. Cross-references live session PIDs with session metadata (repo, topic, work type) and reads PWD from each process's environment. Results are sorted by CPU% descending so the busiest session appears first.
+
+Use postmortem=true when no live sessions are detected (e.g. after a machine crash) to recover which directories had recent Claude activity based on transcript file mtimes within the last 24 hours.
 
 Use this to answer "what is Claude doing right now?" — especially useful when the machine is hot or fans are spinning.`),
+			mcp.WithBoolean("postmortem", mcp.Description("When true and no live sessions exist, report directories with recent Claude activity from transcript mtimes (last 24h).")),
 		),
 		mcp.NewTool("mnemo_self",
 			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
@@ -397,7 +400,7 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 	case "mnemo_self":
 		return h.self(args)
 	case "mnemo_whatsup":
-		return h.whatsup()
+		return h.whatsup(args)
 	case "mnemo_define":
 		return h.defineTemplate(args)
 	case "mnemo_evaluate":
@@ -1107,8 +1110,9 @@ func (h *Handler) chain(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) whatsup() (string, bool, error) {
-	result, err := h.mem.Whatsup()
+func (h *Handler) whatsup(args map[string]any) (string, bool, error) {
+	postmortem, _ := args["postmortem"].(bool)
+	result, err := h.mem.Whatsup(postmortem)
 	if err != nil {
 		return fmt.Sprintf("whatsup failed: %v", err), true, nil
 	}
@@ -1141,6 +1145,33 @@ func (h *Handler) whatsup() (string, bool, error) {
 			}
 			fmt.Fprintf(&b, "%-12s %-6d %6.1f%% %10s %-12s %-20s %s\n",
 				sid, s.PID, s.CPUPct, rss, workType, repo, topic)
+			if s.Cwd != "" {
+				fmt.Fprintf(&b, "  cwd: %s\n", s.Cwd)
+			}
+			switch len(s.Transcripts) {
+			case 0:
+				// no transcript found — omit
+			case 1:
+				fmt.Fprintf(&b, "  transcript: %s\n", s.Transcripts[0].Path)
+			default:
+				fmt.Fprintf(&b, "  transcripts (multiple — disambiguate by mtime/size):\n")
+				for _, t := range s.Transcripts {
+					fmt.Fprintf(&b, "    %s  mtime=%s size=%d\n",
+						t.Path, t.MTime.Format("2006-01-02T15:04:05"), t.Size)
+				}
+			}
+		}
+	}
+
+	// Postmortem section.
+	if len(result.Postmortem) > 0 {
+		fmt.Fprintf(&b, "\nPostmortem (recent claude activity, no live processes):\n")
+		for _, e := range result.Postmortem {
+			fmt.Fprintf(&b, "  cwd: %s\n", e.Cwd)
+			for _, t := range e.Transcripts {
+				fmt.Fprintf(&b, "    %s  mtime=%s size=%d\n",
+					t.Path, t.MTime.Format("2006-01-02T15:04:05"), t.Size)
+			}
 		}
 	}
 

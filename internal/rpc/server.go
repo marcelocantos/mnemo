@@ -137,9 +137,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"SearchDecisions": makeMethod(func(p SearchDecisionsParams) (any, error) {
 			return s.SearchDecisions(p.Query, p.Repo, p.Days, p.Limit)
 		}),
-		"Whatsup": func(_ json.RawMessage) (any, error) {
-			return s.Whatsup()
-		},
+		"Whatsup": makeMethod(func(p struct{ Postmortem bool }) (any, error) {
+			return s.Whatsup(p.Postmortem)
+		}),
 		"SearchGitHubActivity": makeMethod(func(p SearchGitHubActivityParams) (any, error) {
 			return s.SearchGitHubActivity(p.Query, p.Repo, p.State, p.Author, p.ActivityType, p.Days, p.Limit)
 		}),

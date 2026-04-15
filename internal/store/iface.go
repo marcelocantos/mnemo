@@ -33,7 +33,7 @@ type Backend interface {
 	Successor(sessionID string) (string, error)
 	Chain(sessionID string) ([]ChainLink, error)
 	SearchDecisions(query string, repo string, days int, limit int) ([]DecisionInfo, error)
-	Whatsup() (*WhatsupResult, error)
+	Whatsup(postmortem bool) (*WhatsupResult, error)
 	SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]GitHubActivityResult, error)
 	SearchCommits(query string, repo string, author string, days int, limit int) ([]GitCommit, error)
 	DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)

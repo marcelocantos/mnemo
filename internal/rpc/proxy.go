@@ -271,8 +271,8 @@ func (p *Proxy) SearchDecisions(query string, repo string, days int, limit int) 
 	return results, json.Unmarshal(raw, &results)
 }
 
-func (p *Proxy) Whatsup() (*store.WhatsupResult, error) {
-	raw, err := p.client.Call("Whatsup", nil)
+func (p *Proxy) Whatsup(postmortem bool) (*store.WhatsupResult, error) {
+	raw, err := p.client.Call("Whatsup", struct{ Postmortem bool }{postmortem})
 	if err != nil {
 		return nil, err
 	}
