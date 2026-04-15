@@ -1137,10 +1137,10 @@ func New(dbPath, projectDir string) (*Store, error) {
 		n = 1
 	}
 	s := &Store{
-		db:           db,
-		projectDir:   projectDir,
-		offsets:      make(map[string]int64),
-		imageSem: make(chan struct{}, n),
+		db:         db,
+		projectDir: projectDir,
+		offsets:    make(map[string]int64),
+		imageSem:   make(chan struct{}, n),
 	}
 
 	rows, err := db.Query("SELECT path, offset FROM ingest_state")

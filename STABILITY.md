@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.16.0.
+Snapshot as of v0.17.0.
 
 ### CLI flags
 
@@ -229,6 +229,139 @@ table showing per-stream ingest state (added in v0.16.0). **Stability**: Stable.
 **Notes**: Two-phase nonce protocol. Nonces detected during ingest and
 stored in indexed `session_nonces` table. The mechanism may evolve.
 
+#### mnemo_decisions
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `days` | number | no | Recency window in days (default 30) | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.17.0.** Surfaces past decisions across all sessions.
+Detects proposal+confirmation patterns (assistant proposes, user
+confirms with "yes"/"lgtm"/etc) at ingest time and stores them in
+`decisions` FTS5 table. Retroactive backfill runs at startup. **Stability**:
+Fluid — detection heuristic is first-cut and tuning is expected.
+
+#### mnemo_whatsup
+
+No parameters.
+
+**Added in v0.17.0.** Live session resource monitor: per-session CPU%,
+RSS, CPU time for active Claude Code processes, plus system memory
+pressure (macOS). Cross-references PIDs via `lsof` with session metadata
+(repo, topic, work type). **Stability**: Fluid — metric set and output
+shape may evolve.
+
+#### mnemo_commits
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (FTS on subject/body) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `author` | string | no | Author name/email substring | Needs review |
+| `days` | number | no | Recency window in days (default 30) | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.17.0.** Indexes git commits from all known repos (session_meta
++ workspace walker union) into `git_commits` with FTS5 on subject, body,
+repo, and author. Incremental — only fetches new commits per repo since
+last ingest. Backfill limited to last 365 days. **Stability**: Needs review.
+
+#### mnemo_prs
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (FTS on title/body) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `state` | string | no | open, closed, merged, all (default all) | Needs review |
+| `author` | string | no | GitHub username filter | Needs review |
+| `type` | string | no | pr, issue, all (default all) | Needs review |
+| `days` | number | no | Recency window in days (default 30) | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.17.0.** GitHub PR/issue activity via `gh` CLI across all
+repos that appear in session history. Stores in `github_prs` and
+`github_issues` with FTS5. Backfill runs in a goroutine at startup (non-
+blocking). **Stability**: Needs review — output fields and filter
+semantics may evolve.
+
+#### mnemo_discover_patterns
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `days` | number | no | Recency window in days (default 90) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `min_occurrences` | number | no | Minimum pattern occurrences to report (default 3) | Needs review |
+
+**Added in v0.17.0.** Query-time analysis over the indexed transcript corpus
+to find workaround patterns that suggest missing mnemo features. Detects
+direct JSONL reads, transcript-directory grep, repeated mnemo_query
+shapes (normalised), and recurring mnemo_search queries. Feeds the
+"self-improving tool discovery" feedback loop. **Stability**: Fluid —
+detection heuristics are first-cut.
+
+#### mnemo_define
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `name` | string | yes | Template name (unique) | Needs review |
+| `description` | string | no | What the template does | Needs review |
+| `query` | string | yes | SQL with `{{param}}` placeholders | Needs review |
+| `params` | array | no | Parameter names referenced in the query | Needs review |
+
+**Added in v0.17.0.** Stores a reusable parameterised query template
+in `query_templates`. Upserts on name collision. **Stability**: Needs
+review.
+
+#### mnemo_evaluate
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `name` | string | yes | Template name | Needs review |
+| `params` | object | no | Parameter values as key-value pairs | Needs review |
+
+**Added in v0.17.0.** Executes a named query template with parameters.
+Validates that all declared parameters are supplied; substitutes
+`{{param}}` placeholders; delegates to mnemo_query. **Stability**:
+Needs review.
+
+#### mnemo_list_templates
+
+No parameters. **Added in v0.17.0.** Lists all saved query templates
+with names, descriptions, and parameter definitions. **Stability**:
+Stable.
+
+#### mnemo_images
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Text for 'text' or 'semantic' mode; omit for recent list | Needs review |
+| `mode` | string | no | `text` (default), `semantic`, or `similar` | Needs review |
+| `similar_to` | number | no | Image ID for `similar` mode | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `session` | string | no | Session ID prefix filter | Needs review |
+| `days` | number | no | Recency window in days (default 90) | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+| `search_fields` | string | no | `both` (default), `description`, or `ocr` — applies to text mode | Needs review |
+
+**Added in v0.17.0.** Unified image search across three complementary
+indexes:
+
+- `text` mode: FTS5 over AI-generated descriptions and OCR text
+- `semantic` mode: embeds the query via CLIP (SigLIP/ViT-B-32) and does
+  brute-force k-NN cosine search over stored image embeddings
+- `similar` mode: visual similarity using the target image's stored
+  embedding
+
+Every ingested image triggers three sidecars (OCR via Apple Vision/CGO
+or Tesseract, AI description via batched `claude -p` calls, and CLIP
+embedding via a local Python helper). Backfill runs at startup; fresh
+images process on arrival throttled by a shared `runtime.NumCPU()`
+semaphore. **Stability**: Fluid — output format, score field
+interpretation, mode set, and descriptor vs OCR balance may evolve.
+
 ### Store / Backend interface methods
 
 These methods are part of the `Backend` interface used by both the local `Store`
@@ -240,6 +373,16 @@ and the RPC proxy. Breaking changes here would require a protocol version bump.
 | `Predecessor` | `(sessionID string) (string, error)` | v0.16.0 | Needs review |
 | `Successor` | `(sessionID string) (string, error)` | v0.16.0 | Needs review |
 | `Chain` | `(sessionID string) ([]ChainLink, error)` | v0.16.0 | Needs review |
+| `SearchDecisions` | `(query, repo string, days, limit int) ([]DecisionInfo, error)` | v0.17.0 | Fluid |
+| `Whatsup` | `() (*WhatsupResult, error)` | v0.17.0 | Fluid |
+| `SearchCommits` | `(query, repo, author string, days, limit int) ([]GitCommit, error)` | v0.17.0 | Needs review |
+| `SearchGitHubActivity` | `(query, repo, state, author, activityType string, days, limit int) ([]GitHubActivityResult, error)` | v0.17.0 | Needs review |
+| `DiscoverPatterns` | `(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)` | v0.17.0 | Fluid |
+| `DefineTemplate` | `(name, description, queryText string, paramNames []string) error` | v0.17.0 | Needs review |
+| `EvaluateTemplate` | `(name string, params map[string]string) ([]map[string]any, error)` | v0.17.0 | Needs review |
+| `ListTemplates` | `() ([]QueryTemplate, error)` | v0.17.0 | Stable |
+| `SearchImages` | `(query, repo, session string, days, limit int) ([]ImageSearchResult, error)` | v0.17.0 | Fluid |
+| `SearchImagesFiltered` | `(query, repo, session string, days, limit int, searchFields string) ([]ImageSearchResult, error)` | v0.17.0 | Fluid |
 
 **Notes**: `LiveSessions` uses `lsof` to detect active Claude Code processes
 and maps session IDs to PIDs, with a 5-second in-process cache. The lsof
@@ -278,6 +421,22 @@ dependency and cache TTL are implementation details and may change.
 | `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
 | `ingest_state` | path, offset | Fluid |
 | `ingest_status` | stream, last_backfill, files_indexed, files_on_disk — per-stream backfill state | Fluid |
+| `decisions` | id, session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp — proposal+confirmation pairs | Fluid |
+| `decisions_fts` | FTS5 on proposal_text, confirmation_text, repo | Fluid |
+| `query_templates` | id, name (unique), description, query_text, param_names (JSON), created_at, updated_at | Needs review |
+| `git_commits` | id, repo, commit_hash, author_name, author_email, commit_date, subject, body — UNIQUE(repo, commit_hash) | Needs review |
+| `git_commits_fts` | FTS5 on subject, body, repo, author_name | Needs review |
+| `github_prs` | id, repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url — UNIQUE(repo, pr_number) | Needs review |
+| `github_prs_fts` | FTS5 on title, body, repo, author | Needs review |
+| `github_issues` | id, repo, issue_number, title, body, state, author, created_at, updated_at, url, labels (JSON) — UNIQUE(repo, issue_number) | Needs review |
+| `github_issues_fts` | FTS5 on title, body, repo, author | Needs review |
+| `images` | id, content_hash (unique SHA256), bytes (BLOB), original_path, mime_type, width, height, pixel_format, byte_size, created_at | Fluid |
+| `image_occurrences` | image_id (FK), entry_id (FK), message_id (FK), session_id, source_type (`inline`\|`path`), occurred_at — UNIQUE(image_id, entry_id, message_id, source_type) | Fluid |
+| `image_descriptions` | image_id (unique FK), name, description, model, prompt_tokens, completion_tokens, error, created_at | Fluid |
+| `image_descriptions_fts` | FTS5 on name, description | Fluid |
+| `image_ocr` | image_id (PK FK), text, backend (`apple_vision`\|`tesseract`), confidence, error, created_at | Fluid |
+| `image_ocr_fts` | FTS5 on text | Fluid |
+| `image_embeddings` | image_id (PK FK), model, dim, vector (float32 BLOB), error, created_at | Fluid |
 
 **Notes**: v0.9.0 added the `entries` table which stores every JSONL line
 as JSONB with 15 virtual columns for high-query fields. All entry types
@@ -302,6 +461,18 @@ heuristic (≤5s, same cwd, /clear marker in successor's first message).
 Chain detection runs at ingest time and on startup (backfill). Added
 `Predecessor`, `Successor`, `Chain` store methods and the `mnemo_chain`
 MCP tool.
+v0.17.0 brought a major expansion: decisions (🎯T9.6), mnemo_whatsup
+(🎯T9.5), full-fidelity observability (🎯T9), git history indexing
+(🎯T11), GitHub PR/issue indexing (🎯T12), self-improving pattern
+discovery (🎯T5), query templates (🎯T7), and the full image
+indexing stack — storage of decoded image BLOBs, AI descriptions via
+batched `claude -p` (🎯T18), Apple Vision OCR via in-process CGO with
+Tesseract fallback (🎯T19), and CLIP/SigLIP embeddings for semantic
+and visual-similarity search (🎯T20). Schema bumped from 11 to 18 in
+six increments. The forward path processes each new image as it
+arrives with one shared semaphore throttling all sidecars at
+`runtime.NumCPU()`; backfill drains existing content in batched
+parallel workers.
 v0.15.0 (🎯T17) made every repo-level stream self-heal on startup:
 targets, audit logs, plans, CLAUDE.md, and CI polling discover repos
 via filesystem walk of configured workspace roots in addition to
@@ -370,5 +541,12 @@ configurable before 1.0.
 - Authentication / access control on the HTTP endpoint
 - Transcript modification or deletion tools
 - Integration with non-Claude-Code transcript formats
-- Summarisation or semantic search (vector embeddings)
-- Agent-defined query templates (🎯T7) — valuable but not a 1.0 gate
+- Summarisation (live context compaction is tracked as 🎯T10; may land before 1.0 but is not a gate)
+
+**Delivered in v0.17.0** (removed from the 1.0 out-of-scope list):
+
+- Semantic search (via CLIP embeddings for images; 🎯T20) — mnemo_images
+  mode=semantic / mode=similar. Text corpus semantic search remains
+  out-of-scope for 1.0.
+- Agent-defined query templates (🎯T7) — mnemo_define / mnemo_evaluate
+  / mnemo_list_templates.

@@ -77,3 +77,8 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 - **Commit**: `b7a15b4`
 - **Outcome**: Released v0.16.0 (darwin-arm64, linux-amd64, linux-arm64). Session chains (🎯T16): new session_chains table and mnemo_chain tool link /clear-bounded transcripts into work spans via time-gap heuristic. Session liveness (🎯T9.5.1): mnemo_sessions annotates live sessions with [LIVE pid=NNNNN] via lsof detection. Stats streams rendering in mnemo_stats text output. Schema v11. 15 new tests. Homebrew formula updated.
+
+## 2026-04-15 — /release v0.17.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.17.0 (darwin-arm64, linux-amd64, linux-arm64). Major expansion: decisions (🎯T9.6), mnemo_whatsup (🎯T9.5), full-fidelity observability parent (🎯T9 closed), git history (🎯T11), GitHub PRs/issues (🎯T12), self-improving pattern discovery (🎯T5), query templates (🎯T7), and the complete image stack — storage, Apple Vision OCR via CGO/ObjC with Tesseract fallback (🎯T19), batched `claude -p` AI descriptions (🎯T18), and CLIP/SigLIP embeddings with semantic+visual similarity search (🎯T20). Describer moved off ANTHROPIC_API_KEY to claude-p / OAuth. Image sidecars now process on arrival (no poll) with one shared NumCPU semaphore. Schema 11 → 18. Golden-image system tests added (vellum + pdftoppm pipeline, LFS-tracked). Homebrew formula updated.
