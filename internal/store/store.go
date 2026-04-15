@@ -307,7 +307,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 18
+const schemaVersion = 19
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -545,6 +545,19 @@ func New(dbPath, projectDir string) (*Store, error) {
 			repo TEXT NOT NULL DEFAULT '',
 			timestamp TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS compactions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			model TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cost_usd REAL NOT NULL DEFAULT 0,
+			entry_id_from INTEGER NOT NULL DEFAULT 0,
+			entry_id_to INTEGER NOT NULL DEFAULT 0,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			summary TEXT NOT NULL DEFAULT ''
+		);
 		CREATE TABLE IF NOT EXISTS query_templates (
 			id INTEGER PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
@@ -700,6 +713,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_decisions_session ON decisions(session_id);
 		CREATE INDEX IF NOT EXISTS idx_decisions_repo ON decisions(repo);
 		CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_compactions_session_generated ON compactions(session_id, generated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_git_commits_repo ON git_commits(repo);
 		CREATE INDEX IF NOT EXISTS idx_git_commits_date ON git_commits(commit_date);
 		CREATE INDEX IF NOT EXISTS idx_git_commits_hash ON git_commits(commit_hash);
