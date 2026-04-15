@@ -544,19 +544,23 @@ targets:
     origin: manual
     discovered: 2026-04-15
   T25.3:
-    name: Session chain detection gains definitive MCP-connection mechanism; cwd heuristic demoted to fallback
+    name: Session chain detection uses MCP connection identity exclusively; cwd heuristic deleted
     status: identified
     value: 3.0
     cost: 2.0
     acceptance:
     - When a new connection_sessions row is inserted where the connection already had a different session_id with an earlier first_seen_at, a session_chains row is inserted with mechanism='mcp_connection' and confidence='definitive'. No cwd match, no time-gap math.
-    - The existing cwd-based detectChainForSession remains as a fallback, running only for sessions that have no connection_sessions binding (pre-upgrade transcripts, or sessions that made no MCP tool calls to mnemo). Its confidence tier caps at the existing 'high' — 'definitive' is reserved for the connection mechanism.
-    - mnemo_chain tool output attributes each link to its mechanism so the user can see whether a given link is definitive or heuristic.
-    - 'Tests exercise: (a) a new session on an existing connection — expect mechanism=''mcp_connection'', (b) pre-upgrade data with no connection trace — expect fallback to cwd heuristic.'
+    - detectChainForSession, clearMarkerRE, and backfillSessionChains are deleted from store.go. The cwd-most-recent commit from earlier in this release prep (8f8c3b9) becomes dead code and is removed as part of this target.
+    - session_chains keeps its existing columns; the mechanism column takes only the value 'mcp_connection' going forward. Old rows from the heuristic era do not exist — the v0.18.0 schema bump (20) rebuilds the DB from JSONL, and without a heuristic producing rows, nothing lands in session_chains until real connection activity happens.
+    - 'chain_test.go is simplified: drop TestChainLinksImmediateSuccessor, TestChainLinksAcrossLongGap, and TestChainRequiresSameCwd (all heuristic-era). Replace with a single test that exercises two mnemo_self calls on one connection with different session IDs and verifies the session_chains row.'
+    - mnemo_chain tool output no longer needs mechanism attribution — there is only one mechanism.
     context: |-
-      Side product of T25.1 and T25.2, not the primary motivator. Chain linkage under the new model is essentially free — the connection_sessions table already carries every signal needed. Writing a session_chains row on transition is bookkeeping.
+      Simplified 2026-04-15. Original framing kept the cwd heuristic as a "fallback for pre-upgrade transcripts". That was reflexive back-compat thinking: the heuristic has been producing *low-confidence guesses* for 17 releases, and keeping it alive means two code paths, two test matrices, and a permanent question mark on every displayed chain ("was this link definitive or inferred?").
 
-      The cwd heuristic stays because backfill of pre-upgrade transcripts will always need a non-connection path — those sessions never went through a connection-tracked daemon. Keeping it honest: label its rows with mechanism='cwd_most_recent' and let mnemo_chain surface that provenance so the user can see which links are definitive vs heuristic.
+      Under the new model, pre-upgrade transcripts simply lose chain inference on the first v0.18 DB rebuild. Nothing downstream depends on the heuristic being correct (by construction — it wasn't), so losing those inferences is not a functional regression. New sessions start accumulating definitive chain links immediately.
+
+      Side benefit: the commit that tightened the cwd heuristic's window earlier in this release prep (8f8c3b9) becomes dead code and is removed here. Net delta is smaller and clearer than shipping both approaches.</context>
+      <parameter name="tags">["chain", "deletion", "connection-identity"]
     depends_on:
     - T25.1
     tags:
