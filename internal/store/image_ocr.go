@@ -6,13 +6,10 @@ package store
 import (
 	"bytes"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 )
@@ -26,102 +23,11 @@ const (
 // ocrOnce ensures the "no OCR backend" warning is logged only once.
 var ocrOnce sync.Once
 
-// ocrHelperPath is the cached path to the compiled macOS OCR helper.
-var ocrHelperPath string
-var ocrHelperOnce sync.Once
-
-// ocrMacOSResult is the JSON output from tools/ocr-macos/main.swift.
-type ocrMacOSResult struct {
-	Text       string   `json:"text"`
-	Confidence *float64 `json:"confidence"`
-}
-
-// buildMacOSOCRHelper compiles tools/ocr-macos/main.swift to ~/.mnemo/bin/mnemo-ocr
-// if not already present. Returns the absolute path on success, empty string if
-// swiftc is unavailable or we are not on darwin. Silently no-ops on non-darwin.
-func buildMacOSOCRHelper() string {
-	if runtime.GOOS != "darwin" {
-		return ""
-	}
-
-	// Check swiftc availability.
-	swiftc, err := exec.LookPath("swiftc")
-	if err != nil {
-		slog.Warn("swiftc not found — Apple Vision OCR unavailable")
-		return ""
-	}
-
-	// Target path for the compiled binary.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		slog.Warn("could not determine home directory for OCR helper", "err", err)
-		return ""
-	}
-	binDir := filepath.Join(home, ".mnemo", "bin")
-	helperPath := filepath.Join(binDir, "mnemo-ocr")
-
-	// Already compiled?
-	if _, err := os.Stat(helperPath); err == nil {
-		return helperPath
-	}
-
-	// Locate source relative to the executable.
-	exe, err := os.Executable()
-	if err != nil {
-		slog.Warn("could not determine executable path for OCR helper source lookup", "err", err)
-		return ""
-	}
-	// Try <exe_dir>/../../tools/ocr-macos/main.swift (for dev tree).
-	exeDir := filepath.Dir(exe)
-	srcCandidates := []string{
-		filepath.Join(exeDir, "..", "..", "tools", "ocr-macos", "main.swift"),
-		filepath.Join(exeDir, "tools", "ocr-macos", "main.swift"),
-	}
-	var srcPath string
-	for _, c := range srcCandidates {
-		if _, err := os.Stat(c); err == nil {
-			srcPath = c
-			break
-		}
-	}
-	if srcPath == "" {
-		slog.Warn("mnemo-ocr Swift source not found — Apple Vision OCR unavailable")
-		return ""
-	}
-
-	// Create output directory.
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		slog.Warn("could not create ~/.mnemo/bin", "err", err)
-		return ""
-	}
-
-	slog.Info("compiling Apple Vision OCR helper", "src", srcPath, "dst", helperPath)
-	cmd := exec.Command(swiftc, "-O",
-		"-framework", "Vision",
-		"-framework", "CoreImage",
-		srcPath,
-		"-o", helperPath)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		slog.Warn("swiftc failed — Apple Vision OCR unavailable", "err", err, "stderr", stderr.String())
-		return ""
-	}
-	slog.Info("Apple Vision OCR helper compiled", "path", helperPath)
-	return helperPath
-}
-
-// ocrHelperPathOnce returns (and caches) the path to the macOS OCR helper.
-func getOCRHelperPath() string {
-	ocrHelperOnce.Do(func() {
-		ocrHelperPath = buildMacOSOCRHelper()
-	})
-	return ocrHelperPath
-}
-
 // ocrBackend returns the backend to use: "apple_vision", "tesseract", or "".
+// apple_vision is in-process via CGO on macOS; tesseract shells out; empty
+// means neither is available.
 func ocrBackend() string {
-	if runtime.GOOS == "darwin" && getOCRHelperPath() != "" {
+	if appleVisionAvailable {
 		return "apple_vision"
 	}
 	if _, err := exec.LookPath("tesseract"); err == nil {
@@ -135,7 +41,7 @@ func ocrBackend() string {
 func runOCR(imageBytes []byte, backend string) (string, *float64, error) {
 	switch backend {
 	case "apple_vision":
-		return runAppleVisionOCR(imageBytes)
+		return runAppleVisionOCRNative(imageBytes)
 	case "tesseract":
 		return runTesseractOCR(imageBytes)
 	default:
@@ -143,37 +49,9 @@ func runOCR(imageBytes []byte, backend string) (string, *float64, error) {
 	}
 }
 
-// runAppleVisionOCR shells out to the compiled Swift helper.
-func runAppleVisionOCR(imageBytes []byte) (string, *float64, error) {
-	helperPath := getOCRHelperPath()
-	if helperPath == "" {
-		return "", nil, fmt.Errorf("Apple Vision helper not available")
-	}
-
-	cmd := exec.Command(helperPath)
-	cmd.Stdin = bytes.NewReader(imageBytes)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		msg := stderr.String()
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", nil, fmt.Errorf("apple_vision: %s", msg)
-	}
-
-	var result ocrMacOSResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return "", nil, fmt.Errorf("apple_vision: parse output: %w", err)
-	}
-	return result.Text, result.Confidence, nil
-}
-
 // runTesseractOCR writes image data to a temp file and runs tesseract.
+// Tesseract reads from a file path and writes recognized text to stdout.
 func runTesseractOCR(imageBytes []byte) (string, *float64, error) {
-	// Write to a temp file; tesseract reads from a file path.
 	tmp, err := os.CreateTemp("", "mnemo-ocr-*.png")
 	if err != nil {
 		return "", nil, fmt.Errorf("tesseract: create temp: %w", err)
@@ -186,7 +64,6 @@ func runTesseractOCR(imageBytes []byte) (string, *float64, error) {
 	}
 	tmp.Close()
 
-	// tesseract <infile> stdout --psm 3 -l eng
 	cmd := exec.Command("tesseract", tmp.Name(), "stdout", "--psm", "3", "-l", "eng")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -199,7 +76,7 @@ func runTesseractOCR(imageBytes []byte) (string, *float64, error) {
 		}
 		return "", nil, fmt.Errorf("tesseract: %s", msg)
 	}
-	// Tesseract does not provide per-observation confidence via CLI; confidence is NULL.
+	// Tesseract CLI does not expose per-observation confidence; leave NULL.
 	return stdout.String(), nil, nil
 }
 
@@ -210,7 +87,7 @@ func (s *Store) StartImageOCR() {
 	backend := ocrBackend()
 	if backend == "" {
 		ocrOnce.Do(func() {
-			slog.Warn("no OCR backend available (swiftc/Apple Vision not found on macOS, tesseract not installed) — image OCR will be skipped")
+			slog.Warn("no OCR backend available (Apple Vision is macOS-only, tesseract not installed) — image OCR will be skipped")
 		})
 		return
 	}
