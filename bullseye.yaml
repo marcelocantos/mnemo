@@ -14,7 +14,7 @@ targets:
     discovered: 2026-04-07
   T10:
     name: Live context compaction
-    status: identified
+    status: converging
     value: 10.0
     cost: 8.0
     acceptance:
@@ -24,14 +24,25 @@ targets:
     - Idle reaping cleans up summarizer instances
     - mnemo_restore in fresh post-clear segment returns useful context
     - Token cost of summarizer < 10% of the session it tracks
-    context: |
-      mnemo maintains a live compacted context for each active session. When a session /clears, the compacted context is available instantly via mnemo_restore.
+    context: |-
+      mnemo maintains a live compacted context for each active session. When a session /clears, the compacted context is available instantly via `mnemo_restore`.
 
-      **Approach (decided 2026-04-08):** Sonnet 4 via claudia (~/work/github.com/marcelocantos/claudia — claudia.Agent / claudia.Pool / claudia.Registry). Pro Max 20X plan makes per-call cost effectively zero, and Sonnet wins on quality + sub-second latency over local models. claudia is the single LLM interface for mnemo (compaction now, agentic search later for T16).
+      **Approach (decided 2026-04-08):** Sonnet 4 via claudia (~/work/github.com/marcelocantos/claudia — claudia.Agent / claudia.Pool / claudia.Registry). Pro Max 20X plan makes per-call cost effectively zero, and Sonnet wins on quality + sub-second latency over local models. claudia is the single LLM interface for mnemo.
 
-      Local Ollama backends (qwen3:8b ~7s, phi4:14b ~15s) remain a documented fallback for offline/zero-cost use; benchmarks captured in docs/targets.md. Architecture should keep the LLM call site backend-agnostic so the fallback path stays viable.
+      Local Ollama backends (qwen3:8b ~7s, phi4:14b ~15s) remain a documented fallback for offline/zero-cost use. Architecture keeps the LLM call site backend-agnostic so the fallback path stays viable.
 
-      Blocked on T16: current acceptance assumes session identity survives /clear, which it doesn't. Reframe to traverse via session_chains once T16 lands.
+      **Progress (2026-04-15, commit 18335b8):**
+      - ✓ AC1 Summariser spawns automatically for active sessions — `compact.Watcher` polls `LiveSessions()`, spawns per-session goroutines.
+      - ✓ AC2 Compacted context available within 2s of `mnemo_restore` — pure DB read from `compactions` table, sub-ms.
+      - ✓ AC3 Survives /clear boundaries — `ChainCompactions` traverses `session_chains` for the full chain.
+      - ✓ AC4 Idle reaping — default 10-min IdleTimeout; watcher drops per-session goroutine when transcript goes quiet.
+      - ✓ AC5 `mnemo_restore` returns useful context — returns structured summary per chain span.
+      - ✗ AC6 Token cost < 10% of tracked session — structurally plumbed via claudia result events (token/cost accounting extracted) but not yet validated against a real-world session. Needs a compaction log/audit surface + a few weeks of real data to measure.
+
+      **Follow-ups:**
+      - Expose compaction cost telemetry (per-chain tokens, timing) via a new tool or via `mnemo_stats`.
+      - Make the summariser's cwd-based self-exclusion configurable rather than hardcoded in main.go.
+      - Run against a long session chain and tune compaction prompt / cadence to keep AC6 satisfied.
     depends_on:
     - T16
     origin: targets.md bootstrap
@@ -339,9 +350,10 @@ targets:
     achieved: 2026-04-14
   T21:
     name: mnemo indexes project documentation (markdown, txt, PDF) across tracked repos with md/pdf dedup
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
+    actual_cost: 5.0
     acceptance:
     - mnemo indexes markdown, plain-text, and PDF files found under each tracked repo's session root, with results rankable alongside session transcripts
     - Discovery is broader than docs/ — sweep common locations (repo root README/CHANGELOG/notes, docs/, design/, notes/, papers/) rather than hard-coding a single path; respect .gitignore
@@ -353,6 +365,7 @@ targets:
     context: 'Originally framed as docs/-only ingest for the pageflip artifact pipeline (meeting artifacts → searchable). Widened 2026-04-15: many projects keep hand-written docs, TODOs, design notes, and release notes scattered across the repo, not just under docs/. Hunt more broadly for markdown, txt, and PDF under each session root. Dedup rule remains the key correctness property: when a .md and .pdf share a stem in the same directory (often one is generated from the other — e.g., mpe2pdf output), index only one — prefer .md for searchability, fall back to .pdf when markdown is absent. PDF extraction uses whatever tool is available on the host. Downstream consumers: pageflip 🎯T14 (contradiction detector), 🎯T16 (dejargoniser), 🎯T17 (weekly digest), plus general cross-repo doc search.'
     origin: pageflip artifact pipeline — meeting outputs need to be searchable alongside session transcripts
     discovered: 2026-04-14
+    achieved: 2026-04-15
   T22:
     name: mnemo daemon and MCP proxy run natively on Windows
     status: identified
@@ -376,9 +389,10 @@ targets:
     discovered: 2026-04-15
   T23:
     name: File-watch handlers are cheap — heavy work deferred and debounced
-    status: identified
+    status: achieved
     value: 5.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - fsnotify event handlers do minimal work (mark dirty / enqueue), with no inline parsing, hashing, or DB writes on the event-handling goroutine
     - Burst events for the same path (e.g., editor save followed by formatter rewrite) coalesce into a single re-index via a 200–500ms debounce
@@ -392,11 +406,13 @@ targets:
     - watching
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T24:
     name: whatsup enriches live sessions with PID→cwd→transcript mapping and supports postmortem directory recovery
-    status: identified
+    status: achieved
     value: 5.0
     cost: 3.0
+    actual_cost: 3.0
     acceptance:
     - mnemo_whatsup output includes cwd (from ps -E PWD) for each live claude PID
     - mnemo_whatsup output includes the resolved transcript path (newest-mtime jsonl in the cwd's ~/.claude/projects directory) for each live claude PID
@@ -420,6 +436,7 @@ targets:
     - recovery
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T3:
     name: Active work dashboard data
     status: achieved
