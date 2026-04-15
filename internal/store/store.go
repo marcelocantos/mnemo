@@ -3488,40 +3488,53 @@ func (s *Store) Watch() error {
 	}
 	slog.Info("watching for changes", "transcripts", projectDirs, "repos", len(repoRoots))
 
+	// debounce coalesces burst events (editor saves, formatter rewrites, git
+	// operations) for the same path into a single re-index after 300ms of quiet.
+	// Heavy ingest work runs in the timer goroutine, not on the event goroutine.
+	db := newDebouncer(300 * time.Millisecond)
+
 	for {
 		select {
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
 			}
-			if strings.HasSuffix(event.Name, ".jsonl") &&
+			name := event.Name
+			if strings.HasSuffix(name, ".jsonl") &&
 				(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
-				if err := s.ingestFile(event.Name); err != nil {
-					slog.Error("ingest failed", "file", event.Name, "err", err)
-				}
+				db.enqueue(name, func() {
+					if err := s.ingestFile(name); err != nil {
+						slog.Error("ingest failed", "file", name, "err", err)
+					}
+				})
 			}
 			// Watch memory file changes.
-			if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/memory/") {
+			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/memory/") {
 				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-					if err := s.ingestMemoryFile(event.Name); err != nil {
-						slog.Error("ingest memory failed", "file", event.Name, "err", err)
-					}
+					db.enqueue(name, func() {
+						if err := s.ingestMemoryFile(name); err != nil {
+							slog.Error("ingest memory failed", "file", name, "err", err)
+						}
+					})
 				}
 				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					s.deleteMemoryFile(event.Name)
+					// Deletions are not debounced: the file is already gone.
+					s.deleteMemoryFile(name)
 				}
 			}
 			// Watch repo-level context source changes.
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				base := filepath.Base(event.Name)
-				dir := filepath.Dir(event.Name)
+				base := filepath.Base(name)
+				dir := filepath.Dir(name)
 
 				// CLAUDE.md at repo root.
 				if base == "CLAUDE.md" {
 					if repo, ok := repoForRoot[dir]; ok {
-						if err := s.ingestClaudeConfigFile(event.Name, repo); err != nil {
-							slog.Error("ingest claude config failed", "file", event.Name, "err", err)
-						}
+						db.enqueue(name, func() {
+							if err := s.ingestClaudeConfigFile(name, repo); err != nil {
+								slog.Error("ingest claude config failed", "file", name, "err", err)
+							}
+						})
 					}
 				}
 
@@ -3529,9 +3542,11 @@ func (s *Store) Watch() error {
 				if base == "audit-log.md" && filepath.Base(dir) == "docs" {
 					repoRoot := filepath.Dir(dir)
 					if repo, ok := repoForRoot[repoRoot]; ok {
-						if err := s.ingestAuditLogFile(event.Name, repo); err != nil {
-							slog.Error("ingest audit log failed", "file", event.Name, "err", err)
-						}
+						db.enqueue(name, func() {
+							if err := s.ingestAuditLogFile(name, repo); err != nil {
+								slog.Error("ingest audit log failed", "file", name, "err", err)
+							}
+						})
 					}
 				}
 
@@ -3539,40 +3554,49 @@ func (s *Store) Watch() error {
 				if base == "targets.md" && filepath.Base(dir) == "docs" {
 					repoRoot := filepath.Dir(dir)
 					if repo, ok := repoForRoot[repoRoot]; ok {
-						if err := s.ingestTargetFile(event.Name, repo); err != nil {
-							slog.Error("ingest targets failed", "file", event.Name, "err", err)
-						}
+						db.enqueue(name, func() {
+							if err := s.ingestTargetFile(name, repo); err != nil {
+								slog.Error("ingest targets failed", "file", name, "err", err)
+							}
+						})
 					}
 				}
 
 				// .planning/**/*.md
-				if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/.planning/") {
+				if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.planning/") {
 					for root, repo := range repoForRoot {
 						planDir := filepath.Join(root, ".planning")
-						if strings.HasPrefix(event.Name, planDir+"/") {
-							if err := s.ingestPlanFile(event.Name, repo, planDir); err != nil {
-								slog.Error("ingest plan failed", "file", event.Name, "err", err)
-							}
+						if strings.HasPrefix(name, planDir+"/") {
+							// Capture loop variables for the closure.
+							capturedRepo := repo
+							capturedPlanDir := planDir
+							db.enqueue(name, func() {
+								if err := s.ingestPlanFile(name, capturedRepo, capturedPlanDir); err != nil {
+									slog.Error("ingest plan failed", "file", name, "err", err)
+								}
+							})
 							break
 						}
 					}
 				}
 			}
 			// Watch skill file changes.
-			if strings.HasSuffix(event.Name, ".md") && strings.Contains(event.Name, "/.claude/skills/") {
+			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.claude/skills/") {
 				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-					if err := s.ingestSkillFile(event.Name); err != nil {
-						slog.Error("ingest skill failed", "file", event.Name, "err", err)
-					}
+					db.enqueue(name, func() {
+						if err := s.ingestSkillFile(name); err != nil {
+							slog.Error("ingest skill failed", "file", name, "err", err)
+						}
+					})
 				}
 				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					s.deleteSkillFile(event.Name)
+					s.deleteSkillFile(name)
 				}
 			}
 			if event.Has(fsnotify.Create) {
-				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					if wErr := watcher.Add(event.Name); wErr != nil {
-						slog.Warn("failed to watch new directory", "path", event.Name, "err", wErr)
+				if info, err := os.Stat(name); err == nil && info.IsDir() {
+					if wErr := watcher.Add(name); wErr != nil {
+						slog.Warn("failed to watch new directory", "path", name, "err", wErr)
 					}
 				}
 			}
