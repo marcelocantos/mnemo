@@ -3177,6 +3177,7 @@ func (s *Store) IngestAll() error {
 		return files[i].mtime.After(files[j].mtime)
 	})
 
+	ingestStart := time.Now()
 	slog.Info("ingest starting", "files", len(files), "workers", numWorkers)
 
 	// Stage 2: Workers — parse JSONL files in parallel.
@@ -3209,9 +3210,10 @@ func (s *Store) IngestAll() error {
 	}()
 
 	// Stage 3: Writer — single goroutine, batched transactions.
-	if err := s.runWriter(parsedCh); err != nil {
+	if err := s.runWriter(parsedCh, len(files)); err != nil {
 		return err
 	}
+	slog.Info("ingest duration", "files", len(files), "elapsed", time.Since(ingestStart).Round(time.Millisecond))
 
 	// Detect decision pairs (proposal + confirmation) in sessions that
 	// haven't been scanned yet (e.g. sessions ingested before decisions
@@ -3283,7 +3285,7 @@ func (ws *writerState) Close() {
 // runWriter is the single-goroutine writer for the parallel ingest pipeline.
 // It consumes parsed files from the channel and inserts them in batched
 // transactions, yielding the write lock every 200ms for readers.
-func (s *Store) runWriter(parsedCh <-chan parsedFile) error {
+func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	const commitInterval = 200 * time.Millisecond
 
 	s.rwmu.Lock()
@@ -3297,6 +3299,9 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile) error {
 	defer ws.Close()
 
 	lastCommit := time.Now()
+	writeStart := time.Now()
+	var processed int
+	const progressEvery = 100
 
 	commitBatch := func() error {
 		ws.Close()
@@ -3315,6 +3320,23 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile) error {
 	}
 
 	for pf := range parsedCh {
+		processed++
+		slog.Info("ingest file",
+			"n", processed, "of", totalFiles,
+			"session", pf.sessionID,
+			"entries", len(pf.entries), "messages", len(pf.messages))
+		if totalFiles > 0 && progressEvery > 0 && processed%progressEvery == 0 {
+			elapsed := time.Since(writeStart)
+			rate := float64(processed) / elapsed.Seconds()
+			var eta time.Duration
+			if rate > 0 {
+				eta = time.Duration(float64(totalFiles-processed)/rate) * time.Second
+			}
+			slog.Info("ingest progress",
+				"processed", processed, "of", totalFiles,
+				"rate", fmt.Sprintf("%.1f files/s", rate),
+				"eta", eta.Round(time.Second))
+		}
 		// Insert all raw entries and build entryIdx→entryID map.
 		entryIDs := make(map[int]int64, len(pf.entries))
 		for i, e := range pf.entries {
