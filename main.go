@@ -97,9 +97,17 @@ func runServe() {
 	mem.SetWorkspaceRoots(workspaceRoots)
 	slog.Info("workspace roots configured", "roots", workspaceRoots)
 
+	// Configure extra Claude Code project directories (e.g. a Windows
+	// VM's projects dir exposed over SMB). Missing or unavailable
+	// entries are skipped at ingest/watch time rather than failing.
+	mem.SetExtraProjectDirs(cfg.ExtraProjectDirs)
+	if len(cfg.ExtraProjectDirs) > 0 {
+		slog.Info("extra project dirs configured", "dirs", cfg.ExtraProjectDirs)
+	}
+
 	// Ingest and watch in the background.
 	go func() {
-		slog.Info("ingesting transcripts", "dir", projectDir)
+		slog.Info("ingesting transcripts", "dir", projectDir, "extras", len(cfg.ExtraProjectDirs))
 		if err := mem.IngestAll(); err != nil {
 			slog.Error("initial ingest failed", "err", err)
 		}

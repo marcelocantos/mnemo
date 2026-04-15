@@ -23,8 +23,10 @@ type Config struct {
 	WorkspaceRoots []string `json:"workspace_roots,omitempty"`
 
 	// ExtraProjectDirs lists extra Claude Code project directories to
-	// index beyond ~/.claude/projects/. Reserved for cross-platform
-	// transcript ingest (see 🎯T15).
+	// index beyond ~/.claude/projects/. Used for cross-platform
+	// transcript ingest (🎯T15) — e.g. a Windows VM's Claude projects
+	// dir exposed via SMB mount. Missing or unavailable entries are
+	// skipped at ingest/watch time rather than failing.
 	ExtraProjectDirs []string `json:"extra_project_dirs,omitempty"`
 }
 

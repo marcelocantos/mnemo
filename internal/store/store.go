@@ -46,6 +46,12 @@ type Store struct {
 	// under rwmu.RLock by the repoRoots walker.
 	workspaceRoots []string
 
+	// extraProjectDirs are additional Claude Code project directories
+	// to ingest beyond projectDir. Used for cross-platform transcript
+	// ingest (🎯T15) — e.g. a Windows VM's Claude projects exposed via
+	// SMB mount. Mutated only via SetExtraProjectDirs.
+	extraProjectDirs []string
+
 	// liveness cache
 	liveMu        sync.Mutex
 	liveCache     map[string]int // sessionID → PID
@@ -72,6 +78,33 @@ func (s *Store) SetWorkspaceRoots(roots []string) {
 		return
 	}
 	s.workspaceRoots = append(s.workspaceRoots[:0:0], roots...)
+}
+
+// SetExtraProjectDirs configures additional Claude Code project
+// directories beyond the primary projectDir. These are walked at
+// IngestAll and Watch time alongside the primary dir. Missing or
+// unavailable extras (e.g. an unmounted SMB share) are skipped with
+// a warn rather than failing. Call once after Store.New.
+func (s *Store) SetExtraProjectDirs(dirs []string) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	if len(dirs) == 0 {
+		s.extraProjectDirs = nil
+		return
+	}
+	s.extraProjectDirs = append(s.extraProjectDirs[:0:0], dirs...)
+}
+
+// projectDirs returns the full list of project directories to scan:
+// the primary projectDir followed by any extras configured via
+// SetExtraProjectDirs. The returned slice is a defensive copy.
+func (s *Store) projectDirs() []string {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	dirs := make([]string, 0, 1+len(s.extraProjectDirs))
+	dirs = append(dirs, s.projectDir)
+	dirs = append(dirs, s.extraProjectDirs...)
+	return dirs
 }
 
 // ContextMessage is a message surrounding a search hit.
@@ -3033,25 +3066,35 @@ func (s *Store) IngestAll() error {
 		offset int64 // already-ingested offset
 	}
 	var files []fileEntry
-	filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
-			return nil
+	for _, dir := range s.projectDirs() {
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				slog.Warn("project dir unavailable, skipping", "dir", dir)
+			} else {
+				slog.Warn("project dir stat failed, skipping", "dir", dir, "err", err)
+			}
+			continue
 		}
-		s.mu.Lock()
-		offset := s.offsets[path]
-		s.mu.Unlock()
-		// Skip fully ingested files.
-		if offset >= info.Size() {
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+				return nil
+			}
+			s.mu.Lock()
+			offset := s.offsets[path]
+			s.mu.Unlock()
+			// Skip fully ingested files.
+			if offset >= info.Size() {
+				return nil
+			}
+			files = append(files, fileEntry{
+				path:   path,
+				mtime:  info.ModTime(),
+				size:   info.Size(),
+				offset: offset,
+			})
 			return nil
-		}
-		files = append(files, fileEntry{
-			path:   path,
-			mtime:  info.ModTime(),
-			size:   info.Size(),
-			offset: offset,
 		})
-		return nil
-	})
+	}
 
 	if len(files) == 0 {
 		return nil
@@ -3381,14 +3424,25 @@ func (s *Store) Watch() error {
 	}
 	defer watcher.Close()
 
-	filepath.Walk(s.projectDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && info.IsDir() {
-			if wErr := watcher.Add(path); wErr != nil {
-				slog.Warn("failed to watch directory", "path", path, "err", wErr)
+	projectDirs := s.projectDirs()
+	for _, dir := range projectDirs {
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				slog.Warn("project dir unavailable, skipping watch", "dir", dir)
+			} else {
+				slog.Warn("project dir stat failed, skipping watch", "dir", dir, "err", err)
 			}
+			continue
 		}
-		return nil
-	})
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				if wErr := watcher.Add(path); wErr != nil {
+					slog.Warn("failed to watch directory", "path", path, "err", wErr)
+				}
+			}
+			return nil
+		})
+	}
 
 	// Also watch the skills directory for .md changes.
 	if sdir, err := skillsDir(); err == nil {
@@ -3432,7 +3486,7 @@ func (s *Store) Watch() error {
 			})
 		}
 	}
-	slog.Info("watching for changes", "transcripts", s.projectDir, "repos", len(repoRoots))
+	slog.Info("watching for changes", "transcripts", projectDirs, "repos", len(repoRoots))
 
 	for {
 		select {
