@@ -9,7 +9,7 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.17.0.
+Snapshot as of v0.18.0.
 
 ### CLI flags
 
@@ -246,13 +246,19 @@ Fluid — detection heuristic is first-cut and tuning is expected.
 
 #### mnemo_whatsup
 
-No parameters.
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `postmortem` | bool | no | Also list directories with recent claude activity even when no live processes are detected (default false) | Fluid |
 
 **Added in v0.17.0.** Live session resource monitor: per-session CPU%,
 RSS, CPU time for active Claude Code processes, plus system memory
 pressure (macOS). Cross-references PIDs via `lsof` with session metadata
-(repo, topic, work type). **Stability**: Fluid — metric set and output
-shape may evolve.
+(repo, topic, work type). **v0.18.0 (🎯T24):** each live session is
+enriched with the process's `cwd` (via `ps -E PWD`) and the newest-mtime
+transcript resolved from `~/.claude/projects/<encoded-cwd>/*.jsonl`; a
+new `postmortem` parameter reports directories that had recent claude
+activity even when no live processes are detected. **Stability**:
+Fluid — metric set, output shape, and parameter set may evolve.
 
 #### mnemo_commits
 
@@ -333,6 +339,70 @@ No parameters. **Added in v0.17.0.** Lists all saved query templates
 with names, descriptions, and parameter definitions. **Stability**:
 Stable.
 
+#### mnemo_restore
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `session_id` | string | yes | The session for which to restore prior compacted context. Typically the current session (obtain via `mnemo_self`). | Needs review |
+
+**Added in v0.18.0 (🎯T10).** Returns the compacted context accumulated
+on the proxy connection that owns this session — every span the
+background compactor summarised prior to the most recent `/clear`,
+oldest first. Resolution: `session_id → connection_id` via
+`connection_sessions`; all compactions tagged to that connection are
+returned, deduped across multiple connections when a session was
+observed on more than one (ctrl-c + `claude --continue` recovery).
+Wrapped by the `/c` slash-command skill for one-liner post-`/clear`
+restoration. Output is pre-formatted (span headers, targets, files,
+decisions, open threads) with a trailing Budget footer showing the
+compaction-to-session token ratio against the 10% invariant.
+**Stability**: Needs review — first release, output shape may evolve.
+
+#### mnemo_docs
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `query` | string | no | Search query (FTS on title and content) | Needs review |
+| `repo` | string | no | Repo filter | Needs review |
+| `kind` | string | no | Filter: md, txt, pdf | Needs review |
+| `limit` | number | no | Max results (default 20) | Stable |
+
+**Added in v0.18.0 (🎯T21).** Indexes markdown, plain-text, and PDF
+files found across tracked repos. Discovery sweeps common locations —
+repo root README/CHANGELOG/notes, `docs/`, `design/`, `notes/`,
+`papers/` — and respects `.gitignore`. PDF extraction via `pdftotext`
+(poppler) with `mutool` fallback; when neither is available, PDFs are
+skipped with a startup warning. `.md` / `.pdf` pairs sharing a stem in
+the same directory dedup with `.md` preferred. Incremental via
+SHA-256 content hash. **Stability**: Needs review — discovery
+heuristics, exclusion list, and output fields may evolve.
+
+#### mnemo_chain
+
+**v0.18.0 update (🎯T25.3)**: gains a `mode` parameter.
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `session_id` | string | yes | Any session ID in the chain (or a prefix) | Stable |
+| `mode` | string | no | `auto` (default) / `strict` / `candidates` | Needs review |
+
+Chain detection has two layers. **Definitive** rows are written by the
+daemon when a proxy connection observes session transitions (rows carry
+`mechanism='mcp_connection'`, `confidence='definitive'`). **Heuristic**
+candidates are computed on demand at query time via `InferChainHeuristic`
+using the cwd-most-recent rule, for sessions the daemon never saw live.
+
+- `auto`: definitive chain, falling through to heuristic candidates only
+  when the query session has no definitive predecessor.
+- `strict`: definitive only.
+- `candidates`: always returns both definitive and heuristic, attributed
+  by mechanism so ambiguity is visible.
+
+The ingest-time heuristic (detectChainForSession / backfillSessionChains)
+has been removed entirely in v0.18.0. Under v0.17 and earlier, chain
+rows were written at ingest time with `mechanism='time_heuristic'` /
+`'cwd_most_recent'`. Those values no longer appear on fresh indexes.
+
 #### mnemo_images
 
 | Parameter | Type | Required | Description | Stability |
@@ -374,7 +444,15 @@ and the RPC proxy. Breaking changes here would require a protocol version bump.
 | `Successor` | `(sessionID string) (string, error)` | v0.16.0 | Needs review |
 | `Chain` | `(sessionID string) ([]ChainLink, error)` | v0.16.0 | Needs review |
 | `SearchDecisions` | `(query, repo string, days, limit int) ([]DecisionInfo, error)` | v0.17.0 | Fluid |
-| `Whatsup` | `() (*WhatsupResult, error)` | v0.17.0 | Fluid |
+| `Whatsup` | `(postmortem bool) (*WhatsupResult, error)` | v0.17.0 (signature changed in v0.18.0) | Fluid |
+| `ChainCompactions` | `(sessionID string) ([]Compaction, error)` | v0.18.0 | Needs review |
+| `CompactionsForConnection` | `(connectionID string) ([]Compaction, error)` | v0.18.0 | Needs review |
+| `SessionTokens` | `(sessionID string) (int64, int64, error)` | v0.18.0 | Needs review |
+| `CompactionTokens` | `(sessionID string) (int64, int64, error)` | v0.18.0 | Needs review |
+| `SearchDocs` | `(query, repo, kind string, limit int) ([]DocInfo, error)` | v0.18.0 | Needs review |
+| `RecordConnectionSession` | `(connectionID, sessionID string)` | v0.18.0 | Needs review |
+| `ConnectionsForSession` | `(sessionID string) ([]ConnectionSession, error)` | v0.18.0 | Needs review |
+| `InferChainHeuristic` | `(sessionID string, limit int) ([]ChainCandidate, error)` | v0.18.0 | Needs review |
 | `SearchCommits` | `(query, repo, author string, days, limit int) ([]GitCommit, error)` | v0.17.0 | Needs review |
 | `SearchGitHubActivity` | `(query, repo, state, author, activityType string, days, limit int) ([]GitHubActivityResult, error)` | v0.17.0 | Needs review |
 | `DiscoverPatterns` | `(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)` | v0.17.0 | Fluid |
@@ -424,6 +502,11 @@ dependency and cache TTL are implementation details and may change.
 | `decisions` | id, session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp — proposal+confirmation pairs | Fluid |
 | `decisions_fts` | FTS5 on proposal_text, confirmation_text, repo | Fluid |
 | `query_templates` | id, name (unique), description, query_text, param_names (JSON), created_at, updated_at | Needs review |
+| `compactions` | id, session_id, connection_id, generated_at, model, prompt_tokens, output_tokens, cost_usd, entry_id_from, entry_id_to, payload_json, summary — session summaries produced by the background compactor (🎯T10) | Needs review |
+| `docs` | id, repo, file_path, kind (md/txt/pdf), title, content, content_hash, size, mtime, indexed_at (🎯T21) | Needs review |
+| `docs_fts` | FTS5 on title, content, repo | Needs review |
+| `daemon_connections` | connection_id (PK), pid, accepted_at, last_seen_at, closed_at — one row per accepted proxy connection (🎯T25.1) | Needs review |
+| `connection_sessions` | connection_id, session_id, first_seen_at, last_seen_at; PK(connection_id, session_id) — authoritative binding between a live proxy connection and the sessions it drove (🎯T25.2) | Needs review |
 | `git_commits` | id, repo, commit_hash, author_name, author_email, commit_date, subject, body — UNIQUE(repo, commit_hash) | Needs review |
 | `git_commits_fts` | FTS5 on subject, body, repo, author_name | Needs review |
 | `github_prs` | id, repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url — UNIQUE(repo, pr_number) | Needs review |
@@ -509,8 +592,10 @@ Optional config file at `~/.mnemo/config.json` (since v0.15.0):
   walker skips `node_modules`, `.venv`, `venv`, `target`, `build`,
   `.build`, `dist`, `.next`, `.cache`, `__pycache__`, `.tox`,
   `.mypy_cache`, and `.pytest_cache`.
-- `extra_project_dirs` — reserved for cross-platform transcript ingest
-  (🎯T15).
+- `extra_project_dirs` — additional Claude Code project directories
+  to index beyond `~/.claude/projects/`. Missing or unavailable
+  entries (e.g. an unmounted SMB share) are skipped at scan time
+  with a warning (v0.18.0, partial 🎯T15).
 
 All other configuration is via CLI flags. **Stability**: Fluid — the
 config file is new and its schema may grow before 1.0.
@@ -541,7 +626,17 @@ configurable before 1.0.
 - Authentication / access control on the HTTP endpoint
 - Transcript modification or deletion tools
 - Integration with non-Claude-Code transcript formats
-- Summarisation (live context compaction is tracked as 🎯T10; may land before 1.0 but is not a gate)
+**Delivered in v0.18.0** (removed from the 1.0 out-of-scope list):
+
+- Live context compaction (🎯T10) — per-connection background
+  summariser + `mnemo_restore` + `/c` skill. Token budget guard
+  enforces <10% compaction-to-session-tokens invariant.
+- Project documentation indexing (🎯T21) — `mnemo_docs` indexes
+  markdown / txt / PDF across tracked repos.
+- MCP connection identity (🎯T25) — session chain detection is
+  definitive when the daemon sees the transition live; heuristic
+  fallback is query-time only. Compactor and `mnemo_restore` anchor
+  to connection_id, surviving `/clear` deterministically.
 
 **Delivered in v0.17.0** (removed from the 1.0 out-of-scope list):
 
