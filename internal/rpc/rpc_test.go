@@ -604,3 +604,58 @@ func TestRPCChainCompactions(t *testing.T) {
 		t.Fatalf("wrong summary: %q", comps[0].Summary)
 	}
 }
+
+// TestConnObserverE2E exercises the full plumbing path:
+// a proxy connection is accepted, the store records a daemon_connections
+// row with a non-empty connection_id and a non-zero PID (recovered from
+// the kernel on darwin/linux, from the handshake elsewhere), and the row
+// flips to closed when the client disconnects.
+func TestConnObserverE2E(t *testing.T) {
+	client, mem := setupTestServerWithStore(t)
+
+	// The setup already did a Dial; the handshake completed and the
+	// observer should have fired. Give the observer goroutine a beat
+	// to land the row (it runs on the server's handler goroutine).
+	deadline := time.Now().Add(2 * time.Second)
+	var open []store.DaemonConnection
+	for time.Now().Before(deadline) {
+		var err error
+		open, err = mem.OpenConnections()
+		if err != nil {
+			t.Fatalf("OpenConnections: %v", err)
+		}
+		if len(open) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(open) == 0 {
+		t.Fatal("no open connection was recorded after the client dialled")
+	}
+	if len(open) != 1 {
+		t.Fatalf("expected exactly 1 open connection, got %d: %+v", len(open), open)
+	}
+	if open[0].ConnectionID == "" {
+		t.Errorf("connection_id must be non-empty, got %q", open[0].ConnectionID)
+	}
+	if open[0].PID == 0 {
+		t.Errorf("pid must be non-zero (handshake fallback should cover this), got 0")
+	}
+
+	// Disconnect and verify the row flips to closed.
+	if err := client.Close(); err != nil {
+		t.Fatalf("client.Close: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		open, err := mem.OpenConnections()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(open) == 0 {
+			return // success
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("connection was not marked closed within 2s after client disconnect")
+}
