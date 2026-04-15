@@ -544,31 +544,31 @@ targets:
     origin: manual
     discovered: 2026-04-15
   T25.3:
-    name: 'Session chain detection: connection-identity primary, cwd heuristic for unobserved sessions only'
+    name: session_chains records only definitive observations; chain inference is a query-time function
     status: identified
     value: 3.0
     cost: 2.0
     acceptance:
-    - When a new connection_sessions row is inserted for connection C with session_id S, and C already had an earlier session_id S' with a first_seen_at before S, a session_chains row is inserted with (successor=S, predecessor=S', mechanism='mcp_connection', confidence='definitive'). No cwd match, no time-gap math.
-    - The cwd heuristic (detectChainForSession + the most-recent-same-cwd rule from 8f8c3b9) continues to run at ingest time, but only for sessions that do NOT have a connection_sessions row and therefore cannot be resolved by the definitive mechanism. Rows it writes use mechanism='cwd_most_recent' and confidence='high' (the current max for the heuristic).
-    - 'When a definitive chain row lands for a successor that already has a cwd_most_recent row, the cwd row is replaced (UPSERT semantics: session_chains.successor_id is PK, and a subsequent INSERT with mechanism=''mcp_connection'' overwrites). Definitive always supersedes heuristic for the same successor.'
-    - mnemo_chain output attributes each link to its mechanism so the user can distinguish definitive (live-observed) from cwd_most_recent (retroactively inferred).
-    - 'Tests exercise the full matrix: (a) definitive link created on a new session on an existing connection; (b) heuristic link created for a session ingested with no connection binding (covers first-install, daemon-downtime, and mnemo-untouched-session cases); (c) heuristic row is replaced by a definitive row when both mechanisms would apply to the same successor.'
+    - 'session_chains is written by exactly one path: the connection observer, on session transitions within a connection. Rows carry mechanism=''mcp_connection'' and confidence=''definitive''. No ingest-time writes, no UPSERT/supersede logic.'
+    - detectChainForSession, clearMarkerRE, and backfillSessionChains are deleted from store.go. The cwd heuristic from 8f8c3b9 is removed from the ingest path.
+    - A new store method InferChainHeuristic(sessionID, params) computes cwd-based predecessor candidates on demand from session_summary + session_meta. Pure function — no DB writes, no cached state. Parameters cover window, max-candidates, single-vs-multi match.
+    - 'mnemo_chain composes the two layers: session_chains lookup first (definitive), InferChainHeuristic fallthrough for sessions with no definitive row. Each returned link is attributed to its mechanism so callers can distinguish authoritative observation from runtime inference.'
+    - 'mnemo_chain accepts a mode parameter: ''auto'' (default — definitive first, heuristic if none), ''strict'' (definitive only, return empty if no binding), ''candidates'' (always return heuristic candidates alongside any definitive row, so ambiguity is visible). Other tools can consume the same InferChainHeuristic primitive directly.'
+    - 'Tests cover: (a) definitive row from a live connection transition; (b) no definitive row present — heuristic candidates surfaced at query time; (c) both present — definitive returned in ''auto'' mode, heuristic additionally returned in ''candidates'' mode; (d) strict mode returns nothing when no definitive row exists.'
     context: |-
-      Corrected 2026-04-15 after the second-pass review. The first simplification (delete the heuristic entirely) was wrong for three legitimate domains the definitive mechanism cannot cover:
+      Re-architected 2026-04-15. Originally modeled as two ingest-time writers to session_chains with supersede logic; the cleaner shape is one writer (definitive, ephemeral-signal, worth persisting) and one query-time function (heuristic, rederivable from primary data, parameterisable).
 
-      1. **First install** \u2014 the daemon starts with no connection history but inherits existing JSONL. Without a retroactive tool, those sessions are permanently unchained.
+      Motivation:
+      - Definitive links come from a live process observation. Once the connection closes, the information is unrecoverable from the JSONL alone. Persisting them is the only way to retain that signal.
+      - Heuristic links are recomputable at any time from persistent data (cwd, timestamps, /clear markers). Baking them into the DB freezes one particular rule and obscures ambiguity; computing them at query time lets the rule evolve, lets callers parameterise, and lets genuinely ambiguous cases be surfaced as ambiguous rather than silently resolved.
+      - Different callers want different things. A quick 'where did this come from' call wants one best guess; a recovery-UI view wants candidates with confidence scores; a strict audit wants definitive-only. None of that is reachable with pre-baked rows.
 
-      2. **Daemon downtime** \u2014 Claude Code runs while mnemo is off (brew services stop, OS reboot, crash). No connection binding is captured for those sessions. Same treatment as first install, but ongoing.
+      Side benefit: first-install and daemon-downtime are handled naturally by the query-time layer without any special-case plumbing. There is nothing to backfill because nothing was supposed to be filled \u2014 the heuristic runs against live query inputs.
 
-      3. **Sessions that didn't call mnemo** \u2014 user runs Claude Code without invoking any mnemo tool, /clears, still doesn't call mnemo. No connection-side signal for either session. Rare but possible.
+      Consequence for T25.2: mnemo_restore resolves session \u2192 connection via connection_sessions (definitive, cheap, deterministic) and returns that connection's compactions. If a session has no connection binding, there is also no compaction for it (compactor requires a live connection to produce anything), so there is no fallback to consider.
 
-      Under the single-session-per-cwd assumption (user's stated working model), the most-recent-same-cwd-predecessor rule is deterministic within its domain. It correctly labels itself as heuristic (confidence='high' at best), so a user reading mnemo_chain output sees honest provenance.
-
-      The definitive and heuristic mechanisms are **not** alternatives. They cover different domains: definitive for sessions the daemon observed live, heuristic for sessions the daemon only learned about from JSONL on disk. The former supersedes the latter when both apply.
-
-      The earlier commit 8f8c3b9 (widen window, anchor by cwd-most-recent) stays \u2014 it is the retroactive path's primary rule. The original 5-second window was the real bug.</context>
-      <parameter name="tags">["chain", "side-product", "connection-identity", "retroactive"]</parameter>
+      The chain-heuristic commit 8f8c3b9 gets its cwd-most-recent rule migrated into InferChainHeuristic rather than removed outright \u2014 the rule is good, it just belongs in the query layer, not the ingest layer.</context>
+      <parameter name="tags">["chain", "query-time-inference", "connection-identity", "ephemeral-signal"]</parameter>
       </invoke>
     depends_on:
     - T25.1
