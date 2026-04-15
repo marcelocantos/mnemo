@@ -484,6 +484,11 @@ func (p *Proxy) ConnectionsForSession(sessionID string) ([]store.ConnectionSessi
 	return nil, nil
 }
 
+// InferChainHeuristic is daemon-local. Stub for interface.
+func (p *Proxy) InferChainHeuristic(sessionID string, limit int) ([]store.ChainCandidate, error) {
+	return nil, nil
+}
+
 func (p *Proxy) CompactionTokens(sessionID string) (int64, int64, error) {
 	raw, err := p.client.Call("CompactionTokens", ChainCompactionsParams{SessionID: sessionID})
 	if err != nil {

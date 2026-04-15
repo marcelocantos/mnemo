@@ -6,6 +6,7 @@ package store
 import (
 	"database/sql"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -141,6 +142,114 @@ func (s *Store) SessionsForConnection(connectionID string) ([]ConnectionSession,
 	}
 	defer rows.Close()
 	return scanConnectionSessions(rows)
+}
+
+// ChainCandidate is one possible predecessor surfaced by
+// InferChainHeuristic. Unlike session_chains rows (which are
+// definitive observations), candidates are query-time inferences
+// with a confidence tier computed from cwd match and temporal
+// proximity.
+type ChainCandidate struct {
+	PredecessorID string
+	GapMs         int64
+	Confidence    string // "high" (gap < 30s) or "medium"
+	Mechanism     string // always "cwd_most_recent" for this rule
+}
+
+// InferChainHeuristic computes predecessor candidates for a session
+// that has no definitive connection-observed chain link. Uses the
+// cwd-most-recent rule: look for the most recent sessions in the
+// same cwd whose last message preceded this session's first message,
+// limited to sessions where the successor's first user message
+// contains the /clear command marker.
+//
+// Pure function — no DB writes, no cached state. Safe to call
+// repeatedly; every call re-queries the underlying session_summary
+// and session_meta.
+//
+// limit caps the number of candidates returned. Zero or negative
+// defaults to 1 (the single best guess).
+func (s *Store) InferChainHeuristic(sessionID string, limit int) ([]ChainCandidate, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	// First: does this session's first user message actually look
+	// like a /clear rollover? Non-rollover sessions have no inferred
+	// predecessor by design.
+	var firstText, firstTS string
+	err := s.db.QueryRow(`
+		SELECT m.text, m.timestamp
+		FROM messages m
+		WHERE m.session_id = ? AND m.role = 'user'
+		ORDER BY m.id ASC LIMIT 1
+	`, sessionID).Scan(&firstText, &firstTS)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !hasClearMarker(firstText) {
+		return nil, nil
+	}
+
+	// Scope to same cwd.
+	var cwd string
+	_ = s.db.QueryRow(`SELECT cwd FROM session_meta WHERE session_id = ?`, sessionID).Scan(&cwd)
+	if cwd == "" {
+		return nil, nil
+	}
+
+	// Find most recent same-cwd sessions that ended before this one
+	// started. Ordered newest-first; the caller gets up to limit.
+	rows, err := s.db.Query(`
+		SELECT ss.session_id, ss.last_msg
+		FROM session_summary ss
+		JOIN session_meta sm ON sm.session_id = ss.session_id
+		WHERE sm.cwd = ?
+		  AND ss.session_id != ?
+		  AND ss.last_msg <= ?
+		ORDER BY ss.last_msg DESC
+		LIMIT ?
+	`, cwd, sessionID, firstTS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	succTime, _ := time.Parse(time.RFC3339, firstTS)
+	var out []ChainCandidate
+	for rows.Next() {
+		var predID, predLast string
+		if err := rows.Scan(&predID, &predLast); err != nil {
+			continue
+		}
+		gapMs := int64(-1)
+		if t, err := time.Parse(time.RFC3339, predLast); err == nil {
+			gapMs = succTime.Sub(t).Milliseconds()
+		}
+		conf := "medium"
+		if gapMs >= 0 && gapMs < 30_000 {
+			conf = "high"
+		}
+		out = append(out, ChainCandidate{
+			PredecessorID: predID,
+			GapMs:         gapMs,
+			Confidence:    conf,
+			Mechanism:     "cwd_most_recent",
+		})
+	}
+	return out, rows.Err()
+}
+
+// hasClearMarker reports whether the message text contains the
+// Claude Code slash-command envelope for /clear. Used by
+// InferChainHeuristic to identify genuine rollover sessions.
+func hasClearMarker(text string) bool {
+	return strings.Contains(text, "<command-name>/clear</command-name>")
 }
 
 // CurrentSessionForConnection returns the session_id most recently

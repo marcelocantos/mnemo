@@ -294,14 +294,27 @@ Returns nothing if no compactions have been produced yet (the background compact
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix).")),
 		),
 		mcp.NewTool("mnemo_chain",
-			mcp.WithDescription(`Retrieve the full /clear-bounded session chain for any session ID.
+			mcp.WithDescription(`Retrieve the /clear-bounded session chain for any session ID.
 
-When a user types /clear in Claude Code, the current JSONL transcript ends and a new one begins within ~300ms. mnemo detects these rollovers by looking for a <command-name>/clear</command-name> marker in the first user message of a successor session combined with a ≤5s gap between the predecessor's last event and the successor's first event.
+Session chain detection has two layers:
+  - DEFINITIVE: rows in session_chains written live by the daemon
+    when a proxy connection observes successive sessions. These
+    carry mechanism='mcp_connection', confidence='definitive'.
+  - HEURISTIC: query-time inference for sessions the daemon never
+    saw live (first installs, daemon downtime, sessions that never
+    called a mnemo tool). Uses the cwd-most-recent rule.
 
-Given any session ID in a chain, this tool returns the complete ordered chain from oldest to newest, with per-session summaries (topic, timestamps, repo) and the gap/confidence for each link.
-
-If the session has no chain links, a single-element result is returned.`),
+mode:
+  - "auto" (default) — returns the definitive chain; if the query
+    session has no definitive predecessor, surfaces heuristic
+    candidates.
+  - "strict" — definitive only; empty when no connection observed
+    the rollover.
+  - "candidates" — always returns both definitive rows and
+    heuristic candidates, labelled by mechanism, so the caller can
+    see ambiguity explicitly.`),
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix)")),
+			mcp.WithString("mode", mcp.Description(`"auto" (default), "strict", or "candidates".`)),
 		),
 		mcp.NewTool("mnemo_whatsup",
 			mcp.WithDescription(`Report which active Claude Code sessions are doing expensive work right now.
@@ -1231,6 +1244,10 @@ func (h *Handler) chain(args map[string]any) (string, bool, error) {
 	if sessionID == "" {
 		return "session_id is required", true, nil
 	}
+	mode, _ := args["mode"].(string)
+	if mode == "" {
+		mode = "auto"
+	}
 
 	links, err := h.mem.Chain(sessionID)
 	if err != nil {
@@ -1238,6 +1255,19 @@ func (h *Handler) chain(args map[string]any) (string, bool, error) {
 	}
 	if len(links) == 0 {
 		return fmt.Sprintf("No session found for ID %s", sessionID), true, nil
+	}
+
+	// Definitive chain has a predecessor if the head of the chain is
+	// not the queried session. Otherwise, the queried session has no
+	// definitive predecessor — heuristic fallback may be relevant.
+	hasDefinitivePred := len(links) > 1 && links[0].SessionID != sessionID
+
+	var candidates []store.ChainCandidate
+	runHeuristic := mode == "candidates" || (mode == "auto" && !hasDefinitivePred)
+	if runHeuristic {
+		if cc, err := h.mem.InferChainHeuristic(sessionID, 3); err == nil {
+			candidates = cc
+		}
 	}
 
 	var b strings.Builder
@@ -1275,6 +1305,17 @@ func (h *Handler) chain(args map[string]any) (string, bool, error) {
 			marker, i+1, sid, repo, first, last, topic)
 		if i < len(links)-1 && link.Confidence != "" {
 			fmt.Fprintf(&b, "       ↓ gap=%dms confidence=%s\n", link.GapMs, link.Confidence)
+		}
+	}
+	if len(candidates) > 0 {
+		fmt.Fprintf(&b, "\nHeuristic candidates (cwd_most_recent):\n")
+		for _, c := range candidates {
+			pid := c.PredecessorID
+			if len(pid) > 10 {
+				pid = pid[:10]
+			}
+			fmt.Fprintf(&b, "  ? %s  gap=%dms  confidence=%s  mechanism=%s\n",
+				pid, c.GapMs, c.Confidence, c.Mechanism)
 		}
 	}
 	return b.String(), false, nil

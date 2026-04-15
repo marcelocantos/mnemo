@@ -48,4 +48,5 @@ type Backend interface {
 	CompactionTokens(sessionID string) (int64, int64, error)
 	RecordConnectionSession(connectionID, sessionID string)
 	ConnectionsForSession(sessionID string) ([]ConnectionSession, error)
+	InferChainHeuristic(sessionID string, limit int) ([]ChainCandidate, error)
 }
