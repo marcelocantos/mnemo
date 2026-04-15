@@ -78,6 +78,42 @@ func (s *Store) RecordConnectionSessionAt(connectionID, sessionID string, at tim
 	`, connectionID, sessionID, ts, ts); err != nil {
 		slog.Warn("connection session upsert failed",
 			"conn", connectionID, "session", sessionID, "err", err)
+		return
+	}
+
+	// Was a /clear boundary observed? If this connection had an
+	// earlier session distinct from the new one, the most recent such
+	// session is the definitive predecessor. Insert a session_chains
+	// row with mechanism='mcp_connection' and confidence='definitive'.
+	// INSERT OR IGNORE makes this idempotent across repeat observations
+	// of the same binding.
+	var predecessorID, predLastSeen string
+	err := s.db.QueryRow(`
+		SELECT session_id, last_seen_at FROM connection_sessions
+		WHERE connection_id = ?
+		  AND session_id != ?
+		  AND first_seen_at < ?
+		ORDER BY first_seen_at DESC
+		LIMIT 1
+	`, connectionID, sessionID, ts).Scan(&predecessorID, &predLastSeen)
+	if err == sql.ErrNoRows {
+		return // no predecessor — this is the first session on this connection
+	}
+	if err != nil {
+		slog.Warn("chain lookup failed", "conn", connectionID, "err", err)
+		return
+	}
+
+	var gapMs int64
+	if t, perr := time.Parse(time.RFC3339Nano, predLastSeen); perr == nil {
+		gapMs = at.UTC().Sub(t).Milliseconds()
+	}
+	if _, err := s.db.Exec(`
+		INSERT OR IGNORE INTO session_chains
+			(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
+		VALUES (?, ?, 'clear', ?, 'definitive', 'mcp_connection')
+	`, sessionID, predecessorID, gapMs); err != nil {
+		slog.Warn("chain insert failed", "successor", sessionID, "err", err)
 	}
 }
 

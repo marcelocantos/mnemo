@@ -580,8 +580,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 			predecessor_id TEXT NOT NULL,
 			boundary TEXT NOT NULL DEFAULT 'clear',
 			gap_ms INTEGER NOT NULL,
-			confidence TEXT NOT NULL CHECK(confidence IN ('high', 'medium')),
-			mechanism TEXT NOT NULL DEFAULT 'time_heuristic',
+			confidence TEXT NOT NULL CHECK(confidence IN ('definitive', 'high', 'medium', 'low')),
+			mechanism TEXT NOT NULL DEFAULT 'mcp_connection',
 			detected_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 		CREATE TABLE IF NOT EXISTS decisions (
@@ -3213,10 +3213,6 @@ func (s *Store) IngestAll() error {
 		return err
 	}
 
-	// Detect /clear-bounded chain links for any newly ingested sessions.
-	// INSERT OR IGNORE makes this idempotent across restarts.
-	backfillSessionChains(s.db)
-
 	// Detect decision pairs (proposal + confirmation) in sessions that
 	// haven't been scanned yet (e.g. sessions ingested before decisions
 	// table existed).
@@ -5637,9 +5633,6 @@ func (s *Store) ingestFile(path string) error {
 		slog.Debug("ingested", "file", filepath.Base(path), "messages", count)
 	}
 
-	// Detect chain link for this session (no-op if not a /clear rollover).
-	detectChainForSession(s.db, sessionID)
-
 	// Detect decision pairs (proposal + confirmation) in this session.
 	repo := extractRepo(metaCwd)
 	detectDecisions(s.db, sessionID, repo)
@@ -5667,119 +5660,6 @@ func (s *Store) ingestFile(path string) error {
 	}()
 
 	return nil
-}
-
-// clearMarkerRE matches the /clear command marker in user messages.
-var clearMarkerRE = regexp.MustCompile(`<command-name>/clear</command-name>`)
-
-// detectChainForSession checks if sessionID is the successor in a /clear
-// rollover chain and inserts a session_chains row if so.
-// It is idempotent — uses INSERT OR IGNORE.
-func detectChainForSession(db *sql.DB, sessionID string) {
-	// Check if this session's first user message contains the /clear marker.
-	// The /clear message is flagged as noise by isNoise, so we must include
-	// is_noise = 1 here, but we specifically look for the command-name marker.
-	var firstText string
-	var firstTS string
-	err := db.QueryRow(`
-		SELECT m.text, m.timestamp
-		FROM messages m
-		WHERE m.session_id = ?
-		  AND m.role = 'user'
-		ORDER BY m.id ASC
-		LIMIT 1`, sessionID).Scan(&firstText, &firstTS)
-	if err != nil {
-		return // no user messages yet
-	}
-	if !clearMarkerRE.MatchString(firstText) {
-		return // not a /clear rollover
-	}
-
-	// Parse successor's first event timestamp.
-	succTime, err := time.Parse(time.RFC3339, firstTS)
-	if err != nil {
-		return
-	}
-
-	// Find this session's project (cwd) for scoping predecessor search.
-	var cwd string
-	db.QueryRow("SELECT cwd FROM session_meta WHERE session_id = ?", sessionID).Scan(&cwd)
-	if cwd == "" {
-		return // can't scope without a cwd
-	}
-
-	// Find the predecessor: the most recent session in the same cwd
-	// that ended before this session's first event. No time window —
-	// under the working assumption of one Claude Code session per repo
-	// at a time, the user might legitimately /clear hours or days
-	// later to continue the same work, and any fixed window would
-	// drop those legitimate chains. Future work: relax the
-	// single-session assumption by checking for concurrent tabs.
-	row := db.QueryRow(`
-		SELECT ss.session_id, ss.last_msg
-		FROM session_summary ss
-		JOIN session_meta sm ON sm.session_id = ss.session_id
-		WHERE sm.cwd = ?
-		  AND ss.session_id != ?
-		  AND ss.last_msg <= ?
-		ORDER BY ss.last_msg DESC
-		LIMIT 1`,
-		cwd, sessionID, firstTS)
-
-	var bestPredID, predLastMsg string
-	if err := row.Scan(&bestPredID, &predLastMsg); err != nil {
-		return
-	}
-
-	var gapMs int64
-	if predTime, err := time.Parse(time.RFC3339, predLastMsg); err == nil {
-		gapMs = succTime.Sub(predTime).Milliseconds()
-	}
-
-	confidence := "high"
-
-	db.Exec(`INSERT OR IGNORE INTO session_chains
-		(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
-		VALUES (?, ?, 'clear', ?, ?, 'cwd_most_recent')`,
-		sessionID, bestPredID, gapMs, confidence)
-}
-
-// backfillSessionChains runs detectChainForSession for all ingested sessions
-// that have a /clear marker but no chain entry yet. Safe to call on every startup.
-func backfillSessionChains(db *sql.DB) {
-	// Find sessions whose first user message (including noise) contains the /clear
-	// marker and that don't yet have a session_chains entry.
-	rows, err := db.Query(`
-		SELECT m.session_id
-		FROM messages m
-		WHERE m.role = 'user'
-		  AND m.text LIKE '%<command-name>/clear</command-name>%'
-		  AND m.id = (
-			SELECT MIN(m2.id) FROM messages m2
-			WHERE m2.session_id = m.session_id AND m2.role = 'user'
-		  )
-		  AND NOT EXISTS (SELECT 1 FROM session_chains sc WHERE sc.successor_id = m.session_id)`)
-	if err != nil {
-		slog.Warn("backfill session chains query failed", "err", err)
-		return
-	}
-	defer rows.Close()
-
-	var sessionIDs []string
-	for rows.Next() {
-		var sid string
-		if rows.Scan(&sid) == nil {
-			sessionIDs = append(sessionIDs, sid)
-		}
-	}
-	rows.Close()
-
-	for _, sid := range sessionIDs {
-		detectChainForSession(db, sid)
-	}
-	if len(sessionIDs) > 0 {
-		slog.Info("backfilled session chains", "count", len(sessionIDs))
-	}
 }
 
 // Predecessor returns the predecessor session ID for the given session,
