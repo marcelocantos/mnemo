@@ -116,30 +116,41 @@ targets:
     discovered: 2026-04-07
     achieved: 2026-04-07
   T15:
-    name: Windows VM Claude Code transcripts are indexed in realtime alongside macOS sessions
-    status: converging
+    name: Federated queries across linked mnemo instances expose session history from every host as one searchable surface
+    status: identified
     value: 8.0
     cost: 5.0
     observable: true
     acceptance:
-    - ~/.mnemo/config.json supports extra_project_dirs with paths to additional Claude Code project directories
-    - mnemo ingests JSONL transcripts from configured extra dirs at startup
-    - A Windows stub app watches the local Claude projects dir and notifies mnemo of changes via pigeon
-    - mnemo receives pigeon notifications and ingests the corresponding files from the SMB mount path
-    - mnemo_search and mnemo_sessions return results from both macOS and Windows sessions
-    - Graceful degradation when the VM/mount is unavailable — no crashes, warns in log, skips unavailable dirs
+    - Each mnemo instance owns its local ~/.claude/projects/ and indexes only what it can see — no cross-host file access (no SMB mount, no fsnotify-over-network).
+    - 'Config supports `linked_instances`: a list of peer mnemo endpoints with name, URL, and auth material.'
+    - Each mnemo serve exposes a federated query endpoint (reusing the existing RPC surface over authenticated TCP/mTLS, not just the local Unix socket) that accepts the same tool requests as the local stdio proxy.
+    - Query-shaped MCP tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, etc.) fan out to linked peers in parallel with the local query and merge the results.
+    - 'Peer results are attributed in the response — each hit / session / activity record carries its source (e.g. `instance: "local"` / `"pippa-win"`).'
+    - Cross-instance result ranking is sensible — FTS scores normalised or bucketed per source so one dominant host does not drown out another.
+    - Per-peer timeout and graceful degradation — an offline or slow peer drops out of the response with a warning rather than breaking the whole query.
+    - 'Auth: peers authenticate via the same endpoint-file mechanism T22 introduces (mTLS cert + private key in ~/.mnemo/endpoint, exported for federation in a paired ~/.mnemo/peers/<name>.pem pattern or similar).'
+    - Write-shaped tools (ingest, describer, etc.) remain local-only — federation is strictly read/query.
     context: |-
-      The user runs Claude Code on both macOS and a Parallels Windows 11 VM. The Windows filesystem is accessible via SMB mount at ~/winc/. Currently mnemo only indexes ~/.claude/projects/ (macOS-local). Windows session transcripts at ~/winc/Users/marcelo/.claude/projects/ are invisible to mnemo. A config file (~/.mnemo/config.json) specifies extra project directories. A small Windows stub app watches %USERPROFILE%\.claude\projects\ using ReadDirectoryChangesW and sends change notifications to mnemo via pigeon (marcelocantos/pigeon WebTransport relay). mnemo listens for pigeon notifications and ingests the changed files from the SMB mount. The config must gracefully handle VM unavailability (mount not present). fsnotify does not work over SMB, so native Windows notification + pigeon relay is the chosen approach.
+      **Reframed 2026-04-15.** The original T15 framing was "macOS mnemo daemon reaches into a Windows VM's Claude projects dir over an SMB mount, with a Windows stub relaying fsnotify-equivalent events via pigeon." That approach coupled mnemo to fragile filesystem-over-network semantics, required a new relay (pigeon), and did not generalise past one VM.
 
-      **Progress (2026-04-15):** Config + startup ingest half shipped.
-      - ✓ config.json `extra_project_dirs` parses and wires through
-      - ✓ daemon ingests JSONL from configured extra dirs at startup
-      - ✓ missing/unavailable extras skip with a warn (graceful degradation)
-      - ✓ search/sessions jointly return results from primary + extras (same FTS5 index)
-      - ✗ Windows stub app (ReadDirectoryChangesW watcher + pigeon notifier)
-      - ✗ mnemo-side pigeon listener that re-ingests on notification
+      The cleaner model is **query federation**: each host runs its own mnemo, indexes its own ~/.claude/projects/ locally, and linked instances fan out queries to each other at read time. This:
+      - removes all cross-host file access (no SMB, no fsnotify-over-SMB, no pigeon relay),
+      - makes T22 (mnemo native on Windows) a direct prerequisite rather than a parallel workstream,
+      - scales to any number of linked hosts (not just one VM),
+      - degrades gracefully when peers are offline (timeout + warn, local results still returned),
+      - keeps each host's write surface local and authoritative.
 
-      User can already point at `~/winc/Users/marcelo/.claude/projects/` today and get session-history indexing on daemon restart. Realtime Windows→mnemo update (pigeon piece) is the remaining work.
+      **Partial work already shipped (2026-04-15, keep as orthogonal utility):** `config.extra_project_dirs` + startup ingest from extra Claude project dirs is already wired (commits 8700c48, 67fdd9d). This remains useful for legitimate local-ish extra dirs (e.g. a team-shared workspace that's actually locally mounted), but it is NOT the federation mechanism — it should not be used to reach into a VM's projects dir over SMB. The acceptance below is about federation.
+
+      **Why this depends on T22:** federation requires a second mnemo instance running natively on the remote host. On Windows that means T22 (mnemo daemon + proxy native on Windows). The federation protocol can reuse T22's mTLS endpoint file for peer auth.
+
+      **Protocol shape:** existing internal/rpc serves over UDS today; extend it to accept authenticated TCP connections for federation. The MCP tool layer gains a fan-out step in query tools — local RPC + one RPC per linked peer in parallel, merge and attribute.
+
+      **Tags:** cross-platform, federation, query</context>
+      </invoke>
+    depends_on:
+    - T22
     tags:
     - ingest
     - cross-platform
