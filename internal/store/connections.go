@@ -4,6 +4,7 @@
 package store
 
 import (
+	"database/sql"
 	"log/slog"
 	"time"
 )
@@ -104,6 +105,26 @@ func (s *Store) SessionsForConnection(connectionID string) ([]ConnectionSession,
 	}
 	defer rows.Close()
 	return scanConnectionSessions(rows)
+}
+
+// CurrentSessionForConnection returns the session_id most recently
+// observed on the given connection (max last_seen_at). Returns an
+// empty string if the connection has no recorded sessions yet (the
+// proxy has handshook but not yet called a session-resolving tool).
+func (s *Store) CurrentSessionForConnection(connectionID string) (string, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	var sid string
+	err := s.db.QueryRow(`
+		SELECT session_id FROM connection_sessions
+		WHERE connection_id = ?
+		ORDER BY last_seen_at DESC, first_seen_at DESC
+		LIMIT 1
+	`, connectionID).Scan(&sid)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return sid, err
 }
 
 // ConnectionsForSession returns every connection that has ever

@@ -471,6 +471,19 @@ func (p *Proxy) SessionTokens(sessionID string) (int64, int64, error) {
 // Present only to satisfy the Backend interface.
 func (p *Proxy) RecordConnectionSession(connectionID, sessionID string) {}
 
+// CompactionsForConnection is a daemon-local query; proxy would need
+// an RPC hop. Not currently wired since tools.Handler runs inside
+// the daemon and talks to the store directly. Stub present to satisfy
+// the Backend interface.
+func (p *Proxy) CompactionsForConnection(connectionID string) ([]store.Compaction, error) {
+	return nil, nil
+}
+
+// ConnectionsForSession is likewise daemon-local. Stub for interface.
+func (p *Proxy) ConnectionsForSession(sessionID string) ([]store.ConnectionSession, error) {
+	return nil, nil
+}
+
 func (p *Proxy) CompactionTokens(sessionID string) (int64, int64, error) {
 	raw, err := p.client.Call("CompactionTokens", ChainCompactionsParams{SessionID: sessionID})
 	if err != nil {

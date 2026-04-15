@@ -16,6 +16,7 @@ import (
 type Compaction struct {
 	ID           int64
 	SessionID    string
+	ConnectionID string // tag linking back to the live proxy connection that drove this span; empty for pre-T25 rows
 	GeneratedAt  time.Time
 	Model        string
 	PromptTokens int
@@ -40,13 +41,17 @@ func (s *Store) PutCompaction(c Compaction) (int64, error) {
 	if payload == "" {
 		payload = "{}"
 	}
+	var connID any
+	if c.ConnectionID != "" {
+		connID = c.ConnectionID
+	}
 	res, err := s.db.Exec(`
 		INSERT INTO compactions
-			(session_id, generated_at, model, prompt_tokens, output_tokens,
+			(session_id, connection_id, generated_at, model, prompt_tokens, output_tokens,
 			 cost_usd, entry_id_from, entry_id_to, payload_json, summary)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		c.SessionID, generatedAt.UTC().Format(time.RFC3339Nano), c.Model,
+		c.SessionID, connID, generatedAt.UTC().Format(time.RFC3339Nano), c.Model,
 		c.PromptTokens, c.OutputTokens, c.CostUSD,
 		c.EntryIDFrom, c.EntryIDTo, payload, c.Summary,
 	)
@@ -60,7 +65,7 @@ func (s *Store) PutCompaction(c Compaction) (int64, error) {
 // (nil, nil) if none exist.
 func (s *Store) LatestCompaction(sessionID string) (*Compaction, error) {
 	row := s.db.QueryRow(`
-		SELECT id, session_id, generated_at, model, prompt_tokens, output_tokens,
+		SELECT id, session_id, COALESCE(connection_id, ''), generated_at, model, prompt_tokens, output_tokens,
 		       cost_usd, entry_id_from, entry_id_to, payload_json, summary
 		FROM compactions
 		WHERE session_id = ?
@@ -74,7 +79,7 @@ func (s *Store) LatestCompaction(sessionID string) (*Compaction, error) {
 // (oldest first), up to limit. A limit of 0 or negative returns all rows.
 func (s *Store) ListCompactions(sessionID string, limit int) ([]Compaction, error) {
 	q := `
-		SELECT id, session_id, generated_at, model, prompt_tokens, output_tokens,
+		SELECT id, session_id, COALESCE(connection_id, ''), generated_at, model, prompt_tokens, output_tokens,
 		       cost_usd, entry_id_from, entry_id_to, payload_json, summary
 		FROM compactions
 		WHERE session_id = ?
@@ -131,7 +136,7 @@ type scannable interface {
 func scanCompaction(r scannable) (*Compaction, error) {
 	var c Compaction
 	var generatedAt string
-	err := r.Scan(&c.ID, &c.SessionID, &generatedAt, &c.Model,
+	err := r.Scan(&c.ID, &c.SessionID, &c.ConnectionID, &generatedAt, &c.Model,
 		&c.PromptTokens, &c.OutputTokens, &c.CostUSD,
 		&c.EntryIDFrom, &c.EntryIDTo, &c.PayloadJSON, &c.Summary)
 	if err == sql.ErrNoRows {
@@ -163,6 +168,27 @@ func scanCompactions(rows *sql.Rows) ([]Compaction, error) {
 		return nil, fmt.Errorf("iterate compactions: %w", err)
 	}
 	return out, nil
+}
+
+// CompactionsForConnection returns all compactions tagged to the
+// given connection_id, ordered by generated_at ascending (oldest
+// first). Used by mnemo_restore to resolve "what did this connection
+// compact before the current /clear" via a single definitive query.
+func (s *Store) CompactionsForConnection(connectionID string) ([]Compaction, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	rows, err := s.db.Query(`
+		SELECT id, session_id, COALESCE(connection_id, ''), generated_at, model, prompt_tokens, output_tokens,
+		       cost_usd, entry_id_from, entry_id_to, payload_json, summary
+		FROM compactions
+		WHERE connection_id = ?
+		ORDER BY generated_at ASC, id ASC
+	`, connectionID)
+	if err != nil {
+		return nil, fmt.Errorf("compactions for connection: %w", err)
+	}
+	defer rows.Close()
+	return scanCompactions(rows)
 }
 
 // SessionTokens returns the total input + output tokens consumed by

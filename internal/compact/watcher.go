@@ -5,22 +5,23 @@ package compact
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/marcelocantos/mnemo/internal/store"
 )
 
 // WatcherConfig tunes the Watcher. Zero values mean "use defaults".
 type WatcherConfig struct {
-	// PollInterval is how often LiveSessions is queried to discover active
-	// sessions. Default: 30s.
+	// PollInterval is how often the daemon's open-connection list is
+	// sampled to discover new or closed connections. Default: 30s.
 	PollInterval time.Duration
-	// CompactInterval is how often each per-session goroutine attempts a
-	// compaction. Default: 5 minutes.
+	// CompactInterval is how often each per-connection goroutine
+	// attempts a compaction. Default: 5 minutes.
 	CompactInterval time.Duration
-	// IdleTimeout is how long a session may be absent from LiveSessions
-	// before its compaction goroutine is reaped. Default: 10 minutes.
-	IdleTimeout time.Duration
 }
 
 func (c *WatcherConfig) pollInterval() time.Duration {
@@ -37,49 +38,54 @@ func (c *WatcherConfig) compactInterval() time.Duration {
 	return 5 * time.Minute
 }
 
-func (c *WatcherConfig) idleTimeout() time.Duration {
-	if c.IdleTimeout > 0 {
-		return c.IdleTimeout
-	}
-	return 10 * time.Minute
-}
-
-// sessionSource is the narrow slice of the store the Watcher needs.
-type sessionSource interface {
-	// LiveSessions returns session ID → PID for sessions with open JSONL files.
-	LiveSessions() map[string]int
-	// SessionCWD returns the working directory recorded for the session, or ""
-	// if not known. Used for self-exclusion.
+// connSource is the narrow slice of the store the Watcher needs.
+// Under the connection-identity model, connection_id is the anchor —
+// the Watcher spawns one goroutine per live proxy connection and
+// reaps it when the connection closes, rather than chasing session
+// IDs around across /clear events.
+type connSource interface {
+	// OpenConnections returns currently-open proxy connections.
+	OpenConnections() ([]store.DaemonConnection, error)
+	// CurrentSessionForConnection returns the session_id most
+	// recently observed on the connection, or "" if none has been
+	// recorded yet (proxy connected but hasn't called a session-
+	// resolving tool).
+	CurrentSessionForConnection(connectionID string) (string, error)
+	// SessionCWD returns the working directory recorded for a session,
+	// used for self-exclusion of the summariser's own sessions.
 	SessionCWD(sessionID string) string
 }
 
-// Watcher polls for active Claude Code sessions and drives periodic
-// compactions via a Compactor. Each active session gets its own goroutine;
-// sessions absent from LiveSessions for longer than IdleTimeout are reaped.
+// Watcher polls the daemon's open-connection list and drives periodic
+// compactions via a Compactor. Each live connection gets its own
+// goroutine; connections that disappear from OpenConnections (i.e.,
+// the proxy has disconnected — Claude Code exited, ctrl-c, etc.) are
+// reaped immediately.
 type Watcher struct {
-	src        sessionSource
+	src        connSource
 	compactor  *Compactor
 	cfg        WatcherConfig
 	excludeCWD string // path prefix that marks a mnemo/summariser session
 
-	mu       sync.Mutex
-	sessions map[string]*sessionWorker // session ID → worker
+	mu      sync.Mutex
+	workers map[string]*connWorker // connection_id → worker
 }
 
-// NewWatcher creates a Watcher. excludeCWD is the path (or path prefix) used
-// to identify self-sessions (summariser sessions driven by mnemo). Any session
-// whose recorded cwd starts with excludeCWD is skipped.
-func NewWatcher(src sessionSource, c *Compactor, cfg WatcherConfig, excludeCWD string) *Watcher {
+// NewWatcher creates a Watcher. excludeCWD is the path (or path prefix)
+// used to identify self-sessions (summariser sessions driven by mnemo).
+// A connection whose current session's cwd starts with excludeCWD is
+// skipped.
+func NewWatcher(src connSource, c *Compactor, cfg WatcherConfig, excludeCWD string) *Watcher {
 	return &Watcher{
 		src:        src,
 		compactor:  c,
 		cfg:        cfg,
 		excludeCWD: excludeCWD,
-		sessions:   make(map[string]*sessionWorker),
+		workers:    make(map[string]*connWorker),
 	}
 }
 
-// Run polls for live sessions until ctx is cancelled.
+// Run polls open connections until ctx is cancelled.
 func (w *Watcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.pollInterval())
 	defer ticker.Stop()
@@ -96,86 +102,77 @@ func (w *Watcher) Run(ctx context.Context) {
 	}
 }
 
-// ActiveCount returns the number of currently tracked session workers.
-// Exposed for testing.
+// ActiveCount returns the number of currently tracked per-connection
+// workers. Exposed for testing.
 func (w *Watcher) ActiveCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return len(w.sessions)
+	return len(w.workers)
 }
 
 func (w *Watcher) poll(ctx context.Context) {
-	live := w.src.LiveSessions()
+	open, err := w.src.OpenConnections()
+	if err != nil {
+		slog.Warn("compact: poll open connections failed", "err", err)
+		return
+	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	now := time.Now()
-
-	// Mark seen sessions, spawn new ones.
-	for sid := range live {
-		if w.shouldExclude(sid) {
+	live := make(map[string]struct{}, len(open))
+	for _, c := range open {
+		live[c.ConnectionID] = struct{}{}
+		if _, ok := w.workers[c.ConnectionID]; ok {
 			continue
 		}
-		if sw, ok := w.sessions[sid]; ok {
-			sw.lastSeen = now
-		} else {
-			sw := newSessionWorker(sid, w.compactor, w.cfg)
-			w.sessions[sid] = sw
-			go sw.run(ctx)
+		worker := newConnWorker(c.ConnectionID, w.src, w.compactor, w.cfg, w.excludeCWD)
+		w.workers[c.ConnectionID] = worker
+		go worker.run(ctx)
+	}
+
+	// Reap workers for connections no longer in the open list.
+	for id, worker := range w.workers {
+		if _, ok := live[id]; ok {
+			continue
 		}
-	}
-
-	// Reap idle sessions.
-	idleLimit := w.cfg.idleTimeout()
-	for sid, sw := range w.sessions {
-		if now.Sub(sw.lastSeen) > idleLimit {
-			slog.Info("compact: reaping idle session", "session", sid)
-			sw.cancel()
-			delete(w.sessions, sid)
-		}
+		slog.Info("compact: reaping closed connection", "conn", id)
+		worker.cancel()
+		delete(w.workers, id)
 	}
 }
 
-// shouldExclude returns true if the session should not be compacted.
-// Must be called with w.mu held.
-func (w *Watcher) shouldExclude(sessionID string) bool {
-	if w.excludeCWD == "" {
-		return false
-	}
-	cwd := w.src.SessionCWD(sessionID)
-	if cwd == "" {
-		return false
-	}
-	// Exclude sessions whose cwd is the mnemo repo (the summariser itself).
-	return len(cwd) >= len(w.excludeCWD) && cwd[:len(w.excludeCWD)] == w.excludeCWD
+// connWorker runs compaction for a single live connection. On each
+// tick it resolves the connection's current session_id and invokes
+// the compactor on that session, tagging the resulting compaction
+// with the connection_id.
+type connWorker struct {
+	connectionID  string
+	src           connSource
+	compactor     *Compactor
+	cfg           WatcherConfig
+	excludeCWD    string
+	cancel        context.CancelFunc
+	budgetWarned  bool
+	lastSessionID string
 }
 
-// sessionWorker runs compaction for a single session.
-type sessionWorker struct {
-	sessionID    string
-	compactor    *Compactor
-	cfg          WatcherConfig
-	lastSeen     time.Time
-	cancel       context.CancelFunc
-	budgetWarned bool
-}
-
-func newSessionWorker(sessionID string, c *Compactor, cfg WatcherConfig) *sessionWorker {
-	return &sessionWorker{
-		sessionID: sessionID,
-		compactor: c,
-		cfg:       cfg,
-		lastSeen:  time.Now(),
+func newConnWorker(connectionID string, src connSource, c *Compactor, cfg WatcherConfig, excludeCWD string) *connWorker {
+	return &connWorker{
+		connectionID: connectionID,
+		src:          src,
+		compactor:    c,
+		cfg:          cfg,
+		excludeCWD:   excludeCWD,
 	}
 }
 
-func (sw *sessionWorker) run(ctx context.Context) {
+func (w *connWorker) run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
-	sw.cancel = cancel
+	w.cancel = cancel
 	defer cancel()
 
-	ticker := time.NewTicker(sw.cfg.compactInterval())
+	ticker := time.NewTicker(w.cfg.compactInterval())
 	defer ticker.Stop()
 
 	for {
@@ -183,18 +180,41 @@ func (sw *sessionWorker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, err := sw.compactor.Compact(ctx, sw.sessionID)
-			switch {
-			case err == nil, err == ErrNothingToCompact:
-				// normal idle ticks
-			case err == ErrBudgetExceeded:
-				if !sw.budgetWarned {
-					slog.Info("compact: session over budget, skipping further compactions", "session", sw.sessionID)
-					sw.budgetWarned = true
-				}
-			default:
-				slog.Warn("compact: compaction failed", "session", sw.sessionID, "err", err)
-			}
+			w.tick(ctx)
 		}
+	}
+}
+
+func (w *connWorker) tick(ctx context.Context) {
+	sessionID, err := w.src.CurrentSessionForConnection(w.connectionID)
+	if err != nil {
+		slog.Warn("compact: current session lookup failed",
+			"conn", w.connectionID, "err", err)
+		return
+	}
+	if sessionID == "" {
+		return // proxy connected but hasn't resolved a session yet
+	}
+	if w.excludeCWD != "" {
+		cwd := w.src.SessionCWD(sessionID)
+		if cwd != "" && strings.HasPrefix(cwd, w.excludeCWD) {
+			return // summariser itself — skip to avoid recursion
+		}
+	}
+	w.lastSessionID = sessionID
+
+	_, err = w.compactor.Compact(ctx, w.connectionID, sessionID)
+	switch {
+	case err == nil, errors.Is(err, ErrNothingToCompact):
+		// normal idle ticks
+	case errors.Is(err, ErrBudgetExceeded):
+		if !w.budgetWarned {
+			slog.Info("compact: connection over budget, skipping further compactions",
+				"conn", w.connectionID, "session", sessionID)
+			w.budgetWarned = true
+		}
+	default:
+		slog.Warn("compact: compaction failed",
+			"conn", w.connectionID, "session", sessionID, "err", err)
 	}
 }

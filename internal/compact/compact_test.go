@@ -122,7 +122,7 @@ func TestCompactRoundTrip(t *testing.T) {
 	}}
 
 	c := New(store, llm, Config{})
-	got, err := c.Compact(context.Background(), "sess-1")
+	got, err := c.Compact(context.Background(), "", "sess-1")
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestCompactPicksUpAfterLatest(t *testing.T) {
 		Text: `{"targets":[],"decisions":[],"files":[],"open_threads":[],"summary":"second span"}`,
 	}}
 	c := New(s, llm, Config{})
-	got, err := c.Compact(context.Background(), "sess-1")
+	got, err := c.Compact(context.Background(), "", "sess-1")
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestCompactNothingToDo(t *testing.T) {
 	llm := &stubLLM{}
 
 	c := New(s, llm, Config{})
-	_, err := c.Compact(context.Background(), "sess-1")
+	_, err := c.Compact(context.Background(), "", "sess-1")
 	if !errors.Is(err, ErrNothingToCompact) {
 		t.Fatalf("expected ErrNothingToCompact, got %v", err)
 	}
@@ -242,7 +242,7 @@ func TestCompactBudgetExceeded(t *testing.T) {
 
 	llm := &stubLLM{response: LLMResult{Text: `{"summary":"should not run"}`}}
 	c := New(s, llm, Config{})
-	_, err = c.Compact(context.Background(), "sess-1")
+	_, err = c.Compact(context.Background(), "", "sess-1")
 	if !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
 	}
@@ -268,7 +268,7 @@ func TestCompactBudgetUnmeasurableAllowed(t *testing.T) {
 		Text: `{"summary":"first"}`, PromptTokens: 50, OutputTokens: 20,
 	}}
 	c := New(s, llm, Config{})
-	if _, err := c.Compact(context.Background(), "sess-1"); err != nil {
+	if _, err := c.Compact(context.Background(), "", "sess-1"); err != nil {
 		t.Fatalf("Compact should succeed when session tokens unknown: %v", err)
 	}
 	if llm.calls != 1 {

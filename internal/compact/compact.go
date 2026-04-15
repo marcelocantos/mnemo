@@ -163,12 +163,17 @@ func (c *Compactor) checkBudget(sessionID string) error {
 }
 
 // Compact distills the next window of a session's transcript into a
-// Compaction row. Picks up after the latest existing compaction's
-// entry_id_to (0 if none). Returns ErrNothingToCompact if no new
-// substantive messages have accumulated, or ErrBudgetExceeded if the
-// cumulative summariser cost has reached MaxTokenRatio of the
-// session's own token cost (🎯T10 AC6).
-func (c *Compactor) Compact(ctx context.Context, sessionID string) (*store.Compaction, error) {
+// Compaction row tagged with the given connection_id. Picks up after
+// the latest existing compaction's entry_id_to (0 if none). Returns
+// ErrNothingToCompact if no new substantive messages have accumulated,
+// or ErrBudgetExceeded if the cumulative summariser cost has reached
+// MaxTokenRatio of the session's own token cost (🎯T10 AC6).
+//
+// connectionID is the mcpbridge ConnContext ID of the live proxy
+// driving this session. It is recorded on the compaction so that
+// mnemo_restore can resolve session → connection → prior compactions
+// across /clear boundaries without needing a chain heuristic.
+func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string) (*store.Compaction, error) {
 	if err := c.checkBudget(sessionID); err != nil {
 		return nil, err
 	}
@@ -206,6 +211,7 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string) (*store.Compa
 
 	comp := store.Compaction{
 		SessionID:    sessionID,
+		ConnectionID: connectionID,
 		Model:        res.Model,
 		PromptTokens: res.PromptTokens,
 		OutputTokens: res.OutputTokens,

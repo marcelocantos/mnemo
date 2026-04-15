@@ -1130,16 +1130,35 @@ func (h *Handler) restore(args map[string]any) (string, bool, error) {
 		return "session_id is required", true, nil
 	}
 
-	compactions, err := h.mem.ChainCompactions(sessionID)
-	if err != nil {
-		return fmt.Sprintf("restore failed: %v", err), true, nil
+	// Primary path: resolve session_id → connection_id via
+	// connection_sessions (definitive, deterministic). Return all
+	// compactions tagged to any connection that ever owned this
+	// session. Typically one connection; two after ctrl-c +
+	// `claude --continue`.
+	var compactions []store.Compaction
+	if conns, err := h.mem.ConnectionsForSession(sessionID); err == nil {
+		seen := map[int64]bool{}
+		for _, cs := range conns {
+			cc, err := h.mem.CompactionsForConnection(cs.ConnectionID)
+			if err != nil {
+				continue
+			}
+			for _, c := range cc {
+				if seen[c.ID] {
+					continue
+				}
+				seen[c.ID] = true
+				compactions = append(compactions, c)
+			}
+		}
 	}
+
 	if len(compactions) == 0 {
-		return "No compactions available yet for this session chain. The background compactor runs every 5 minutes on active sessions.", false, nil
+		return "No compactions available yet for this session. The background compactor runs every 5 minutes on live connections; a fresh session with no prior /clear will have nothing to restore.", false, nil
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Compacted context for session chain (%d span(s)):\n\n", len(compactions))
+	fmt.Fprintf(&b, "Compacted context for this connection (%d span(s)):\n\n", len(compactions))
 
 	// Token-budget footer data: measure the running summariser cost
 	// against the session's own cost for this chain leaf. Surfaces the
