@@ -6,6 +6,7 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/bridge"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -54,7 +55,25 @@ func NewServerAt(s *store.Store, sockPath string, opts ...ServerOption) (*Server
 	if err != nil {
 		return nil, err
 	}
+	// Record every accepted proxy connection in the store so we can
+	// attribute later ingest work back to the connection that drove
+	// it. The store is the authoritative home for this state; the
+	// bridge just fires lifecycle hooks.
+	bridge.SetConnObserver(storeObserver{s})
 	return &Server{bridge: bridge}, nil
+}
+
+// storeObserver adapts the store's RecordConnectionOpen/Close methods
+// to the bridge's ConnObserver interface, keeping the store free of
+// bridge-specific types at the call site.
+type storeObserver struct{ s *store.Store }
+
+func (o storeObserver) OnConnect(cc mcpbridge.ConnContext) {
+	o.s.RecordConnectionOpen(cc.ID, cc.PID, cc.AcceptedAt)
+}
+
+func (o storeObserver) OnDisconnect(cc mcpbridge.ConnContext) {
+	o.s.RecordConnectionClose(cc.ID, time.Now())
 }
 
 // Serve accepts connections. Blocks until the listener is closed.

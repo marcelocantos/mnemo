@@ -356,7 +356,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 19
+const schemaVersion = 20
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -597,6 +597,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE TABLE IF NOT EXISTS compactions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id TEXT NOT NULL,
+			connection_id TEXT,
 			generated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			model TEXT NOT NULL DEFAULT '',
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
@@ -607,6 +608,15 @@ func New(dbPath, projectDir string) (*Store, error) {
 			payload_json TEXT NOT NULL DEFAULT '{}',
 			summary TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS daemon_connections (
+			connection_id TEXT PRIMARY KEY,
+			pid INTEGER NOT NULL,
+			accepted_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			closed_at TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_daemon_connections_pid ON daemon_connections(pid);
+		CREATE INDEX IF NOT EXISTS idx_daemon_connections_open ON daemon_connections(closed_at) WHERE closed_at IS NULL;
 		CREATE TABLE IF NOT EXISTS query_templates (
 			id INTEGER PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
