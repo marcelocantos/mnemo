@@ -329,6 +329,27 @@ targets:
     context: 'pageflip will emit structured meeting artifacts into a configurable docs/ folder (see pageflip 🎯T12). For the contradiction detector (pageflip 🎯T14), dejargoniser (🎯T16), and weekly digest (🎯T17) to work, mnemo must treat docs/*.md and docs/*.pdf as first-class indexable content alongside Claude Code session transcripts. Many projects also already keep hand-written docs, TODOs, design notes, and release notes in docs/; indexing those gives the entire corpus a single searchable surface. Dedup rule: when a `.md` and `.pdf` exist for the same stem (e.g., `report.md` and `report.pdf` generated from it), index only one — prefer `.md` for searchability and fall back to `.pdf` when markdown is absent. Extraction for PDFs goes through whatever text-extraction tool is already available on the host.'
     origin: pageflip artifact pipeline — meeting outputs need to be searchable alongside session transcripts
     discovered: 2026-04-14
+  T22:
+    name: mnemo daemon and MCP proxy run natively on Windows
+    status: identified
+    value: 5.0
+    cost: 8.0
+    acceptance:
+    - mnemo serve and mnemo (stdio proxy) build and run on Windows arm64 and x86_64
+    - Daemon listens on TCP loopback; endpoint file at ~/.mnemo/endpoint contains port + self-signed cert + private key with user-only ACL
+    - Proxy connects via mTLS using the endpoint file; rejects connections without matching client cert
+    - macOS and Linux behaviour unchanged (same TCP-loopback transport everywhere, or platform-conditional with Unix socket fallback — design choice)
+    - SQLite driver swapped to modernc.org/sqlite; FTS5 still works; existing tests pass on all platforms
+    - Process metrics (mnemo_whatsup) either work on Windows or degrade gracefully with a clear message
+    - CI runs go test on windows-latest GHA runner and passes
+    - Image OCR degrades to no-OCR or tesseract on Windows without crashing
+    context: 'Currently macOS/Linux only. Blockers: (1) Unix domain socket IPC in mcpbridge — switch to TCP loopback with a port file at ~/.mnemo/endpoint containing port + mTLS cert + private key (user-only ACL; access to file == access to service); (2) mattn/go-sqlite3 needs CGO+MSYS2 on Windows — swap to modernc.org/sqlite (pure Go, FTS5); (3) lsof/ps shell-outs in store.go (~4883, ~5755) need Windows equivalents (tasklist/WMI) or to be gated; vm_stat is already gated. Image OCR (Vision framework) and vm_stat are correctly gated behind //go:build darwin and degrade to stubs — no work needed beyond verification. claude/uv/gh/tesseract/git are all available on Windows; describer/embeddings work unchanged when those tools are installed. Distinct from 🎯T15 which is about indexing Windows-side transcripts from a Windows VM — this target is mnemo itself running on Windows. Estimated effort: 5–7 days.'
+    tags:
+    - cross-platform
+    - ipc
+    - windows
+    origin: manual
+    discovered: 2026-04-15
   T3:
     name: Active work dashboard data
     status: achieved
