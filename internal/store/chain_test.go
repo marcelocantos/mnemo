@@ -51,8 +51,10 @@ func ingestChainPair(t *testing.T, predLastTS, succFirstTS, cwd string) (*Store,
 	return s, predID, succID
 }
 
-// TestChainHighConfidence verifies that a gap < 2s produces a high-confidence link.
-func TestChainHighConfidence(t *testing.T) {
+// TestChainLinksImmediateSuccessor verifies that a /clear directly after
+// the predecessor's last message links the two sessions with gap_ms
+// recorded.
+func TestChainLinksImmediateSuccessor(t *testing.T) {
 	s, predID, succID := ingestChainPair(t,
 		"2026-04-10T10:00:10Z", // pred last message
 		"2026-04-10T10:00:11Z", // succ first message (1s gap)
@@ -75,13 +77,11 @@ func TestChainHighConfidence(t *testing.T) {
 		t.Fatalf("expected successor %q, got %q", succID, succ)
 	}
 
-	// Verify confidence in DB.
 	var confidence string
 	var gapMs int64
-	err = s.db.QueryRow(
+	if err := s.db.QueryRow(
 		"SELECT confidence, gap_ms FROM session_chains WHERE successor_id = ?", succID,
-	).Scan(&confidence, &gapMs)
-	if err != nil {
+	).Scan(&confidence, &gapMs); err != nil {
 		t.Fatal(err)
 	}
 	if confidence != "high" {
@@ -92,11 +92,14 @@ func TestChainHighConfidence(t *testing.T) {
 	}
 }
 
-// TestChainMediumConfidence verifies that a 2–5s gap produces a medium-confidence link.
-func TestChainMediumConfidence(t *testing.T) {
+// TestChainLinksAcrossLongGap verifies the no-window invariant: a
+// predecessor that ended hours or days before the /clear still links,
+// as long as it is the most recent session in the same cwd. The old
+// 5-second window mistakenly dropped these legitimate chains.
+func TestChainLinksAcrossLongGap(t *testing.T) {
 	s, predID, succID := ingestChainPair(t,
-		"2026-04-10T10:00:10Z",
-		"2026-04-10T10:00:13Z", // 3s gap
+		"2026-04-10T10:00:10Z", // pred last message
+		"2026-04-12T15:30:00Z", // succ first message (~2 days later)
 		"/Users/dev/work/myrepo",
 	)
 
@@ -105,32 +108,50 @@ func TestChainMediumConfidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pred != predID {
-		t.Fatalf("expected predecessor %q, got %q", predID, pred)
+		t.Fatalf("expected predecessor %q, got %q (chain must survive long gaps)", predID, pred)
 	}
 
-	var confidence string
-	s.db.QueryRow(
-		"SELECT confidence FROM session_chains WHERE successor_id = ?", succID,
-	).Scan(&confidence)
-	if confidence != "medium" {
-		t.Errorf("expected medium confidence, got %q", confidence)
+	var gapMs int64
+	if err := s.db.QueryRow(
+		"SELECT gap_ms FROM session_chains WHERE successor_id = ?", succID,
+	).Scan(&gapMs); err != nil {
+		t.Fatal(err)
+	}
+	if gapMs < 2*24*3600*1000 {
+		t.Errorf("expected gap_ms to reflect ~2 day delay, got %d", gapMs)
 	}
 }
 
-// TestChainGapTooLarge verifies that a gap > 5s produces no link.
-func TestChainGapTooLarge(t *testing.T) {
-	s, _, succID := ingestChainPair(t,
-		"2026-04-10T10:00:10Z",
-		"2026-04-10T10:00:17Z", // 7s gap — over the 5s threshold
-		"/Users/dev/work/myrepo",
-	)
+// TestChainRequiresSameCwd verifies that a /clear in one repo does not
+// reach back to a session in a different cwd, even if it is the most
+// recent overall.
+func TestChainRequiresSameCwd(t *testing.T) {
+	projectDir := t.TempDir()
 
-	pred, err := s.Predecessor(succID)
+	// Predecessor lives in cwd A.
+	writeJSONL(t, projectDir, "projA", "pred-A", []map[string]any{
+		metaMsg("user", "Work in repo A", "2026-04-10T10:00:00Z",
+			"/Users/dev/work/repoA", "feat/x"),
+		msg("assistant", "OK", "2026-04-10T10:00:05Z"),
+	})
+	// Successor opens a /clear in cwd B. No predecessor exists in B.
+	writeJSONL(t, projectDir, "projB", "succ-B", []map[string]any{
+		metaMsg("user", "<command-name>/clear</command-name>", "2026-04-10T10:00:10Z",
+			"/Users/dev/work/repoB", "main"),
+		msg("assistant", "Context cleared.", "2026-04-10T10:00:11Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	pred, err := s.Predecessor("succ-B")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pred != "" {
-		t.Errorf("expected no predecessor for large gap, got %q", pred)
+		t.Errorf("expected no predecessor (cross-cwd must not link), got %q", pred)
 	}
 }
 

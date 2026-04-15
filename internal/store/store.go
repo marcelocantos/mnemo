@@ -5689,62 +5689,40 @@ func detectChainForSession(db *sql.DB, sessionID string) {
 		return // can't scope without a cwd
 	}
 
-	// Find the predecessor: same cwd, last_msg closest before successor's
-	// first event, within 5 seconds.
-	const maxGapMs = 5000
-	windowStart := succTime.Add(-5 * time.Second).Format(time.RFC3339)
-
-	rows, err := db.Query(`
+	// Find the predecessor: the most recent session in the same cwd
+	// that ended before this session's first event. No time window —
+	// under the working assumption of one Claude Code session per repo
+	// at a time, the user might legitimately /clear hours or days
+	// later to continue the same work, and any fixed window would
+	// drop those legitimate chains. Future work: relax the
+	// single-session assumption by checking for concurrent tabs.
+	row := db.QueryRow(`
 		SELECT ss.session_id, ss.last_msg
 		FROM session_summary ss
 		JOIN session_meta sm ON sm.session_id = ss.session_id
 		WHERE sm.cwd = ?
 		  AND ss.session_id != ?
-		  AND ss.last_msg >= ?
 		  AND ss.last_msg <= ?
 		ORDER BY ss.last_msg DESC
-		LIMIT 5`,
-		cwd, sessionID, windowStart, firstTS)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
+		LIMIT 1`,
+		cwd, sessionID, firstTS)
 
-	bestPredID := ""
-	var bestGapMs int64 = maxGapMs + 1
-
-	for rows.Next() {
-		var predID, predLastMsg string
-		if rows.Scan(&predID, &predLastMsg) != nil {
-			continue
-		}
-		predTime, err := time.Parse(time.RFC3339, predLastMsg)
-		if err != nil {
-			continue
-		}
-		gapMs := succTime.Sub(predTime).Milliseconds()
-		if gapMs < 0 || gapMs > maxGapMs {
-			continue
-		}
-		if gapMs < bestGapMs {
-			bestGapMs = gapMs
-			bestPredID = predID
-		}
-	}
-
-	if bestPredID == "" {
+	var bestPredID, predLastMsg string
+	if err := row.Scan(&bestPredID, &predLastMsg); err != nil {
 		return
 	}
 
-	confidence := "medium"
-	if bestGapMs < 2000 {
-		confidence = "high"
+	var gapMs int64
+	if predTime, err := time.Parse(time.RFC3339, predLastMsg); err == nil {
+		gapMs = succTime.Sub(predTime).Milliseconds()
 	}
+
+	confidence := "high"
 
 	db.Exec(`INSERT OR IGNORE INTO session_chains
 		(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
-		VALUES (?, ?, 'clear', ?, ?, 'time_heuristic')`,
-		sessionID, bestPredID, bestGapMs, confidence)
+		VALUES (?, ?, 'clear', ?, ?, 'cwd_most_recent')`,
+		sessionID, bestPredID, gapMs, confidence)
 }
 
 // backfillSessionChains runs detectChainForSession for all ingested sessions
