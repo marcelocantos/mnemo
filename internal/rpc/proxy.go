@@ -438,3 +438,12 @@ func (p *Proxy) SearchImagesSimilar(similarTo int, repo string, session string, 
 	var results []store.ImageSearchResult
 	return results, json.Unmarshal(raw, &results)
 }
+
+func (p *Proxy) ChainCompactions(sessionID string) ([]store.Compaction, error) {
+	raw, err := p.client.Call("ChainCompactions", ChainCompactionsParams{SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	var results []store.Compaction
+	return results, json.Unmarshal(raw, &results)
+}

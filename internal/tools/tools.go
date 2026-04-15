@@ -284,6 +284,14 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_restore",
+			mcp.WithDescription(`Return the compacted context for a session chain — all compaction summaries across the full /clear-bounded chain, oldest first.
+
+Use this at the start of a session to restore context from a previous run. Given any session ID in a chain (including the current one), it returns the structured summaries (targets, decisions, files touched, open threads) produced by the background compactor across all segments of that chain.
+
+Returns nothing if no compactions have been produced yet (the background compactor runs every 5 minutes on active sessions).`),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix).")),
+		),
 		mcp.NewTool("mnemo_chain",
 			mcp.WithDescription(`Retrieve the full /clear-bounded session chain for any session ID.
 
@@ -405,6 +413,8 @@ func (h *Handler) Call(name string, args map[string]any) (string, bool, error) {
 		return h.commits(args)
 	case "mnemo_decisions":
 		return h.decisions(args)
+	case "mnemo_restore":
+		return h.restore(args)
 	case "mnemo_chain":
 		return h.chain(args)
 	case "mnemo_self":
@@ -1099,6 +1109,63 @@ func (h *Handler) whoRan(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *Handler) restore(args map[string]any) (string, bool, error) {
+	sessionID, _ := args["session_id"].(string)
+	if sessionID == "" {
+		return "session_id is required", true, nil
+	}
+
+	compactions, err := h.mem.ChainCompactions(sessionID)
+	if err != nil {
+		return fmt.Sprintf("restore failed: %v", err), true, nil
+	}
+	if len(compactions) == 0 {
+		return "No compactions available yet for this session chain. The background compactor runs every 5 minutes on active sessions.", false, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Compacted context for session chain (%d span(s)):\n\n", len(compactions))
+	for i, c := range compactions {
+		sid := c.SessionID
+		if len(sid) > 10 {
+			sid = sid[:10]
+		}
+		fmt.Fprintf(&b, "── Span %d  [%s]  entries %d..%d  %s ──\n",
+			i+1, sid, c.EntryIDFrom, c.EntryIDTo,
+			c.GeneratedAt.Format("2006-01-02 15:04"))
+		if c.Summary != "" {
+			fmt.Fprintf(&b, "Summary: %s\n", c.Summary)
+		}
+		if c.PayloadJSON != "" && c.PayloadJSON != "{}" {
+			var payload struct {
+				Targets     []string `json:"targets"`
+				Files       []string `json:"files"`
+				OpenThreads []string `json:"open_threads"`
+				Decisions   []struct {
+					What string `json:"what"`
+					Why  string `json:"why"`
+				} `json:"decisions"`
+			}
+			if err := json.Unmarshal([]byte(c.PayloadJSON), &payload); err == nil {
+				if len(payload.Targets) > 0 {
+					fmt.Fprintf(&b, "Targets: %s\n", strings.Join(payload.Targets, ", "))
+				}
+				if len(payload.Files) > 0 {
+					fmt.Fprintf(&b, "Files: %s\n", strings.Join(payload.Files, ", "))
+				}
+				for _, d := range payload.Decisions {
+					fmt.Fprintf(&b, "Decision: %s — %s\n", d.What, d.Why)
+				}
+				if len(payload.OpenThreads) > 0 {
+					fmt.Fprintf(&b, "Open threads: %s\n", strings.Join(payload.OpenThreads, "; "))
+				}
+			}
+		}
+		b.WriteByte('\n')
+	}
+	return b.String(), false, nil
 }
 
 func (h *Handler) chain(args map[string]any) (string, bool, error) {

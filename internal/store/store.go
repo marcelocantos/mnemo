@@ -5018,6 +5018,17 @@ func (s *Store) LiveSessions() map[string]int {
 	return result
 }
 
+// SessionCWD returns the working directory recorded for the session in
+// session_meta, or "" if not known. Used by the compaction watcher for
+// self-exclusion (summariser sessions have the mnemo repo as their cwd).
+func (s *Store) SessionCWD(sessionID string) string {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	var cwd string
+	s.db.QueryRow("SELECT cwd FROM session_meta WHERE session_id = ? LIMIT 1", sessionID).Scan(&cwd)
+	return cwd
+}
+
 // runLsof runs lsof to find JSONL files open by any claude process under dir.
 // Returns the raw output lines. Exported for testing via a seam — in tests,
 // the actual lsof binary is not required; parseLsofOutput is tested directly.

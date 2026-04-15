@@ -24,6 +24,7 @@ import (
 
 	"github.com/marcelocantos/mcpbridge"
 
+	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/rpc"
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -144,6 +145,18 @@ func runServe() {
 		if err := mem.Watch(); err != nil {
 			slog.Error("watcher failed", "err", err)
 		}
+	}()
+
+	// Start background compaction watcher.
+	go func() {
+		mnemoDir, _ := os.UserHomeDir()
+		mnemoRepoDir := filepath.Join(mnemoDir, "work", "github.com", "marcelocantos", "mnemo")
+		caller := compact.NewClaudiaCaller(mnemoRepoDir, "sonnet")
+		compactor := compact.New(mem, caller, compact.Config{})
+		watcher := compact.NewWatcher(mem, compactor, compact.WatcherConfig{}, mnemoRepoDir)
+		ctx := context.Background()
+		slog.Info("compact: watcher starting")
+		watcher.Run(ctx)
 	}()
 
 	// Poll CI runs periodically (every 5 minutes).

@@ -517,3 +517,90 @@ func TestRPCPerformance(t *testing.T) {
 		})
 	}
 }
+
+// setupTestServerWithStore is like setupTestServer but also returns the store
+// so tests can write compactions before querying.
+func setupTestServerWithStore(t *testing.T) (*mcpbridge.Client, *store.Store) {
+	t.Helper()
+
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "myproject", "sess-compact-test", []map[string]any{
+		metaMsg("user", "Design the schema", "2026-04-01T10:00:00Z", "/project", "main"),
+		msg("assistant", "Here is the schema.", "2026-04-01T10:00:05Z"),
+	})
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	mem, err := store.New(dbPath, projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(t.TempDir(), "mnemo.sock")
+	srv, err := NewServerAt(mem, sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() {
+		srv.Close()
+		mem.Close()
+	})
+
+	client, err := DialAt(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	return client, mem
+}
+
+// TestRPCChainCompactions verifies that ChainCompactions returns an empty
+// slice (not an error) when no compactions exist, and returns pre-stored
+// compactions when they do.
+func TestRPCChainCompactions(t *testing.T) {
+	client, mem := setupTestServerWithStore(t)
+	proxy := NewProxy(client)
+
+	var comps []store.Compaction
+	var err error
+	timed(t, "ChainCompactions empty", func() {
+		comps, err = proxy.ChainCompactions("sess-compact-test")
+	})
+	if err != nil {
+		t.Fatalf("ChainCompactions failed: %v", err)
+	}
+	// No compactions have been written — empty slice expected.
+	if len(comps) != 0 {
+		t.Fatalf("expected 0 compactions, got %d", len(comps))
+	}
+
+	// Write a compaction directly into the store.
+	_, err = mem.PutCompaction(store.Compaction{
+		SessionID:   "sess-compact-test",
+		Model:       "stub",
+		EntryIDFrom: 0,
+		EntryIDTo:   2,
+		Summary:     "designed the schema",
+		PayloadJSON: `{"targets":["T10"],"decisions":[],"files":["internal/store/compactions.go"],"open_threads":[],"summary":"designed the schema"}`,
+	})
+	if err != nil {
+		t.Fatalf("PutCompaction: %v", err)
+	}
+
+	timed(t, "ChainCompactions with data", func() {
+		comps, err = proxy.ChainCompactions("sess-compact-test")
+	})
+	if err != nil {
+		t.Fatalf("ChainCompactions after write failed: %v", err)
+	}
+	if len(comps) != 1 {
+		t.Fatalf("expected 1 compaction, got %d", len(comps))
+	}
+	if comps[0].Summary != "designed the schema" {
+		t.Fatalf("wrong summary: %q", comps[0].Summary)
+	}
+}

@@ -170,6 +170,9 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"SearchImagesSimilar": makeMethod(func(p SearchImagesSimilarParams) (any, error) {
 			return s.SearchImagesSimilar(p.SimilarTo, p.Repo, p.Session, p.Days, p.Limit)
 		}),
+		"ChainCompactions": makeMethod(func(p ChainCompactionsParams) (any, error) {
+			return s.ChainCompactions(p.SessionID)
+		}),
 	}
 }
 
@@ -409,4 +412,9 @@ type SearchImagesSimilarParams struct {
 	Session   string `json:"session"`
 	Days      int    `json:"days"`
 	Limit     int    `json:"limit"`
+}
+
+// ChainCompactionsParams matches the ChainCompactions method signature.
+type ChainCompactionsParams struct {
+	SessionID string `json:"session_id"`
 }
