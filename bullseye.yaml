@@ -443,9 +443,10 @@ targets:
     achieved: 2026-04-15
   T25:
     name: Compactor and chain detection anchor to MCP connection identity, not heuristics
-    status: identified
+    status: achieved
     value: 8.0
     cost: 8.0
+    actual_cost: 8.0
     acceptance:
     - All three sub-targets (T25.1, T25.2, T25.3) are retired.
     - '10-second before/after /clear empirical test run and recorded: proxy PID is observed to be continuous across /clear, closing the last 5% of the validation gap.'
@@ -481,6 +482,7 @@ targets:
     - determinism
     origin: discovered while hardening the chain heuristic for /c + mnemo_restore
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T25.1:
     name: Connection identity plumbing — vendor bridge, thread ConnContext through handlers
     status: achieved
@@ -547,9 +549,10 @@ targets:
     achieved: 2026-04-15
   T25.3:
     name: session_chains records only definitive observations; chain inference is a query-time function
-    status: identified
+    status: achieved
     value: 3.0
     cost: 2.0
+    actual_cost: 2.0
     acceptance:
     - 'session_chains is written by exactly one path: the connection observer, on session transitions within a connection. Rows carry mechanism=''mcp_connection'' and confidence=''definitive''. No ingest-time writes, no UPSERT/supersede logic.'
     - detectChainForSession, clearMarkerRE, and backfillSessionChains are deleted from store.go. The cwd heuristic from 8f8c3b9 is removed from the ingest path.
@@ -579,6 +582,7 @@ targets:
     - side-product
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T3:
     name: Active work dashboard data
     status: achieved
