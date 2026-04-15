@@ -316,17 +316,19 @@ targets:
     discovered: 2026-04-14
     achieved: 2026-04-14
   T21:
-    name: mnemo indexes docs/ content (markdown and PDF) across tracked repos with md/pdf dedup
+    name: mnemo indexes project documentation (markdown, txt, PDF) across tracked repos with md/pdf dedup
     status: identified
     value: 8.0
     cost: 5.0
     acceptance:
-    - mnemo indexes `docs/*.md` content across all tracked repos, with results rankable alongside session transcripts
-    - mnemo indexes `docs/*.pdf` content via text extraction, scoped to the same repos
-    - When a `.md` and `.pdf` share the same stem in the same directory, only one is indexed (prefer `.md`; fall back to `.pdf` only if `.md` is absent)
+    - mnemo indexes markdown, plain-text, and PDF files found under each tracked repo's session root, with results rankable alongside session transcripts
+    - Discovery is broader than docs/ — sweep common locations (repo root README/CHANGELOG/notes, docs/, design/, notes/, papers/) rather than hard-coding a single path; respect .gitignore
+    - PDF text is extracted via whatever extraction tool is available on the host
+    - When a .md and .pdf share the same stem in the same directory, only one is indexed (prefer .md; fall back to .pdf only if .md is absent). Same rule applies for .txt vs .pdf if relevant.
     - Re-indexing is incremental — unchanged files are not re-processed
     - pageflip meeting-artifact markdown written into a tracked repo's docs/ becomes searchable without any pageflip-specific integration code in mnemo
-    context: 'pageflip will emit structured meeting artifacts into a configurable docs/ folder (see pageflip 🎯T12). For the contradiction detector (pageflip 🎯T14), dejargoniser (🎯T16), and weekly digest (🎯T17) to work, mnemo must treat docs/*.md and docs/*.pdf as first-class indexable content alongside Claude Code session transcripts. Many projects also already keep hand-written docs, TODOs, design notes, and release notes in docs/; indexing those gives the entire corpus a single searchable surface. Dedup rule: when a `.md` and `.pdf` exist for the same stem (e.g., `report.md` and `report.pdf` generated from it), index only one — prefer `.md` for searchability and fall back to `.pdf` when markdown is absent. Extraction for PDFs goes through whatever text-extraction tool is already available on the host.'
+    - Binary/large/generated files (e.g., minified, vendored, node_modules) are excluded by sensible defaults
+    context: 'Originally framed as docs/-only ingest for the pageflip artifact pipeline (meeting artifacts → searchable). Widened 2026-04-15: many projects keep hand-written docs, TODOs, design notes, and release notes scattered across the repo, not just under docs/. Hunt more broadly for markdown, txt, and PDF under each session root. Dedup rule remains the key correctness property: when a .md and .pdf share a stem in the same directory (often one is generated from the other — e.g., mpe2pdf output), index only one — prefer .md for searchability, fall back to .pdf when markdown is absent. PDF extraction uses whatever tool is available on the host. Downstream consumers: pageflip 🎯T14 (contradiction detector), 🎯T16 (dejargoniser), 🎯T17 (weekly digest), plus general cross-repo doc search.'
     origin: pageflip artifact pipeline — meeting outputs need to be searchable alongside session transcripts
     discovered: 2026-04-14
   T22:
@@ -348,6 +350,24 @@ targets:
     - cross-platform
     - ipc
     - windows
+    origin: manual
+    discovered: 2026-04-15
+  T23:
+    name: File-watch handlers are cheap — heavy work deferred and debounced
+    status: identified
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - fsnotify event handlers do minimal work (mark dirty / enqueue), with no inline parsing, hashing, or DB writes on the event-handling goroutine
+    - Burst events for the same path (e.g., editor save followed by formatter rewrite) coalesce into a single re-index via a 200–500ms debounce
+    - A flush/worker goroutine drains the dirty queue at a sustainable rate, with backpressure if ingest falls behind
+    - Self-heal on startup remains the source of truth — dropping a queued event must never leave the index permanently stale
+    - 'Measured: re-indexing cost during a synthetic burst (e.g., 100 rapid touches of one transcript) is bounded to one parse+write, not 100'
+    context: 'As mnemo''s watch surface grows (transcripts, git, planned docs/markdown/PDF in 🎯T21, etc.) and as more MCP servers run alongside it, redundant work in response to file events becomes the dominant cost — not the kernel notifications themselves. Two complementary mitigations: (1) keep event handlers cheap by marking files dirty and enqueueing rather than parsing/indexing inline; defer the real work to a background flush, query-time, or startup self-heal (mnemo already does the last of these). (2) Coalesce bursts via a debounce window (200–500ms) so editor save storms, formatter rewrites, and rapid git operations produce at most one re-index per affected file. This protects laptop battery on idle and keeps editor saves snappy on large repos.'
+    tags:
+    - performance
+    - ingest
+    - watching
     origin: manual
     discovered: 2026-04-15
   T3:
