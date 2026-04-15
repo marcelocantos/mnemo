@@ -584,33 +584,34 @@ targets:
     discovered: 2026-04-15
     achieved: 2026-04-15
   T26:
-    name: Schema migrations preserve ephemeral data — no more wipe-and-rebuild on bumps
+    name: Use sqlift for schema migrations; stop wiping the DB on bumps
     status: identified
     value: 8.0
     cost: 3.0
     acceptance:
-    - On schema version mismatch, Store.New no longer deletes the database. Instead, it applies an ordered sequence of migration functions (migrate_N_to_M) to bring the DB to the current schema version.
-    - 'For v0.18.0 → v0.19.0 (first post-ephemeral-data bump), at minimum a dump-preserve-restore shim exists: the four ephemeral tables (daemon_connections, connection_sessions, session_chains, compactions) are dumped before any destructive schema operation and restored after. Verified by a test that writes rows to each ephemeral table, bumps schemaVersion, reopens the store, and checks the rows are intact.'
-    - The derived tables (entries, messages, session_meta, session_summary, memories, skills, audit_entries, targets, plans, docs, ci_runs, git_commits, github_prs, github_issues, images, etc.) CAN still be wiped and rebuilt when a schema change makes that easier — but only those tables, not the whole database file.
-    - 'Migration log lines clearly announce each step: the starting version, each migration function that runs, and the final version. Failed migrations halt startup with a clear error rather than silently wiping and re-ingesting.'
-    - The schemaVersion constant and the migrations list are colocated and documented in a single place (e.g. internal/store/migrations.go) so adding a new bump is adding one entry, not editing New().
+    - mnemo imports sqlift (either as the standalone github.com/marcelocantos/sqlift/go/sqlift, or via sqlpipe's Database if that broader switchover happens at the same time).
+    - A single authoritative schema.sql file holds the desired schema. On Store.New, sqlift.Apply diffs it against the current DB and applies the deltas in-place. Ephemeral data (daemon_connections, connection_sessions, session_chains definitive rows, compactions) is preserved by construction — sqlift's destructive-operation guard is left on so accidental drops cause errors, not silent data loss.
+    - The existing wipe-on-mismatch branch in Store.New is deleted. There is no schemaVersion integer any more; sqlift compares full DDL, so the authoritative schema file IS the version.
+    - 'Test: seed rows into each of the four ephemeral tables, make an additive schema change (new column, new index, new table), reopen the store, confirm the old rows still exist.'
+    - 'Test: make a destructive schema change (drop a column) without the opt-in flag, reopen the store, confirm it errors rather than silently drops the data.'
+    - The existing derived-data tables (entries, messages, session_meta, session_summary, memories, skills, audit_entries, targets, plans, docs, ci_runs, git_commits, github_prs, github_issues, images, etc.) no longer get wiped on schema change either — but if a schema change ever genuinely requires a rebuild from JSONL (e.g. an entry-parsing bug that corrupted old rows), that can be triggered explicitly, not as an unconditional side effect of bumping a version constant.
     context: |-
-      The current scheme deletes `mnemo.db` on any schemaVersion mismatch and rebuilds from JSONL transcripts. That was safe when every table's contents were derivable from disk. v0.18.0 changed this: four tables now hold ephemeral, capture-or-lose-it data that cannot be recovered from JSONL.
+      The current scheme deletes `mnemo.db` on any `schemaVersion` mismatch and rebuilds from JSONL. That was safe when every table's contents were derivable from disk. v0.18.0 changed this: four tables now hold ephemeral, capture-or-lose-it data that cannot be recovered from JSONL (daemon_connections, connection_sessions, session_chains definitive rows, compactions).
 
-      - daemon_connections: one row per accepted proxy connection, captured at handshake via LOCAL_PEERPID. Gone when the connection closes; only the daemon's persistent record survives.
-      - connection_sessions: definitive (connection_id, session_id) binding, recorded when mnemo_self resolves. The resolution event itself is a live observation that cannot be reconstructed.
-      - session_chains: definitive chain rows written on observed session transitions (mechanism='mcp_connection'). Query-time heuristic inference produces lower-confidence candidates for gaps.
-      - compactions: LLM-generated summaries tagged to a connection. Not recoverable — rerunning the compactor against historical JSONL would cost real tokens and wouldn't match the live spans.
+      We already own the right tool for this. **sqlift** (github.com/marcelocantos/sqlift) does declarative SQLite schema migration via structural diffing — maintain the schema as a single SQL file and sqlift computes the delta at startup. No numbered migration files, no ordering conflicts. It has a destructive-operation guard that refuses to drop tables/columns without explicit opt-in, which is exactly the safety net we need for ephemeral data.
 
-      We got away with it for v0.18.0 because these tables were brand new — no data to preserve. But every schema bump from here on will destroy ephemeral history unless the machinery is replaced.
+      **Packaging choice, left to implementation:**
 
-      **Minimum viable fix (v0.19.0 safety net):** dump the four ephemeral tables to a temp file before any wipe, rebuild from JSONL, restore. Works if the schema change is additive on derived tables and doesn't touch ephemeral tables' structure.
+      - *Standalone sqlift only*: import `github.com/marcelocantos/sqlift/go/sqlift`, call Apply at startup, keep the existing `database/sql` + `mattn/go-sqlite3` layer for normal operations. Minimal delta to mnemo's existing code.
+      - *Full sqlpipe switchover*: sqlpipe bundles sqlift + sqldeep + replication. Adopting `sqlpipe.Database` as the primary DB handle would give auto-migration, sqldeep-by-default on every query, and replication primitives that would be load-bearing for 🎯T15 federation. Bigger mechanical refactor (~7000 LoC of SQL call sites) but a coherent superset.
 
-      **Correct fix (post-1.0):** proper ordered migrations. Each schema bump adds a `migrate_N_to_N+1` function that uses ALTER TABLE / CREATE / INSERT SELECT to move data forward without dropping it. No database-wide wipe.
+      The standalone-sqlift path is sufficient for this target's goal (preserve ephemeral data across schema bumps). The sqlpipe switchover is a better framing for a later target that sits at the intersection of T15 (federation needs replication) and this one.
 
-      Discovered 2026-04-16 during /release v0.18.0 smoke testing. The user flagged it after seeing connection_sessions / compactions fill up and recognising they would be lost on the next bump.</context>
-      <parameter name="origin">discovered while observing v0.18.0 reindex</parameter>
-      <parameter name="tags">["migration", "schema", "ephemeral-data", "durability"]</parameter>
+      We got away with wipe-and-rebuild for v0.18.0 because the ephemeral tables were brand new \u2014 no data to preserve. Every schema bump from here on has teeth unless this target ships first.
+
+      Discovered 2026-04-16 during /release v0.18.0 smoke testing.</context>
+      <parameter name="origin">discovered while observing v0.18.0 reindex; sqlift was the known tool</parameter>
+      <parameter name="tags">["migration", "schema", "sqlift", "ephemeral-data", "durability"]</parameter>
       </invoke>
     origin: manual
     discovered: 2026-04-16
