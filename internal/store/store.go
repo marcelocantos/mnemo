@@ -300,7 +300,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 17
+const schemaVersion = 18
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -611,6 +611,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE TABLE IF NOT EXISTS image_descriptions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+			name TEXT NOT NULL DEFAULT '',
 			description TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
@@ -987,6 +988,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
 		END;
 		CREATE VIRTUAL TABLE IF NOT EXISTS image_descriptions_fts USING fts5(
+			name,
 			description,
 			content=image_descriptions,
 			content_rowid=id
@@ -994,22 +996,22 @@ func New(dbPath, projectDir string) (*Store, error) {
 		DROP TRIGGER IF EXISTS image_descriptions_ai;
 		CREATE TRIGGER image_descriptions_ai AFTER INSERT ON image_descriptions
 		BEGIN
-			INSERT INTO image_descriptions_fts(rowid, description)
-			VALUES (new.id, new.description);
+			INSERT INTO image_descriptions_fts(rowid, name, description)
+			VALUES (new.id, new.name, new.description);
 		END;
 		DROP TRIGGER IF EXISTS image_descriptions_au;
 		CREATE TRIGGER image_descriptions_au AFTER UPDATE ON image_descriptions
 		BEGIN
-			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, description)
-			VALUES ('delete', old.id, old.description);
-			INSERT INTO image_descriptions_fts(rowid, description)
-			VALUES (new.id, new.description);
+			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, name, description)
+			VALUES ('delete', old.id, old.name, old.description);
+			INSERT INTO image_descriptions_fts(rowid, name, description)
+			VALUES (new.id, new.name, new.description);
 		END;
 		DROP TRIGGER IF EXISTS image_descriptions_ad;
 		CREATE TRIGGER image_descriptions_ad AFTER DELETE ON image_descriptions
 		BEGIN
-			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, description)
-			VALUES ('delete', old.id, old.description);
+			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, name, description)
+			VALUES ('delete', old.id, old.name, old.description);
 		END;
 		CREATE VIRTUAL TABLE IF NOT EXISTS image_ocr_fts USING fts5(
 			text,
@@ -6578,6 +6580,7 @@ type ImageOccurrence struct {
 // ImageSearchResult is a single image search hit.
 type ImageSearchResult struct {
 	Image       ImageInfo         `json:"image"`
+	Name        string            `json:"name,omitempty"`
 	Description string            `json:"description,omitempty"`
 	OCRText     string            `json:"ocr_text,omitempty"`
 	MatchSource string            `json:"match_source,omitempty"` // "description", "ocr", "both", "semantic", "similar"
@@ -6747,14 +6750,14 @@ func (s *Store) SearchImagesFiltered(query string, repo string, session string, 
 		if err := s.db.QueryRow(`
 			SELECT img.id, img.content_hash, img.original_path, img.mime_type,
 			       img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
-			       COALESCE(d.description,''), COALESCE(o.text,'')
+			       COALESCE(d.name,''), COALESCE(d.description,''), COALESCE(o.text,'')
 			FROM images img
 			LEFT JOIN image_descriptions d ON d.image_id = img.id
 			LEFT JOIN image_ocr o ON o.image_id = img.id
 			WHERE img.id = ?`, id).Scan(
 			&r.Image.ID, &r.Image.ContentHash, &origPath, &r.Image.MimeType,
 			&r.Image.Width, &r.Image.Height, &r.Image.PixelFormat, &r.Image.ByteSize,
-			&r.Image.CreatedAt, &r.Description, &r.OCRText,
+			&r.Image.CreatedAt, &r.Name, &r.Description, &r.OCRText,
 		); err != nil {
 			continue
 		}
@@ -6922,14 +6925,14 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 		if err := s.db.QueryRow(`
 			SELECT img.id, img.content_hash, img.original_path, img.mime_type,
 			       img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
-			       COALESCE(d.description,''), COALESCE(o.text,'')
+			       COALESCE(d.name,''), COALESCE(d.description,''), COALESCE(o.text,'')
 			FROM images img
 			LEFT JOIN image_descriptions d ON d.image_id = img.id
 			LEFT JOIN image_ocr o ON o.image_id = img.id
 			WHERE img.id = ?`, id).Scan(
 			&r.Image.ID, &r.Image.ContentHash, &origPath, &r.Image.MimeType,
 			&r.Image.Width, &r.Image.Height, &r.Image.PixelFormat, &r.Image.ByteSize,
-			&r.Image.CreatedAt, &r.Description, &r.OCRText,
+			&r.Image.CreatedAt, &r.Name, &r.Description, &r.OCRText,
 		); err != nil {
 			continue
 		}

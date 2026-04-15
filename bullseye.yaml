@@ -24,7 +24,14 @@ targets:
     - Idle reaping cleans up summarizer instances
     - mnemo_restore in fresh post-clear segment returns useful context
     - Token cost of summarizer < 10% of the session it tracks
-    context: mnemo maintains a live compacted context for each active session. When a session /clears, the compacted context is available instantly via mnemo_restore. Depends on jevon claude.Process / manager.Manager for Claude instance lifecycle.
+    context: |
+      mnemo maintains a live compacted context for each active session. When a session /clears, the compacted context is available instantly via mnemo_restore.
+
+      **Approach (decided 2026-04-08):** Sonnet 4 via claudia (~/work/github.com/marcelocantos/claudia — claudia.Agent / claudia.Pool / claudia.Registry). Pro Max 20X plan makes per-call cost effectively zero, and Sonnet wins on quality + sub-second latency over local models. claudia is the single LLM interface for mnemo (compaction now, agentic search later for T16).
+
+      Local Ollama backends (qwen3:8b ~7s, phi4:14b ~15s) remain a documented fallback for offline/zero-cost use; benchmarks captured in docs/targets.md. Architecture should keep the LLM call site backend-agnostic so the fallback path stays viable.
+
+      Blocked on T16: current acceptance assumes session identity survives /clear, which it doesn't. Reframe to traverse via session_chains once T16 lands.
     depends_on:
     - T16
     origin: targets.md bootstrap
