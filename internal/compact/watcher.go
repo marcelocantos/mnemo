@@ -153,11 +153,12 @@ func (w *Watcher) shouldExclude(sessionID string) bool {
 
 // sessionWorker runs compaction for a single session.
 type sessionWorker struct {
-	sessionID string
-	compactor *Compactor
-	cfg       WatcherConfig
-	lastSeen  time.Time
-	cancel    context.CancelFunc
+	sessionID    string
+	compactor    *Compactor
+	cfg          WatcherConfig
+	lastSeen     time.Time
+	cancel       context.CancelFunc
+	budgetWarned bool
 }
 
 func newSessionWorker(sessionID string, c *Compactor, cfg WatcherConfig) *sessionWorker {
@@ -182,7 +183,16 @@ func (sw *sessionWorker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := sw.compactor.Compact(ctx, sw.sessionID); err != nil && err != ErrNothingToCompact {
+			_, err := sw.compactor.Compact(ctx, sw.sessionID)
+			switch {
+			case err == nil, err == ErrNothingToCompact:
+				// normal idle ticks
+			case err == ErrBudgetExceeded:
+				if !sw.budgetWarned {
+					slog.Info("compact: session over budget, skipping further compactions", "session", sw.sessionID)
+					sw.budgetWarned = true
+				}
+			default:
 				slog.Warn("compact: compaction failed", "session", sw.sessionID, "err", err)
 			}
 		}

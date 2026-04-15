@@ -164,3 +164,37 @@ func scanCompactions(rows *sql.Rows) ([]Compaction, error) {
 	}
 	return out, nil
 }
+
+// SessionTokens returns the total input + output tokens consumed by
+// assistant messages in a session. Cache tokens are excluded — they
+// are not paid tokens in the same sense, and the AC for 🎯T10
+// measures summariser cost against "real" session cost.
+func (s *Store) SessionTokens(sessionID string) (input int64, output int64, err error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	row := s.db.QueryRow(`
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+		FROM entries
+		WHERE session_id = ? AND type = 'assistant'
+	`, sessionID)
+	if err := row.Scan(&input, &output); err != nil {
+		return 0, 0, fmt.Errorf("session tokens: %w", err)
+	}
+	return input, output, nil
+}
+
+// CompactionTokens returns the cumulative prompt + output tokens
+// consumed by every compaction run for a session.
+func (s *Store) CompactionTokens(sessionID string) (prompt int64, output int64, err error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	row := s.db.QueryRow(`
+		SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(output_tokens), 0)
+		FROM compactions
+		WHERE session_id = ?
+	`, sessionID)
+	if err := row.Scan(&prompt, &output); err != nil {
+		return 0, 0, fmt.Errorf("compaction tokens: %w", err)
+	}
+	return prompt, output, nil
+}

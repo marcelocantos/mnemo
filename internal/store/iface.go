@@ -43,4 +43,6 @@ type Backend interface {
 	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	ChainCompactions(sessionID string) ([]Compaction, error)
+	SessionTokens(sessionID string) (int64, int64, error)
+	CompactionTokens(sessionID string) (int64, int64, error)
 }

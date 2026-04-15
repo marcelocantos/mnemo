@@ -1127,6 +1127,18 @@ func (h *Handler) restore(args map[string]any) (string, bool, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Compacted context for session chain (%d span(s)):\n\n", len(compactions))
+
+	// Token-budget footer data: measure the running summariser cost
+	// against the session's own cost for this chain leaf. Surfaces the
+	// 🎯T10 AC6 invariant live.
+	var compIn, compOut, sessIn, sessOut int64
+	if in, out, err := h.mem.CompactionTokens(sessionID); err == nil {
+		compIn, compOut = in, out
+	}
+	if in, out, err := h.mem.SessionTokens(sessionID); err == nil {
+		sessIn, sessOut = in, out
+	}
+
 	for i, c := range compactions {
 		sid := c.SessionID
 		if len(sid) > 10 {
@@ -1165,6 +1177,20 @@ func (h *Handler) restore(args map[string]any) (string, bool, error) {
 		}
 		b.WriteByte('\n')
 	}
+
+	compTotal := compIn + compOut
+	sessTotal := sessIn + sessOut
+	if compTotal > 0 || sessTotal > 0 {
+		fmt.Fprintf(&b, "── Budget ──\n")
+		fmt.Fprintf(&b, "Compaction tokens: %d (prompt %d + output %d)\n", compTotal, compIn, compOut)
+		if sessTotal > 0 {
+			ratio := 100.0 * float64(compTotal) / float64(sessTotal)
+			fmt.Fprintf(&b, "Session tokens: %d  |  Compaction/session: %.2f%%  (target < 10%%)\n", sessTotal, ratio)
+		} else {
+			fmt.Fprintf(&b, "Session tokens: unknown yet  |  ratio unmeasurable\n")
+		}
+	}
+
 	return b.String(), false, nil
 }
 

@@ -173,6 +173,14 @@ func extraMethods(s *store.Store) map[string]mcpbridge.MethodFunc {
 		"ChainCompactions": makeMethod(func(p ChainCompactionsParams) (any, error) {
 			return s.ChainCompactions(p.SessionID)
 		}),
+		"SessionTokens": makeMethod(func(p ChainCompactionsParams) (any, error) {
+			in, out, err := s.SessionTokens(p.SessionID)
+			return map[string]int64{"input": in, "output": out}, err
+		}),
+		"CompactionTokens": makeMethod(func(p ChainCompactionsParams) (any, error) {
+			in, out, err := s.CompactionTokens(p.SessionID)
+			return map[string]int64{"input": in, "output": out}, err
+		}),
 	}
 }
 

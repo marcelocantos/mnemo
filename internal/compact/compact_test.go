@@ -19,6 +19,11 @@ type fakeStore struct {
 	msgs     []store.SessionMessage
 	compacts []store.Compaction
 	nextID   int64
+	// sessionIn / sessionOut simulate the session's own token usage
+	// (as it would be measured from entries table). Tests override
+	// these to drive the budget-guard logic.
+	sessionIn  int64
+	sessionOut int64
 }
 
 func (f *fakeStore) ReadSession(sessionID, role string, offset, limit int) ([]store.SessionMessage, error) {
@@ -54,6 +59,26 @@ func (f *fakeStore) LatestCompaction(sessionID string) (*store.Compaction, error
 	}
 	last := f.compacts[len(f.compacts)-1]
 	return &last, nil
+}
+
+func (f *fakeStore) SessionTokens(sessionID string) (int64, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessionIn, f.sessionOut, nil
+}
+
+func (f *fakeStore) CompactionTokens(sessionID string) (int64, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var in, out int64
+	for _, c := range f.compacts {
+		if c.SessionID != sessionID {
+			continue
+		}
+		in += int64(c.PromptTokens)
+		out += int64(c.OutputTokens)
+	}
+	return in, out, nil
 }
 
 type stubLLM struct {
@@ -183,6 +208,71 @@ func TestCompactNothingToDo(t *testing.T) {
 	}
 	if llm.calls != 0 {
 		t.Fatalf("LLM should not have been called, was: %d", llm.calls)
+	}
+}
+
+// TestCompactBudgetExceeded verifies that once the cumulative
+// compaction tokens reach MaxTokenRatio of the session tokens, further
+// compactions return ErrBudgetExceeded without invoking the LLM.
+// This closes 🎯T10 AC6.
+func TestCompactBudgetExceeded(t *testing.T) {
+	s := &fakeStore{
+		session: "sess-1",
+		msgs: []store.SessionMessage{
+			{ID: 1, Role: "user", Text: "question"},
+			{ID: 2, Role: "assistant", Text: "answer"},
+		},
+		sessionIn:  900,
+		sessionOut: 100,
+	}
+	// Seed an existing compaction worth 10% of session (1000 tokens),
+	// so the running ratio is exactly at the 10% bound and further
+	// compactions must be refused.
+	_, err := s.PutCompaction(store.Compaction{
+		SessionID:    "sess-1",
+		EntryIDFrom:  0,
+		EntryIDTo:    0,
+		PromptTokens: 80,
+		OutputTokens: 20,
+		Summary:      "prior span",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	llm := &stubLLM{response: LLMResult{Text: `{"summary":"should not run"}`}}
+	c := New(s, llm, Config{})
+	_, err = c.Compact(context.Background(), "sess-1")
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
+	}
+	if llm.calls != 0 {
+		t.Fatalf("LLM must not be called when over budget, was: %d", llm.calls)
+	}
+}
+
+// TestCompactBudgetUnmeasurableAllowed verifies that a session with
+// zero known session tokens (e.g. no assistant messages ingested yet)
+// is allowed through the budget gate — otherwise the first compaction
+// could never fire.
+func TestCompactBudgetUnmeasurableAllowed(t *testing.T) {
+	s := &fakeStore{
+		session: "sess-1",
+		msgs: []store.SessionMessage{
+			{ID: 1, Role: "user", Text: "hi"},
+			{ID: 2, Role: "assistant", Text: "hello"},
+		},
+		// sessionIn/sessionOut default to zero
+	}
+	llm := &stubLLM{response: LLMResult{
+		Text: `{"summary":"first"}`, PromptTokens: 50, OutputTokens: 20,
+	}}
+	c := New(s, llm, Config{})
+	if _, err := c.Compact(context.Background(), "sess-1"); err != nil {
+		t.Fatalf("Compact should succeed when session tokens unknown: %v", err)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("expected 1 LLM call, got %d", llm.calls)
 	}
 }
 

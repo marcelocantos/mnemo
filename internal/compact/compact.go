@@ -78,6 +78,8 @@ type storeBackend interface {
 	ReadSession(sessionID string, role string, offset int, limit int) ([]store.SessionMessage, error)
 	PutCompaction(c store.Compaction) (int64, error)
 	LatestCompaction(sessionID string) (*store.Compaction, error)
+	SessionTokens(sessionID string) (int64, int64, error)
+	CompactionTokens(sessionID string) (int64, int64, error)
 }
 
 // Compactor produces compactions for sessions on demand.
@@ -86,6 +88,9 @@ type Compactor struct {
 	caller   LLMCaller
 	maxMsgs  int
 	maxChars int
+	// maxRatio caps the cumulative summariser token cost as a fraction
+	// of the tracked session's token cost (🎯T10 AC6). Default 0.10.
+	maxRatio float64
 }
 
 // Config tunes the compactor. Zero values mean "use defaults".
@@ -95,16 +100,30 @@ type Config struct {
 	MaxMessages int
 	// MaxTranscriptChars bounds the rendered transcript size. Default: 60000.
 	MaxTranscriptChars int
+	// MaxTokenRatio is the upper bound on (cumulative compaction tokens)
+	// divided by (session tokens). When the running ratio already meets
+	// or exceeds this bound, further compactions for that session are
+	// skipped via ErrBudgetExceeded. Default: 0.10 (10%).
+	MaxTokenRatio float64
 }
 
 // New wires a Compactor to a Store-like backend and an LLM caller.
 func New(s storeBackend, caller LLMCaller, cfg Config) *Compactor {
-	c := &Compactor{store: s, caller: caller, maxMsgs: cfg.MaxMessages, maxChars: cfg.MaxTranscriptChars}
+	c := &Compactor{
+		store:    s,
+		caller:   caller,
+		maxMsgs:  cfg.MaxMessages,
+		maxChars: cfg.MaxTranscriptChars,
+		maxRatio: cfg.MaxTokenRatio,
+	}
 	if c.maxMsgs <= 0 {
 		c.maxMsgs = 500
 	}
 	if c.maxChars <= 0 {
 		c.maxChars = 60000
+	}
+	if c.maxRatio <= 0 {
+		c.maxRatio = 0.10
 	}
 	return c
 }
@@ -113,11 +132,47 @@ func New(s storeBackend, caller LLMCaller, cfg Config) *Compactor {
 // most recent compaction. Not a real error — callers poll on this.
 var ErrNothingToCompact = errors.New("compact: nothing new to compact")
 
+// ErrBudgetExceeded indicates the cumulative summariser cost for this
+// session has reached the configured ratio of the session's own token
+// cost. The watcher swallows this like ErrNothingToCompact.
+var ErrBudgetExceeded = errors.New("compact: token budget exceeded for session")
+
+// checkBudget returns ErrBudgetExceeded when the cumulative compaction
+// token cost already meets or exceeds maxRatio of the session's own
+// token cost. Unmeasurable sessions (zero known session tokens) are
+// allowed through — the first compaction has to run before there is
+// anything to measure against.
+func (c *Compactor) checkBudget(sessionID string) error {
+	compIn, compOut, err := c.store.CompactionTokens(sessionID)
+	if err != nil {
+		return fmt.Errorf("compaction tokens: %w", err)
+	}
+	sessIn, sessOut, err := c.store.SessionTokens(sessionID)
+	if err != nil {
+		return fmt.Errorf("session tokens: %w", err)
+	}
+	sessTotal := sessIn + sessOut
+	if sessTotal == 0 {
+		return nil
+	}
+	ratio := float64(compIn+compOut) / float64(sessTotal)
+	if ratio >= c.maxRatio {
+		return ErrBudgetExceeded
+	}
+	return nil
+}
+
 // Compact distills the next window of a session's transcript into a
 // Compaction row. Picks up after the latest existing compaction's
 // entry_id_to (0 if none). Returns ErrNothingToCompact if no new
-// substantive messages have accumulated.
+// substantive messages have accumulated, or ErrBudgetExceeded if the
+// cumulative summariser cost has reached MaxTokenRatio of the
+// session's own token cost (🎯T10 AC6).
 func (c *Compactor) Compact(ctx context.Context, sessionID string) (*store.Compaction, error) {
+	if err := c.checkBudget(sessionID); err != nil {
+		return nil, err
+	}
+
 	latest, err := c.store.LatestCompaction(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("latest compaction: %w", err)

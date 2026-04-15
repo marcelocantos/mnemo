@@ -447,3 +447,32 @@ func (p *Proxy) ChainCompactions(sessionID string) ([]store.Compaction, error) {
 	var results []store.Compaction
 	return results, json.Unmarshal(raw, &results)
 }
+
+type tokenPair struct {
+	Input  int64 `json:"input"`
+	Output int64 `json:"output"`
+}
+
+func (p *Proxy) SessionTokens(sessionID string) (int64, int64, error) {
+	raw, err := p.client.Call("SessionTokens", ChainCompactionsParams{SessionID: sessionID})
+	if err != nil {
+		return 0, 0, err
+	}
+	var r tokenPair
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return 0, 0, err
+	}
+	return r.Input, r.Output, nil
+}
+
+func (p *Proxy) CompactionTokens(sessionID string) (int64, int64, error) {
+	raw, err := p.client.Call("CompactionTokens", ChainCompactionsParams{SessionID: sessionID})
+	if err != nil {
+		return 0, 0, err
+	}
+	var r tokenPair
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return 0, 0, err
+	}
+	return r.Input, r.Output, nil
+}
