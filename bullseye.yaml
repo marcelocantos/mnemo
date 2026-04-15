@@ -513,9 +513,10 @@ targets:
     achieved: 2026-04-15
   T25.2:
     name: Compactor and /c reworked around connection identity, with ctrl-c + continue recovery
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
+    actual_cost: 5.0
     acceptance:
     - compactions table gains a connection_id column (nullable for pre-upgrade rows) alongside the existing session_id.
     - compact.Watcher spawns one compactor goroutine per live connection (not per session); idle reaping moves from 'absent from LiveSessions' to 'connection closed'.
@@ -543,6 +544,7 @@ targets:
     - user-facing
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T25.3:
     name: session_chains records only definitive observations; chain inference is a query-time function
     status: identified
