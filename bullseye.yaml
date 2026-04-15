@@ -584,34 +584,34 @@ targets:
     discovered: 2026-04-15
     achieved: 2026-04-15
   T26:
-    name: Use sqlift for schema migrations; stop wiping the DB on bumps
+    name: Adopt sqlpipe.Database as mnemo's SQLite layer
     status: identified
-    value: 8.0
-    cost: 3.0
+    value: 13.0
+    cost: 8.0
     acceptance:
-    - mnemo imports sqlift (either as the standalone github.com/marcelocantos/sqlift/go/sqlift, or via sqlpipe's Database if that broader switchover happens at the same time).
-    - A single authoritative schema.sql file holds the desired schema. On Store.New, sqlift.Apply diffs it against the current DB and applies the deltas in-place. Ephemeral data (daemon_connections, connection_sessions, session_chains definitive rows, compactions) is preserved by construction — sqlift's destructive-operation guard is left on so accidental drops cause errors, not silent data loss.
-    - The existing wipe-on-mismatch branch in Store.New is deleted. There is no schemaVersion integer any more; sqlift compares full DDL, so the authoritative schema file IS the version.
-    - 'Test: seed rows into each of the four ephemeral tables, make an additive schema change (new column, new index, new table), reopen the store, confirm the old rows still exist.'
-    - 'Test: make a destructive schema change (drop a column) without the opt-in flag, reopen the store, confirm it errors rather than silently drops the data.'
-    - The existing derived-data tables (entries, messages, session_meta, session_summary, memories, skills, audit_entries, targets, plans, docs, ci_runs, git_commits, github_prs, github_issues, images, etc.) no longer get wiped on schema change either — but if a schema change ever genuinely requires a rebuild from JSONL (e.g. an entry-parsing bug that corrupted old rows), that can be triggered explicitly, not as an unconditional side effect of bumping a version constant.
+    - mnemo's Store replaces the database/sql + mattn/go-sqlite3 layer with sqlpipe.Database as the primary DB handle. Calls like s.db.Exec, s.db.Query, and s.db.QueryRow become their sqlpipe.Database equivalents; s.rwmu serialisation is reviewed against sqlpipe's concurrency model.
+    - 'Schema migration via sqlift is live: a single authoritative schema.sql file is the source of truth. At Store.New, sqlpipe.Database''s built-in sqlift diffs the current DB against schema.sql and applies the delta. The wipe-on-schemaVersion-mismatch branch is deleted.'
+    - 'Ephemeral data (daemon_connections, connection_sessions, session_chains, compactions) survives schema bumps by construction — sqlift''s destructive-op guard is left on. Test: write rows to each ephemeral table, make an additive schema change, reopen, confirm rows intact.'
+    - sqldeep transpilation is active on all queries passing through sqlpipe.Database, not just mnemo_query. Callers can use the `FROM ... SELECT { ... }` JSON-object syntax anywhere. No regression in existing tool outputs.
+    - Replication primitives (Master/Replica/Peer) are available for 🎯T15 federation when that target comes up — not wired yet, but reachable via the same sqlpipe.Database handle that normal queries use.
+    - 'CGo build flags are updated: sqlpipe vendors its own SQLite, so the mattn/go-sqlite3 -tags sqlite_fts5 path may no longer apply. make bullseye green end-to-end on darwin and linux.'
+    - All existing tests pass unchanged (behaviour-preserving refactor for the DB layer).
     context: |-
-      The current scheme deletes `mnemo.db` on any `schemaVersion` mismatch and rebuilds from JSONL. That was safe when every table's contents were derivable from disk. v0.18.0 changed this: four tables now hold ephemeral, capture-or-lose-it data that cannot be recovered from JSONL (daemon_connections, connection_sessions, session_chains definitive rows, compactions).
+      Reframed 2026-04-16. Originally scoped as "use sqlift to stop wiping the DB", with sqlpipe called out as an optional superset. User direction: the sqlpipe adoption needs to happen regardless — schema migration, sqldeep everywhere, and replication primitives are all foundation work that benefits mnemo independent of any one feature. Treat the DB-layer switch as the primary work item and the three capabilities as inherent, not optional.
 
-      We already own the right tool for this. **sqlift** (github.com/marcelocantos/sqlift) does declarative SQLite schema migration via structural diffing — maintain the schema as a single SQL file and sqlift computes the delta at startup. No numbered migration files, no ordering conflicts. It has a destructive-operation guard that refuses to drop tables/columns without explicit opt-in, which is exactly the safety net we need for ephemeral data.
+      **What sqlpipe.Database brings:**
 
-      **Packaging choice, left to implementation:**
+      - **sqlift** — declarative schema migration via structural diffing. Schema lives in a single SQL file; sqlift computes and applies deltas at startup. Destructive-operation guard prevents accidental data loss. Replaces the wipe-and-rebuild machinery that would otherwise destroy ephemeral data (daemon_connections, connection_sessions, session_chains, compactions) on every schema bump.
+      - **sqldeep** — JSON5-like SQL transpilation. Currently mnemo uses sqldeep selectively in mnemo_query; under sqlpipe every query transpiles by default. The JSON object construction syntax becomes available anywhere.
+      - **Replication primitives** (Master/Replica/Peer/Relay) — bidirectional, transport-agnostic. Load-bearing for 🎯T15 federation if/when that lands; zero cost to have them sitting dormant until then.
 
-      - *Standalone sqlift only*: import `github.com/marcelocantos/sqlift/go/sqlift`, call Apply at startup, keep the existing `database/sql` + `mattn/go-sqlite3` layer for normal operations. Minimal delta to mnemo's existing code.
-      - *Full sqlpipe switchover*: sqlpipe bundles sqlift + sqldeep + replication. Adopting `sqlpipe.Database` as the primary DB handle would give auto-migration, sqldeep-by-default on every query, and replication primitives that would be load-bearing for 🎯T15 federation. Bigger mechanical refactor (~7000 LoC of SQL call sites) but a coherent superset.
+      **Scope: the DB layer rewrite is the expensive part.** mnemo has ~7000 lines of Go with hundreds of `s.db.Exec` / `s.db.Query` / `s.db.QueryRow` sites, plus the `s.rwmu` read-write lock coordinating them. Each site becomes a sqlpipe.Database equivalent. Tests that seed DB state using `sql.DB` need rewriting to use `sqlpipe.Database`. The CGo build flags for FTS5 likely change since sqlpipe vendors its own SQLite.
 
-      The standalone-sqlift path is sufficient for this target's goal (preserve ephemeral data across schema bumps). The sqlpipe switchover is a better framing for a later target that sits at the intersection of T15 (federation needs replication) and this one.
-
-      We got away with wipe-and-rebuild for v0.18.0 because the ephemeral tables were brand new \u2014 no data to preserve. Every schema bump from here on has teeth unless this target ships first.
+      **Sequencing:** land this before the next schema bump. v0.18.0 introduced the ephemeral tables; v0.19.0 has no committed schema changes yet, so the window to switch is now before any data is captured that would need migration. Practically: T26 and 🎯T22 (Windows) are independent; T26 and 🎯T15 (federation) are coupled (federation will use sqlpipe's replication).
 
       Discovered 2026-04-16 during /release v0.18.0 smoke testing.</context>
-      <parameter name="origin">discovered while observing v0.18.0 reindex; sqlift was the known tool</parameter>
-      <parameter name="tags">["migration", "schema", "sqlift", "ephemeral-data", "durability"]</parameter>
+      <parameter name="origin">v0.18.0 release exposed the wipe-and-rebuild hazard with ephemeral data</parameter>
+      <parameter name="tags">["db-layer", "sqlpipe", "sqlift", "sqldeep", "durability", "foundation"]</parameter>
       </invoke>
     origin: manual
     discovered: 2026-04-16
