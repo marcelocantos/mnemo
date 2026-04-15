@@ -50,6 +50,14 @@ type Store struct {
 	liveMu        sync.Mutex
 	liveCache     map[string]int // sessionID → PID
 	liveCacheTime time.Time
+
+	// Image-sidecar concurrency limits: each new image fires one
+	// goroutine per pipeline (OCR, describer, embedder); the semaphores
+	// cap fanout so the system isn't swamped when many images arrive at
+	// once. Initialized in New; nil-safe reads via acquireSidecarSlot.
+	ocrSem       chan struct{}
+	describerSem chan struct{}
+	embedderSem  chan struct{}
 }
 
 // SetWorkspaceRoots configures the filesystem roots under which repo-
@@ -1125,10 +1133,17 @@ func New(dbPath, projectDir string) (*Store, error) {
 	// re-reading the first entry of each JSONL file.
 	backfillSessionMeta(db, projectDir)
 
+	n := runtime.NumCPU()
+	if n < 1 {
+		n = 1
+	}
 	s := &Store{
-		db:         db,
-		projectDir: projectDir,
-		offsets:    make(map[string]int64),
+		db:           db,
+		projectDir:   projectDir,
+		offsets:      make(map[string]int64),
+		ocrSem:       make(chan struct{}, n),
+		describerSem: make(chan struct{}, n),
+		embedderSem:  make(chan struct{}, n),
 	}
 
 	rows, err := db.Query("SELECT path, offset FROM ingest_state")
@@ -5474,7 +5489,7 @@ func (s *Store) ingestFile(path string) error {
 			var raw []byte
 			var ts string
 			if rows.Scan(&id, &raw, &ts) == nil {
-				ingestImagesForEntry(s.db, id, sessionID, raw, ts)
+				ingestImagesForEntry(s, id, sessionID, raw, ts)
 			}
 		}
 	}()

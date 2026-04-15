@@ -116,8 +116,9 @@ func recordOccurrence(db *sql.DB, imageID int64, entryID int64, messageID int64,
 
 // ingestImagesForEntry extracts inline base64 images from a raw JSONL entry
 // and stores them in the images/image_occurrences tables.
-// Called during ingest for user/assistant entries.
-func ingestImagesForEntry(db *sql.DB, entryID int64, sessionID string, rawJSON []byte, occurredAt string) {
+// Called during ingest for user/assistant entries. Triggers per-image
+// sidecar processing (OCR / description / embedding) for each new image.
+func ingestImagesForEntry(s *Store, entryID int64, sessionID string, rawJSON []byte, occurredAt string) {
 	var entry rawEntry
 	if json.Unmarshal(rawJSON, &entry) != nil {
 		return
@@ -152,18 +153,20 @@ func ingestImagesForEntry(db *sql.DB, entryID int64, sessionID string, rawJSON [
 			mimeType = "image/png"
 		}
 
-		imageID, err := storeImage(db, imgData, mimeType, "")
+		imageID, err := storeImage(s.db, imgData, mimeType, "")
 		if err != nil {
 			slog.Warn("store image failed", "session", sessionID, "err", err)
 			continue
 		}
 
-		recordOccurrence(db, imageID, entryID, 0, sessionID, "inline", occurredAt)
+		recordOccurrence(s.db, imageID, entryID, 0, sessionID, "inline", occurredAt)
+		s.triggerImageSidecars(imageID, imgData, mimeType)
 	}
 }
 
-// ingestImageFromPath loads and stores an image file referenced by path.
-func ingestImageFromPath(db *sql.DB, path string, entryID int64, messageID int64, sessionID string, occurredAt string) {
+// ingestImageFromPath loads and stores an image file referenced by path,
+// then triggers per-image sidecar processing.
+func ingestImageFromPath(s *Store, path string, entryID int64, messageID int64, sessionID string, occurredAt string) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
@@ -177,13 +180,50 @@ func ingestImageFromPath(db *sql.DB, path string, entryID int64, messageID int64
 	}
 
 	mimeType := extToMime(ext)
-	imageID, err := storeImage(db, data, mimeType, path)
+	imageID, err := storeImage(s.db, data, mimeType, path)
 	if err != nil {
 		slog.Warn("store image from path failed", "path", path, "err", err)
 		return
 	}
 
-	recordOccurrence(db, imageID, entryID, messageID, sessionID, "path", occurredAt)
+	recordOccurrence(s.db, imageID, entryID, messageID, sessionID, "path", occurredAt)
+	s.triggerImageSidecars(imageID, data, mimeType)
+}
+
+// triggerImageSidecars spawns one goroutine per sidecar pipeline (OCR,
+// description, embedding) for a single image. Each goroutine acquires a
+// semaphore slot (capped at runtime.NumCPU() per pipeline) so that a burst
+// of new images cannot swamp the system with concurrent claude-p and
+// Python subprocesses. If the backend for a given pipeline is unavailable
+// (no tesseract, no ANTHROPIC auth, no uv) the goroutine is a cheap no-op.
+func (s *Store) triggerImageSidecars(imageID int64, data []byte, mimeType string) {
+	if s == nil || s.db == nil {
+		return
+	}
+	// OCR.
+	if s.ocrSem != nil {
+		go func() {
+			s.ocrSem <- struct{}{}
+			defer func() { <-s.ocrSem }()
+			ocrOneImage(s.db, imageID, data)
+		}()
+	}
+	// Description.
+	if s.describerSem != nil {
+		go func() {
+			s.describerSem <- struct{}{}
+			defer func() { <-s.describerSem }()
+			describeOneImage(s.db, imageID, data, mimeType)
+		}()
+	}
+	// Embedding.
+	if s.embedderSem != nil {
+		go func() {
+			s.embedderSem <- struct{}{}
+			defer func() { <-s.embedderSem }()
+			embedOneImage(s.db, imageID, data, mimeType)
+		}()
+	}
 }
 
 // extToMime maps common image extensions to MIME types.
@@ -237,7 +277,7 @@ func backfillImages(s *Store) {
 
 	inlineCount := 0
 	for _, e := range entries {
-		ingestImagesForEntry(s.db, e.id, e.sessionID, e.raw, e.ts)
+		ingestImagesForEntry(s, e.id, e.sessionID, e.raw, e.ts)
 		inlineCount++
 	}
 
@@ -278,7 +318,7 @@ func backfillImages(s *Store) {
 
 	pathCount := 0
 	for _, m := range msgs {
-		ingestImageFromPath(s.db, m.filePath, m.entryID, m.id, m.sessionID, m.ts)
+		ingestImageFromPath(s, m.filePath, m.entryID, m.id, m.sessionID, m.ts)
 		pathCount++
 	}
 

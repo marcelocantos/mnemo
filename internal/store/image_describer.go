@@ -28,15 +28,14 @@ var describerOnce sync.Once
 
 const (
 	describerBatchSize  = 10
-	describerPollEvery  = 5 * time.Minute
 	describerModelLabel = "claude-code"
 	maxImageDimension   = 1568 // downscale images beyond this longest edge
 )
 
-// describerWorkers returns the number of concurrent claude -p invocations
-// the describer should run. Capped at GOMAXPROCS; the caller can bound
-// it further via CPU/GPU pressure if needed.
-func describerWorkers() int {
+// describerBackfillWorkers returns the number of concurrent claude -p
+// invocations the backfill drain should run. Capped at runtime.NumCPU()
+// so it matches the per-pipeline semaphore used on the forward path.
+func describerBackfillWorkers() int {
 	n := runtime.NumCPU()
 	if n < 1 {
 		return 1
@@ -80,10 +79,11 @@ type pendingImage struct {
 	mimeType string
 }
 
-// StartImageDescriber launches background workers that batch undescribed
-// images and describe them via claude -p in parallel. Workers pool up to
-// runtime.NumCPU() concurrent claude invocations. Safe to call multiple
-// times.
+// StartImageDescriber runs one backfill drain over all undescribed
+// images, using up to runtime.NumCPU() parallel claude -p batches of 10.
+// Returns as soon as the queue is empty. Fresh images that arrive after
+// startup are handled per-image via describeOneImage, triggered by
+// ingestImagesForEntry / ingestImageFromPath.
 func (s *Store) StartImageDescriber() {
 	if _, err := exec.LookPath("claude"); err != nil {
 		describerOnce.Do(func() {
@@ -91,23 +91,20 @@ func (s *Store) StartImageDescriber() {
 		})
 		return
 	}
-	w := describerWorkers()
-	slog.Info("starting image describer workers", "workers", w, "batch_size", describerBatchSize)
+	w := describerBackfillWorkers()
+	slog.Info("starting describer backfill", "workers", w, "batch_size", describerBatchSize)
+	var wg sync.WaitGroup
 	for range w {
-		go imageDescriberWorker(s.db)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			drainDescriberQueue(s.db)
+		}()
 	}
-}
-
-// imageDescriberWorker polls for undescribed images and describes them in
-// batches. Each worker drains its queue then sleeps until the next poll.
-func imageDescriberWorker(db *sql.DB) {
-	ticker := time.NewTicker(describerPollEvery)
-	defer ticker.Stop()
-
-	drainDescriberQueue(db)
-	for range ticker.C {
-		drainDescriberQueue(db)
-	}
+	go func() {
+		wg.Wait()
+		slog.Debug("describer backfill drained")
+	}()
 }
 
 // drainDescriberQueue processes pending batches until the queue is empty.
@@ -123,6 +120,29 @@ func drainDescriberQueue(db *sql.DB) {
 		}
 		describeBatchAndStore(db, batch)
 	}
+}
+
+// describeOneImage processes a single image through claude -p. Called on
+// the forward path when a new image is ingested. Idempotent via the
+// INSERT OR IGNORE claim — if another worker (including backfill) has
+// already claimed this image, this call is a cheap no-op.
+func describeOneImage(db *sql.DB, imageID int64, data []byte, mimeType string) {
+	if _, err := exec.LookPath("claude"); err != nil {
+		return
+	}
+	// Claim via placeholder row; skip if already claimed/done.
+	res, err := db.Exec(`
+		INSERT OR IGNORE INTO image_descriptions
+			(image_id, name, description, model, error)
+		VALUES (?, '', '', ?, 'claiming')`,
+		imageID, describerModelLabel)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return // already claimed or described
+	}
+	describeBatchAndStore(db, []pendingImage{{id: imageID, data: data, mimeType: mimeType}})
 }
 
 // claimPendingBatch atomically claims up to n undescribed images by

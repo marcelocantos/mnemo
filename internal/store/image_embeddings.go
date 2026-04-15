@@ -16,14 +16,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
-	"time"
 )
 
-const (
-	embedderWorkers   = 2
-	embedderPollDelay = 5 * time.Minute
-	embedScriptPath   = "tools/embed-clip/embed.py"
-)
+const embedScriptPath = "tools/embed-clip/embed.py"
 
 // embedderOnce ensures the "uv not available" warning is logged only once.
 var embedderOnce sync.Once
@@ -204,8 +199,10 @@ func cosineSimilarity(a, b []float32) float32 {
 	return float32(dot / (math.Sqrt(normA) * math.Sqrt(normB)))
 }
 
-// StartImageEmbedder launches background goroutines that generate CLIP embeddings
-// for images that don't yet have one. No-op if uv or the embed script is unavailable.
+// StartImageEmbedder runs one backfill pass over all images without
+// embeddings. Returns when the queue is empty. Fresh images arriving
+// after startup are handled per-image via embedOneImage, triggered by
+// ingestImagesForEntry / ingestImageFromPath.
 func (s *Store) StartImageEmbedder() {
 	if !embedBackendAvailable() {
 		embedderOnce.Do(func() {
@@ -213,21 +210,26 @@ func (s *Store) StartImageEmbedder() {
 		})
 		return
 	}
-
-	for range embedderWorkers {
-		go imageEmbedderWorker(s)
-	}
+	slog.Info("starting embedder backfill")
+	go processUnembeddedImages(s)
 }
 
-// imageEmbedderWorker polls for images without embeddings and generates them.
-func imageEmbedderWorker(s *Store) {
-	ticker := time.NewTicker(embedderPollDelay)
-	defer ticker.Stop()
-
-	processUnembeddedImages(s)
-	for range ticker.C {
-		processUnembeddedImages(s)
+// embedOneImage generates and stores an embedding for a single image.
+// Idempotent: skips if an embedding already exists.
+func embedOneImage(db *sql.DB, imageID int64, data []byte, mimeType string) {
+	if !embedBackendAvailable() {
+		return
 	}
+	var exists int
+	if err := db.QueryRow(`SELECT 1 FROM image_embeddings WHERE image_id = ? LIMIT 1`, imageID).Scan(&exists); err == nil {
+		return
+	}
+	model, dim, vector, err := runEmbedImage(data, mimeType)
+	if err != nil {
+		storeEmbedding(db, imageID, "", 0, nil, err.Error())
+		return
+	}
+	storeEmbedding(db, imageID, model, dim, vector, "")
 }
 
 // processUnembeddedImages generates embeddings for all images without one.

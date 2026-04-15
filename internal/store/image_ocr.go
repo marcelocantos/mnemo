@@ -11,14 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"time"
 )
 
-const (
-	ocrWorkers   = 2
-	ocrBatchSize = 50
-	ocrPollEvery = 5 * time.Minute
-)
+const ocrBatchSize = 50
 
 // ocrOnce ensures the "no OCR backend" warning is logged only once.
 var ocrOnce sync.Once
@@ -80,9 +75,10 @@ func runTesseractOCR(imageBytes []byte) (string, *float64, error) {
 	return stdout.String(), nil, nil
 }
 
-// StartImageOCR launches background workers that run OCR on images that
-// don't yet have an image_ocr entry. Safe to call multiple times — workers
-// exit when there are no more pending images and re-poll every 5 minutes.
+// StartImageOCR runs one backfill pass over all images without OCR
+// entries. Returns when the queue is empty. Fresh images that arrive
+// after startup are handled per-image via ocrOneImage, triggered by
+// ingestImagesForEntry / ingestImageFromPath.
 func (s *Store) StartImageOCR() {
 	backend := ocrBackend()
 	if backend == "" {
@@ -91,21 +87,24 @@ func (s *Store) StartImageOCR() {
 		})
 		return
 	}
-	slog.Info("starting image OCR workers", "backend", backend, "workers", ocrWorkers)
-	for range ocrWorkers {
-		go imageOCRWorker(s.db, backend)
-	}
+	slog.Info("starting OCR backfill", "backend", backend)
+	go processPendingOCR(s.db, backend)
 }
 
-// imageOCRWorker polls for images without OCR entries and processes them.
-func imageOCRWorker(db *sql.DB, backend string) {
-	ticker := time.NewTicker(ocrPollEvery)
-	defer ticker.Stop()
-
-	processPendingOCR(db, backend)
-	for range ticker.C {
-		processPendingOCR(db, backend)
+// ocrOneImage runs OCR on a single newly-ingested image. Idempotent via
+// the image_ocr table's PK on image_id (INSERT OR IGNORE semantics here
+// by checking existence first).
+func ocrOneImage(db *sql.DB, imageID int64, data []byte) {
+	backend := ocrBackend()
+	if backend == "" {
+		return
 	}
+	// Skip if already processed.
+	var exists int
+	if err := db.QueryRow(`SELECT 1 FROM image_ocr WHERE image_id = ? LIMIT 1`, imageID).Scan(&exists); err == nil {
+		return
+	}
+	ocrAndStore(db, imageID, data, backend)
 }
 
 // processPendingOCR runs OCR on images that have no image_ocr row yet.
