@@ -117,7 +117,7 @@ targets:
     achieved: 2026-04-07
   T15:
     name: Windows VM Claude Code transcripts are indexed in realtime alongside macOS sessions
-    status: identified
+    status: converging
     value: 8.0
     cost: 5.0
     observable: true
@@ -128,7 +128,18 @@ targets:
     - mnemo receives pigeon notifications and ingests the corresponding files from the SMB mount path
     - mnemo_search and mnemo_sessions return results from both macOS and Windows sessions
     - Graceful degradation when the VM/mount is unavailable — no crashes, warns in log, skips unavailable dirs
-    context: The user runs Claude Code on both macOS and a Parallels Windows 11 VM. The Windows filesystem is accessible via SMB mount at ~/winc/. Currently mnemo only indexes ~/.claude/projects/ (macOS-local). Windows session transcripts at ~/winc/Users/marcelo/.claude/projects/ are invisible to mnemo. A config file (~/.mnemo/config.json) specifies extra project directories. A small Windows stub app watches %USERPROFILE%\.claude\projects\ using ReadDirectoryChangesW and sends change notifications to mnemo via pigeon (marcelocantos/pigeon WebTransport relay). mnemo listens for pigeon notifications and ingests the changed files from the SMB mount. The config must gracefully handle VM unavailability (mount not present). fsnotify does not work over SMB, so native Windows notification + pigeon relay is the chosen approach.
+    context: |-
+      The user runs Claude Code on both macOS and a Parallels Windows 11 VM. The Windows filesystem is accessible via SMB mount at ~/winc/. Currently mnemo only indexes ~/.claude/projects/ (macOS-local). Windows session transcripts at ~/winc/Users/marcelo/.claude/projects/ are invisible to mnemo. A config file (~/.mnemo/config.json) specifies extra project directories. A small Windows stub app watches %USERPROFILE%\.claude\projects\ using ReadDirectoryChangesW and sends change notifications to mnemo via pigeon (marcelocantos/pigeon WebTransport relay). mnemo listens for pigeon notifications and ingests the changed files from the SMB mount. The config must gracefully handle VM unavailability (mount not present). fsnotify does not work over SMB, so native Windows notification + pigeon relay is the chosen approach.
+
+      **Progress (2026-04-15):** Config + startup ingest half shipped.
+      - ✓ config.json `extra_project_dirs` parses and wires through
+      - ✓ daemon ingests JSONL from configured extra dirs at startup
+      - ✓ missing/unavailable extras skip with a warn (graceful degradation)
+      - ✓ search/sessions jointly return results from primary + extras (same FTS5 index)
+      - ✗ Windows stub app (ReadDirectoryChangesW watcher + pigeon notifier)
+      - ✗ mnemo-side pigeon listener that re-ingests on notification
+
+      User can already point at `~/winc/Users/marcelo/.claude/projects/` today and get session-history indexing on daemon restart. Realtime Windows→mnemo update (pigeon piece) is the remaining work.
     tags:
     - ingest
     - cross-platform
