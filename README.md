@@ -1,14 +1,54 @@
 # mnemo
 
 Searchable memory across all Claude Code session transcripts. Runs as
-a persistent HTTP-based MCP server — available in every Claude Code
-session.
+a persistent MCP server — available in every Claude Code session.
 
 mnemo indexes JSONL transcript files from `~/.claude/projects/`,
-maintains a realtime SQLite FTS5 index, and exposes search/query tools
-via MCP. New transcripts are picked up automatically via filesystem
-watching. All content block types are indexed — text, tool use, tool
-results, and thinking blocks.
+maintains a realtime SQLite FTS5 index, and exposes 30+ tools via MCP.
+New transcripts are picked up automatically via filesystem watching.
+
+**What it indexes:**
+
+- **Session transcripts** — all content block types (text, tool use,
+  tool results, thinking), with full-text search and surrounding context
+- **Images** — inline and file-path images from transcripts, with AI
+  descriptions, Apple Vision OCR, and CLIP embeddings for semantic and
+  visual-similarity search
+- **Git commits** — full history from all tracked repos, searchable by
+  message, author, date
+- **GitHub PRs and issues** — backfilled via `gh` CLI across all repos
+  in session history
+- **CI/CD runs** — GitHub Actions history with failure log indexing
+- **Project documentation** — markdown, plain text, and PDF files from
+  `docs/`, `design/`, `notes/`, repo root, and more
+- **Auto-memory files** — cross-project memory search across all
+  `~/.claude/projects/*/memory/` directories
+- **Skills** — `~/.claude/skills/*.md` discovery and search
+- **CLAUDE.md configs** — project instructions from all repos
+- **Convergence targets** — `docs/targets.md` from all repos
+- **Implementation plans** — `.planning/` directories from all repos
+- **Audit logs** — `docs/audit-log.md` from all repos
+- **Decisions** — automatically detected proposal+confirmation pairs
+  across all sessions
+
+**What else it does:**
+
+- **Live session monitoring** — per-session CPU%, RSS, and memory
+  pressure for active Claude Code processes
+- **Session chain detection** — links `/clear`-bounded sessions into
+  continuous work spans, with definitive detection for live transitions
+  and heuristic fallback for historical sessions
+- **Context compaction** — background summariser preserves context
+  across `/clear` boundaries; `mnemo_restore` retrieves it
+- **Token usage analytics** — aggregated input/output/cache tokens with
+  cost estimates, grouped by day, model, or repo
+- **Query templates** — save and reuse parameterised SQL queries
+- **Pattern discovery** — analyses transcript history to find workaround
+  patterns suggesting missing features
+- **Permission analysis** — suggests `allowedTools` rules from actual
+  tool usage patterns
+- **Raw SQL access** — read-only queries against the full database,
+  including sqldeep nested syntax for hierarchical JSON output
 
 ## Quick start
 
@@ -84,53 +124,95 @@ mid-session are not picked up.
 
 ## MCP Tools
 
+### Transcript search and browsing
+
 | Tool | Description |
 |---|---|
-| `mnemo_search` | Full-text search with context. Supports `repo` filter, configurable before/after context (default 3). |
-| `mnemo_sessions` | List sessions by recency; filter by project, repo, or work type |
+| `mnemo_search` | Full-text search with context (like `grep -C`). Repo filter, configurable before/after context. |
+| `mnemo_sessions` | List sessions by recency; filter by project, repo, work type, or session type |
 | `mnemo_read_session` | Read messages from a specific session (supports prefix IDs) |
-| `mnemo_query` | Raw SQL SELECT against the transcript database |
-| `mnemo_repos` | List repos with paths, session counts, last activity. Supports globs (`marcelocantos/sql*`). |
-| `mnemo_stats` | Index statistics — sessions and messages by type |
-| `mnemo_self` | Discover the calling session's ID via nonce protocol |
+| `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
+| `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts |
+| `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
+| `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
+| `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
 
-### Search with context
+### Cross-project knowledge
 
-`mnemo_search` returns surrounding messages with each hit (like
-`grep -C`). Defaults to 3 messages before and after. Context defaults
-to substantive messages only (user/assistant, non-noise); pass
-`context_filter: "all"` for everything including tool calls.
-
-### Session filtering
-
-By default, `mnemo_search` and `mnemo_sessions` return only interactive
-sessions (excluding subagents, worktrees, and ephemeral sessions). Pass
-`session_type: "all"` to include everything.
-
-`mnemo_sessions` supports filtering by:
-- `repo` — org/name substring (e.g. `"marcelocantos/mnemo"`)
-- `work_type` — development, feature, bugfix, refactor, chore, docs,
-  test, ci, release, review, branch-work
-- `project` — project name substring
-
-### SQL schema
-
-The `mnemo_query` tool provides read-only access to:
-
-| Table | Key columns |
+| Tool | Description |
 |---|---|
-| `messages` | id, session_id, project, role, text, timestamp, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error |
-| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill |
-| `messages_fts` | FTS5 virtual table (excludes noise). `WHERE messages_fts MATCH 'terms'` |
-| `sessions` | View: session_id, project, session_type, repo, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg |
+| `mnemo_memories` | Search auto-memory files from all projects |
+| `mnemo_skills` | Search skill files from `~/.claude/skills/` |
+| `mnemo_configs` | Search CLAUDE.md project instructions from all repos |
+| `mnemo_targets` | Search convergence targets from all repos |
+| `mnemo_plans` | Search implementation plans from all repos |
+| `mnemo_audit` | Search audit logs from all repos |
+| `mnemo_docs` | Search markdown, text, and PDF documentation from all repos |
 
-Content types: `text`, `tool_use`, `tool_result`, `thinking`.
+### External source indexing
 
-### Session self-identification
+| Tool | Description |
+|---|---|
+| `mnemo_commits` | Search git commits across all tracked repos |
+| `mnemo_prs` | Search GitHub PRs and issues across all repos |
+| `mnemo_ci` | Search CI/CD run history (GitHub Actions) with failure log indexing |
+| `mnemo_images` | Search images via FTS on descriptions/OCR, semantic embeddings, or visual similarity |
 
-`mnemo_self` lets an agent discover its own session ID using a
-two-phase nonce protocol, then query its own transcript with
-`mnemo_read_session`.
+### Analytics and observability
+
+| Tool | Description |
+|---|---|
+| `mnemo_usage` | Token usage analytics with cost estimates, grouped by day/model/repo |
+| `mnemo_whatsup` | Live session resource monitor: CPU%, RSS, memory pressure |
+| `mnemo_permissions` | Analyse tool usage patterns to suggest `allowedTools` rules |
+| `mnemo_discover_patterns` | Find workaround patterns suggesting missing features |
+
+### Database and templates
+
+| Tool | Description |
+|---|---|
+| `mnemo_query` | Read-only SQL or sqldeep nested syntax against the full database |
+| `mnemo_repos` | List repos with paths, session counts, last activity. Supports globs. |
+| `mnemo_stats` | Index statistics — sessions and messages by type |
+| `mnemo_define` | Save a reusable parameterised query template |
+| `mnemo_evaluate` | Execute a named query template with parameters |
+| `mnemo_list_templates` | List all saved query templates |
+
+### Context restoration
+
+| Tool | Description |
+|---|---|
+| `mnemo_restore` | Retrieve compacted context from prior `/clear` boundaries |
+
+For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
+or run `mnemo --help-agent`.
+
+## Workflows mnemo enables
+
+mnemo's tools are building blocks. Some examples of what you can build
+on top of them:
+
+- **Context restoration after `/clear`** — use `mnemo_restore` to
+  retrieve compacted summaries from prior conversation spans, so a
+  fresh session can pick up where the last one left off
+- **"Where are we?" briefings** — combine `mnemo_recent_activity` and
+  `mnemo_search` to generate a summary of recent work across repos
+  after being away
+- **Convergence evaluation** — query `mnemo_recent_activity` to
+  understand recent movement before assessing whether targets are on
+  track
+- **Cross-repo knowledge lookups** — search memories, configs, targets,
+  and plans from any project without leaving your current session
+- **Session forensics** — trace a multi-session work span with
+  `mnemo_chain`, replay decisions with `mnemo_decisions`, or audit
+  what commands were run with `mnemo_who_ran`
+- **Custom dashboards** — use `mnemo_query` with SQL or sqldeep syntax
+  to build project-specific analytics (message volume, tool usage
+  patterns, active repos)
+
+These workflows can be codified as Claude Code
+[skills](https://docs.anthropic.com/en/docs/claude-code/skills) for
+one-command invocation.
 
 ## Agent guide
 
