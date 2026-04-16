@@ -97,3 +97,11 @@ maintenance activities. Append-only — newest entries at the bottom.
   extra_project_dirs config wired (partial 🎯T15). Schema 18 → 20,
   protocol 1 → 2. mcpbridge vendored into internal/bridge/.
   Ingest-time chain heuristic deleted.
+
+## 2026-04-16 — /release v0.19.0
+
+- **Commit**: pending
+- **Outcome**: Released v0.19.0. Per-file and progress logging during
+  ingest: each changed file logs session ID, entry/message counts;
+  periodic progress summary every 100 files with rate and ETA. Only
+  files that grew since last ingest are logged. Homebrew formula updated.
