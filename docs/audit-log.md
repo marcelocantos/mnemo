@@ -100,7 +100,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-16 — /release v0.19.0
 
-- **Commit**: pending
+- **Commit**: `29e48d3`
 - **Outcome**: Released v0.19.0. Per-file and progress logging during
   ingest: each changed file logs session ID, entry/message counts;
   periodic progress summary every 100 files with rate and ETA. Only
