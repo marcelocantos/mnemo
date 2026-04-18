@@ -108,7 +108,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-18 — /release v0.20.0
 
-- **Commit**: pending
+- **Commit**: `ff5aae6`
 - **Outcome**: Released v0.20.0. Architectural collapse (🎯T27): mnemo
   is now a single HTTP MCP daemon. Stdio proxy and custom UDS
   JSON-RPC protocol removed; mark3labs/mcp-go StreamableHTTP handles
