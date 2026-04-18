@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,6 +29,23 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
+
+// stdioMigrationMessage is emitted when mnemo is launched with stdin
+// piped (i.e. by an MCP client expecting a stdio server) but cannot
+// bind its HTTP port because the brew-managed daemon already owns it.
+// This is the common upgrade hazard from v0.19.0: Claude Code's
+// stdio registration survived the upgrade and now launches the new
+// binary in an incompatible mode.
+const stdioMigrationMessage = `mnemo has migrated to HTTP MCP (🎯T27 in v0.20.0). Your Claude Code
+registration is out of date.
+
+The mnemo daemon is already running on http://localhost:19419/mcp
+(via brew services). Update your registration:
+
+  claude mcp remove mnemo
+  claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+
+Then restart this Claude Code session.`
 
 //go:embed agents-guide.md
 var agentsGuide string
@@ -56,7 +74,41 @@ func main() {
 		return
 	}
 
+	// Detect a stale stdio MCP registration before opening the store.
+	// If our stdin looks piped and the target port is already bound,
+	// the caller is almost certainly Claude Code invoking this binary
+	// via an old stdio registration while the new HTTP daemon holds
+	// the port. Exit with a migration hint rather than silently
+	// failing on port-already-in-use.
+	if stdinPiped() && portInUse(*addr) {
+		fmt.Fprintln(os.Stderr, stdioMigrationMessage)
+		os.Exit(1)
+	}
+
 	runServe(*addr)
+}
+
+// stdinPiped reports whether stdin is a pipe or file (i.e. not a tty),
+// which is the case when an MCP client launches mnemo as a stdio
+// server. Returns false on stat errors so terminal-interactive users
+// never see the migration path by accident.
+func stdinPiped() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) == 0
+}
+
+// portInUse reports whether the given TCP address is already bound.
+// Any listen error (including "address in use") is treated as busy.
+func portInUse(addr string) bool {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return true
+	}
+	_ = l.Close()
+	return false
 }
 
 // runServe opens the store, starts ingest and background workers, and
