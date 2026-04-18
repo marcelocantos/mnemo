@@ -9,7 +9,16 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.19.0.
+Snapshot as of v0.20.0.
+
+**v0.20.0 note (🎯T27)**: mnemo collapsed from two binaries (stdio proxy +
+serve daemon coupled by a custom UDS JSON-RPC protocol) to a single HTTP
+MCP daemon. Registration is now
+`claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp`.
+The `Mcp-Session-Id` HTTP header replaces the UDS connection ID for
+session-binding, compaction anchoring, and chain detection. Stale
+stdio registrations get an actionable migration hint on launch
+instead of failing silently.
 
 ### CLI flags
 
@@ -631,6 +640,14 @@ configurable before 1.0.
 - Authentication / access control on the HTTP endpoint
 - Transcript modification or deletion tools
 - Integration with non-Claude-Code transcript formats
+**Delivered in v0.20.0** (🎯T27):
+
+- Single HTTP MCP daemon — no more stdio proxy, no more UDS
+  custom-protocol. mark3labs/mcp-go StreamableHTTP serves directly.
+  `internal/rpc/` and `internal/bridge/` deleted. connection_id
+  sourced from Mcp-Session-Id header. Stale stdio registrations get
+  a migration hint on launch.
+
 **Delivered in v0.18.0** (removed from the 1.0 out-of-scope list):
 
 - Live context compaction (🎯T10) — per-connection background

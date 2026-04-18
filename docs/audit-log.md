@@ -105,3 +105,16 @@ maintenance activities. Append-only — newest entries at the bottom.
   ingest: each changed file logs session ID, entry/message counts;
   periodic progress summary every 100 files with rate and ETA. Only
   files that grew since last ingest are logged. Homebrew formula updated.
+
+## 2026-04-18 — /release v0.20.0
+
+- **Commit**: pending
+- **Outcome**: Released v0.20.0. Architectural collapse (🎯T27): mnemo
+  is now a single HTTP MCP daemon. Stdio proxy and custom UDS
+  JSON-RPC protocol removed; mark3labs/mcp-go StreamableHTTP handles
+  clients directly (−2,231 lines net). connection_id sourced from
+  Mcp-Session-Id header; compactor / mnemo_restore / chain detection
+  continue to work. Stale stdio registrations get a migration hint on
+  launch. Registration command changes to
+  `claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp`.
+  Homebrew formula updated.
