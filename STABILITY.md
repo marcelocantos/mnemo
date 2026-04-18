@@ -346,12 +346,14 @@ Stable.
 | `session_id` | string | yes | The session for which to restore prior compacted context. Typically the current session (obtain via `mnemo_self`). | Needs review |
 
 **Added in v0.18.0 (🎯T10).** Returns the compacted context accumulated
-on the proxy connection that owns this session — every span the
-background compactor summarised prior to the most recent `/clear`,
-oldest first. Resolution: `session_id → connection_id` via
+on the MCP session that owns this Claude Code session — every span
+the background compactor summarised prior to the most recent
+`/clear`, oldest first. Resolution: `session_id → connection_id` via
 `connection_sessions`; all compactions tagged to that connection are
 returned, deduped across multiple connections when a session was
 observed on more than one (ctrl-c + `claude --continue` recovery).
+Since v0.20.0 (🎯T27) the connection_id is sourced from the
+Mcp-Session-Id HTTP header rather than a UDS connection accept.
 Wrapped by the `/c` slash-command skill for one-liner post-`/clear`
 restoration. Output is pre-formatted (span headers, targets, files,
 decisions, open threads) with a trailing Budget footer showing the
@@ -387,10 +389,11 @@ heuristics, exclusion list, and output fields may evolve.
 | `mode` | string | no | `auto` (default) / `strict` / `candidates` | Needs review |
 
 Chain detection has two layers. **Definitive** rows are written by the
-daemon when a proxy connection observes session transitions (rows carry
-`mechanism='mcp_connection'`, `confidence='definitive'`). **Heuristic**
-candidates are computed on demand at query time via `InferChainHeuristic`
-using the cwd-most-recent rule, for sessions the daemon never saw live.
+daemon when an MCP session observes transitions between Claude Code
+sessions (rows carry `mechanism='mcp_connection'`, `confidence='definitive'`).
+**Heuristic** candidates are computed on demand at query time via
+`InferChainHeuristic` using the cwd-most-recent rule, for sessions the
+daemon never saw live.
 
 - `auto`: definitive chain, falling through to heuristic candidates only
   when the query session has no definitive predecessor.
@@ -434,8 +437,10 @@ interpretation, mode set, and descriptor vs OCR balance may evolve.
 
 ### Store / Backend interface methods
 
-These methods are part of the `Backend` interface used by both the local `Store`
-and the RPC proxy. Breaking changes here would require a protocol version bump.
+These methods are part of the `Backend` interface used by the local
+`Store`. Breaking changes here are internal-only since v0.20.0
+(🎯T27) — the daemon serves MCP directly over HTTP and no longer
+exposes the Backend via a cross-process protocol.
 
 | Method | Signature | Added | Stability |
 |---|---|---|---|
@@ -505,8 +510,8 @@ dependency and cache TTL are implementation details and may change.
 | `compactions` | id, session_id, connection_id, generated_at, model, prompt_tokens, output_tokens, cost_usd, entry_id_from, entry_id_to, payload_json, summary — session summaries produced by the background compactor (🎯T10) | Needs review |
 | `docs` | id, repo, file_path, kind (md/txt/pdf), title, content, content_hash, size, mtime, indexed_at (🎯T21) | Needs review |
 | `docs_fts` | FTS5 on title, content, repo | Needs review |
-| `daemon_connections` | connection_id (PK), pid, accepted_at, last_seen_at, closed_at — one row per accepted proxy connection (🎯T25.1) | Needs review |
-| `connection_sessions` | connection_id, session_id, first_seen_at, last_seen_at; PK(connection_id, session_id) — authoritative binding between a live proxy connection and the sessions it drove (🎯T25.2) | Needs review |
+| `daemon_connections` | connection_id (PK), pid, accepted_at, last_seen_at, closed_at — one row per observed MCP session. connection_id holds the Mcp-Session-Id header value since v0.20.0 (🎯T27); previously the UDS accept ID (🎯T25.1). | Needs review |
+| `connection_sessions` | connection_id, session_id, first_seen_at, last_seen_at; PK(connection_id, session_id) — authoritative binding between an MCP session and the Claude Code sessions it drove (🎯T25.2, updated 🎯T27) | Needs review |
 | `git_commits` | id, repo, commit_hash, author_name, author_email, commit_date, subject, body — UNIQUE(repo, commit_hash) | Needs review |
 | `git_commits_fts` | FTS5 on subject, body, repo, author_name | Needs review |
 | `github_prs` | id, repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url — UNIQUE(repo, pr_number) | Needs review |

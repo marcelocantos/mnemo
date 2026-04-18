@@ -3,8 +3,9 @@
 
 package store
 
+import "time"
+
 // Backend is the interface for querying the transcript store.
-// Both the direct Store and the RPC Proxy implement this.
 type Backend interface {
 	Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]SearchResult, error)
 	ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]SessionInfo, error)
@@ -46,6 +47,7 @@ type Backend interface {
 	CompactionsForConnection(connectionID string) ([]Compaction, error)
 	SessionTokens(sessionID string) (int64, int64, error)
 	CompactionTokens(sessionID string) (int64, int64, error)
+	RecordConnectionOpen(connectionID string, pid int, acceptedAt time.Time)
 	RecordConnectionSession(connectionID, sessionID string)
 	ConnectionsForSession(sessionID string) ([]ConnectionSession, error)
 	InferChainHeuristic(sessionID string, limit int) ([]ChainCandidate, error)

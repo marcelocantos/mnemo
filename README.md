@@ -65,7 +65,7 @@ Or do it yourself:
 ```bash
 brew install marcelocantos/tap/mnemo
 brew services start mnemo
-claude mcp add --scope user mnemo -- mnemo
+claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
 Then restart your Claude Code session. The `mnemo_*` tools will be
@@ -96,7 +96,8 @@ Logs: `$(brew --prefix)/var/log/mnemo.log`
 **Manually**:
 
 ```bash
-mnemo serve
+mnemo               # listen on :19419 (default)
+mnemo --addr :8080  # custom port
 ```
 
 ## Registering as an MCP server
@@ -104,7 +105,7 @@ mnemo serve
 **Claude Code** (global install to `~/.claude.json`):
 
 ```bash
-claude mcp add --scope user mnemo -- mnemo
+claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
 **Generic MCP client** JSON config:
@@ -113,7 +114,8 @@ claude mcp add --scope user mnemo -- mnemo
 {
   "mcpServers": {
     "mnemo": {
-      "command": "mnemo"
+      "type": "http",
+      "url": "http://localhost:19419/mcp"
     }
   }
 }

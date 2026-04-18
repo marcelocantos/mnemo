@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/marcelocantos/mnemo/internal/bridge"
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
@@ -382,11 +381,11 @@ Returns candidate features with evidence counts, example sessions, and suggested
 // Returns (text, isError, err) where isError means a tool-level error
 // (returned to the user) vs err which is a transport/system error.
 //
-// The connection context is accepted on every call so that tools which
-// care about per-connection identity (currently: none; future:
-// mnemo_self/mnemo_restore/compactor hooks) can use it. Most tools
-// ignore it.
-func (h *Handler) Call(cc mcpbridge.ConnContext, name string, args map[string]any) (string, bool, error) {
+// The CallContext carries the MCP session ID (from the Mcp-Session-Id
+// header). Most tools ignore it; mnemo_self uses it to bind a Claude
+// Code session to its owning MCP session, which the compactor and
+// mnemo_restore rely on for /clear-boundary context preservation.
+func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string, bool, error) {
 	switch name {
 	case "mnemo_search":
 		return h.search(args)
@@ -1082,7 +1081,7 @@ func (h *Handler) decisions(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) self(cc mcpbridge.ConnContext, args map[string]any) (string, bool, error) {
+func (h *Handler) self(cc CallContext, args map[string]any) (string, bool, error) {
 	nonce, _ := args["nonce"].(string)
 
 	if nonce == "" {
@@ -1099,12 +1098,12 @@ func (h *Handler) self(cc mcpbridge.ConnContext, args map[string]any) (string, b
 		return fmt.Sprintf("Nonce not found. The transcript may not be ingested yet — wait a moment and retry. Error: %v", err), true, nil
 	}
 
-	// Record the (connection, session) binding so the daemon has an
-	// authoritative record that this connection is currently handling
-	// this session. This is the signal the compactor / mnemo_restore
-	// / chain detection all build on. No-op if cc.ID is empty (old
-	// proto or tests without a connection).
-	h.mem.RecordConnectionSession(cc.ID, sessionID)
+	// Record the (MCP session, Claude Code session) binding so the
+	// daemon has an authoritative record of which MCP session is
+	// currently driving this transcript. This is the signal the
+	// compactor / mnemo_restore / chain detection all build on.
+	// No-op if MCPSessionID is empty (e.g. stateless test calls).
+	h.mem.RecordConnectionSession(cc.MCPSessionID, sessionID)
 
 	return fmt.Sprintf("session_id: %s", sessionID), false, nil
 }

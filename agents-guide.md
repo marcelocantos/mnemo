@@ -61,7 +61,7 @@ mnemo --addr :8080   # custom port
 **Claude Code** (global install to `~/.claude.json`):
 
 ```bash
-claude mcp add --scope user mnemo -- mnemo
+claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
 **Generic MCP client** JSON config:
@@ -70,7 +70,8 @@ claude mcp add --scope user mnemo -- mnemo
 {
   "mcpServers": {
     "mnemo": {
-      "command": "mnemo"
+      "type": "http",
+      "url": "http://localhost:19419/mcp"
     }
   }
 }
@@ -83,20 +84,24 @@ is not optional — tools registered mid-session are not picked up.
 
 ## Verifying the setup
 
-**Before restarting** (to confirm the serve process is running):
+**Before restarting** (to confirm the server is listening):
 
 ```bash
-ls -la ~/.mnemo/mnemo.sock
+lsof -iTCP:19419 -sTCP:LISTEN
 ```
 
-This should show the Unix domain socket file. If it's missing, the
-serve process isn't running — check `brew services list` and
+This should show the mnemo process holding the port. If nothing is
+shown, the server isn't running — check `brew services list` and
 `$(brew --prefix)/var/log/mnemo.log`.
+
+Do **not** use `curl` to probe `/mcp` — MCP endpoints only respond to
+POST requests with a JSON-RPC body. A plain GET or empty POST returns
+nothing meaningful, which agents misread as "server not ready".
 
 **After restarting** (to confirm the MCP integration works):
 
 Call `mnemo_stats`. It should return session and message counts. If it
-fails with a connection error, the serve process may not be running.
+fails with a connection error, the server may not be running.
 
 ## MCP Tools
 

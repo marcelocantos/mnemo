@@ -5,11 +5,11 @@
 // Claude Code session transcripts. It indexes JSONL files from
 // ~/.claude/projects/ and maintains a realtime FTS5 index in SQLite.
 //
-// Two modes:
+// mnemo runs as a single HTTP MCP daemon:
 //
-//	mnemo              # stdio MCP server (what Claude Code launches)
-//	mnemo serve        # persistent daemon (what brew services runs)
-//	claude mcp add --scope user mnemo -- mnemo
+//	mnemo              # run the HTTP MCP daemon (default :19419)
+//	mnemo --addr :8080 # custom listen address
+//	claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 package main
 
 import (
@@ -22,21 +22,25 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/marcelocantos/mnemo/internal/bridge"
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/compact"
-	"github.com/marcelocantos/mnemo/internal/rpc"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
 //go:embed agents-guide.md
 var agentsGuide string
 
-const version = "0.19.0"
+const (
+	version     = "0.19.0"
+	defaultAddr = ":19419"
+)
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	helpAgent := flag.Bool("help-agent", false, "print agent guide and exit")
+	addr := flag.String("addr", defaultAddr, "HTTP listen address")
 	flag.Parse()
 
 	if *showVersion {
@@ -45,24 +49,19 @@ func main() {
 	}
 	if *helpAgent {
 		flag.CommandLine.SetOutput(os.Stdout)
-		fmt.Fprintf(os.Stdout, "mnemo %s\n\nUsage: mnemo [command] [flags]\n\nCommands:\n  serve    Run persistent daemon (for brew services)\n  (none)   Run stdio MCP server\n\nFlags:\n", version)
+		fmt.Fprintf(os.Stdout, "mnemo %s\n\nUsage: mnemo [flags]\n\nFlags:\n", version)
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stdout)
 		fmt.Print(agentsGuide)
 		return
 	}
 
-	args := flag.Args()
-	if len(args) > 0 && args[0] == "serve" {
-		runServe()
-	} else {
-		runStdio()
-	}
+	runServe(*addr)
 }
 
-// runServe runs the persistent daemon: opens the store, ingests,
-// watches for changes, and serves RPC over a Unix domain socket.
-func runServe() {
+// runServe opens the store, starts ingest and background workers, and
+// serves the MCP protocol over HTTP.
+func runServe(addr string) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -169,34 +168,24 @@ func runServe() {
 		}
 	}()
 
-	// Serve RPC over Unix domain socket.
-	srv, err := rpc.NewServer(mem)
-	if err != nil {
-		slog.Error("failed to start RPC server", "err", err)
-		os.Exit(1)
-	}
-	defer srv.Close()
+	// Build the MCP server, register every tool, and expose it as an
+	// HTTP streamable endpoint. Stateful mode lets clients maintain an
+	// Mcp-Session-Id across requests — the value we thread through to
+	// mnemo_self for session binding.
+	mcp := server.NewMCPServer(
+		"mnemo",
+		version,
+		server.WithToolCapabilities(true),
+	)
+	tools.NewHandler(mem).RegisterTools(mcp)
 
-	slog.Info("mnemo serve starting", "version", version)
-	if err := srv.Serve(); err != nil {
-		slog.Error("RPC server failed", "err", err)
-		os.Exit(1)
-	}
-}
+	http := server.NewStreamableHTTPServer(mcp,
+		server.WithStateful(true),
+	)
 
-// runStdio runs the stdio MCP proxy via mcpbridge.
-func runStdio() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	})))
-
-	if err := mcpbridge.RunProxy(context.Background(), mcpbridge.ProxyConfig{
-		SocketPath: rpc.SocketPath(),
-		ServerName: "mnemo",
-		Version:    version,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "mnemo: %v\n", err)
-		fmt.Fprintf(os.Stderr, "hint: start the server with 'brew services start mnemo' or 'mnemo serve'\n")
+	slog.Info("mnemo serve starting", "version", version, "addr", addr)
+	if err := http.Start(addr); err != nil {
+		slog.Error("HTTP MCP server failed", "err", err)
 		os.Exit(1)
 	}
 }

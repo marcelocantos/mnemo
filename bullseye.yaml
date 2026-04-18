@@ -385,6 +385,8 @@ targets:
     - CI runs go test on windows-latest GHA runner and passes
     - Image OCR degrades to no-OCR or tesseract on Windows without crashing
     context: 'Currently macOS/Linux only. Blockers: (1) Unix domain socket IPC in mcpbridge — switch to TCP loopback with a port file at ~/.mnemo/endpoint containing port + mTLS cert + private key (user-only ACL; access to file == access to service); (2) mattn/go-sqlite3 needs CGO+MSYS2 on Windows — swap to modernc.org/sqlite (pure Go, FTS5); (3) lsof/ps shell-outs in store.go (~4883, ~5755) need Windows equivalents (tasklist/WMI) or to be gated; vm_stat is already gated. Image OCR (Vision framework) and vm_stat are correctly gated behind //go:build darwin and degrade to stubs — no work needed beyond verification. claude/uv/gh/tesseract/git are all available on Windows; describer/embeddings work unchanged when those tools are installed. Distinct from 🎯T15 which is about indexing Windows-side transcripts from a Windows VM — this target is mnemo itself running on Windows. Estimated effort: 5–7 days.'
+    depends_on:
+    - T27
     tags:
     - cross-platform
     - ipc
@@ -615,6 +617,37 @@ targets:
       </invoke>
     origin: manual
     discovered: 2026-04-16
+  T27:
+    name: mnemo is a single HTTP MCP daemon with no proxy and no custom protocol
+    status: achieved
+    value: 13.0
+    cost: 8.0
+    actual_cost: 3.0
+    acceptance:
+    - The internal/rpc/ package is deleted and no UDS-based client-daemon communication remains.
+    - main.go has a single operational mode — HTTP MCP serve. The stdio proxy mode is gone.
+    - '`mnemo` (no args) runs the HTTP MCP server on :19419. CLI flags retained: --version, --help, --help-agent, --addr.'
+    - The Claude Code registration command in README and agents-guide is `claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp`.
+    - Tools that implicitly used the proxy's cwd now accept explicit cwd or repo parameters, and the agents-guide documents which fields are expected.
+    - connection_id tracking migrates to use the MCP session ID (from the Mcp-Session-Id header). Affected tables (daemon_connections, connection_sessions) are renamed or repurposed accordingly.
+    - mnemo_restore continues to return the compacted context for the caller's session, anchored to MCP session ID.
+    - Chain detection (T25) still produces definitive rows for sessions the daemon has seen live, now keyed on MCP session ID.
+    - Homebrew service definition is unchanged conceptually (brew services start mnemo still runs the daemon).
+    - Existing indexed data (entries, messages, embeddings, commits, PRs, etc.) survives the transition — no schema rebuild required for the rename.
+    - Agents-guide, README, CLAUDE.md, and STABILITY.md are updated to describe the HTTP-only architecture.
+    context: |-
+      mnemo previously shipped as two binaries coupled by a custom UDS protocol: a stdio MCP proxy (that Claude Code launched per-session) and a serve daemon (that owned the SQLite writer, filesystem watchers, and backfill workers). The custom protocol in internal/rpc/ carried cwd, session_id, and connection_id implicitly, letting tools behave as if they were per-session even though all state lived in the daemon.
+
+      mcpbridge has since been reworked as a generic, transparent MCP proxy — it forwards MCP frames between an agent and any upstream MCP server without interpretation. A transparent proxy cannot inject context like cwd. This invalidates the custom-protocol pattern that the mnemo proxy/daemon pair relied on.
+
+      The resulting architecture: mnemo becomes a single HTTP MCP daemon. Claude Code registers it via `claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp`, or fronts it with mcpbridge for users who want a stdio shim. Context that the proxy used to carry (cwd, session ID, connection ID) becomes explicit — either as tool parameters or as MCP session-level headers that the daemon reads directly.
+
+      This also unblocks T22 (Windows port): the UDS protocol was the biggest portability obstacle, and HTTP MCP is cross-platform by default.
+
+      The migration is orthogonal to the semantic-search / RAG work being scoped but should land first so that embeddings build on a stable foundation.
+    origin: manual
+    discovered: 2026-04-18
+    achieved: 2026-04-18
   T3:
     name: Active work dashboard data
     status: achieved

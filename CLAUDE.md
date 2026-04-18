@@ -1,8 +1,8 @@
 # mnemo
 
-Searchable memory across all Claude Code session transcripts. Bimodal
-architecture: `mnemo serve` is the persistent daemon that owns the
-database, and `mnemo` (no args) is the stdio MCP proxy that agents use.
+Searchable memory across all Claude Code session transcripts. mnemo
+runs as a single HTTP MCP daemon — clients register it directly via
+the streamable-HTTP transport.
 
 ## What it does
 
@@ -15,15 +15,15 @@ text, tool_use, tool_result, and thinking.
 
 ```bash
 go build -tags "sqlite_fts5" -o bin/mnemo .
-bin/mnemo serve          # persistent daemon (listens on ~/.mnemo/mnemo.sock)
-bin/mnemo                # stdio MCP proxy (connects to serve via UDS)
+bin/mnemo                # HTTP MCP daemon (default :19419)
+bin/mnemo --addr :8080   # custom listen address
 ```
 
 ## Install as MCP server
 
 ```bash
-brew services start mnemo                     # start the daemon
-claude mcp add --scope user mnemo -- mnemo    # register stdio proxy
+brew services start mnemo                                                              # start the daemon
+claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp          # register
 ```
 
 After installing, add the following to your global `~/.claude/CLAUDE.md`
@@ -81,16 +81,15 @@ user. Good moments to reach for mnemo:
 
 ```
 mnemo/
-├── main.go                 # Entry point: stdio proxy or serve daemon
+├── main.go                 # Entry point: HTTP MCP daemon
 ├── internal/
 │   ├── store/              # SQLite FTS5 index, ingest, search
 │   │   ├── store.go        # Database operations
 │   │   └── iface.go        # Backend interface
-│   ├── rpc/                # UDS communication between proxy and daemon
-│   │   ├── rpc.go          # Protocol types and client
-│   │   ├── server.go       # Daemon-side RPC handler
-│   │   └── proxy.go        # Client-side Backend implementation
-│   └── tools/tools.go      # MCP tool definitions and handlers
+│   ├── compact/            # Background /clear-span compactor
+│   └── tools/
+│       ├── tools.go        # MCP tool definitions and handlers
+│       └── mcp.go          # Adapter that registers tools on the MCP server
 ```
 
 ## Testing

@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-// DaemonConnection records one accepted proxy connection.
+// DaemonConnection records one MCP session observed by the daemon.
+// The connection_id field holds the Mcp-Session-Id value — a stable
+// identifier minted by the streamable-HTTP transport for the
+// duration of the client's MCP session.
 type DaemonConnection struct {
 	ConnectionID string
 	PID          int
@@ -20,10 +23,8 @@ type DaemonConnection struct {
 }
 
 // RecordConnectionOpen inserts a daemon_connections row. Idempotent
-// via INSERT OR IGNORE (a restarted daemon will mint fresh connection
-// IDs so collisions are not expected in normal operation, but the
-// bridge contract calls this once per accept and we treat the
-// connection_id as authoritative).
+// via INSERT OR IGNORE. Called lazily on the first tool call for a
+// given MCP session ID.
 func (s *Store) RecordConnectionOpen(connectionID string, pid int, acceptedAt time.Time) {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
@@ -37,8 +38,10 @@ func (s *Store) RecordConnectionOpen(connectionID string, pid int, acceptedAt ti
 	}
 }
 
-// RecordConnectionClose marks a connection as closed. Called when the
-// proxy disconnects (EOF on the UDS) — Claude Code exit, ctrl-c, etc.
+// RecordConnectionClose marks a connection as closed. The HTTP MCP
+// transport does not expose a reliable disconnect signal, so this is
+// currently only called when the daemon shuts down or when a future
+// idle-timeout sweeper is added. Existing callers (tests) still work.
 func (s *Store) RecordConnectionClose(connectionID string, closedAt time.Time) {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
@@ -255,7 +258,8 @@ func hasClearMarker(text string) bool {
 // CurrentSessionForConnection returns the session_id most recently
 // observed on the given connection (max last_seen_at). Returns an
 // empty string if the connection has no recorded sessions yet (the
-// proxy has handshook but not yet called a session-resolving tool).
+// client has opened an MCP session but not yet called a
+// session-resolving tool like mnemo_self).
 func (s *Store) CurrentSessionForConnection(connectionID string) (string, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
@@ -310,8 +314,8 @@ func scanConnectionSessions(rows interface {
 	return out, rows.Err()
 }
 
-// OpenConnections returns the currently-open proxy connections,
-// ordered by acceptance time (oldest first).
+// OpenConnections returns the MCP sessions the daemon currently
+// treats as live, ordered by acceptance time (oldest first).
 func (s *Store) OpenConnections() ([]DaemonConnection, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
