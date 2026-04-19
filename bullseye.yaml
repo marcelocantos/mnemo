@@ -137,15 +137,11 @@ targets:
     cost: 5.0
     observable: true
     acceptance:
-    - Each mnemo instance owns its local ~/.claude/projects/ and indexes only what it can see — no cross-host file access (no SMB mount, no fsnotify-over-network).
-    - 'Config supports `linked_instances`: a list of peer mnemo endpoints with name, URL, and auth material.'
-    - Each mnemo serve exposes a federated query endpoint (reusing the existing RPC surface over authenticated TCP/mTLS, not just the local Unix socket) that accepts the same tool requests as the local stdio proxy.
-    - Query-shaped MCP tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, etc.) fan out to linked peers in parallel with the local query and merge the results.
-    - 'Peer results are attributed in the response — each hit / session / activity record carries its source (e.g. `instance: "local"` / `"pippa-win"`).'
-    - Cross-instance result ranking is sensible — FTS scores normalised or bucketed per source so one dominant host does not drown out another.
-    - Per-peer timeout and graceful degradation — an offline or slow peer drops out of the response with a warning rather than breaking the whole query.
-    - 'Auth: peers authenticate via the same endpoint-file mechanism T22 introduces (mTLS cert + private key in ~/.mnemo/endpoint, exported for federation in a paired ~/.mnemo/peers/<name>.pem pattern or similar).'
-    - Write-shaped tools (ingest, describer, etc.) remain local-only — federation is strictly read/query.
+    - All sub-targets T15.1, T15.2, T15.3, T15.4, T15.5 are achieved.
+    - Two mnemo daemons (separate hosts, or two local temp-dir instances for CI) are configured as each other's peers via `linked_instances` and each daemon's `~/.mnemo/peers/` holds the other's public cert.
+    - A single mnemo_search from one daemon returns attributed hits from both daemons in one response, with the correct `instance` field on each record.
+    - 'Per-peer timeout + graceful degradation verified end-to-end: stopping one daemon mid-query lets the surviving daemon''s response complete with local hits and a structured warning naming the stalled peer.'
+    - Write-shaped tools (ingest, describers, mnemo_self, template writes, etc.) never cross a federation boundary — verified by absence from the federated tool set and by a test attempting such calls over mTLS.
     context: |-
       **Reframed 2026-04-15.** The original T15 framing was "macOS mnemo daemon reaches into a Windows VM's Claude projects dir over an SMB mount, with a Windows stub relaying fsnotify-equivalent events via pigeon." That approach coupled mnemo to fragile filesystem-over-network semantics, required a new relay (pigeon), and did not generalise past one VM.
 
@@ -156,22 +152,150 @@ targets:
       - degrades gracefully when peers are offline (timeout + warn, local results still returned),
       - keeps each host's write surface local and authoritative.
 
-      **Partial work already shipped (2026-04-15, keep as orthogonal utility):** `config.extra_project_dirs` + startup ingest from extra Claude project dirs is already wired (commits 8700c48, 67fdd9d). This remains useful for legitimate local-ish extra dirs (e.g. a team-shared workspace that's actually locally mounted), but it is NOT the federation mechanism — it should not be used to reach into a VM's projects dir over SMB. The acceptance below is about federation.
+      **Partial work already shipped (2026-04-15, keep as orthogonal utility):** `config.extra_project_dirs` + startup ingest from extra Claude project dirs is already wired (commits 8700c48, 67fdd9d). This remains useful for legitimate local-ish extra dirs (e.g. a team-shared workspace that's actually locally mounted), but it is NOT the federation mechanism \u2014 it should not be used to reach into a VM's projects dir over SMB.
 
-      **Why this depends on T22:** federation requires a second mnemo instance running natively on the remote host. On Windows that means T22 (mnemo daemon + proxy native on Windows). The federation protocol can reuse T22's mTLS endpoint file for peer auth.
+      **Why this depends on T22:** federation in practice requires a second mnemo instance running natively on the remote host. On Windows that means T22 (mnemo daemon native on Windows, now achieved).
 
-      **Protocol shape:** existing internal/rpc serves over UDS today; extend it to accept authenticated TCP connections for federation. The MCP tool layer gains a fan-out step in query tools — local RPC + one RPC per linked peer in parallel, merge and attribute.
+      ---
 
-      **Tags:** cross-platform, federation, query</context>
-      </invoke>
+      **Architecture correction 2026-04-19.** Two premises in the earlier context were wrong:
+
+      1. mnemo's transport is HTTP MCP (streamable-HTTP via mark3labs/mcp-go on :19419), NOT a UDS/internal RPC surface. The stale `~/.mnemo/mnemo.sock` file is a pre-v0.20.0 artefact; no current Go code references it. Federation extends the existing HTTP MCP transport with a second mTLS-wrapped HTTP endpoint \u2014 not a non-existent `internal/rpc` package.
+
+      2. T22 shipped Windows native build support only. It did NOT produce any mTLS infrastructure (no `tls.Config`, `x509`, or `LoadX509KeyPair` anywhere in the repo). The claim that federation "reuses T22's mTLS endpoint file" was aspirational; T15.1 builds that mechanism from scratch.
+
+      **Decomposition (2026-04-19).** T15 is now an umbrella target over five leaves:
+      - **T15.1** mTLS endpoint-file machinery (cert gen + peer-cert trust store)
+      - **T15.2** `linked_instances` config surface
+      - **T15.3** federated read-only MCP endpoint (server-side, mTLS)
+      - **T15.4** federated MCP client (caller-side, mTLS, timeout, typed errors)
+      - **T15.5** fan-out + merge + attribution + graceful degradation in query tools
+
+      Each leaf has its own observable checkpoint. This parent's acceptance is the end-to-end integration demo: two peered daemons, a single cross-instance search, attributed results, graceful degradation on peer failure, write-tool isolation.
+
+      **Tags:** cross-platform, federation, query
     depends_on:
     - T22
+    - T15.1
+    - T15.2
+    - T15.3
+    - T15.4
+    - T15.5
     tags:
     - ingest
     - cross-platform
     - pigeon
     origin: 'conversation: user wants unified transcript search across macOS and Windows VM environments'
     discovered: 2026-04-09
+  T15.1:
+    name: mnemo manages an mTLS endpoint file for authenticated peer access
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - On first start, mnemo serve generates a self-signed X.509 cert + key pair at ~/.mnemo/endpoint/{cert.pem,key.pem} (mode 0600 on key).
+    - On subsequent starts, existing cert/key are loaded. A corrupt or expired cert triggers regeneration with a warning.
+    - A new `mnemo --print-endpoint` subcommand emits the public cert (cert.pem contents) on stdout for paste-distribution to peers.
+    - Trusted peer certs are loaded at startup from ~/.mnemo/peers/<name>.pem. Malformed entries are skipped with a warning; the daemon continues.
+    - The endpoint cert, key, and trusted-peer set are exposed via a typed accessor (internal package) usable by both federated-server (T15.3) and federated-client (T15.4) code paths.
+    - 'Unit tests cover: first-run generation, reload of existing files, corrupt-cert regen, peer-dir parsing of valid + invalid entries, and 0600 mode enforcement on the key.'
+    context: First leaf of the T15 decomposition. T22 (Windows native) did NOT ship any mTLS/endpoint-file infrastructure — earlier T15 context that claimed it would "reuse T22's mTLS endpoint file" was aspirational. T15.1 builds that machinery from scratch. Self-signed is sufficient because every cert is individually trusted peer-to-peer (no CA hierarchy). Placing peer certs under ~/.mnemo/peers/<name>.pem gives the human a trivial distribute-by-paste workflow. Output of this target is purely infrastructure — no behaviour change visible to MCP clients yet; the observable checkpoint is the `--print-endpoint` subcommand.
+    tags:
+    - federation
+    - mTLS
+    - auth
+    origin: decomposition of T15 (2026-04-19)
+    discovered: 2026-04-19
+  T15.2:
+    name: Config supports a linked_instances list of peer mnemo endpoints
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - store.Config gains a LinkedInstances []LinkedInstance field with Name (string), URL (string, https only), and PeerCert (name of cert under ~/.mnemo/peers/ OR inline PEM).
+    - ~/.mnemo/config.json parses cleanly; an absent field is zero-value and disables federation entirely.
+    - Duplicate Name entries fail loud at startup with a clear error naming both offending entries.
+    - Non-parseable URL or URL whose scheme is not https fails loud at startup.
+    - A PeerCert name that does not resolve under ~/.mnemo/peers/ fails loud at startup; inline PEM that does not parse as a certificate fails loud.
+    - 'Unit tests cover: empty list, single valid peer, duplicate-name rejection, malformed-URL rejection, unresolvable-peer-cert rejection, inline-PEM happy path and malformed-PEM rejection.'
+    context: 'Second leaf of the T15 decomposition. Pure config surface — no runtime behaviour change. Gives T15.4 (peer client) something to read. https-only is deliberate: federation is mTLS-bound and there is no reason to allow plaintext or other schemes. Inline PEM as an alternative to the ~/.mnemo/peers/ name keeps small deployments (e.g. two machines, hand-edited config) from needing a second filesystem step.'
+    tags:
+    - federation
+    - config
+    origin: decomposition of T15 (2026-04-19)
+    discovered: 2026-04-19
+  T15.3:
+    name: mnemo serves a federated, mTLS-authenticated, read-only MCP endpoint for peer queries
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - mnemo serve listens on a second configurable address (default :19420; flag `--federated-addr`; `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
+    - 'Only read-shaped tools are exposed on the federated endpoint: mnemo_search, mnemo_sessions, mnemo_read_session, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, mnemo_memories, mnemo_skills, mnemo_configs, mnemo_usage, mnemo_audit, mnemo_targets, mnemo_plans, mnemo_who_ran, mnemo_ci, mnemo_query, mnemo_repos, mnemo_stats, mnemo_chain, mnemo_decisions, mnemo_images, mnemo_discover_patterns, mnemo_status. Write-shaped / control tools (mnemo_self, template writes, describers control, etc.) are absent from the federated tool set.'
+    - TLS layer rejects connections whose client cert is not in the trusted-peer set (config from T15.1).
+    - mnemo_self nonce binding is NOT exposed — federated clients are a different identity domain.
+    - Smoke test spins up two mnemo processes in temp dirs; one calls mnemo_stats on the other over the federated endpoint and gets a well-formed result.
+    - '`mnemo --print-federated-addr` (or equivalent) emits the federated URL for copy-paste into peer configs.'
+    context: Third leaf of the T15 decomposition. Adds a second MCP HTTP endpoint with mTLS; does not touch the existing :19419 local endpoint. Reuses mark3labs/mcp-go's streamable-HTTP server but builds a separate NewMCPServer instance with a curated read-only tool set, so there is zero chance of a write tool leaking over federation. The read/write split is the only security-critical boundary at this layer; T15.5 handles the fan-out semantics.
+    depends_on:
+    - T15.1
+    tags:
+    - federation
+    - server
+    - mTLS
+    origin: decomposition of T15 (2026-04-19)
+    discovered: 2026-04-19
+  T15.4:
+    name: mnemo invokes read-tools on a configured peer over mTLS with timeout and graceful failure
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - An internal client package (e.g. internal/federation/client) exposes a CallTool(ctx, instance, toolName, args) -> result method that targets a LinkedInstance from T15.2.
+    - mTLS handshake presents the local endpoint cert/key (T15.1) as client identity and trusts only the peer cert configured for that instance (not the whole trusted-peer set).
+    - Per-peer timeout is configurable (config or flag); default 5s. Exceeding the timeout cancels the call and logs a warning tagged with the instance name.
+    - 'Connection reuse: repeated calls to the same peer reuse an http.Client and underlying connection (keep-alive / HTTP/2 where available).'
+    - Connection refused, TLS handshake failure, server-side error, and malformed response each surface as a typed error that callers can distinguish for graceful-degradation logic in T15.5.
+    - CLI helper `mnemo --ping-peer <name>` calls mnemo_stats on the peer and prints the result for manual verification.
+    - 'Unit tests cover: happy-path call, cert mismatch, timeout, connection refused, malformed peer response. Integration test spins up a stub federated server and drives CallTool against it.'
+    context: 'Fourth leaf of the T15 decomposition. Peer-facing counterpart to T15.3. Deliberately narrow — a single CallTool entry point, no per-tool wrappers yet. T15.5 builds fan-out on top of this and handles result merging. Typed errors matter here: T15.5 must be able to drop a slow or offline peer with a warning rather than fail the whole response.'
+    depends_on:
+    - T15.1
+    - T15.2
+    tags:
+    - federation
+    - client
+    - mTLS
+    origin: decomposition of T15 (2026-04-19)
+    discovered: 2026-04-19
+  T15.5:
+    name: Query-shaped MCP tools fan out to linked peers in parallel and return merged, attributed results
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - Read-shaped query tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, and others with per-record result shapes) issue local + per-peer calls in parallel via T15.4's client.
+    - 'Every returned record carries an instance-source field (e.g. "local" for the host responder, "<peer name>" for peers). Response schemas extended in a backwards-compatible way: existing unattributed callers still parse.'
+    - Cross-instance FTS ranking is normalised per source — implementation may bucket by source (local first, peers interleaved) or rescale scores; acceptance is that one instance with many hits does not push a strong single hit from another instance off the page.
+    - A slow or offline peer is dropped from the response with a structured warning (peer name + error category) attached to the tool response; local results are still returned.
+    - Write-shaped / control tools (mnemo_self, template writes, describer controls, etc.) bypass federation entirely.
+    - 'End-to-end test: two mnemo daemons in temp dirs, each indexing distinct fixture data, one configured as the other''s peer, a single mnemo_search returns attributed hits from both sides.'
+    - 'Graceful-degradation test: one daemon paused mid-query still produces a response from the other within the peer timeout, with a warning naming the stalled peer.'
+    context: 'Fifth and final leaf of the T15 decomposition. This is the only leaf where the MCP surface changes shape. Result attribution is the load-bearing design decision: it must not break existing clients, so the instance field is additive (default \"local\" when federation is disabled, which preserves the current JSON shape for local-only deployments if the field is omitted entirely when no peers are configured). Ranking normalisation is deliberately under-specified \u2014 bucketing is the simplest acceptable implementation; score rescaling is optional. Graceful degradation is tested explicitly because it is the main failure mode users will hit.'
+    depends_on:
+    - T15.3
+    - T15.4
+    tags:
+    - federation
+    - fanout
+    - attribution
+    origin: decomposition of T15 (2026-04-19)
+    discovered: 2026-04-19
   T16:
     name: Session chains link /clear-bounded transcripts into work spans
     status: achieved

@@ -118,3 +118,15 @@ maintenance activities. Append-only — newest entries at the bottom.
   launch. Registration command changes to
   `claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp`.
   Homebrew formula updated.
+
+## 2026-04-19 — /release v0.21.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.21.0. Windows native support (🎯T22): mnemo
+  daemon builds and runs on Windows amd64 and arm64 alongside the
+  existing darwin-arm64, linux-amd64, linux-arm64 targets. Platform-
+  specific code split into `internal/store/store_unix.go` /
+  `store_windows.go`. No CLI or MCP surface change. Also identified
+  four new data-mined introspection targets (🎯T28–🎯T31) and
+  decomposed 🎯T15 (federated queries) into five leaf sub-targets
+  (🎯T15.1–🎯T15.5). Homebrew formula updated.
