@@ -372,7 +372,7 @@ targets:
     achieved: 2026-04-15
   T22:
     name: mnemo daemon runs natively on Windows
-    status: identified
+    status: converging
     value: 5.0
     cost: 5.0
     acceptance:
@@ -384,7 +384,14 @@ targets:
     - CI runs go test on windows-latest GHA runner with CGO_ENABLED=1 and passes
     - README documents MinGW-w64 prereq for Windows source builds
     - macOS and Linux behaviour unchanged — no regressions
-    context: 'Reframed 2026-04-19 after 🎯T27 landed (v0.20.0). The original target included Unix-socket → TCP-loopback IPC and an mTLS-protected stdio proxy; T27 collapsed the architecture to a single HTTP MCP daemon on TCP loopback, so that work is already done. The modernc.org/sqlite swap is also out: user direction (2026-04-19) is to stick with bona fide SQLite via mattn/go-sqlite3 and accept the CGO toolchain cost on Windows. windows-latest GHA runners ship MinGW-w64 preinstalled so CI is straightforward; local Windows builds require MinGW-w64 or LLVM clang (not MSVC — Go cgo does not use MSVC). Remaining work is: (1) platform-gate lsof/ps/vm_stat shell-outs in store.go with //go:build tags and Windows stubs/equivalents; (2) verify existing darwin gates (Vision OCR, vm_stat) hold up; (3) wire windows-latest into CI with CGO_ENABLED=1; (4) static-link the Windows release binary. Estimated effort: 2–3 days. Distinct from 🎯T15 which is about indexing Windows-side transcripts from a Windows VM — this target is mnemo itself running on Windows.'
+    context: |-
+      Converging 2026-04-19. Core platform split is committed on mnemo master (ce7c3c6): internal/store/store_{unix,windows}.go isolate the lsof/ps/vm_stat shell-outs, mnemo_whatsup degrades gracefully on Windows, parsePsMetricsOutput is extracted so Whatsup routes through the same seam pattern as parsePsEnvOutput. CI (.github/workflows/ci.yml) runs go test on ubuntu-latest and windows-latest with CGO_ENABLED=1; release.yml builds a static-linked Windows amd64 .zip artefact with -extldflags "-static". README documents the MinGW-w64 prereq.
+
+      Dependency unblock: github.com/marcelocantos/claudia was using syscall.Flock/LOCK_EX/LOCK_UN directly. Split into flock_unix.go / flock_windows.go (LockFileEx via golang.org/x/sys/windows) on claudia master (b724d4f). Claudia needs a release and mnemo's go.mod needs a corresponding bump before Windows CI can go green end-to-end.
+
+      Remaining: (1) release claudia with the Flock fix; (2) bump mnemo go.mod to the new claudia; (3) watch windows-latest CI pass with CGO_ENABLED=1; (4) verify the static-linked Windows binary runs with no MinGW DLLs on PATH (CI artefact smoke test, or manual check); (5) consider adding windows arm64 to the release matrix once amd64 is green (GHA runners for Windows arm64 are in limited preview).
+
+      Reframed 2026-04-19 after 🎯T27 landed (v0.20.0). The original target included Unix-socket → TCP-loopback IPC and an mTLS-protected stdio proxy; T27 collapsed the architecture to a single HTTP MCP daemon on TCP loopback, so that work is already done. The modernc.org/sqlite swap is also out: user direction (2026-04-19) is to stick with bona fide SQLite via mattn/go-sqlite3 and accept the CGO toolchain cost on Windows.
     depends_on:
     - T27
     tags:
