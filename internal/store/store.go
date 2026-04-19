@@ -5269,8 +5269,11 @@ func extractMetaFromFile(path string) (cwd, branch, topic string) {
 var repoPattern = regexp.MustCompile(`/work/github\.com/([^/]+/[^/]+)`)
 
 // extractRepo derives an org/repo string from a working directory path.
+// Windows paths (e.g. C:\Users\...\work\github.com\org\repo) are normalised
+// to forward slashes before matching so the same regex works on every
+// platform.
 func extractRepo(cwd string) string {
-	m := repoPattern.FindStringSubmatch(cwd)
+	m := repoPattern.FindStringSubmatch(filepath.ToSlash(cwd))
 	if m == nil {
 		return ""
 	}
