@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: cc
+            cxx: c++
+            ar: ar
+          - os: windows-latest
+            # windows-latest ships mingw-w64 preinstalled; use the
+            # GCC toolchain explicitly so we do not accidentally get
+            # MSVC-style behaviour via setup-go.
+            cc: gcc
+            cxx: g++
+            ar: ar
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mnemo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: marcelocantos/sqldeep
+          path: sqldeep
+
+      - name: Build sqldeep
+        working-directory: sqldeep
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          AR: ${{ matrix.ar }}
+        run: |
+          mkdir -p build
+          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
+          "$CC" -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
+          "$AR" rcs build/libsqldeep.a build/sqldeep.o
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mnemo/go.mod
+
+      - name: Test
+        working-directory: mnemo
+        env:
+          CGO_ENABLED: "1"
+        run: go test -tags sqlite_fts5 ./...

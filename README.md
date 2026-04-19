@@ -83,6 +83,14 @@ Or build from source (requires Go and CGo for SQLite):
 go build -tags "sqlite_fts5" -o bin/mnemo .
 ```
 
+On Windows, CGo requires a MinGW-w64 or LLVM clang toolchain on the
+PATH — Go cgo does not use MSVC. The simplest setup is
+[MSYS2](https://www.msys2.org/) with the `mingw-w64-x86_64-toolchain`
+package. Release binaries from the GitHub release page are statically
+linked and have no external runtime requirements. Live-session
+discovery (`mnemo_whatsup`, `lsof`-based liveness) degrades gracefully
+on Windows; transcript indexing and all query tools work identically.
+
 ## Running
 
 **As a service** (recommended — survives reboots):
