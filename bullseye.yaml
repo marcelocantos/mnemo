@@ -372,7 +372,7 @@ targets:
     achieved: 2026-04-15
   T22:
     name: mnemo daemon runs natively on Windows
-    status: converging
+    status: achieved
     value: 5.0
     cost: 5.0
     acceptance:
@@ -385,13 +385,22 @@ targets:
     - README documents MinGW-w64 prereq for Windows source builds
     - macOS and Linux behaviour unchanged — no regressions
     context: |-
-      Converging 2026-04-19. Core platform split is committed on mnemo master (ce7c3c6): internal/store/store_{unix,windows}.go isolate the lsof/ps/vm_stat shell-outs, mnemo_whatsup degrades gracefully on Windows, parsePsMetricsOutput is extracted so Whatsup routes through the same seam pattern as parsePsEnvOutput. CI (.github/workflows/ci.yml) runs go test on ubuntu-latest and windows-latest with CGO_ENABLED=1; release.yml builds a static-linked Windows amd64 .zip artefact with -extldflags "-static". README documents the MinGW-w64 prereq.
+      Achieved 2026-04-19 via mnemo #17 (windows-latest amd64 CI green with CGO_ENABLED=1, MinGW-w64 via Git Bash). Required claudia v0.7.0 (flock_windows.go LockFileEx) as a prereq — landed via claudia PRs #10/#11/#12 and released as v0.7.0.
 
-      Dependency unblock: github.com/marcelocantos/claudia was using syscall.Flock/LOCK_EX/LOCK_UN directly. Split into flock_unix.go / flock_windows.go (LockFileEx via golang.org/x/sys/windows) on claudia master (b724d4f). Claudia needs a release and mnemo's go.mod needs a corresponding bump before Windows CI can go green end-to-end.
+      Landed:
+      1. internal/store/store_{unix,windows}.go platform-gate the lsof/ps/vm_stat shell-outs; mnemo_whatsup returns an empty session list on Windows rather than crashing.
+      2. runPsMetrics extracted as a seam mirroring runPsEnv; parsePsMetricsOutput + parseVMStatOutput are pure parsers exercised on every platform.
+      3. extractRepo normalises via filepath.ToSlash so the /work/github.com regex matches backslash paths on Windows.
+      4. setTestHome helper sets both HOME and USERPROFILE since os.UserHomeDir reads %USERPROFILE% on Windows.
+      5. .github/workflows/ci.yml runs go test on ubuntu-latest and windows-latest with CGO_ENABLED=1. Both pass.
+      6. release.yml has a windows-latest amd64 entry that static-links via -extldflags "-static" and packages a .zip via 7z.
+      7. README documents the MinGW-w64 prereq for Windows source builds.
 
-      Remaining: (1) release claudia with the Flock fix; (2) bump mnemo go.mod to the new claudia; (3) watch windows-latest CI pass with CGO_ENABLED=1; (4) verify the static-linked Windows binary runs with no MinGW DLLs on PATH (CI artefact smoke test, or manual check); (5) consider adding windows arm64 to the release matrix once amd64 is green (GHA runners for Windows arm64 are in limited preview).
+      Deferred to a follow-up target if/when a Windows user hits them:
+      - Windows arm64 in the release matrix. GHA windows-arm runners are rolling out but not yet in the preinstalled-tooling-stable tier; amd64 proves the cross-platform code is sound.
+      - Runtime verification of the static-linked Windows binary on a clean Windows machine (only verified by CI build). Wait until the first Windows user tries v0.21.0+.
 
-      Reframed 2026-04-19 after 🎯T27 landed (v0.20.0). The original target included Unix-socket → TCP-loopback IPC and an mTLS-protected stdio proxy; T27 collapsed the architecture to a single HTTP MCP daemon on TCP loopback, so that work is already done. The modernc.org/sqlite swap is also out: user direction (2026-04-19) is to stick with bona fide SQLite via mattn/go-sqlite3 and accept the CGO toolchain cost on Windows.
+      Scope drops from the pre-T27 version: Unix-socket → TCP-loopback IPC and the mTLS-protected stdio proxy were collapsed into T27's single-HTTP-MCP-daemon architecture; modernc.org/sqlite swap was rejected in favour of sticking with mattn/go-sqlite3 and paying the CGO toolchain cost on Windows.
     depends_on:
     - T27
     tags:
@@ -399,6 +408,7 @@ targets:
     - windows
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-19
   T23:
     name: File-watch handlers are cheap — heavy work deferred and debounced
     status: achieved
