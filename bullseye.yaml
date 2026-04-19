@@ -371,25 +371,31 @@ targets:
     discovered: 2026-04-14
     achieved: 2026-04-15
   T22:
-    name: mnemo daemon and MCP proxy run natively on Windows
-    status: identified
+    name: mnemo daemon runs natively on Windows
+    status: converging
     value: 5.0
-    cost: 8.0
+    cost: 5.0
     acceptance:
-    - mnemo serve and mnemo (stdio proxy) build and run on Windows arm64 and x86_64
-    - Daemon listens on TCP loopback; endpoint file at ~/.mnemo/endpoint contains port + self-signed cert + private key with user-only ACL
-    - Proxy connects via mTLS using the endpoint file; rejects connections without matching client cert
-    - macOS and Linux behaviour unchanged (same TCP-loopback transport everywhere, or platform-conditional with Unix socket fallback — design choice)
-    - SQLite driver swapped to modernc.org/sqlite; FTS5 still works; existing tests pass on all platforms
-    - Process metrics (mnemo_whatsup) either work on Windows or degrade gracefully with a clear message
-    - CI runs go test on windows-latest GHA runner and passes
-    - Image OCR degrades to no-OCR or tesseract on Windows without crashing
-    context: 'Currently macOS/Linux only. Blockers: (1) Unix domain socket IPC in mcpbridge — switch to TCP loopback with a port file at ~/.mnemo/endpoint containing port + mTLS cert + private key (user-only ACL; access to file == access to service); (2) mattn/go-sqlite3 needs CGO+MSYS2 on Windows — swap to modernc.org/sqlite (pure Go, FTS5); (3) lsof/ps shell-outs in store.go (~4883, ~5755) need Windows equivalents (tasklist/WMI) or to be gated; vm_stat is already gated. Image OCR (Vision framework) and vm_stat are correctly gated behind //go:build darwin and degrade to stubs — no work needed beyond verification. claude/uv/gh/tesseract/git are all available on Windows; describer/embeddings work unchanged when those tools are installed. Distinct from 🎯T15 which is about indexing Windows-side transcripts from a Windows VM — this target is mnemo itself running on Windows. Estimated effort: 5–7 days.'
+    - mnemo builds and runs on Windows arm64 and x86_64 with CGO enabled and mattn/go-sqlite3 intact
+    - Release binary on Windows is statically linked against the MinGW runtime (or bundles required DLLs) so end users need no extra install
+    - Unix-only shell-outs in internal/store/store.go (lsof near line 5073, ps near lines 5784 and 5896, vm_stat near 6064) are gated by //go:build and have Windows equivalents or graceful-degradation stubs (tasklist/WMI or feature disabled with clear log message)
+    - Process metrics (mnemo_whatsup) either work on Windows via tasklist/WMI or degrade gracefully with a clear message
+    - Image OCR path degrades to no-op or tesseract on Windows without crashing (Vision framework is already macOS-gated — verify)
+    - CI runs go test on windows-latest GHA runner with CGO_ENABLED=1 and passes
+    - README documents MinGW-w64 prereq for Windows source builds
+    - macOS and Linux behaviour unchanged — no regressions
+    context: |-
+      Converging 2026-04-19. Core platform split is committed on mnemo master (ce7c3c6): internal/store/store_{unix,windows}.go isolate the lsof/ps/vm_stat shell-outs, mnemo_whatsup degrades gracefully on Windows, parsePsMetricsOutput is extracted so Whatsup routes through the same seam pattern as parsePsEnvOutput. CI (.github/workflows/ci.yml) runs go test on ubuntu-latest and windows-latest with CGO_ENABLED=1; release.yml builds a static-linked Windows amd64 .zip artefact with -extldflags "-static". README documents the MinGW-w64 prereq.
+
+      Dependency unblock: github.com/marcelocantos/claudia was using syscall.Flock/LOCK_EX/LOCK_UN directly. Split into flock_unix.go / flock_windows.go (LockFileEx via golang.org/x/sys/windows) on claudia master (b724d4f). Claudia needs a release and mnemo's go.mod needs a corresponding bump before Windows CI can go green end-to-end.
+
+      Remaining: (1) release claudia with the Flock fix; (2) bump mnemo go.mod to the new claudia; (3) watch windows-latest CI pass with CGO_ENABLED=1; (4) verify the static-linked Windows binary runs with no MinGW DLLs on PATH (CI artefact smoke test, or manual check); (5) consider adding windows arm64 to the release matrix once amd64 is green (GHA runners for Windows arm64 are in limited preview).
+
+      Reframed 2026-04-19 after 🎯T27 landed (v0.20.0). The original target included Unix-socket → TCP-loopback IPC and an mTLS-protected stdio proxy; T27 collapsed the architecture to a single HTTP MCP daemon on TCP loopback, so that work is already done. The modernc.org/sqlite swap is also out: user direction (2026-04-19) is to stick with bona fide SQLite via mattn/go-sqlite3 and accept the CGO toolchain cost on Windows.
     depends_on:
     - T27
     tags:
     - cross-platform
-    - ipc
     - windows
     origin: manual
     discovered: 2026-04-15
@@ -648,6 +654,31 @@ targets:
     origin: manual
     discovered: 2026-04-18
     achieved: 2026-04-18
+  T28:
+    name: mnemo exposes session-structure introspection
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns a structured summary of a sessions entry types and shape
+    - Output is compact enough to inspect directly
+    - Replaces inline-Python JSONL introspection patterns observed in workaround data
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). In post-mnemo sessions, Claude still falls back to bash against .claude/projects/... with inline-Python patterns that Counter() the entry types, assistant stop_reasons, system subtypes, and content-block kinds of a session JSONL. 16 post-mnemo sessions showed this pattern. No existing mnemo tool answers it: mnemo_read_session returns raw messages, mnemo_query can do it but requires hand-written SQL each time. A dedicated mnemo_session_structure(session_id) would retire this whole class of bash fallback.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
+  T29:
+    name: mnemo surfaces raw tool-result bodies
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns the raw tool-result payload text for a given tool invocation
+    - Supports truncation and offset for large payloads
+    - Tool-result bodies are indexed at ingest so lookup is O(1)
+    - Handles missing tool_use_ids gracefully
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo workaround: cat and tail against .claude/projects/<project>/<session>/tool-results/<id>.txt. Tool-result payloads are stored on disk as separate files (one per tool_use_id) but arent directly retrievable via mnemo. mnemo_read_session returns the message stream with tool_use inputs but not the full tool-result text bodies. A mnemo_tool_result(session_id, tool_use_id) tool would remove another class of direct .claude/projects/ bash access.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
   T3:
     name: Active work dashboard data
     status: achieved
@@ -661,6 +692,32 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-07
+  T30:
+    name: mnemo returns raw content of a named memory file
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns the raw markdown body of a named memory file
+    - Supports project lookup by bare name or path fragment
+    - Lists available memories when name is omitted
+    - Handles MEMORY.md index and topic files uniformly
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo pattern: cat of /Users/marcelo/.claude/projects/<project>/memory/<name>.md and find for *.md under memory directories. mnemo_memories exists but returns search hits, not the full body of a named memory file. When Claude knows the project plus memory name it wants the raw text directly; today it either cats the file or runs mnemo_memories with a query it hopes will match and then has to open the file anyway.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
+  T31:
+    name: mnemo locates an entry by UUID across sessions
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns the session and entry index where a given UUID appears
+    - Supports partial UUID prefixes for convenience
+    - Handles entry UUIDs, message UUIDs, tool_use_ids, and parent UUIDs from one entry point
+    - Returns structured result with session_id, entry_id, type, timestamp, and surrounding context
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo pattern: Python loops over session JSONL files grepping for specific UUIDs to answer which session contains entry X or to trace parent-UUID chains. No current mnemo tool does this directly; bash grep over JSONL files is the only path. Common use cases include debugging session chaining, tracking tool_use_ids through retries, and resolving cross-session references.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
   T4:
     name: Individual session transcript access
     status: achieved

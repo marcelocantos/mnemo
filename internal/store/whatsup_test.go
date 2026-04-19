@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+// setTestHome points os.UserHomeDir at the given directory on every
+// platform. Go's os.UserHomeDir reads $HOME on Unix but %USERPROFILE% on
+// Windows, so a bare t.Setenv("HOME", ...) is a no-op on Windows.
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 // TestParsePsEnvOutput verifies that parsePsEnvOutput extracts PWD from
 // ps -wwEo pid,command output, including graceful degradation when PWD is
 // absent or the line is malformed.
@@ -99,7 +108,7 @@ func TestParsePsEnvOutput(t *testing.T) {
 func TestCwdToTranscripts(t *testing.T) {
 	// Build a fake home directory with a projects subtree.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	cwd := "/Users/alice/work/myrepo"
 	encoded := strings.ReplaceAll(cwd, "/", "-")
@@ -151,7 +160,7 @@ func TestCwdToTranscripts(t *testing.T) {
 // projects directory for a cwd does not exist.
 func TestCwdToTranscriptsMissingDir(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	got := cwdToTranscripts("/nonexistent/path/that/has/no/project")
 	if len(got) != 0 {
@@ -164,7 +173,7 @@ func TestCwdToTranscriptsMissingDir(t *testing.T) {
 func TestWhatsupPsEnvSeam(t *testing.T) {
 	// Build a fake home with a transcript for PID 9999.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	cwd := "/Users/alice/work/proj"
 	encoded := strings.ReplaceAll(cwd, "/", "-")
@@ -215,7 +224,7 @@ func TestWhatsupPsEnvSeam(t *testing.T) {
 // returns empty output (e.g. ps fails or PWD is absent from env).
 func TestWhatsupPsEnvFailure(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	// Override runPsEnv to simulate failure.
 	orig := runPsEnv

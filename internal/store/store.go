@@ -5066,13 +5066,9 @@ func (s *Store) SessionCWD(sessionID string) string {
 	return cwd
 }
 
-// runLsof runs lsof to find JSONL files open by any claude process under dir.
-// Returns the raw output lines. Exported for testing via a seam — in tests,
-// the actual lsof binary is not required; parseLsofOutput is tested directly.
-func runLsof(projectsDir string) []byte {
-	out, _ := exec.Command("lsof", "-c", "claude", "-a", "+D", projectsDir).Output()
-	return out
-}
+// runLsof is platform-specific: see store_unix.go / store_windows.go. It runs
+// whatever OS-native command discovers the Claude process's open JSONL files
+// and returns raw bytes for parseLsofOutput to consume.
 
 // parseLsofOutput parses lsof output into a sessionID → PID map.
 // Each JSONL filename stem (without .jsonl) is treated as a session ID.
@@ -5273,8 +5269,11 @@ func extractMetaFromFile(path string) (cwd, branch, topic string) {
 var repoPattern = regexp.MustCompile(`/work/github\.com/([^/]+/[^/]+)`)
 
 // extractRepo derives an org/repo string from a working directory path.
+// Windows paths (e.g. C:\Users\...\work\github.com\org\repo) are normalised
+// to forward slashes before matching so the same regex works on every
+// platform.
 func extractRepo(cwd string) string {
-	m := repoPattern.FindStringSubmatch(cwd)
+	m := repoPattern.FindStringSubmatch(filepath.ToSlash(cwd))
 	if m == nil {
 		return ""
 	}
@@ -5776,13 +5775,54 @@ func (s *Store) chainLocked(sessionID string) ([]ChainLink, error) {
 	return chain, nil
 }
 
-// runPsEnv is a test seam: in production it invokes ps to get PID→env output.
-// Tests replace it with a function that returns synthetic output.
-var runPsEnv = func(pids []string) []byte {
-	// ps -wwEo pid,command shows env vars appended after the command line.
-	args := append([]string{"-wwEo", "pid,command", "-p"}, strings.Join(pids, ","))
-	out, _ := exec.Command("ps", args...).Output()
-	return out
+// runPsEnv and runPsMetrics are platform-gated seams — see store_unix.go /
+// store_windows.go. Tests replace them with functions that return synthetic
+// output. On Windows they return empty by default (live-session discovery and
+// per-PID metrics degrade gracefully without a lsof/ps equivalent wired in).
+
+// psRow is the per-PID metrics captured from `ps -o pid=,rss=,%cpu=,time=`.
+type psRow struct {
+	rss     int64
+	cpuPct  float64
+	cpuTime string
+}
+
+// parsePsMetricsOutput parses `ps -o pid=,rss=,%cpu=,time= -p <pids>` output
+// into a map of PID → psRow. Malformed or short lines are silently skipped so
+// the caller can degrade gracefully when ps fails or returns nothing.
+func parsePsMetricsOutput(data []byte) map[int]psRow {
+	result := make(map[int]psRow)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid := 0
+		for _, ch := range fields[0] {
+			if ch < '0' || ch > '9' {
+				pid = -1
+				break
+			}
+			pid = pid*10 + int(ch-'0')
+		}
+		if pid <= 0 {
+			continue
+		}
+		rss := int64(0)
+		for _, ch := range fields[1] {
+			if ch >= '0' && ch <= '9' {
+				rss = rss*10 + int64(ch-'0')
+			}
+		}
+		cpuPct := 0.0
+		fmt.Sscanf(fields[2], "%f", &cpuPct)
+		result[pid] = psRow{
+			rss:     rss * 1024, // ps reports RSS in KB
+			cpuPct:  cpuPct,
+			cpuTime: fields[3],
+		}
+	}
+	return result
 }
 
 // parsePsEnvOutput parses the output of `ps -wwEo pid,command -p <pids>`
@@ -5884,48 +5924,7 @@ func (s *Store) Whatsup(postmortem bool) (*WhatsupResult, error) {
 		pidToSession[pid] = sid
 	}
 
-	type psRow struct {
-		rss     int64
-		cpuPct  float64
-		cpuTime string
-	}
-	pidMetrics := make(map[int]psRow)
-
-	// ps -o pid=,rss=,%cpu=,time= -p <pid,...>
-	args := append([]string{"-o", "pid=,rss=,%cpu=,time=", "-p"}, strings.Join(pidList, ","))
-	out, err := exec.Command("ps", args...).Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 4 {
-				continue
-			}
-			pid := 0
-			for _, ch := range fields[0] {
-				if ch < '0' || ch > '9' {
-					pid = -1
-					break
-				}
-				pid = pid*10 + int(ch-'0')
-			}
-			if pid <= 0 {
-				continue
-			}
-			rss := int64(0)
-			for _, ch := range fields[1] {
-				if ch >= '0' && ch <= '9' {
-					rss = rss*10 + int64(ch-'0')
-				}
-			}
-			cpuPct := 0.0
-			fmt.Sscanf(fields[2], "%f", &cpuPct)
-			pidMetrics[pid] = psRow{
-				rss:     rss * 1024, // ps reports RSS in KB
-				cpuPct:  cpuPct,
-				cpuTime: fields[3],
-			}
-		}
-	}
+	pidMetrics := parsePsMetricsOutput(runPsMetrics(pidList))
 
 	// Collect cwd for each PID via ps -E (graceful: missing PWD is skipped).
 	pidCwd := parsePsEnvOutput(runPsEnv(pidList))
@@ -6059,14 +6058,17 @@ func collectPostmortem(window time.Duration) []WhatsupPostmortemEntry {
 	return out
 }
 
-// collectVMStat parses vm_stat output to compute macOS memory pressure.
-func collectVMStat() SystemMetrics {
-	out, err := exec.Command("vm_stat").Output()
-	if err != nil {
-		return SystemMetrics{}
-	}
+// collectVMStat is platform-specific — see store_unix.go / store_windows.go.
+// Currently only the darwin implementation produces real data; non-darwin
+// platforms return a zero SystemMetrics. The caller in Whatsup gates the
+// invocation on runtime.GOOS == "darwin".
+
+// parseVMStatOutput parses vm_stat output to compute macOS memory pressure.
+// Kept in the shared file so it is exercised by tests on all platforms even
+// though only the darwin build path invokes vm_stat.
+func parseVMStatOutput(data []byte) SystemMetrics {
 	vals := make(map[string]int64)
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(string(data), "\n") {
 		// Lines look like: "Pages free:                               12345."
 		if !strings.Contains(line, ":") {
 			continue
