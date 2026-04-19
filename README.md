@@ -73,11 +73,30 @@ available in every session from that point on.
 
 ## Install
 
+### macOS / Linux
+
 ```bash
 brew install marcelocantos/tap/mnemo
 ```
 
-Or build from source (requires Go and CGo for SQLite):
+### Windows
+
+Download `mnemo-<version>-windows-amd64-setup.exe` from the
+[releases page](https://github.com/marcelocantos/mnemo/releases/latest)
+and double-click it. The installer:
+
+- copies `mnemo.exe` to `C:\Program Files\mnemo\`,
+- registers mnemo as a Windows Service (auto-start on boot,
+  restart-on-failure),
+- patches `%USERPROFILE%\.claude.json` so Claude Code picks up mnemo
+  on its next session,
+- shows up in **Add/Remove Programs** as `mnemo` for a clean uninstall.
+
+No terminal required. Restart your Claude Code session after install.
+
+### Build from source
+
+Requires Go and CGo for SQLite:
 
 ```bash
 go build -tags "sqlite_fts5" -o bin/mnemo .
@@ -96,10 +115,15 @@ on Windows; transcript indexing and all query tools work identically.
 **As a service** (recommended — survives reboots):
 
 ```bash
-brew services start mnemo       # macOS
+brew services start mnemo       # macOS / Linuxbrew
 ```
 
-Logs: `$(brew --prefix)/var/log/mnemo.log`
+On Windows the installer already registers mnemo as a Windows Service
+(`sc query mnemo` to inspect, Services.msc to manage). Service logs:
+`%ProgramData%\mnemo\logs\mnemo.log` plus the Windows Event Log
+(Application source: `mnemo`).
+
+Logs on macOS: `$(brew --prefix)/var/log/mnemo.log`.
 
 **Manually**:
 

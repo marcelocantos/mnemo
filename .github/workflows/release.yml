@@ -84,6 +84,25 @@ jobs:
               ;;
           esac
 
+      - name: Build Windows installer
+        if: matrix.goos == 'windows'
+        working-directory: mnemo
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp "mnemo.exe" dist/
+          cp LICENSE dist/LICENSE.txt
+          # Inno Setup 6 is preinstalled on windows-latest runners.
+          ISCC="/c/Program Files (x86)/Inno Setup 6/iscc.exe"
+          "$ISCC" "/DAppVersion=${VERSION}" \
+            "/DSourceDir=dist" \
+            "/O." \
+            installer/windows/mnemo.iss
+          # Output is named mnemo-${VERSION}-windows-amd64-setup.exe per
+          # OutputBaseFilename in the .iss file.
+          ls -la "mnemo-${VERSION}-windows-amd64-setup.exe"
+
       - name: Upload release artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -92,6 +111,16 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           gh release upload "$GITHUB_REF_NAME" \
             "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}"
+
+      - name: Upload Windows installer
+        if: matrix.goos == 'windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: mnemo
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "mnemo-${VERSION}-windows-amd64-setup.exe"
 
   test:
     runs-on: ubuntu-latest

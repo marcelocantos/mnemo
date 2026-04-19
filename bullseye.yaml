@@ -852,6 +852,71 @@ targets:
     context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo pattern: Python loops over session JSONL files grepping for specific UUIDs to answer which session contains entry X or to trace parent-UUID chains. No current mnemo tool does this directly; bash grep over JSONL files is the only path. Common use cases include debugging session chaining, tracking tool_use_ids through retries, and resolving cross-session references.'
     origin: doit data-mining 2026-04-19
     discovered: 2026-04-19
+  T32:
+    name: Non-technical Windows users install mnemo via a double-click installer, with no terminal required
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - A non-technical Windows user downloads one .exe from the release page, double-clicks it, clicks Next through a standard Windows installer, and mnemo is running as a Windows Service with MCP registered in Claude Code's config — zero terminal commands required.
+    - Uninstalling via Add/Remove Programs cleanly removes the service, binary, and MCP registration.
+    - The installer is built in CI on every release and attached to the GitHub release as mnemo-<version>-windows-amd64-setup.exe.
+    - README documents the Windows install path alongside the brew path.
+    context: v0.21.0 shipped Windows-compatible binaries (🎯T22), but the install pathway still assumes developer tooling (manual zip extraction, PATH setup, claude mcp add via terminal). For the project to reach non-technical Windows users, the install flow must be a single signed .exe that handles binary placement, Windows Service registration, MCP config patching, and uninstallation — all without the user opening a terminal. This is the remaining gap between "runs on Windows" and "ships to Windows end users".
+    depends_on:
+    - T32.1
+    - T32.2
+    - T32.3
+    origin: manual
+    discovered: 2026-04-19
+  T32.1:
+    name: mnemo runs as a native Windows Service (auto-start on boot, restart on failure, logs to Windows Event Log)
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - mnemo.exe install-service registers mnemo as a Windows Service named "mnemo" with auto-start and restart-on-failure configured.
+    - mnemo.exe uninstall-service stops and removes the service.
+    - When running as a service, mnemo reports status to the SCM and handles stop/shutdown events cleanly.
+    - Non-Windows builds still compile; service_other.go returns a clear error if the install-service subcommand is invoked.
+    - Service logs route to the Windows Event Log (or at minimum a file under %ProgramData%\\mnemo\\logs\\).
+    context: The installer needs to register mnemo as a Windows Service so it survives reboots and runs without a logged-in user. Implemented using golang.org/x/sys/windows/svc (native, no nssm/WinSW wrapper). Per the established repo pattern (store_windows.go, ocr_darwin.go), platform-specific code lives in file-suffixed files rather than build-tag ifdefs scattered through main.go.
+    origin: manual
+    discovered: 2026-04-19
+  T32.2:
+    name: mnemo has a subcommand that registers/unregisters itself as an MCP server in Claude Code's config
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - mnemo.exe register-mcp adds/updates the mnemo entry in ~/.claude.json, preserving all other top-level keys and other mcpServers entries.
+    - mnemo.exe unregister-mcp removes the mnemo entry (and removes mcpServers if it becomes empty).
+    - Both subcommands are idempotent and exit 0 if the target state already holds.
+    - If ~/.claude.json does not exist, register-mcp creates a minimal file with just the mcpServers key.
+    context: 'Non-technical users can''t be expected to run claude mcp add from a terminal. mnemo itself can patch %USERPROFILE%\\.claude.json (shape is known: {\"mcpServers\": {\"mnemo\": {\"type\": \"http\", \"url\": \"http://localhost:19419/mcp\"}}}). Subcommand is cross-platform (same code path on macOS/Linux/Windows) and is invoked by the Windows installer post-install but is also useful to anyone wanting a one-shot registration.'
+    origin: manual
+    discovered: 2026-04-19
+  T32.3:
+    name: Inno Setup installer packages mnemo.exe, registers the service, invokes register-mcp, and is built in CI on every release
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - A .iss file in the repo builds into mnemo-<version>-windows-amd64-setup.exe when compiled with iscc.exe on a windows-latest runner.
+    - 'The installer: elevates to admin, copies mnemo.exe to %ProgramFiles%\\mnemo\\, runs install-service, runs register-mcp as the invoking user (so ~/.claude.json is the user''s, not SYSTEM''s), and creates a Start Menu uninstall entry.'
+    - 'The uninstaller: runs unregister-mcp, runs uninstall-service, deletes %ProgramFiles%\\mnemo\\, and removes %ProgramData%\\mnemo\\ (logs).'
+    - release.yml builds the installer after the Windows zip and attaches it to the GitHub release.
+    - README documents the Windows install path.
+    context: Inno Setup is the standard choice for non-Microsoft Windows installers — free, well-supported, produces a single .exe. Can run post-install commands, create uninstall entries, handle elevation. Runs in CI on windows-latest (Inno Setup is preinstalled on the GitHub runner image). No code-signing in this target (separate follow-up — requires a cert purchase).
+    depends_on:
+    - T32.1
+    - T32.2
+    origin: manual
+    discovered: 2026-04-19
   T4:
     name: Individual session transcript access
     status: achieved
