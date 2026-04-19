@@ -121,7 +121,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-19 — /release v0.21.0
 
-- **Commit**: `pending`
+- **Commit**: `8a777d1`
 - **Outcome**: Released v0.21.0. Windows native support (🎯T22): mnemo
   daemon builds and runs on Windows amd64 and arm64 alongside the
   existing darwin-arm64, linux-amd64, linux-arm64 targets. Platform-
