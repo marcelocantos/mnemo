@@ -371,25 +371,24 @@ targets:
     discovered: 2026-04-14
     achieved: 2026-04-15
   T22:
-    name: mnemo daemon and MCP proxy run natively on Windows
+    name: mnemo daemon runs natively on Windows
     status: identified
     value: 5.0
-    cost: 8.0
+    cost: 5.0
     acceptance:
-    - mnemo serve and mnemo (stdio proxy) build and run on Windows arm64 and x86_64
-    - Daemon listens on TCP loopback; endpoint file at ~/.mnemo/endpoint contains port + self-signed cert + private key with user-only ACL
-    - Proxy connects via mTLS using the endpoint file; rejects connections without matching client cert
-    - macOS and Linux behaviour unchanged (same TCP-loopback transport everywhere, or platform-conditional with Unix socket fallback — design choice)
-    - SQLite driver swapped to modernc.org/sqlite; FTS5 still works; existing tests pass on all platforms
-    - Process metrics (mnemo_whatsup) either work on Windows or degrade gracefully with a clear message
-    - CI runs go test on windows-latest GHA runner and passes
-    - Image OCR degrades to no-OCR or tesseract on Windows without crashing
-    context: 'Currently macOS/Linux only. Blockers: (1) Unix domain socket IPC in mcpbridge — switch to TCP loopback with a port file at ~/.mnemo/endpoint containing port + mTLS cert + private key (user-only ACL; access to file == access to service); (2) mattn/go-sqlite3 needs CGO+MSYS2 on Windows — swap to modernc.org/sqlite (pure Go, FTS5); (3) lsof/ps shell-outs in store.go (~4883, ~5755) need Windows equivalents (tasklist/WMI) or to be gated; vm_stat is already gated. Image OCR (Vision framework) and vm_stat are correctly gated behind //go:build darwin and degrade to stubs — no work needed beyond verification. claude/uv/gh/tesseract/git are all available on Windows; describer/embeddings work unchanged when those tools are installed. Distinct from 🎯T15 which is about indexing Windows-side transcripts from a Windows VM — this target is mnemo itself running on Windows. Estimated effort: 5–7 days.'
+    - mnemo builds and runs on Windows arm64 and x86_64 with CGO enabled and mattn/go-sqlite3 intact
+    - Release binary on Windows is statically linked against the MinGW runtime (or bundles required DLLs) so end users need no extra install
+    - Unix-only shell-outs in internal/store/store.go (lsof near line 5073, ps near lines 5784 and 5896, vm_stat near 6064) are gated by //go:build and have Windows equivalents or graceful-degradation stubs (tasklist/WMI or feature disabled with clear log message)
+    - Process metrics (mnemo_whatsup) either work on Windows via tasklist/WMI or degrade gracefully with a clear message
+    - Image OCR path degrades to no-op or tesseract on Windows without crashing (Vision framework is already macOS-gated — verify)
+    - CI runs go test on windows-latest GHA runner with CGO_ENABLED=1 and passes
+    - README documents MinGW-w64 prereq for Windows source builds
+    - macOS and Linux behaviour unchanged — no regressions
+    context: 'Reframed 2026-04-19 after 🎯T27 landed (v0.20.0). The original target included Unix-socket → TCP-loopback IPC and an mTLS-protected stdio proxy; T27 collapsed the architecture to a single HTTP MCP daemon on TCP loopback, so that work is already done. The modernc.org/sqlite swap is also out: user direction (2026-04-19) is to stick with bona fide SQLite via mattn/go-sqlite3 and accept the CGO toolchain cost on Windows. windows-latest GHA runners ship MinGW-w64 preinstalled so CI is straightforward; local Windows builds require MinGW-w64 or LLVM clang (not MSVC — Go cgo does not use MSVC). Remaining work is: (1) platform-gate lsof/ps/vm_stat shell-outs in store.go with //go:build tags and Windows stubs/equivalents; (2) verify existing darwin gates (Vision OCR, vm_stat) hold up; (3) wire windows-latest into CI with CGO_ENABLED=1; (4) static-link the Windows release binary. Estimated effort: 2–3 days. Distinct from 🎯T15 which is about indexing Windows-side transcripts from a Windows VM — this target is mnemo itself running on Windows.'
     depends_on:
     - T27
     tags:
     - cross-platform
-    - ipc
     - windows
     origin: manual
     discovered: 2026-04-15
