@@ -9,7 +9,13 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.20.0.
+Snapshot as of v0.21.0.
+
+**v0.21.0 note (🎯T22)**: mnemo now builds and runs natively on Windows
+(amd64 and arm64 in addition to darwin-arm64, linux-amd64, linux-arm64).
+No CLI or MCP surface change; platform-specific code is split into
+`store_unix.go` / `store_windows.go` so the daemon, watcher, and ingest
+pipeline work without CGO cross-compilation workarounds.
 
 **v0.20.0 note (🎯T27)**: mnemo collapsed from two binaries (stdio proxy +
 serve daemon coupled by a custom UDS JSON-RPC protocol) to a single HTTP
