@@ -648,6 +648,31 @@ targets:
     origin: manual
     discovered: 2026-04-18
     achieved: 2026-04-18
+  T28:
+    name: mnemo exposes session-structure introspection
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns a structured summary of a sessions entry types and shape
+    - Output is compact enough to inspect directly
+    - Replaces inline-Python JSONL introspection patterns observed in workaround data
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). In post-mnemo sessions, Claude still falls back to bash against .claude/projects/... with inline-Python patterns that Counter() the entry types, assistant stop_reasons, system subtypes, and content-block kinds of a session JSONL. 16 post-mnemo sessions showed this pattern. No existing mnemo tool answers it: mnemo_read_session returns raw messages, mnemo_query can do it but requires hand-written SQL each time. A dedicated mnemo_session_structure(session_id) would retire this whole class of bash fallback.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
+  T29:
+    name: mnemo surfaces raw tool-result bodies
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns the raw tool-result payload text for a given tool invocation
+    - Supports truncation and offset for large payloads
+    - Tool-result bodies are indexed at ingest so lookup is O(1)
+    - Handles missing tool_use_ids gracefully
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo workaround: cat and tail against .claude/projects/<project>/<session>/tool-results/<id>.txt. Tool-result payloads are stored on disk as separate files (one per tool_use_id) but arent directly retrievable via mnemo. mnemo_read_session returns the message stream with tool_use inputs but not the full tool-result text bodies. A mnemo_tool_result(session_id, tool_use_id) tool would remove another class of direct .claude/projects/ bash access.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
   T3:
     name: Active work dashboard data
     status: achieved
@@ -661,6 +686,32 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-07
+  T30:
+    name: mnemo returns raw content of a named memory file
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns the raw markdown body of a named memory file
+    - Supports project lookup by bare name or path fragment
+    - Lists available memories when name is omitted
+    - Handles MEMORY.md index and topic files uniformly
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo pattern: cat of /Users/marcelo/.claude/projects/<project>/memory/<name>.md and find for *.md under memory directories. mnemo_memories exists but returns search hits, not the full body of a named memory file. When Claude knows the project plus memory name it wants the raw text directly; today it either cats the file or runs mnemo_memories with a query it hopes will match and then has to open the file anyway.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
+  T31:
+    name: mnemo locates an entry by UUID across sessions
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - New MCP tool returns the session and entry index where a given UUID appears
+    - Supports partial UUID prefixes for convenience
+    - Handles entry UUIDs, message UUIDs, tool_use_ids, and parent UUIDs from one entry point
+    - Returns structured result with session_id, entry_id, type, timestamp, and surrounding context
+    context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo pattern: Python loops over session JSONL files grepping for specific UUIDs to answer which session contains entry X or to trace parent-UUID chains. No current mnemo tool does this directly; bash grep over JSONL files is the only path. Common use cases include debugging session chaining, tracking tool_use_ids through retries, and resolving cross-session references.'
+    origin: doit data-mining 2026-04-19
+    discovered: 2026-04-19
   T4:
     name: Individual session transcript access
     status: achieved
