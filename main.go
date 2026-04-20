@@ -7,8 +7,12 @@
 //
 // mnemo runs as a single HTTP MCP daemon:
 //
-//	mnemo              # run the HTTP MCP daemon (default :19419)
-//	mnemo --addr :8080 # custom listen address
+//	mnemo                       # run the HTTP MCP daemon (default :19419)
+//	mnemo --addr :8080          # custom listen address
+//	mnemo register-mcp          # add mnemo to ~/.claude.json
+//	mnemo unregister-mcp        # remove mnemo from ~/.claude.json
+//	mnemo install-service       # (Windows) install mnemo as a service
+//	mnemo uninstall-service     # (Windows) remove the mnemo service
 //	claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 package main
 
@@ -26,6 +30,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/mcpconfig"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
@@ -53,9 +58,34 @@ var agentsGuide string
 const (
 	version     = "0.21.0"
 	defaultAddr = ":19419"
+	// serviceName is the Windows Service identifier used by
+	// install-service / uninstall-service and by the service control
+	// dispatcher when mnemo is launched by the SCM.
+	serviceName = "mnemo"
 )
 
 func main() {
+	// Subcommands are dispatched before flag.Parse so their own flags
+	// don't collide with the global ones (--addr, --version). The
+	// default (no subcommand) path keeps the v0.21.0 behaviour: parse
+	// global flags and serve HTTP.
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "register-mcp":
+			cmdRegisterMCP(os.Args[2:])
+			return
+		case "unregister-mcp":
+			cmdUnregisterMCP(os.Args[2:])
+			return
+		case "install-service":
+			cmdInstallService(os.Args[2:])
+			return
+		case "uninstall-service":
+			cmdUninstallService(os.Args[2:])
+			return
+		}
+	}
+
 	showVersion := flag.Bool("version", false, "print version and exit")
 	helpAgent := flag.Bool("help-agent", false, "print agent guide and exit")
 	addr := flag.String("addr", defaultAddr, "HTTP listen address")
@@ -74,6 +104,17 @@ func main() {
 		return
 	}
 
+	// On Windows, if the SCM launched this process (no interactive
+	// session), hand off to the service control dispatcher, which
+	// calls runServe with a cancellable context driven by SCM events.
+	if handled, err := runAsServiceIfUnderSCM(*addr); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "service run failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Detect a stale stdio MCP registration before opening the store.
 	// If our stdin looks piped and the target port is already bound,
 	// the caller is almost certainly Claude Code invoking this binary
@@ -85,7 +126,74 @@ func main() {
 		os.Exit(1)
 	}
 
-	runServe(*addr)
+	if err := runServe(context.Background(), *addr); err != nil {
+		os.Exit(1)
+	}
+}
+
+func cmdRegisterMCP(args []string) {
+	fs := flag.NewFlagSet("register-mcp", flag.ExitOnError)
+	url := fs.String("url", mcpconfig.DefaultURL, "MCP endpoint URL to register")
+	configPath := fs.String("config", "", "Claude Code config path (default ~/.claude.json)")
+	_ = fs.Parse(args)
+	path := *configPath
+	if path == "" {
+		p, err := mcpconfig.ConfigPath()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		path = p
+	}
+	changed, err := mcpconfig.Register(path, *url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "register-mcp: %v\n", err)
+		os.Exit(1)
+	}
+	if changed {
+		fmt.Printf("mnemo MCP registered in %s\n", path)
+	} else {
+		fmt.Printf("mnemo MCP already registered in %s\n", path)
+	}
+}
+
+func cmdUnregisterMCP(args []string) {
+	fs := flag.NewFlagSet("unregister-mcp", flag.ExitOnError)
+	configPath := fs.String("config", "", "Claude Code config path (default ~/.claude.json)")
+	_ = fs.Parse(args)
+	path := *configPath
+	if path == "" {
+		p, err := mcpconfig.ConfigPath()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		path = p
+	}
+	changed, err := mcpconfig.Unregister(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unregister-mcp: %v\n", err)
+		os.Exit(1)
+	}
+	if changed {
+		fmt.Printf("mnemo MCP removed from %s\n", path)
+	} else {
+		fmt.Printf("mnemo MCP was not registered in %s\n", path)
+	}
+}
+
+func cmdInstallService(args []string) {
+	if err := installService(args); err != nil {
+		fmt.Fprintf(os.Stderr, "install-service: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdUninstallService(args []string) {
+	if err := uninstallService(args); err != nil {
+		fmt.Fprintf(os.Stderr, "uninstall-service: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // stdinPiped reports whether stdin is a pipe or file (i.e. not a tty),
@@ -112,8 +220,10 @@ func portInUse(addr string) bool {
 }
 
 // runServe opens the store, starts ingest and background workers, and
-// serves the MCP protocol over HTTP.
-func runServe(addr string) {
+// serves the MCP protocol over HTTP until ctx is cancelled or the
+// server fails. Used by both the foreground launcher and the Windows
+// Service handler.
+func runServe(ctx context.Context, addr string) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -121,7 +231,7 @@ func runServe(addr string) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot determine home directory: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	projectDir := filepath.Join(homeDir, ".claude", "projects")
@@ -129,13 +239,13 @@ func runServe(addr string) {
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "cannot create db directory: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	mem, err := store.New(dbPath, projectDir)
 	if err != nil {
 		slog.Error("failed to open store", "err", err)
-		os.Exit(1)
+		return err
 	}
 	defer mem.Close()
 
@@ -205,18 +315,23 @@ func runServe(addr string) {
 		caller := compact.NewClaudiaCaller(mnemoRepoDir, "sonnet")
 		compactor := compact.New(mem, caller, compact.Config{})
 		watcher := compact.NewWatcher(mem, compactor, compact.WatcherConfig{}, mnemoRepoDir)
-		ctx := context.Background()
 		slog.Info("compact: watcher starting")
 		watcher.Run(ctx)
 	}()
 
 	// Poll CI runs periodically (every 5 minutes).
 	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
 		for {
 			if err := mem.PollCI(); err != nil {
 				slog.Warn("CI poll failed", "err", err)
 			}
-			time.Sleep(5 * time.Minute)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
 	}()
 
@@ -231,13 +346,29 @@ func runServe(addr string) {
 	)
 	tools.NewHandler(mem).RegisterTools(mcp)
 
-	http := server.NewStreamableHTTPServer(mcp,
+	httpSrv := server.NewStreamableHTTPServer(mcp,
 		server.WithStateful(true),
 	)
 
 	slog.Info("mnemo serve starting", "version", version, "addr", addr)
-	if err := http.Start(addr); err != nil {
+
+	// Run the HTTP server in a goroutine so we can react to ctx
+	// cancellation (triggered by the Windows Service handler on SCM
+	// Stop, or never triggered in the foreground case).
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.Start(addr) }()
+
+	select {
+	case err := <-errCh:
 		slog.Error("HTTP MCP server failed", "err", err)
-		os.Exit(1)
+		return err
+	case <-ctx.Done():
+		slog.Info("mnemo serve shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("HTTP shutdown error", "err", err)
+		}
+		return nil
 	}
 }
