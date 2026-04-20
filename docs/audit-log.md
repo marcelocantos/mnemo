@@ -133,7 +133,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-20 — /release v0.22.0
 
-- **Commit**: `pending`
+- **Commit**: `0663dc6`
 - **Outcome**: Released v0.22.0. Windows double-click installer
   (🎯T32 groundwork): Inno Setup `.exe` produced in CI on every
   release, bundling mnemo.exe plus a native Windows Service mode
