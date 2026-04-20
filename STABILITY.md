@@ -9,7 +9,19 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.21.0.
+Snapshot as of v0.22.0.
+
+**v0.22.0 note (🎯T32 groundwork)**: Windows-native install pathway
+— mnemo ships as a double-click `.exe` installer produced by Inno
+Setup in CI. The binary gains a Windows Service mode (auto-start on
+boot, restart-on-failure, Event Log source) via
+`golang.org/x/sys/windows/svc`, plus four cross-platform subcommands:
+`register-mcp`, `unregister-mcp`, `install-service`,
+`uninstall-service`. The installer is not yet code-signed, so
+SmartScreen will warn on first run until an EV cert is added.
+Default bare-invocation behaviour (`mnemo` → serve HTTP on :19419)
+is unchanged — existing macOS / Linux / brew-managed setups are
+untouched.
 
 **v0.21.0 note (🎯T22)**: mnemo now builds and runs natively on Windows
 (amd64 and arm64 in addition to darwin-arm64, linux-amd64, linux-arm64).
@@ -33,6 +45,20 @@ instead of failing silently.
 | `--addr` | string | `:19419` | Stable |
 | `--version` | bool | false | Stable |
 | `--help-agent` | bool | false | Stable |
+
+### CLI subcommands
+
+| Subcommand | Flags | Platform | Description | Stability |
+|---|---|---|---|---|
+| `register-mcp` | `--url`, `--config` | all | Add mnemo entry to `~/.claude.json` (idempotent) | Needs review |
+| `unregister-mcp` | `--config` | all | Remove mnemo entry from `~/.claude.json` (idempotent) | Needs review |
+| `install-service` | `--exe` | Windows | Register mnemo as a Windows Service with auto-start + restart-on-failure | Needs review |
+| `uninstall-service` | — | Windows | Stop and remove the Windows Service and its Event Log source | Needs review |
+
+Subcommands are new in v0.22.0 — API shape and flag set may evolve
+before 1.0 as end-user feedback arrives. Non-Windows invocations of
+the `*-service` subcommands return a helpful error pointing at brew
+services / systemd instead.
 
 ### MCP tools
 

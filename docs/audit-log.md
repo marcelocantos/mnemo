@@ -130,3 +130,23 @@ maintenance activities. Append-only — newest entries at the bottom.
   four new data-mined introspection targets (🎯T28–🎯T31) and
   decomposed 🎯T15 (federated queries) into five leaf sub-targets
   (🎯T15.1–🎯T15.5). Homebrew formula updated.
+
+## 2026-04-20 — /release v0.22.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.22.0. Windows double-click installer
+  (🎯T32 groundwork): Inno Setup `.exe` produced in CI on every
+  release, bundling mnemo.exe plus a native Windows Service mode
+  (auto-start, restart-on-failure, Event Log source) via
+  `golang.org/x/sys/windows/svc`. Four new cross-platform subcommands
+  (`register-mcp`, `unregister-mcp`, `install-service`,
+  `uninstall-service`) let the installer patch `%USERPROFILE%\.claude.json`
+  and register the service without the user opening a terminal.
+  `runServe` now takes a context and shuts down gracefully via HTTP
+  Shutdown on SCM Stop. New `internal/mcpconfig/` package with full
+  unit coverage handles atomic config patching (preserves other keys
+  and MCP entries). Decomposed 🎯T32 into T32.1 (service), T32.2
+  (registration subcommand), T32.3 (installer + CI). Code signing
+  deliberately deferred to a follow-up target — SmartScreen will
+  warn on first run until an EV cert is added. Homebrew formula
+  updated.
