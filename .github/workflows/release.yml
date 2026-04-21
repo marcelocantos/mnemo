@@ -88,6 +88,11 @@ jobs:
         if: matrix.goos == 'windows'
         working-directory: mnemo
         shell: bash
+        env:
+          # MSYS path-conversion mangles ISCC's slash-prefixed flags
+          # (/DAppVersion=..., /O.) into Windows paths before exec,
+          # causing ISCC to treat them as extra script filenames.
+          MSYS_NO_PATHCONV: "1"
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
