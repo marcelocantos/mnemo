@@ -90,13 +90,15 @@ Filename: "{app}\mnemo.exe"; Parameters: "register-mcp"; \
   Flags: runhidden waituntilterminated runasoriginaluser
 
 [UninstallRun]
-; Reverse order: unregister MCP first (as original user), then stop
-; and remove the service. This order means Claude Code never sees a
-; broken registration pointing at a stopped service.
-Filename: "{app}\mnemo.exe"; Parameters: "unregister-mcp"; \
-  Flags: runhidden waituntilterminated runasoriginaluser; \
-  RunOnceId: "MnemoUnregisterMCP"
-
+; Stop and remove the Windows Service. We deliberately DO NOT invoke
+; `mnemo unregister-mcp` at uninstall: Inno Setup's [UninstallRun]
+; section does not support the `runasoriginaluser` flag, so the
+; command would run as the elevated uninstaller account and patch
+; the wrong ~/.claude.json. The stale entry in the real user's
+; config is harmless — Claude Code will fail to connect and move
+; on. Users who want a clean config can run
+; `mnemo unregister-mcp` themselves before uninstalling, or delete
+; the mnemo entry by hand afterwards.
 Filename: "{app}\mnemo.exe"; Parameters: "uninstall-service"; \
   Flags: runhidden waituntilterminated; \
   RunOnceId: "MnemoUninstallService"
