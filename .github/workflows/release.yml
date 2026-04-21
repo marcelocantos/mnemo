@@ -95,9 +95,13 @@ jobs:
           MSYS_NO_PATHCONV: "1"
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p dist
-          cp "mnemo.exe" dist/
-          cp LICENSE dist/LICENSE.txt
+          # Stage alongside the .iss file so Inno Setup's relative
+          # Source: paths (resolved from the .iss file's directory)
+          # find LICENSE.txt and mnemo.exe.
+          STAGE=installer/windows/dist
+          mkdir -p "$STAGE"
+          cp "mnemo.exe" "$STAGE/"
+          cp LICENSE "$STAGE/LICENSE.txt"
           # Inno Setup 6 is preinstalled on windows-latest runners.
           ISCC="/c/Program Files (x86)/Inno Setup 6/iscc.exe"
           "$ISCC" "/DAppVersion=${VERSION}" \
