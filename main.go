@@ -56,7 +56,7 @@ Then restart this Claude Code session.`
 var agentsGuide string
 
 const (
-	version     = "0.22.0"
+	version     = "0.23.0"
 	defaultAddr = ":19419"
 	// serviceName is the Windows Service identifier used by
 	// install-service / uninstall-service and by the service control

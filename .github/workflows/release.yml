@@ -37,6 +37,12 @@ jobs:
             # on Windows is statically linked (or bundles required
             # DLLs)".
             ldflags_extra: '-extldflags "-static"'
+          - os: windows-11-arm
+            goos: windows
+            goarch: arm64
+            ext: ".exe"
+            archive: zip
+            ldflags_extra: '-extldflags "-static"'
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -102,15 +108,25 @@ jobs:
           mkdir -p "$STAGE"
           cp "mnemo.exe" "$STAGE/"
           cp LICENSE "$STAGE/LICENSE.txt"
-          # Inno Setup 6 is preinstalled on windows-latest runners.
+          # Inno Setup 6 is preinstalled on windows-latest amd64 runners
+          # but not on the windows-11-arm image. Install via Chocolatey
+          # when missing so both matrix legs work identically. Inno
+          # Setup itself is x86, but runs fine under the x86 emulator
+          # on arm64 and produces arch-native payload installers when
+          # the .iss ArchitecturesInstallIn64BitMode directive is set
+          # appropriately (we do that via /DArch).
           ISCC="/c/Program Files (x86)/Inno Setup 6/iscc.exe"
+          if [[ ! -f "$ISCC" ]]; then
+            choco install innosetup --no-progress -y
+          fi
           "$ISCC" "/DAppVersion=${VERSION}" \
             "/DSourceDir=dist" \
+            "/DArch=${{ matrix.goarch }}" \
             "/O." \
             installer/windows/mnemo.iss
-          # Output is named mnemo-${VERSION}-windows-amd64-setup.exe per
-          # OutputBaseFilename in the .iss file.
-          ls -la "mnemo-${VERSION}-windows-amd64-setup.exe"
+          # Output is named mnemo-${VERSION}-windows-${ARCH}-setup.exe
+          # per OutputBaseFilename in the .iss file.
+          ls -la "mnemo-${VERSION}-windows-${{ matrix.goarch }}-setup.exe"
 
       - name: Upload release artifact
         env:
@@ -129,7 +145,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release upload "$GITHUB_REF_NAME" \
-            "mnemo-${VERSION}-windows-amd64-setup.exe"
+            "mnemo-${VERSION}-windows-${{ matrix.goarch }}-setup.exe"
 
   test:
     runs-on: ubuntu-latest

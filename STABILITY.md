@@ -9,7 +9,14 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.22.0.
+Snapshot as of v0.23.0.
+
+**v0.23.0 note (🎯T32 groundwork)**: Windows ARM64 installer parity
+— the release now produces `mnemo-<version>-windows-arm64-setup.exe`
+alongside the amd64 installer, built natively on a `windows-11-arm`
+GitHub runner. The `.iss` takes an `/DArch=...` preprocessor flag
+and emits the correct `ArchitecturesInstallIn64BitMode` directive
+per architecture. No CLI or MCP surface change.
 
 **v0.22.0 note (🎯T32 groundwork)**: Windows-native install pathway
 — mnemo ships as a double-click `.exe` installer produced by Inno

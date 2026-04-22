@@ -150,3 +150,19 @@ maintenance activities. Append-only — newest entries at the bottom.
   deliberately deferred to a follow-up target — SmartScreen will
   warn on first run until an EV cert is added. Homebrew formula
   updated.
+
+## 2026-04-22 — /release v0.23.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.23.0. Windows ARM64 installer parity:
+  release.yml gained a `windows-11-arm` matrix leg that produces a
+  native arm64 mnemo.exe zip plus a matching
+  `mnemo-<version>-windows-arm64-setup.exe` Inno Setup installer.
+  The shared `.iss` now takes a `/DArch=...` preprocessor flag that
+  drives `ArchitecturesInstallIn64BitMode`, `ArchitecturesAllowed`,
+  and `OutputBaseFilename`. The installer build step auto-installs
+  Inno Setup via Chocolatey when iscc.exe is missing, so it works
+  uniformly on both windows-latest (amd64) and windows-11-arm
+  (arm64) runners. Validated via a v0.23.0-rc.1 prerelease before
+  cutting the real tag, per the new release-workflow-touch signal
+  in the /release skill. Homebrew formula updated.
