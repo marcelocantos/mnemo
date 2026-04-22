@@ -17,16 +17,25 @@ jobs:
             goarch: arm64
             ext: ""
             archive: tar.gz
+            cc: cc
+            cxx: c++
+            ar: ar
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
             ext: ""
             archive: tar.gz
+            cc: cc
+            cxx: c++
+            ar: ar
           - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             ext: ""
             archive: tar.gz
+            cc: cc
+            cxx: c++
+            ar: ar
           - os: windows-latest
             goos: windows
             goarch: amd64
@@ -37,12 +46,23 @@ jobs:
             # on Windows is statically linked (or bundles required
             # DLLs)".
             ldflags_extra: '-extldflags "-static"'
-          - os: windows-11-arm
+            # windows-latest has MinGW-w64 GCC preinstalled; bare
+            # names resolve via PATH.
+            cc: gcc
+            cxx: g++
+            ar: ar
+          - os: windows-latest
             goos: windows
             goarch: arm64
             ext: ".exe"
             archive: zip
             ldflags_extra: '-extldflags "-static"'
+            # Cross-compile via llvm-mingw, installed in the
+            # "Install llvm-mingw" step below. Its binaries land in
+            # PATH via GITHUB_PATH, so these bare names resolve.
+            cc: aarch64-w64-mingw32-clang
+            cxx: aarch64-w64-mingw32-clang++
+            ar: aarch64-w64-mingw32-ar
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -57,13 +77,33 @@ jobs:
           repository: marcelocantos/sqldeep
           path: sqldeep
 
+      - name: Install llvm-mingw (windows/arm64 cross)
+        # windows-latest has x86_64 MinGW GCC preinstalled but no
+        # arm64 target. Install llvm-mingw — a Windows-hosted,
+        # ARM64-targeting clang + binutils bundle — and prepend it
+        # to PATH so `aarch64-w64-mingw32-clang` etc. resolve.
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        shell: pwsh
+        run: |
+          $ver = "20250528"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-x86_64.zip"
+          Invoke-WebRequest $url -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath .
+          $bin = (Resolve-Path ".\llvm-mingw-$ver-ucrt-x86_64\bin").Path
+          Write-Output "Adding to PATH: $bin"
+          Add-Content $env:GITHUB_PATH $bin
+
       - name: Build sqldeep
         working-directory: sqldeep
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          AR: ${{ matrix.ar }}
         run: |
           mkdir -p build
-          c++ -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
-          cc -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
-          ar rcs build/libsqldeep.a build/sqldeep.o
+          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
+          "$CC" -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
+          "$AR" rcs build/libsqldeep.a build/sqldeep.o
 
       - uses: actions/setup-go@v5
         with:
@@ -75,6 +115,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           LDFLAGS_EXTRA: ${{ matrix.ldflags_extra }}
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          AR: ${{ matrix.ar }}
         working-directory: mnemo
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
