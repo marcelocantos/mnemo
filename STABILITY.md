@@ -9,7 +9,15 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.23.0.
+Snapshot as of v0.24.0.
+
+**v0.24.0 note (🎯T32 groundwork)**: Suppress the console window the
+Windows Scheduled Task was popping on logon. mnemo.exe is now built
+with `-ldflags -H=windowsgui` so Windows never attaches a console
+to it; a `console_windows.go` init shim calls
+`AttachConsole(ATTACH_PARENT_PROCESS)` so `mnemo --version` et al.
+still show output when invoked from PowerShell / cmd. No CLI or
+MCP surface change.
 
 **v0.23.0 note (🎯T32 groundwork)**: Windows ARM64 installer parity
 and a critical fix to how mnemo runs on Windows. v0.22.0 installed

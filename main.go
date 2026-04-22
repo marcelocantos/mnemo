@@ -56,7 +56,7 @@ Then restart this Claude Code session.`
 var agentsGuide string
 
 const (
-	version     = "0.23.0"
+	version     = "0.24.0"
 	defaultAddr = ":19419"
 )
 

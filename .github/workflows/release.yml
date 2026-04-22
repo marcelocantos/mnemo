@@ -41,11 +41,12 @@ jobs:
             goarch: amd64
             ext: ".exe"
             archive: zip
-            # Static-link the MinGW runtime so end users do not need
-            # MinGW-w64 DLLs on their PATH. 🎯T22 AC: "Release binary
-            # on Windows is statically linked (or bundles required
-            # DLLs)".
-            ldflags_extra: '-extldflags "-static"'
+            # -H=windowsgui so Scheduled-Task launch does not pop a
+            # console window (console_windows.go re-attaches stdio
+            # when launched from a shell). -extldflags "-static"
+            # static-links the MinGW runtime so end users do not
+            # need MinGW-w64 DLLs on their PATH.
+            ldflags_extra: '-H=windowsgui -extldflags "-static"'
             # windows-latest has MinGW-w64 GCC preinstalled; bare
             # names resolve via PATH.
             cc: gcc
@@ -56,7 +57,7 @@ jobs:
             goarch: arm64
             ext: ".exe"
             archive: zip
-            ldflags_extra: '-extldflags "-static"'
+            ldflags_extra: '-H=windowsgui -extldflags "-static"'
             # Cross-compile via llvm-mingw, installed in the
             # "Install llvm-mingw" step below. Its binaries land in
             # PATH via GITHUB_PATH, so these bare names resolve.
