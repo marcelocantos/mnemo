@@ -183,7 +183,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-22 — /release v0.24.0
 
-- **Commit**: `pending`
+- **Commit**: `46126f6`
 - **Outcome**: Released v0.24.0. Fixes the visible console window
   the Windows Scheduled Task was popping at logon. v0.23.0 shipped
   mnemo.exe with the default console subsystem; when `schtasks`
