@@ -33,6 +33,18 @@
 #ifndef SourceDir
   #define SourceDir "."
 #endif
+#ifndef Arch
+  #define Arch "amd64"
+#endif
+
+; Inno Setup architecture keywords differ from the Go GOARCH values
+; we use everywhere else — translate once here so the rest of the
+; [Setup] block stays readable.
+#if Arch == "arm64"
+  #define InnoArch "arm64"
+#else
+  #define InnoArch "x64compatible"
+#endif
 
 [Setup]
 AppId={{C7F3B2A1-8E4D-4B5C-9A2F-1D6E8C7B9A0F}
@@ -46,13 +58,13 @@ AppUpdatesURL=https://github.com/marcelocantos/mnemo/releases
 DefaultDirName={autopf}\mnemo
 DefaultGroupName=mnemo
 DisableProgramGroupPage=yes
-OutputBaseFilename=mnemo-{#AppVersion}-windows-amd64-setup
+OutputBaseFilename=mnemo-{#AppVersion}-windows-{#Arch}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-ArchitecturesInstallIn64BitMode=x64compatible
-ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode={#InnoArch}
+ArchitecturesAllowed={#InnoArch}
 ; Allow `uninstall-service` and `unregister-mcp` to find mnemo.exe via
 ; full path even if PATH is not updated.
 UninstallDisplayIcon={app}\mnemo.exe

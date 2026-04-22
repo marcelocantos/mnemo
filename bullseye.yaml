@@ -868,11 +868,12 @@ targets:
     - T32.1
     - T32.2
     - T32.3
+    - T33
     origin: manual
     discovered: 2026-04-19
   T32.1:
     name: mnemo runs as a native Windows Service (auto-start on boot, restart on failure, logs to Windows Event Log)
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
@@ -885,9 +886,10 @@ targets:
     context: The installer needs to register mnemo as a Windows Service so it survives reboots and runs without a logged-in user. Implemented using golang.org/x/sys/windows/svc (native, no nssm/WinSW wrapper). Per the established repo pattern (store_windows.go, ocr_darwin.go), platform-specific code lives in file-suffixed files rather than build-tag ifdefs scattered through main.go.
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-21
   T32.2:
     name: mnemo has a subcommand that registers/unregisters itself as an MCP server in Claude Code's config
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
@@ -899,9 +901,10 @@ targets:
     context: 'Non-technical users can''t be expected to run claude mcp add from a terminal. mnemo itself can patch %USERPROFILE%\\.claude.json (shape is known: {\"mcpServers\": {\"mnemo\": {\"type\": \"http\", \"url\": \"http://localhost:19419/mcp\"}}}). Subcommand is cross-platform (same code path on macOS/Linux/Windows) and is invoked by the Windows installer post-install but is also useful to anyone wanting a one-shot registration.'
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-21
   T32.3:
     name: Inno Setup installer packages mnemo.exe, registers the service, invokes register-mcp, and is built in CI on every release
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
@@ -917,6 +920,19 @@ targets:
     - T32.2
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-21
+  T33:
+    name: Windows installer is code-signed so non-technical users do not see a SmartScreen warning on first run
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - EV code signing certificate acquired and stored as GitHub Actions secrets.
+    - release.yml runs signtool.exe against mnemo.exe and the setup.exe before upload.
+    - On a fresh Windows install, double-clicking setup.exe shows the standard UAC prompt with mnemo's publisher name, not a SmartScreen warning.
+    context: v0.22.0 ships an unsigned installer. Windows SmartScreen shows 'unrecognized publisher' on first run, which non-technical users read as 'unsafe' and abort. Fix requires an EV cert (~$300/yr issued to a verifiable legal entity) plus signtool integration in release.yml.
+    origin: manual
+    discovered: 2026-04-21
   T4:
     name: Individual session transcript access
     status: achieved
