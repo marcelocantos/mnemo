@@ -180,3 +180,19 @@ maintenance activities. Append-only — newest entries at the bottom.
   (arm64) runners. Validated via a v0.23.0-rc.1 prerelease before
   cutting the real tag, per the new release-workflow-touch signal
   in the /release skill. Homebrew formula updated.
+
+## 2026-04-22 — /release v0.24.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.24.0. Fixes the visible console window
+  the Windows Scheduled Task was popping at logon. v0.23.0 shipped
+  mnemo.exe with the default console subsystem; when `schtasks`
+  launches it, Windows creates a console and shows it. Switched
+  the Windows build to `-H=windowsgui` so Windows never attaches a
+  console. Added `console_windows.go` with an init shim that calls
+  `AttachConsole(ATTACH_PARENT_PROCESS)` and reopens CONOUT$/CONIN$
+  so `mnemo --version` and other CLI invocations from PowerShell /
+  cmd still show output. Headless launches (Scheduled Task,
+  Explorer double-click) stay silent as intended. No code change
+  beyond the subsystem flag + the init shim. Homebrew formula
+  updated.
