@@ -153,7 +153,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-22 — /release v0.23.0
 
-- **Commit**: `pending`
+- **Commit**: `ce98e11`
 - **Outcome**: Released v0.23.0. Two-part Windows fix rolled into
   one release. **(1) Critical indexing fix**: v0.22.0 ran mnemo as
   a Windows Service (LocalSystem), so `os.UserHomeDir()` pointed at
