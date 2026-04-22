@@ -11,8 +11,8 @@
 //	mnemo --addr :8080          # custom listen address
 //	mnemo register-mcp          # add mnemo to ~/.claude.json
 //	mnemo unregister-mcp        # remove mnemo from ~/.claude.json
-//	mnemo install-service       # (Windows) install mnemo as a service
-//	mnemo uninstall-service     # (Windows) remove the mnemo service
+//	mnemo install-agent         # (Windows) register the per-user Scheduled Task
+//	mnemo uninstall-agent       # (Windows) remove the Scheduled Task
 //	claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 package main
 
@@ -58,10 +58,6 @@ var agentsGuide string
 const (
 	version     = "0.23.0"
 	defaultAddr = ":19419"
-	// serviceName is the Windows Service identifier used by
-	// install-service / uninstall-service and by the service control
-	// dispatcher when mnemo is launched by the SCM.
-	serviceName = "mnemo"
 )
 
 func main() {
@@ -77,11 +73,11 @@ func main() {
 		case "unregister-mcp":
 			cmdUnregisterMCP(os.Args[2:])
 			return
-		case "install-service":
-			cmdInstallService(os.Args[2:])
+		case "install-agent":
+			cmdInstallAgent(os.Args[2:])
 			return
-		case "uninstall-service":
-			cmdUninstallService(os.Args[2:])
+		case "uninstall-agent":
+			cmdUninstallAgent(os.Args[2:])
 			return
 		}
 	}
@@ -101,17 +97,6 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stdout)
 		fmt.Print(agentsGuide)
-		return
-	}
-
-	// On Windows, if the SCM launched this process (no interactive
-	// session), hand off to the service control dispatcher, which
-	// calls runServe with a cancellable context driven by SCM events.
-	if handled, err := runAsServiceIfUnderSCM(*addr); handled {
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "service run failed: %v\n", err)
-			os.Exit(1)
-		}
 		return
 	}
 
@@ -182,16 +167,16 @@ func cmdUnregisterMCP(args []string) {
 	}
 }
 
-func cmdInstallService(args []string) {
-	if err := installService(args); err != nil {
-		fmt.Fprintf(os.Stderr, "install-service: %v\n", err)
+func cmdInstallAgent(args []string) {
+	if err := installAgent(args); err != nil {
+		fmt.Fprintf(os.Stderr, "install-agent: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func cmdUninstallService(args []string) {
-	if err := uninstallService(args); err != nil {
-		fmt.Fprintf(os.Stderr, "uninstall-service: %v\n", err)
+func cmdUninstallAgent(args []string) {
+	if err := uninstallAgent(args); err != nil {
+		fmt.Fprintf(os.Stderr, "uninstall-agent: %v\n", err)
 		os.Exit(1)
 	}
 }
