@@ -81,13 +81,17 @@ brew install marcelocantos/tap/mnemo
 
 ### Windows
 
-Download `mnemo-<version>-windows-amd64-setup.exe` from the
+Download the installer for your architecture from the
 [releases page](https://github.com/marcelocantos/mnemo/releases/latest)
-and double-click it. The installer:
+— `mnemo-<version>-windows-amd64-setup.exe` for Intel/AMD PCs or
+`mnemo-<version>-windows-arm64-setup.exe` for Copilot+ / Surface Pro
+X / other Windows-on-ARM devices — and double-click it. The
+installer:
 
 - copies `mnemo.exe` to `C:\Program Files\mnemo\`,
-- registers mnemo as a Windows Service (auto-start on boot,
-  restart-on-failure),
+- registers mnemo as a per-user Scheduled Task that starts
+  automatically at logon and runs in your session (not as a
+  LocalSystem service),
 - patches `%USERPROFILE%\.claude.json` so Claude Code picks up mnemo
   on its next session,
 - shows up in **Add/Remove Programs** as `mnemo` for a clean uninstall.
@@ -118,10 +122,10 @@ on Windows; transcript indexing and all query tools work identically.
 brew services start mnemo       # macOS / Linuxbrew
 ```
 
-On Windows the installer already registers mnemo as a Windows Service
-(`sc query mnemo` to inspect, Services.msc to manage). Service logs:
-`%ProgramData%\mnemo\logs\mnemo.log` plus the Windows Event Log
-(Application source: `mnemo`).
+On Windows the installer already registers mnemo as a per-user
+Scheduled Task (`schtasks /query /tn mnemo` to inspect, Task
+Scheduler to manage). The task runs mnemo in your logon session so
+it indexes the transcripts under `%USERPROFILE%\.claude\projects\`.
 
 Logs on macOS: `$(brew --prefix)/var/log/mnemo.log`.
 

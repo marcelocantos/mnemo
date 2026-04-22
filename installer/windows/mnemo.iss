@@ -65,7 +65,7 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode={#InnoArch}
 ArchitecturesAllowed={#InnoArch}
-; Allow `uninstall-service` and `unregister-mcp` to find mnemo.exe via
+; Allow `uninstall-agent` and `unregister-mcp` to find mnemo.exe via
 ; full path even if PATH is not updated.
 UninstallDisplayIcon={app}\mnemo.exe
 UninstallDisplayName=mnemo {#AppVersion}
@@ -76,42 +76,34 @@ Source: "{#SourceDir}\mnemo.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; Service install (elevated — this is the installer's default
-; context). Must run before register-mcp because register-mcp's
-; `--url` default assumes the service is up on :19419 and Claude Code
-; will connect shortly after.
-Filename: "{app}\mnemo.exe"; Parameters: "install-service"; \
-  StatusMsg: "Installing mnemo Windows Service..."; \
-  Flags: runhidden waituntilterminated
+; Register the per-user Scheduled Task that runs mnemo at logon.
+; `runasoriginaluser` is critical: the task must be registered for
+; the real user's account (not the installer's elevated admin
+; context), otherwise the task would run in the wrong user profile
+; and os.UserHomeDir() would point at the wrong ~/.claude/projects/.
+; install-agent also cleans up any v0.22.0-era Windows Service of
+; the same name, so upgrading in place works.
+Filename: "{app}\mnemo.exe"; Parameters: "install-agent"; \
+  StatusMsg: "Registering mnemo user agent..."; \
+  Flags: runhidden waituntilterminated runasoriginaluser
 
-; Start the service immediately so the user doesn't have to reboot.
-; `net start` is used instead of sc.exe for universal availability;
-; tolerate failure (service may already be running on upgrade).
-Filename: "{sys}\net.exe"; Parameters: "start mnemo"; \
-  StatusMsg: "Starting mnemo service..."; \
-  Flags: runhidden waituntilterminated; \
-  Check: ServiceShouldStart
-
-; MCP registration (as the original user, so the right
-; ~/.claude.json is patched). runasoriginaluser is critical: without
-; it, the installer's elevated SYSTEM/Administrator context would
-; patch a different user's profile — leaving the actual user with
-; mnemo unregistered.
+; MCP registration (also as the original user, so the right
+; ~/.claude.json is patched).
 Filename: "{app}\mnemo.exe"; Parameters: "register-mcp"; \
   StatusMsg: "Registering mnemo with Claude Code..."; \
   Flags: runhidden waituntilterminated runasoriginaluser
 
 [UninstallRun]
-; Stop and remove the Windows Service. We deliberately DO NOT invoke
-; `mnemo unregister-mcp` at uninstall: Inno Setup's [UninstallRun]
-; section does not support the `runasoriginaluser` flag, so the
-; command would run as the elevated uninstaller account and patch
-; the wrong ~/.claude.json. The stale entry in the real user's
-; config is harmless — Claude Code will fail to connect and move
-; on. Users who want a clean config can run
-; `mnemo unregister-mcp` themselves before uninstalling, or delete
-; the mnemo entry by hand afterwards.
-Filename: "{app}\mnemo.exe"; Parameters: "uninstall-service"; \
+; Remove the Scheduled Task (and any v0.22.0-era Service of the same
+; name). We deliberately DO NOT invoke `mnemo unregister-mcp` at
+; uninstall: Inno Setup's [UninstallRun] section does not support
+; the `runasoriginaluser` flag, so the command would run as the
+; elevated uninstaller account and patch the wrong ~/.claude.json.
+; The stale entry in the real user's config is harmless — Claude
+; Code will fail to connect and move on. Users who want a clean
+; config can run `mnemo unregister-mcp` themselves before
+; uninstalling, or delete the mnemo entry by hand afterwards.
+Filename: "{app}\mnemo.exe"; Parameters: "uninstall-agent"; \
   Flags: runhidden waituntilterminated; \
   RunOnceId: "MnemoUninstallService"
 
@@ -121,12 +113,3 @@ Filename: "{app}\mnemo.exe"; Parameters: "uninstall-service"; \
 ; deliberately preserved so reinstalling does not destroy the index.
 Type: filesandordirs; Name: "{commonappdata}\mnemo"
 
-[Code]
-// ServiceShouldStart is a Check function for the `net start` line.
-// We only try to start the service if the install-service step
-// succeeded (the Filename: above runs before this; if it failed,
-// Inno Setup would have already aborted the installer).
-function ServiceShouldStart(): Boolean;
-begin
-  Result := True;
-end;

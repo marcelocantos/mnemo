@@ -154,9 +154,23 @@ maintenance activities. Append-only — newest entries at the bottom.
 ## 2026-04-22 — /release v0.23.0
 
 - **Commit**: `pending`
-- **Outcome**: Released v0.23.0. Windows ARM64 installer parity:
-  release.yml gained a `windows-11-arm` matrix leg that produces a
-  native arm64 mnemo.exe zip plus a matching
+- **Outcome**: Released v0.23.0. Two-part Windows fix rolled into
+  one release. **(1) Critical indexing fix**: v0.22.0 ran mnemo as
+  a Windows Service (LocalSystem), so `os.UserHomeDir()` pointed at
+  the LocalSystem profile and the indexer found zero transcripts —
+  mnemo effectively did nothing on Windows. v0.23.0 switches to a
+  per-user Scheduled Task triggered AtLogon, which runs in the
+  user's session with the correct `USERPROFILE`. The installer now
+  invokes `mnemo install-agent` / `uninstall-agent` (new
+  subcommands replacing the SCM-based `install-service` /
+  `uninstall-service`). `install-agent` also tears down any
+  v0.22.0-era Service of the same name for clean upgrades in
+  place. `service_windows.go` / `service_other.go` removed;
+  replaced by `agent_windows.go` / `agent_other.go` (no SCM
+  dependency — shells out to `schtasks.exe` and `sc.exe`).
+  **(2) Windows ARM64 parity**: release.yml gained a
+  `windows-11-arm` matrix leg that produces a native arm64
+  mnemo.exe zip plus a matching
   `mnemo-<version>-windows-arm64-setup.exe` Inno Setup installer.
   The shared `.iss` now takes a `/DArch=...` preprocessor flag that
   drives `ArchitecturesInstallIn64BitMode`, `ArchitecturesAllowed`,

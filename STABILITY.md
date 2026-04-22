@@ -12,11 +12,22 @@ new product. The pre-1.0 period exists to get these surfaces right.
 Snapshot as of v0.23.0.
 
 **v0.23.0 note (🎯T32 groundwork)**: Windows ARM64 installer parity
-— the release now produces `mnemo-<version>-windows-arm64-setup.exe`
-alongside the amd64 installer, built natively on a `windows-11-arm`
-GitHub runner. The `.iss` takes an `/DArch=...` preprocessor flag
-and emits the correct `ArchitecturesInstallIn64BitMode` directive
-per architecture. No CLI or MCP surface change.
+and a critical fix to how mnemo runs on Windows. v0.22.0 installed
+mnemo as a Windows Service (LocalSystem), which made
+`os.UserHomeDir()` return `C:\Windows\System32\config\systemprofile`
+instead of the installing user's home — so the indexer found zero
+transcripts. v0.23.0 switches to a per-user Scheduled Task
+triggered AtLogon, which runs mnemo in the user's session with the
+correct `USERPROFILE`. The installer now calls
+`mnemo install-agent` / `uninstall-agent` (replacing
+`install-service` / `uninstall-service`); the agent subcommands
+also clean up any v0.22.0-era Service of the same name so
+upgrade-in-place works. Additionally, the release produces
+`mnemo-<version>-windows-arm64-setup.exe` alongside the amd64
+installer, built natively on a `windows-11-arm` GitHub runner.
+The `.iss` takes a `/DArch=...` preprocessor flag and emits the
+correct `ArchitecturesInstallIn64BitMode` directive per
+architecture. No MCP surface change.
 
 **v0.22.0 note (🎯T32 groundwork)**: Windows-native install pathway
 — mnemo ships as a double-click `.exe` installer produced by Inno
@@ -59,13 +70,17 @@ instead of failing silently.
 |---|---|---|---|---|
 | `register-mcp` | `--url`, `--config` | all | Add mnemo entry to `~/.claude.json` (idempotent) | Needs review |
 | `unregister-mcp` | `--config` | all | Remove mnemo entry from `~/.claude.json` (idempotent) | Needs review |
-| `install-service` | `--exe` | Windows | Register mnemo as a Windows Service with auto-start + restart-on-failure | Needs review |
-| `uninstall-service` | — | Windows | Stop and remove the Windows Service and its Event Log source | Needs review |
+| `install-agent` | `--exe` | Windows | Register mnemo as a per-user Scheduled Task triggered AtLogon | Needs review |
+| `uninstall-agent` | — | Windows | Remove the Scheduled Task (and any v0.22.0 Service of the same name) | Needs review |
 
 Subcommands are new in v0.22.0 — API shape and flag set may evolve
 before 1.0 as end-user feedback arrives. Non-Windows invocations of
-the `*-service` subcommands return a helpful error pointing at brew
-services / systemd instead.
+the `*-agent` subcommands return a helpful error pointing at brew
+services / systemd instead. v0.22.0 shipped `install-service` /
+`uninstall-service` variants backed by the Windows Service Control
+Manager; v0.23.0 replaced them with the Scheduled Task approach
+because the Service ran as LocalSystem and could not reach the
+installing user's `~/.claude/projects/`.
 
 ### MCP tools
 
