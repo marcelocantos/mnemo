@@ -4,7 +4,10 @@
 package compact
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -271,6 +274,150 @@ func TestWatcherNoDoubleSpawn(t *testing.T) {
 
 	if got := watcher.ActiveCount(); got != 1 {
 		t.Fatalf("expected exactly 1 worker for one connection, got %d", got)
+	}
+}
+
+// captureSlog installs a text-handler logger that writes into a buffer
+// for the duration of the test, returning the buffer and a restore
+// function. All levels are enabled so DEBUG lines are captured.
+func captureSlog() (*bytes.Buffer, func()) {
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	old := slog.Default()
+	slog.SetDefault(slog.New(h))
+	return &buf, func() { slog.SetDefault(old) }
+}
+
+// makeWorker builds a connWorker wired to a fakeConnSource + compactor.
+// The compactor uses a countingStore whose LLM is a stubNopLLM, giving
+// one pre-seeded session message so the first Compact call succeeds.
+func makeWorker(connID, sessionID, cwd, excludeCWD string) (*connWorker, *stubNopLLM) {
+	src := newFakeConnSource()
+	if sessionID != "" {
+		src.setConnection(connID, 1, sessionID, cwd)
+	} else {
+		src.setConnection(connID, 1, "", "")
+	}
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := newConnWorker(connID, src, compactor, WatcherConfig{}, excludeCWD)
+	return w, llm
+}
+
+// TestTickLogSkippedNoSession checks that a tick with no session emits a
+// DEBUG "compact: tick" line with outcome=skipped_no_session.
+func TestTickLogSkippedNoSession(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	w, _ := makeWorker("conn-pre", "", "", "")
+	w.tick(context.Background())
+
+	got := buf.String()
+	if !strings.Contains(got, "compact: tick") {
+		t.Errorf("expected 'compact: tick' in log, got: %s", got)
+	}
+	if !strings.Contains(got, string(outcomeSkippedNoSession)) {
+		t.Errorf("expected outcome=%s in log, got: %s", outcomeSkippedNoSession, got)
+	}
+	// DEBUG lines should NOT contain level=INFO or level=WARN.
+	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
+		t.Errorf("skipped_no_session should be DEBUG, got: %s", got)
+	}
+}
+
+// TestTickLogSkippedSelf checks that a self-session tick emits DEBUG with
+// outcome=skipped_self.
+func TestTickLogSkippedSelf(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	w, _ := makeWorker("conn-mnemo", "sess-mnemo", "/mnemo-repo/sub", "/mnemo-repo")
+	w.tick(context.Background())
+
+	got := buf.String()
+	if !strings.Contains(got, string(outcomeSkippedSelf)) {
+		t.Errorf("expected outcome=%s in log, got: %s", outcomeSkippedSelf, got)
+	}
+	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
+		t.Errorf("skipped_self should be DEBUG, got: %s", got)
+	}
+}
+
+// TestTickLogNothingToCompact checks that an idle tick (nothing new)
+// emits DEBUG with outcome=nothing_to_compact.
+func TestTickLogNothingToCompact(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	// Use fakeStore directly so LatestCompaction respects seeded data.
+	// fakeStore has one message at ID=1; seeding a compaction covering
+	// entry 1 makes filterNew return an empty slice → ErrNothingToCompact.
+	fs := &fakeStore{
+		session: "sess-idle",
+		msgs:    []store.SessionMessage{{ID: 1, Role: "user", Text: "hi"}},
+	}
+	if err := insertSeed(fs, 1); err != nil {
+		t.Fatal(err)
+	}
+	src := newFakeConnSource()
+	src.setConnection("conn-idle", 1, "sess-idle", "/some-project")
+	llm := &stubNopLLM{}
+	compactor := New(fs, llm, Config{})
+	w := newConnWorker("conn-idle", src, compactor, WatcherConfig{}, "")
+
+	w.tick(context.Background())
+
+	got := buf.String()
+	if !strings.Contains(got, string(outcomeNothingToCompact)) {
+		t.Errorf("expected outcome=%s in log, got: %s", outcomeNothingToCompact, got)
+	}
+	// nothing_to_compact is DEBUG, not INFO.
+	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
+		t.Errorf("nothing_to_compact should be DEBUG, got: %s", got)
+	}
+}
+
+// TestTickLogCompacted checks that a successful compaction emits an INFO
+// line with outcome=compacted, compaction_id, and entry_id_to.
+func TestTickLogCompacted(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	w, _ := makeWorker("conn-ok", "sess-ok", "/some-project", "")
+	w.tick(context.Background())
+
+	got := buf.String()
+	if !strings.Contains(got, string(outcomeCompacted)) {
+		t.Errorf("expected outcome=%s in log, got: %s", outcomeCompacted, got)
+	}
+	if !strings.Contains(got, "compaction_id=") {
+		t.Errorf("expected compaction_id field in log, got: %s", got)
+	}
+	if !strings.Contains(got, "entry_id_to=") {
+		t.Errorf("expected entry_id_to field in log, got: %s", got)
+	}
+	if !strings.Contains(got, "level=INFO") {
+		t.Errorf("compacted should be INFO, got: %s", got)
+	}
+}
+
+// TestTickLogConnectionID checks that connection_id and session_id are
+// always present in the tick log line.
+func TestTickLogConnectionID(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	w, _ := makeWorker("conn-xyz", "sess-abc", "/project", "")
+	w.tick(context.Background())
+
+	got := buf.String()
+	if !strings.Contains(got, "connection_id=conn-xyz") {
+		t.Errorf("expected connection_id=conn-xyz in log, got: %s", got)
+	}
+	if !strings.Contains(got, "session_id=sess-abc") {
+		t.Errorf("expected session_id=sess-abc in log, got: %s", got)
 	}
 }
 

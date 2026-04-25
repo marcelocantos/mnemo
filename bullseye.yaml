@@ -1028,6 +1028,22 @@ targets:
     origin: manual
     discovered: 2026-04-26
     achieved: 2026-04-26
+  T38:
+    name: Watcher tick logs are observable
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Each watcher tick emits a single structured log line with connection_id, session_id, outcome (compacted/nothing_to_compact/budget_exceeded/failed/skipped_self/skipped_no_session), and for compacted: compaction_id and entry_id_to'
+    - Routine nothing_to_compact outcomes logged at DEBUG; non-routine outcomes (compacted, failed, budget_exceeded) at INFO/WARN
+    - Silent early-returns in connWorker.tick emit DEBUG with a reason code rather than returning silently
+    - A user inspecting mnemo.log after 10 minutes of activity can answer whether the compactor fired, for which sessions, and whether anything failed
+    context: The watcher previously logged only the startup line and compaction-failed warning. The routine tick path (tick fires, nothing to compact, return) was silent, as were early-exit branches (no session yet, excludeCWD match). With nothing between startup and failure, a user with zero compactions could not tell whether the watcher is even ticking.
+    tags:
+    - observability
+    origin: manual
+    discovered: 2026-04-26
+    achieved: 2026-04-26
   T4:
     name: Individual session transcript access
     status: achieved
