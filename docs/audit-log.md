@@ -300,7 +300,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-25 — /release v0.29.0
 
-- **Commit**: `pending`
+- **Commit**: `b23dcc9`
 - **Outcome**: Released v0.29.0. Federation across linked mnemo
   instances (🎯T15, all five sub-targets shipped). Adds
   `internal/endpoint/` (mTLS material under
