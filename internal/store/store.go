@@ -4917,8 +4917,10 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 				if err := msgRows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp); err != nil {
 					continue
 				}
-				// Truncate assistant messages.
-				if m.Role == "assistant" && len(m.Text) > truncateLen {
+				// Truncate every excerpt — user pastes (logs, code,
+				// command output) inflate response size just as much
+				// as assistant tool-call serialisations do.
+				if len(m.Text) > truncateLen {
 					m.Text = m.Text[:truncateLen] + "..."
 					m.Truncated = true
 				}

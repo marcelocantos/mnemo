@@ -721,15 +721,15 @@ func (h *callHandler) status(args map[string]any) (string, bool, error) {
 		days = int(d)
 	}
 	repoFilter, _ := args["repo"].(string)
-	maxSessions := 3
+	maxSessions := 2
 	if m, ok := args["max_sessions"].(float64); ok && m > 0 {
 		maxSessions = int(m)
 	}
-	maxExcerpts := 20
+	maxExcerpts := 6
 	if m, ok := args["max_excerpts"].(float64); ok && m > 0 {
 		maxExcerpts = int(m)
 	}
-	truncateLen := 200
+	truncateLen := 160
 	if t, ok := args["truncate_len"].(float64); ok && t > 0 {
 		truncateLen = int(t)
 	}

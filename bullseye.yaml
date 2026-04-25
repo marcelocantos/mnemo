@@ -936,7 +936,7 @@ targets:
     discovered: 2026-04-21
   T34:
     name: mnemo indexes synthesis docs across configurable roots with taxonomy awareness
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
@@ -951,6 +951,7 @@ targets:
     context: 'User has established a four-dir synthesis-doc taxonomy (papers/design/analysis/plans) in ~/.claude/CLAUDE.md, with audit-log.md and convergence-report.md as adjacent snapshot artifacts. Synthesis docs live in repos under ~/work AND in non-repo planning space under ~/think. Goal: give mnemo a taxonomy-aware query surface so a future /synth portfolio skill (or any cross-repo synthesis query) has the same ergonomics as mnemo_search. Builds on existing IngestDocs infrastructure — does not replace it.'
     origin: 'user request 2026-04-24: integrate Karpathy wiki ideas into existing system; synthesis docs stay in repos but mnemo provides global query layer'
     discovered: 2026-04-24
+    achieved: 2026-04-25
   T35:
     name: Indexer is idempotent — re-reading a transcript file does not duplicate rows in entries
     status: identified
