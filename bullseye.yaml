@@ -256,10 +256,11 @@ targets:
     achieved: 2026-04-25
   T15.4:
     name: mnemo invokes read-tools on a configured peer over mTLS with timeout and graceful failure
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
+    demonstration: 'internal/federation Client exposes CallTool(ctx, instance, toolName, args). Eight unit/integration tests stand up real tls.Listen sockets and exercise the typed-error matrix end-to-end: happy path returns expected payload; unknown instance → ErrUnknownInstance; cert mismatch (client pins WRONG cert as the peer) → ErrTLSHandshake at handshake; connection refused (closed port) → ErrConnectionRefused; 100ms timeout against a 500ms-delayed tool → ErrTimeout (logs "federation: peer call timed out instance=stub"); server tool returning IsError=true → ErrServerError; non-JSON text/plain on /mcp → ErrMalformedResponse; PinnedClientTLSConfig accepts pinned cert and rejects any other. CLI `mnemo ping-peer` smoke-tested both error paths (no-args usage, no-config diagnostic). Connection reuse via persistent http.Client + IdleConnTimeout=90s + ForceAttemptHTTP2 per peer; one MCP Initialize per peer cached via sync.Once.'
     acceptance:
     - An internal client package (e.g. internal/federation/client) exposes a CallTool(ctx, instance, toolName, args) -> result method that targets a LinkedInstance from T15.2.
     - mTLS handshake presents the local endpoint cert/key (T15.1) as client identity and trusts only the peer cert configured for that instance (not the whole trusted-peer set).
@@ -278,6 +279,7 @@ targets:
     - mTLS
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.5:
     name: Query-shaped MCP tools fan out to linked peers in parallel and return merged, attributed results
     status: identified
