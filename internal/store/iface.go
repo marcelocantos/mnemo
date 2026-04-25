@@ -52,4 +52,5 @@ type Backend interface {
 	RecordConnectionSession(connectionID, sessionID string)
 	ConnectionsForSession(sessionID string) ([]ConnectionSession, error)
 	InferChainHeuristic(sessionID string, limit int) ([]ChainCandidate, error)
+	SessionStructure(sessionID string) (*SessionStructure, error)
 }
