@@ -75,21 +75,39 @@ func UsernameFromContext(ctx context.Context) string {
 // that user's daemon_connections table so the compactor's watcher
 // can find it.
 func (h *Handler) RegisterTools(s *mcpserver.MCPServer) {
+	h.RegisterToolsExcept(s, nil)
+}
+
+// RegisterToolsExcept is RegisterTools with a skip-set: tools whose
+// names appear in exclude are NOT registered. The caller (typically
+// main.go when wiring federation fan-out) registers the excluded
+// tools separately with a custom handler closure.
+func (h *Handler) RegisterToolsExcept(s *mcpserver.MCPServer, exclude map[string]struct{}) {
 	for _, tool := range Definitions() {
-		name := tool.Name
-		s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			cc := CallContext{
-				MCPSessionID: req.Header.Get(sessionIDHeader),
-				Username:     UsernameFromContext(ctx),
-			}
-			text, isError, err := h.Call(cc, name, req.GetArguments())
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
-			}
-			if isError {
-				return mcp.NewToolResultError(text), nil
-			}
-			return mcp.NewToolResultText(text), nil
-		})
+		if _, skip := exclude[tool.Name]; skip {
+			continue
+		}
+		s.AddTool(tool, h.LocalHandler(tool.Name))
+	}
+}
+
+// LocalHandler returns the standard tool-call closure for name —
+// translating between the MCP CallToolRequest envelope and the
+// Handler.Call API. Exposed so federation fan-out can invoke the
+// local tool inline without re-registering it on the MCP server.
+func (h *Handler) LocalHandler(name string) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		cc := CallContext{
+			MCPSessionID: req.Header.Get(sessionIDHeader),
+			Username:     UsernameFromContext(ctx),
+		}
+		text, isError, err := h.Call(cc, name, req.GetArguments())
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
+		}
+		if isError {
+			return mcp.NewToolResultError(text), nil
+		}
+		return mcp.NewToolResultText(text), nil
 	}
 }

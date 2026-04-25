@@ -11,7 +11,11 @@ package main
 
 import "fmt"
 
-func runAsServiceIfUnderSCM(string) (bool, error) { return false, nil }
+func runAsServiceIfUnderSCM(addr, federatedAddr string) (bool, error) {
+	_ = addr
+	_ = federatedAddr
+	return false, nil
+}
 
 func installService([]string) error {
 	return fmt.Errorf("install-service is only supported on Windows " +

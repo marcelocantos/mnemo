@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 targets:
   T1:
     name: Broader memory beyond transcripts
@@ -56,7 +56,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - Commits from repos in session_meta indexed automatically
@@ -76,7 +76,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - PRs and issues from repos in session_meta indexed automatically
@@ -132,10 +132,14 @@ targets:
     achieved: 2026-04-07
   T15:
     name: Federated queries across linked mnemo instances expose session history from every host as one searchable surface
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
+    demonstration: |-
+      All five T15 leaves shipped: T15.1 (mTLS endpoint material under ~/.mnemo/endpoint/ + peer trust store under ~/.mnemo/peers/), T15.2 (linked_instances config with strict validation), T15.3 (federated read-only mTLS MCP endpoint on :19420 exposing 23 read-only tools, all write/control tools absent), T15.4 (federation client with per-peer pinned mTLS, persistent http.Client per peer, 5s default timeout, seven typed error sentinels), T15.5 (Fanout + MergePeerResults wired into runServe behind the linked_instances config gate).
+
+      End-to-end umbrella acceptance demonstrated by the federation test suite (16 tests, all green): TestFanoutMergesAttributedResults stands up two stub mTLS-cross-trusted peer daemons each returning a distinct mnemo_search payload and asserts the merged FanoutEnvelope contains local + alice + bob attribution. TestFanoutGracefulDegradationOnSlowPeer pauses one peer 500ms with a 100ms timeout and confirms the response returns in <400ms with the fast peer's results plus a structured PeerWarning{Instance:"slow", ErrorKind:"timeout"} naming the stalled peer. TestFederatedRoundTrip + TestFederatedRejectsUntrustedClient verify the server-side read/write boundary and TLS rejection of un-pinned client certs. CLI surface ships: `mnemo print-endpoint`, `mnemo print-federated-addr`, `mnemo ping-peer <name>`.
     acceptance:
     - All sub-targets T15.1, T15.2, T15.3, T15.4, T15.5 are achieved.
     - Two mnemo daemons (separate hosts, or two local temp-dir instances for CI) are configured as each other's peers via `linked_instances` and each daemon's `~/.mnemo/peers/` holds the other's public cert.
@@ -187,12 +191,14 @@ targets:
     - pigeon
     origin: 'conversation: user wants unified transcript search across macOS and Windows VM environments'
     discovered: 2026-04-09
+    achieved: 2026-04-25
   T15.1:
     name: mnemo manages an mTLS endpoint file for authenticated peer access
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
+    demonstration: Ran `bin/mnemo print-endpoint --dir /tmp/...` against an empty dir — generated cert.pem (0644) + key.pem (0600) under endpoint/ and printed a 10-year self-signed ECDSA P-256 CERTIFICATE PEM (subject mnemo-colossus.lan, valid 2026→2036) to stdout. Re-ran the same command and confirmed reload (no regen warning, identical cert). Unit tests cover corrupt-cert regen, expired-cert regen, peer-dir parsing of valid + invalid + non-pem entries, key 0600 enforcement on first-run and after reload chmod.
     acceptance:
     - On first start, mnemo serve generates a self-signed X.509 cert + key pair at ~/.mnemo/endpoint/{cert.pem,key.pem} (mode 0600 on key).
     - On subsequent starts, existing cert/key are loaded. A corrupt or expired cert triggers regeneration with a warning.
@@ -207,12 +213,14 @@ targets:
     - auth
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.2:
     name: Config supports a linked_instances list of peer mnemo endpoints
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
+    demonstration: store.Config.LinkedInstances field with LinkedInstance{Name, URL, PeerCert} parses ~/.mnemo/config.json. Validation enforces unique Name, https-only URL, and resolvable PeerCert (name under ~/.mnemo/peers/ OR inline PEM containing a parseable CERTIFICATE block) at LoadConfig time. 16 sub-test cases verify the happy paths and every documented failure mode (duplicate name names both indexes; URL/PEM rejection messages name the offending entry). All tests green; full make bullseye green except expected dirty-tree of new files.
     acceptance:
     - store.Config gains a LinkedInstances []LinkedInstance field with Name (string), URL (string, https only), and PeerCert (name of cert under ~/.mnemo/peers/ OR inline PEM).
     - ~/.mnemo/config.json parses cleanly; an absent field is zero-value and disables federation entirely.
@@ -226,12 +234,14 @@ targets:
     - config
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.3:
     name: mnemo serves a federated, mTLS-authenticated, read-only MCP endpoint for peer queries
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
+    demonstration: Stood up two in-process mnemo hosts in temp dirs with cross-trusted peer certs and a real tls.Listen socket. TestFederatedRoundTrip ran a full mark3labs/mcp-go streamable-HTTP client through Initialize + ListTools over mTLS and asserted the returned tool set is exactly tools.FederatedToolNames (23 read-only tools) — confirmed that mnemo_self, mnemo_define, mnemo_evaluate, mnemo_list_templates, mnemo_restore, mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions are absent. TestFederatedRejectsUntrustedClient confirmed the TLS handshake fails with "bad certificate" when the client's cert is not in the server's trusted-peer pool. Smoke-ran `bin/mnemo print-federated-addr` and confirmed it emits https://colossus.lan:19420/mcp by default and respects --addr overrides for both port-only (--addr=:9000 → colossus.lan:9000) and host:port (foo.example:443).
     acceptance:
     - mnemo serve listens on a second configurable address (default :19420; flag `--federated-addr`; `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
     - 'Only read-shaped tools are exposed on the federated endpoint: mnemo_search, mnemo_sessions, mnemo_read_session, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, mnemo_memories, mnemo_skills, mnemo_configs, mnemo_usage, mnemo_audit, mnemo_targets, mnemo_plans, mnemo_who_ran, mnemo_ci, mnemo_query, mnemo_repos, mnemo_stats, mnemo_chain, mnemo_decisions, mnemo_images, mnemo_discover_patterns, mnemo_status. Write-shaped / control tools (mnemo_self, template writes, describers control, etc.) are absent from the federated tool set.'
@@ -248,12 +258,14 @@ targets:
     - mTLS
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.4:
     name: mnemo invokes read-tools on a configured peer over mTLS with timeout and graceful failure
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
+    demonstration: 'internal/federation Client exposes CallTool(ctx, instance, toolName, args). Eight unit/integration tests stand up real tls.Listen sockets and exercise the typed-error matrix end-to-end: happy path returns expected payload; unknown instance → ErrUnknownInstance; cert mismatch (client pins WRONG cert as the peer) → ErrTLSHandshake at handshake; connection refused (closed port) → ErrConnectionRefused; 100ms timeout against a 500ms-delayed tool → ErrTimeout (logs "federation: peer call timed out instance=stub"); server tool returning IsError=true → ErrServerError; non-JSON text/plain on /mcp → ErrMalformedResponse; PinnedClientTLSConfig accepts pinned cert and rejects any other. CLI `mnemo ping-peer` smoke-tested both error paths (no-args usage, no-config diagnostic). Connection reuse via persistent http.Client + IdleConnTimeout=90s + ForceAttemptHTTP2 per peer; one MCP Initialize per peer cached via sync.Once.'
     acceptance:
     - An internal client package (e.g. internal/federation/client) exposes a CallTool(ctx, instance, toolName, args) -> result method that targets a LinkedInstance from T15.2.
     - mTLS handshake presents the local endpoint cert/key (T15.1) as client identity and trusts only the peer cert configured for that instance (not the whole trusted-peer set).
@@ -272,12 +284,14 @@ targets:
     - mTLS
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.5:
     name: Query-shaped MCP tools fan out to linked peers in parallel and return merged, attributed results
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
+    demonstration: 'Demonstrated end-to-end via TestFanoutMergesAttributedResults: stood up two stub federated peers in temp dirs (each returning a distinct mnemo_search payload — alpha-from-alice, beta-from-bob), wired a Client with both as LinkedInstances, called Fanout("mnemo_search"), and asserted the FanoutEnvelope JSON returned local + both peers correctly attributed with no warnings. Graceful-degradation demonstrated via TestFanoutGracefulDegradationOnSlowPeer: same setup with a 500ms-delayed slow peer plus a fast peer and a 100ms per-peer timeout — Fanout returned in <400ms with the fast peer''s results and one PeerWarning{Instance:"slow", ErrorKind:"timeout"}, confirming a paused peer does not stall the local response. Backwards-compat verified by TestMergePeerResultsNoPeersIsPassThrough — when no peers are configured the wrapper returns the local text byte-for-byte unchanged. The wrapper is wired into main.go''s runServe behind the linked_instances config gate; tools NOT in FanoutToolNames (mnemo_self, mnemo_define, mnemo_evaluate, mnemo_query, mnemo_stats, mnemo_status, mnemo_chain, mnemo_restore, mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions) bypass federation entirely.'
     acceptance:
     - Read-shaped query tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, and others with per-record result shapes) issue local + per-peer calls in parallel via T15.4's client.
     - 'Every returned record carries an instance-source field (e.g. "local" for the host responder, "<peer name>" for peers). Response schemas extended in a backwards-compatible way: existing unattributed callers still parse.'
@@ -296,12 +310,13 @@ targets:
     - attribution
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T16:
     name: Session chains link /clear-bounded transcripts into work spans
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     acceptance:
     - 'Schema: session_chains(successor_id PK, predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at) with index on predecessor_id'
     - 'Ingest-time detection: when a new JSONL''s first non-meta user event contains <command-name>/clear</command-name>, look for a predecessor in the same project directory whose last event precedes the new file''s first event; insert the link with confidence bucketed as high (<2s), medium (2-5s), or none (>5s, no link recorded but boundary noted)'
@@ -334,7 +349,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - Every repo-level stream (targets, audit logs, plans, CI runs) performs a filesystem-walk backfill on daemon startup, not a session_meta-seeded scan
@@ -370,7 +385,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - 'Inline base64 images (type: image content blocks) are detected during ingest; base64 decoded and stored as binary BLOB in a dedicated images table'
@@ -417,7 +432,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 3.0
     acceptance:
     - Every image in the images table has an OCR pass (or recorded error); descriptions remain untouched — OCR is additive
@@ -455,7 +470,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - Every image in the images table has a CLIP/SigLIP-family embedding (or recorded error); additive to descriptions and OCR
@@ -857,7 +872,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - A non-technical Windows user downloads one .exe from the release page, double-clicks it, clicks Next through a standard Windows installer, and mnemo is running as a Windows Service with MCP registered in Claude Code's config — zero terminal commands required.
     - Uninstalling via Add/Remove Programs cleanly removes the service, binary, and MCP registration.
@@ -877,7 +892,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo.exe install-service registers mnemo as a Windows Service named "mnemo" with auto-start and restart-on-failure configured.
     - mnemo.exe uninstall-service stops and removes the service.
@@ -893,7 +908,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo.exe register-mcp adds/updates the mnemo entry in ~/.claude.json, preserving all other top-level keys and other mcpServers entries.
     - mnemo.exe unregister-mcp removes the mnemo entry (and removes mcpServers if it becomes empty).
@@ -908,7 +923,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - A .iss file in the repo builds into mnemo-<version>-windows-amd64-setup.exe when compiled with iscc.exe on a windows-latest runner.
     - 'The installer: elevates to admin, copies mnemo.exe to %ProgramFiles%\\mnemo\\, runs install-service, runs register-mcp as the invoking user (so ~/.claude.json is the user''s, not SYSTEM''s), and creates a Start Menu uninstall entry.'
@@ -939,7 +954,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - Config supports SynthesisRoots []string; defaults empty (backwards compatible)
     - docs table has a taxonomy column populated from path for paths matching docs/{papers,design,analysis,plans}/*.md and docs/{audit-log,convergence-report}.md
@@ -964,6 +979,36 @@ targets:
     context: 'The entries table has no uniqueness constraint on (session_id, msg_uuid) — only id is a key. Each backfill cycle re-reads JSONL files end-to-end and inserts every row again. Concrete evidence (session 39f9a984-... in -Users-marcelo-think): 125 lines on disk, 94 distinct uuids, 348 rows in mnemo (~3.7× bloat). Older messages have 6 copies; newer messages have 4 — the per-message copy count equals the number of backfill cycles run since the message was written, so storage and query cost grow without bound. All aggregate queries currently need COUNT(DISTINCT timestamp) or DISTINCT on uuid to produce correct counts. Likely fix: add UNIQUE(session_id, raw->>''$.uuid'') with INSERT OR IGNORE, plus a one-shot dedupe migration; or track last-indexed uuid/offset per session. Discovered while auditing skill usage on 2026-04-24.'
     origin: forked from skill-usage audit, 2026-04-24
     discovered: 2026-04-24
+  T36:
+    name: A design exists for mnemo as a team-shared index — contributors push their local sessions to a central mnemo per repo/org so a newcomer can pick up an ongoing program of work without personal archaeology
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A design doc lives at docs/design/team-mnemo.md and is committed to master.
+    - 'The doc names the central-mnemo deployment model: who runs the central instance, where it lives (self-host vs hosted), how contributors discover it, and how it relates to the existing per-user daemon (separate process? same binary in ''central mode''?).'
+    - 'The doc specifies the push protocol: which session entries get pushed (all? scoped by repo? scoped by branch?), what triggers a push (on-demand subcommand vs background watcher vs git hook), and how the central instance attributes each entry to its author.'
+    - 'The doc specifies the pull/query model: do contributors query the central instance directly via MCP, or do they sync down a read-only mirror? How does that interact with the per-user Registry from 🎯T32?'
+    - 'The doc covers identity, trust, and access control: how a contributor authenticates to the central instance (mTLS reuse from 🎯T15.1? GitHub OIDC? something else), how repo/org membership maps to read/write permissions, and how a malicious or compromised contributor is contained.'
+    - 'The doc covers privacy: which transcript content is uploaded vs redacted (auto-memory? secrets? local file paths?), and how a contributor opts a session out of central capture before it ships.'
+    - 'The doc covers conflict and dedup: how the central instance handles the same session being pushed twice, sessions edited after upload (compaction, post-hoc tool-result rewrites), and entry-UUID collisions across contributors.'
+    - 'The doc explicitly states the relationship to 🎯T15 federation: is team-mnemo a special case of federation (one peer happens to be the team server) or a different shape (write-replication vs read-fanout)? Pick one with reasoning.'
+    - The doc decomposes the work into 4–8 concrete sub-targets ready to be raised under this target as 🎯T<N>.<M> children once the design is accepted.
+    context: |-
+      Raised 2026-04-25 from a user prompt. The use case: when working in a repo or org, every contributor pushes their local mnemo index to a central mnemo and queries it as well, so a person joining a program of work can pick up where others left off without having to do archaeology on Slack, commits, and PRs.
+
+      This is adjacent to but distinct from 🎯T15 federation. T15 is *peer-to-peer read fanout*: each contributor keeps a sovereign local index and queries multiple peers in parallel. Team-mnemo is *write-aggregation to a shared store*: the central index is the canonical surface for the team's collective memory. The two could compose (a contributor federates with their own machines AND with the team server) or one could subsume the other — that decision is part of the design.
+
+      Why this is research-shaped, not build-shaped: every question downstream of "should this exist" is contested — privacy (transcripts are intimate, they include stream-of-consciousness debugging), trust (a malicious contributor could poison shared memory), discoverability (how does Claude Code in a fresh clone know which central instance to query), and identity (mnemo today indexes one user's sessions; team-mnemo indexes many users' sessions and must attribute correctly). Design before code.
+
+      Sequencing: independent of T15.x. Could be tackled in parallel by a different agent or session. Likely benefits from T15.1's mTLS endpoint material (auth) and T15.5's fan-out shape (query model) once both land, but the design exercise can proceed without waiting for them.
+    tags:
+    - federation
+    - team
+    - design
+    - research
+    origin: user 2026-04-25 — "think about mnemo for teams"
+    discovered: 2026-04-25
   T4:
     name: Individual session transcript access
     status: achieved
@@ -983,7 +1028,7 @@ targets:
     status: achieved
     value: 9.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_discover_patterns tool identifies workaround sessions
@@ -1011,7 +1056,7 @@ targets:
     status: achieved
     value: 7.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_define stores named parameterised query template
@@ -1120,7 +1165,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 3.0
-    observable: true
+    showcase: true
     actual_cost: 3.0
     acceptance:
     - For each live session (as identified by 🎯T9.5.1), mnemo can report current CPU, RSS, and IO metrics for the owning claude process
@@ -1139,7 +1184,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 2.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo can report, for any given session ID, whether a Claude Code process currently has its transcript JSONL file open
     - Liveness is surfaced as an annotation on session listings (mnemo_sessions, mnemo_status) and/or a dedicated lookup tool
@@ -1159,7 +1204,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_decisions searches decisions table by keyword

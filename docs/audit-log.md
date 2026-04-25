@@ -297,3 +297,41 @@ maintenance activities. Append-only — newest entries at the bottom.
   Explorer double-click) stay silent as intended. No code change
   beyond the subsystem flag + the init shim. Homebrew formula
   updated.
+
+## 2026-04-25 — /release v0.29.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.29.0. Federation across linked mnemo
+  instances (🎯T15, all five sub-targets shipped). Adds
+  `internal/endpoint/` (mTLS material under
+  `~/.mnemo/endpoint/{cert.pem,key.pem}`, key 0600, ECDSA P-256,
+  10-year validity, regen on corruption/expiry; trusted peer certs
+  under `~/.mnemo/peers/<name>.pem` with malformed-skip), new
+  `linked_instances` config field with strict validation
+  (https-only URLs, unique names, resolvable peer cert by name OR
+  inline PEM), second mTLS MCP listener on `:19420`
+  (`--federated-addr` flag, default `:19420`, empty disables) via
+  `internal/federation/server.go`, federation client in
+  `internal/federation/client.go` with per-peer pinned mTLS,
+  persistent http.Client + HTTP/2 + 90s keep-alive per peer, 5s
+  default timeout, and seven typed error sentinels
+  (`ErrUnknownInstance`, `ErrConnectionRefused`, `ErrConnectFailed`,
+  `ErrTLSHandshake`, `ErrTimeout`, `ErrServerError`,
+  `ErrMalformedResponse`), and fan-out + merge in
+  `internal/federation/fanout.go` (`Fanout(ctx, toolName, args)`
+  parallel-calls every peer; `MergePeerResults` wraps local +
+  peers + warnings into a `FanoutEnvelope`). 16 read-shaped tools
+  participate in fan-out; write- and control-shaped tools bypass
+  federation by enumeration. Backwards-compatible: when
+  `linked_instances` is empty the wrapper returns the local text
+  verbatim. New CLI subcommands: `print-endpoint`,
+  `print-federated-addr`, `ping-peer <name>`. 16 federation tests
+  cover happy path, cert mismatch, connection refused, timeout,
+  server error, malformed response, fan-out merge attribution,
+  graceful degradation under timeout, error-kind classification,
+  backwards-compat pass-through, and the federated-server tool-set
+  boundary. Skill correction during this release: the release
+  skill's Ahead-N rule was internally inconsistent with squash-only
+  repos; updated `discover.sh` to emit `merge_strategy` and
+  branched the SKILL.md handling accordingly. Homebrew formula
+  updated.
