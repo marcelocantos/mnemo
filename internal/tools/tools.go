@@ -418,6 +418,24 @@ Answers "what is in this session?" without reading full transcript text. Returns
 Use this to quickly understand a session's shape before deep-reading it, to compare session structures, or to verify that a session contains the content type you expect.`),
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (exact or prefix, consistent with mnemo_read_session)")),
 		),
+		mcp.NewTool("mnemo_locate_uuid",
+			mcp.WithDescription(`Locate an entry by UUID across all sessions. Searches every UUID field in the transcript index and returns the session, entry, and which field matched.
+
+UUID fields searched:
+  - entry_uuid       — the entry's own $.uuid
+  - parent_uuid      — the parent entry's UUID ($.parentUuid)
+  - top_tool_use_id  — entry-level tool use ID ($.toolUseID, for progress/result entries)
+  - parent_tool_use_id — entry-level parent tool use ID ($.parentToolUseID)
+  - tool_use_id      — a tool_use content block's id inside $.message.content
+  - tool_result_id   — a tool_result content block's tool_use_id inside $.message.content
+
+Supports partial UUID prefixes — the first 8 characters are usually enough to uniquely identify an entry.
+
+Returns a structured result with session_id, entry_id, entry type, timestamp, match_kind (which field matched), the full matched UUID, and surrounding context messages. Returns "not found" when no entry matches.`),
+			mcp.WithString("uuid", mcp.Required(), mcp.Description("Full UUID or prefix to locate (e.g. \"abc12345\" or the full UUID)")),
+			mcp.WithNumber("context_before", mcp.Description("Number of messages before the entry to include (default 3)")),
+			mcp.WithNumber("context_after", mcp.Description("Number of messages after the entry to include (default 3)")),
+		),
 		mcp.NewTool("mnemo_images",
 			mcp.WithDescription(`Search images captured from Claude Code transcripts. Three search modes: (1) text (default) — FTS5 over AI descriptions and OCR text; (2) semantic — embed the query text and find images by meaning using CLIP k-NN (requires embed backend); (3) similar — find visually similar images given an image ID. Use 'text' to find images by paraphrase, 'semantic' for conceptual matches like "architecture diagram", and 'similar' to browse related screenshots.`),
 			mcp.WithString("query", mcp.Description("Search query. Used in 'text' and 'semantic' modes. Omit to list recent (text mode).")),
@@ -528,6 +546,8 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.listTemplates()
 	case "mnemo_discover_patterns":
 		return ch.discoverPatterns(args)
+	case "mnemo_locate_uuid":
+		return ch.locateUUID(args)
 	case "mnemo_images":
 		return ch.images(args)
 	case "mnemo_session_structure":
@@ -1881,4 +1901,33 @@ func (h *callHandler) toolResult(args map[string]any) (string, bool, error) {
 	b.WriteString("\n\n")
 	b.WriteString(payload.Text)
 	return b.String(), false, nil
+}
+
+func (h *callHandler) locateUUID(args map[string]any) (string, bool, error) {
+	prefix, _ := args["uuid"].(string)
+	if prefix == "" {
+		return "uuid is required", true, nil
+	}
+	contextBefore := 3
+	if cb, ok := args["context_before"].(float64); ok && cb >= 0 {
+		contextBefore = int(cb)
+	}
+	contextAfter := 3
+	if ca, ok := args["context_after"].(float64); ok && ca >= 0 {
+		contextAfter = int(ca)
+	}
+
+	matches, err := h.mem.LocateUUID(prefix, contextBefore, contextAfter)
+	if err != nil {
+		return fmt.Sprintf("locate_uuid failed: %v", err), true, nil
+	}
+	if len(matches) == 0 {
+		return fmt.Sprintf("UUID %q not found in any session.", prefix), false, nil
+	}
+
+	out, err := json.MarshalIndent(matches, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }

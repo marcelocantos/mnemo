@@ -859,7 +859,7 @@ targets:
     achieved: 2026-04-26
   T31:
     name: mnemo locates an entry by UUID across sessions
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -870,6 +870,7 @@ targets:
     context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). Observed post-mnemo pattern: Python loops over session JSONL files grepping for specific UUIDs to answer which session contains entry X or to trace parent-UUID chains. No current mnemo tool does this directly; bash grep over JSONL files is the only path. Common use cases include debugging session chaining, tracking tool_use_ids through retries, and resolving cross-session references.'
     origin: doit data-mining 2026-04-19
     discovered: 2026-04-19
+    achieved: 2026-04-26
   T32:
     name: Non-technical Windows users install mnemo via a double-click installer, with no terminal required
     status: achieved
