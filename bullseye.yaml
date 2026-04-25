@@ -969,7 +969,7 @@ targets:
     achieved: 2026-04-25
   T35:
     name: Indexer is idempotent — re-reading a transcript file does not duplicate rows in entries
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -979,6 +979,7 @@ targets:
     context: 'The entries table has no uniqueness constraint on (session_id, msg_uuid) — only id is a key. Each backfill cycle re-reads JSONL files end-to-end and inserts every row again. Concrete evidence (session 39f9a984-... in -Users-marcelo-think): 125 lines on disk, 94 distinct uuids, 348 rows in mnemo (~3.7× bloat). Older messages have 6 copies; newer messages have 4 — the per-message copy count equals the number of backfill cycles run since the message was written, so storage and query cost grow without bound. All aggregate queries currently need COUNT(DISTINCT timestamp) or DISTINCT on uuid to produce correct counts. Likely fix: add UNIQUE(session_id, raw->>''$.uuid'') with INSERT OR IGNORE, plus a one-shot dedupe migration; or track last-indexed uuid/offset per session. Discovered while auditing skill usage on 2026-04-24.'
     origin: forked from skill-usage audit, 2026-04-24
     discovered: 2026-04-24
+    achieved: 2026-04-26
   T36:
     name: A design exists for mnemo as a team-shared index — contributors push their local sessions to a central mnemo per repo/org so a newcomer can pick up an ongoing program of work without personal archaeology
     status: identified
