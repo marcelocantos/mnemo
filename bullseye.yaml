@@ -805,7 +805,7 @@ targets:
     achieved: 2026-04-18
   T28:
     name: mnemo exposes session-structure introspection
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -815,6 +815,7 @@ targets:
     context: 'Data-mined from 180 days of Claude session transcripts (2026-04-19). In post-mnemo sessions, Claude still falls back to bash against .claude/projects/... with inline-Python patterns that Counter() the entry types, assistant stop_reasons, system subtypes, and content-block kinds of a session JSONL. 16 post-mnemo sessions showed this pattern. No existing mnemo tool answers it: mnemo_read_session returns raw messages, mnemo_query can do it but requires hand-written SQL each time. A dedicated mnemo_session_structure(session_id) would retire this whole class of bash fallback.'
     origin: doit data-mining 2026-04-19
     discovered: 2026-04-19
+    achieved: 2026-04-26
   T29:
     name: mnemo surfaces raw tool-result bodies
     status: identified
