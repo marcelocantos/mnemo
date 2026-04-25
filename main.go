@@ -417,6 +417,56 @@ func portInUse(addr string) bool {
 	return false
 }
 
+// registerFanoutTools installs the federation fan-out wrapper for
+// every tool in federation.FanoutToolNames. The wrapper runs the
+// local handler and the per-peer Fanout in parallel, merges the
+// outputs into a federation.FanoutEnvelope, and returns it as MCP
+// TextContent. Local errors short-circuit (peers can't compensate
+// for a broken local store); peer errors classify into warnings on
+// the envelope so a slow or offline peer never blocks the response.
+func registerFanoutTools(s *server.MCPServer, h *tools.Handler, fed *federation.Client) {
+	for _, tool := range tools.Definitions() {
+		if _, ok := federation.FanoutToolNames[tool.Name]; !ok {
+			continue
+		}
+		name := tool.Name
+		local := h.LocalHandler(name)
+		s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			type localOut struct {
+				res *mcp.CallToolResult
+				err error
+			}
+			localCh := make(chan localOut, 1)
+			go func() {
+				res, err := local(ctx, req)
+				localCh <- localOut{res: res, err: err}
+			}()
+			peerResults, peerWarnings := fed.Fanout(ctx, name, req.GetArguments())
+			lo := <-localCh
+			if lo.err != nil {
+				return lo.res, lo.err
+			}
+			if lo.res != nil && lo.res.IsError {
+				return lo.res, nil
+			}
+
+			localText := ""
+			if lo.res != nil {
+				for _, c := range lo.res.Content {
+					if t, ok := c.(mcp.TextContent); ok {
+						localText += t.Text
+					}
+				}
+			}
+			merged, err := federation.MergePeerResults(localText, peerResults, peerWarnings)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("%s: merge peer results: %v", name, err)), nil
+			}
+			return mcp.NewToolResultText(merged), nil
+		})
+	}
+}
+
 // runServe opens the store, starts ingest and background workers, and
 // serves the MCP protocol over HTTP until ctx is cancelled or the
 // server fails. Used by both the foreground launcher and the Windows
@@ -486,14 +536,47 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// mnemo_self for session binding. WithHTTPContextFunc captures the
 	// ?user=<name> query parameter onto every request's ctx so tool
 	// handlers can look up the right user's store.
-	mcp := server.NewMCPServer(
+	mcpSrv := server.NewMCPServer(
 		"mnemo",
 		version,
 		server.WithToolCapabilities(true),
 	)
-	tools.NewHandler(resolve).RegisterTools(mcp)
+	handler := tools.NewHandler(resolve)
 
-	httpSrv := server.NewStreamableHTTPServer(mcp,
+	// Build a federation client if linked_instances are configured —
+	// this owns one persistent http.Client per peer and is shared
+	// across every fan-out tool registration. Failure to construct
+	// (e.g. a bad peer cert that slipped past startup validation)
+	// disables fan-out but does not block the local listener.
+	var fedClient *federation.Client
+	if len(cfg.LinkedInstances) > 0 {
+		mnemoDir, err := endpoint.DefaultDir()
+		if err == nil {
+			ep, err := endpoint.Load(mnemoDir)
+			if err == nil {
+				fedClient, err = federation.NewClient(ep, cfg.LinkedInstances)
+				if err != nil {
+					slog.Warn("federation client disabled", "err", err)
+					fedClient = nil
+				} else {
+					slog.Info("federation peers configured", "peers", fedClient.PeerNames())
+				}
+			} else {
+				slog.Warn("federation client disabled", "err", err)
+			}
+		}
+	}
+
+	if fedClient != nil && len(fedClient.PeerNames()) > 0 {
+		// Skip the fan-out tools when registering defaults so we can
+		// install our wrapper instead.
+		handler.RegisterToolsExcept(mcpSrv, federation.FanoutToolNames)
+		registerFanoutTools(mcpSrv, handler, fedClient)
+	} else {
+		handler.RegisterTools(mcpSrv)
+	}
+
+	httpSrv := server.NewStreamableHTTPServer(mcpSrv,
 		server.WithStateful(true),
 		server.WithHTTPContextFunc(tools.UsernameContextFunc),
 	)

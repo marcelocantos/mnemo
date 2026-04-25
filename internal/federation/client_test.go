@@ -259,6 +259,64 @@ func (s *stubServer) reload(t *testing.T) {
 	s.endpoint = ep
 }
 
+// stubServerTrusting builds a stub MCP-over-mTLS server that trusts
+// only the supplied client cert. Use when the test creates the
+// client endpoint outside this helper (e.g. fan-out tests sharing
+// one client across multiple servers).
+func stubServerTrusting(t *testing.T, clientCertPEM []byte, opts ...stubServerOpt) *stubServer {
+	t.Helper()
+
+	serverDir := filepath.Join(t.TempDir(), "server")
+	serverEP, err := endpoint.Load(serverDir)
+	if err != nil {
+		t.Fatalf("load server endpoint: %v", err)
+	}
+	addPeer(t, serverEP, "client", clientCertPEM)
+	serverEP, err = endpoint.Load(serverDir)
+	if err != nil {
+		t.Fatalf("reload server: %v", err)
+	}
+
+	s := &stubServer{
+		dir:      serverDir,
+		endpoint: serverEP,
+		tools:    map[string]stubTool{},
+		peerName: "stub",
+	}
+	for _, o := range opts {
+		o(s)
+	}
+
+	tlsCfg, err := serverEP.ServerTLSConfig()
+	if err != nil {
+		t.Fatalf("ServerTLSConfig: %v", err)
+	}
+
+	mcp := mcpserver.NewMCPServer("stub", "test",
+		mcpserver.WithToolCapabilities(true))
+	for name, tool := range s.tools {
+		def := mcp_NewTool(name)
+		registerStubTool(mcp, def, tool, s.delay)
+	}
+
+	httpHandler := mcpserver.NewStreamableHTTPServer(mcp,
+		mcpserver.WithStateful(true))
+
+	addr := freeAddr(t)
+	srv := &http.Server{Addr: addr, Handler: httpHandler, TLSConfig: tlsCfg}
+	ln, err := tls.Listen("tcp", addr, tlsCfg)
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	waitForListen(t, addr)
+
+	s.srv = srv
+	s.ln = ln
+	s.url = "https://" + addr + "/mcp"
+	return s
+}
+
 // stubFederationPair stands up: (a) a stub MCP-over-mTLS server in a
 // temp dir with cross-trust set up against a fresh client endpoint;
 // (b) a Client wired with that one peer. Returns both.
