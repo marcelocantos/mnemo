@@ -181,6 +181,26 @@ maintenance activities. Append-only — newest entries at the bottom.
   cutting the real tag, per the new release-workflow-touch signal
   in the /release skill. Homebrew formula updated.
 
+## 2026-04-25 — /release v0.27.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.27.0. Trim `mnemo_status` defaults so
+  routine calls stay inline in Claude Code (under 25KB tool-result
+  threshold). User reported a 74KB response from `mnemo_status`
+  with default args on a moderately busy machine, which Claude
+  Code persisted to disk and showed only a 2KB preview. Cause:
+  defaults were `max_sessions=3`, `max_excerpts=20`,
+  `truncate_len=200` and truncation applied only to assistant
+  messages — user pastes (logs, command output, code) escaped the
+  cap entirely. Defaults are now `max_sessions=2`,
+  `max_excerpts=6`, `truncate_len=160`, and truncation applies to
+  every excerpt regardless of role. Estimated response-size
+  reduction: ~10× on the reported workload (74KB → ~6KB). All
+  three knobs remain caller-overridable for users who actually
+  want the verbose form. Pure UX/default change in
+  `internal/store/store.go` and `internal/tools/tools.go`. No
+  schema or protocol impact. Homebrew formula updated.
+
 ## 2026-04-25 — /release v0.26.0
 
 - **Commit**: `aabd560`

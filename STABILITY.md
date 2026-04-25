@@ -9,7 +9,17 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.26.0.
+Snapshot as of v0.27.0.
+
+**v0.27.0 note**: Trim `mnemo_status` defaults so a routine call no
+longer blows past Claude Code's 25KB inline tool-result threshold.
+Defaults: `max_sessions` 3 → 2, `max_excerpts` 20 → 6, `truncate_len`
+200 → 160. Also: truncation now applies to **every** excerpt rather
+than just assistant ones, so user pastes (logs, command output)
+stop dominating response size. A typical 30-day call against a
+moderately busy machine drops from ~74 KB to ~6 KB. Behaviour is
+configurable per call — pass larger explicit values to recover the
+old verbosity. No CLI or MCP surface change.
 
 **v0.26.0 note**: Auto-migration from legacy stdio registrations.
 mnemo launched with stdin piped (i.e. invoked by Claude Code's
