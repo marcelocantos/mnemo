@@ -14,6 +14,7 @@
 //	mnemo install-service       # (Windows) install mnemo as a Service
 //	mnemo uninstall-service     # (Windows) remove the Service
 //	mnemo diagnose              # health check: tools, paths, db, freshness, integration
+//	mnemo print-endpoint        # print this host's mTLS public cert (for federated peer trust)
 //	claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<name>"
 package main
 
@@ -32,6 +33,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -79,6 +81,9 @@ func main() {
 			return
 		case "diagnose":
 			cmdDiagnose(os.Args[2:])
+			return
+		case "print-endpoint":
+			cmdPrintEndpoint(os.Args[2:])
 			return
 		}
 	}
@@ -243,6 +248,35 @@ func cmdUnregisterMCP(args []string) {
 		fmt.Printf("mnemo MCP removed from %s\n", path)
 	} else {
 		fmt.Printf("mnemo MCP was not registered in %s\n", path)
+	}
+}
+
+// cmdPrintEndpoint emits the daemon's public mTLS certificate to
+// stdout for paste-distribution to peer mnemo instances. If no cert
+// exists yet, one is generated on the spot — matching the "first
+// start" semantics of `mnemo serve`.
+func cmdPrintEndpoint(args []string) {
+	fs := flag.NewFlagSet("print-endpoint", flag.ExitOnError)
+	dirFlag := fs.String("dir", "", "mnemo state directory (default ~/.mnemo)")
+	_ = fs.Parse(args)
+
+	dir := *dirFlag
+	if dir == "" {
+		d, err := endpoint.DefaultDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "print-endpoint: %v\n", err)
+			os.Exit(1)
+		}
+		dir = d
+	}
+	ep, err := endpoint.Load(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "print-endpoint: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := os.Stdout.Write(ep.CertPEM); err != nil {
+		fmt.Fprintf(os.Stderr, "print-endpoint: %v\n", err)
+		os.Exit(1)
 	}
 }
 
