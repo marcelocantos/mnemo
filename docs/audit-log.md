@@ -181,6 +181,39 @@ maintenance activities. Append-only — newest entries at the bottom.
   cutting the real tag, per the new release-workflow-touch signal
   in the /release skill. Homebrew formula updated.
 
+## 2026-04-25 — /release v0.28.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.28.0. New `mnemo diagnose` subcommand —
+  manual single-screen health report covering nine dimensions:
+  (1) daemon process (PID, listening port, inherited PATH from
+  ps eww / /proc/PID/environ); (2) HTTP MCP endpoint with an
+  initialize handshake + RTT; (3) external tools (gh, git, claude,
+  uv, pdftotext, mutool, lsof, brew) checked against BOTH the
+  calling shell's PATH and the daemon's inherited PATH — the
+  [d only] flag surfaces the most common silent-failure mode where
+  the user's shell can see a tool but the launchd-spawned daemon
+  cannot; (4) filesystem (~/.claude/projects/ readability + JSONL
+  count, ~/.mnemo/ writability, db file size + mtime); (5) database
+  opened read-only via SQLite ?mode=ro so it runs alongside the
+  live daemon, reporting schema version, 17 table row counts, and
+  per-stream ingest_status recency; (6) index freshness (newest
+  JSONL mtime vs newest indexed message timestamp, with drift
+  classification: <5min healthy / <1h lagging / >=1h not keeping up);
+  (7) configuration snapshot showing workspace_roots /
+  extra_project_dirs / synthesis_roots with each path's existence;
+  (8) Claude Code integration — reads ~/.claude.json, recognises
+  the mcpbridge wrapper pattern (extracts the wrapped --url for
+  validation), validates ?user=<name> presence; (9) recent
+  ERROR/WARN lines from the mnemo log (auto-located by platform).
+  Exit code 1 on any FAIL for scripted health probes. Self-test
+  on author's machine immediately surfaced that the brew-services
+  daemon's launchd-inherited PATH is the spartan default
+  /usr/bin:/bin:/usr/sbin:/sbin, hiding gh/claude/uv/pdftotext/brew
+  — explaining why ci_runs/github_prs/github_issues are all 0.
+  ~530 lines in a new diagnose.go; no impact on existing code paths.
+  Homebrew formula updated.
+
 ## 2026-04-25 — /release v0.27.0
 
 - **Commit**: `d0eb33e`

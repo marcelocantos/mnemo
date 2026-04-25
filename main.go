@@ -13,6 +13,7 @@
 //	mnemo unregister-mcp        # remove mnemo from ~/.claude.json
 //	mnemo install-service       # (Windows) install mnemo as a Service
 //	mnemo uninstall-service     # (Windows) remove the Service
+//	mnemo diagnose              # health check: tools, paths, db, freshness, integration
 //	claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<name>"
 package main
 
@@ -53,7 +54,7 @@ Then restart this Claude Code session.`
 var agentsGuide string
 
 const (
-	version     = "0.27.0"
+	version     = "0.28.0"
 	defaultAddr = ":19419"
 )
 
@@ -75,6 +76,9 @@ func main() {
 			return
 		case "uninstall-service":
 			cmdUninstallService(os.Args[2:])
+			return
+		case "diagnose":
+			cmdDiagnose(os.Args[2:])
 			return
 		}
 	}
