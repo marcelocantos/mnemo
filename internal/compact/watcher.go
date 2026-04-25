@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/targets"
 )
 
 // WatcherConfig tunes the Watcher. Zero values mean "use defaults".
@@ -154,6 +155,7 @@ type connWorker struct {
 	excludeCWD    string
 	cancel        context.CancelFunc
 	budgetWarned  bool
+	targetsWarned bool
 	lastSessionID string
 }
 
@@ -185,6 +187,44 @@ func (w *connWorker) run(ctx context.Context) {
 	}
 }
 
+// loadTargetContext resolves the session's CWD and reads bullseye.yaml
+// from that root if present. Failures are logged once and treated as
+// "no graph available"; the compactor's nil-tolerant prompt builder
+// then produces the pre-🎯T1.4 payload shape.
+func (w *connWorker) loadTargetContext(sessionID string) *TargetContext {
+	cwd := w.src.SessionCWD(sessionID)
+	if cwd == "" {
+		return nil
+	}
+	state, err := targets.LoadFromCWD(cwd)
+	if err != nil {
+		if !w.targetsWarned {
+			slog.Warn("compact: target graph load failed",
+				"conn", w.connectionID, "session", sessionID, "cwd", cwd, "err", err)
+			w.targetsWarned = true
+		}
+		return nil
+	}
+	if state == nil {
+		return nil
+	}
+	tc := &TargetContext{
+		RepoRoot:    state.RepoRoot,
+		FrontierIDs: append([]string(nil), state.FrontierIDs...),
+	}
+	for _, t := range state.Active {
+		tc.Active = append(tc.Active, TargetSnapshot{
+			ID: t.ID, Name: t.Name, Status: string(t.Status),
+		})
+	}
+	for _, t := range state.Achieved {
+		tc.Achieved = append(tc.Achieved, TargetSnapshot{
+			ID: t.ID, Name: t.Name, Status: string(t.Status),
+		})
+	}
+	return tc
+}
+
 func (w *connWorker) tick(ctx context.Context) {
 	sessionID, err := w.src.CurrentSessionForConnection(w.connectionID)
 	if err != nil {
@@ -203,7 +243,8 @@ func (w *connWorker) tick(ctx context.Context) {
 	}
 	w.lastSessionID = sessionID
 
-	_, err = w.compactor.Compact(ctx, w.connectionID, sessionID)
+	tc := w.loadTargetContext(sessionID)
+	_, err = w.compactor.Compact(ctx, w.connectionID, sessionID, tc)
 	switch {
 	case err == nil, errors.Is(err, ErrNothingToCompact):
 		// normal idle ticks
