@@ -9,7 +9,29 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.28.0.
+Snapshot as of v0.29.0.
+
+**v0.29.0 note (🎯T15)**: Federation across linked mnemo instances.
+A second mTLS-authenticated MCP endpoint on `:19420` exposes a
+curated read-only tool subset to peer hosts. mTLS material lives
+under `~/.mnemo/endpoint/{cert.pem,key.pem}` (self-signed ECDSA P-256,
+key mode 0600, regenerated on corruption or expiry); trusted peer
+certs go under `~/.mnemo/peers/<name>.pem`. A new
+`linked_instances` array in `~/.mnemo/config.json` declares peer
+URLs + per-peer pinned certs. New CLI subcommands: `print-endpoint`
+(emit local cert.pem for paste-distribution), `print-federated-addr`
+(emit URL peers paste into their config), `ping-peer <name>`
+(invoke `mnemo_stats` on a configured peer). New flag
+`--federated-addr` (default `:19420`; empty disables). When
+`linked_instances` is non-empty, 16 read-shaped tools (mnemo_search,
+mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits,
+mnemo_prs, mnemo_memories, mnemo_who_ran, mnemo_audit, mnemo_targets,
+mnemo_plans, mnemo_skills, mnemo_configs, mnemo_ci, mnemo_images,
+mnemo_discover_patterns) wrap their response in a `FanoutEnvelope`
+(`{local, peers[], warnings[]}`) attributing results per instance;
+write- and control-shaped tools bypass federation. Slow or offline
+peers are dropped with a typed warning rather than blocking the
+response.
 
 **v0.28.0 note**: New `mnemo diagnose` subcommand — single-screen
 health report covering daemon process, HTTP MCP endpoint reachability,
@@ -124,8 +146,13 @@ instead of failing silently.
 | Flag | Type | Default | Stability |
 |---|---|---|---|
 | `--addr` | string | `:19419` | Stable |
+| `--federated-addr` | string | `:19420` | Needs review |
 | `--version` | bool | false | Stable |
 | `--help-agent` | bool | false | Stable |
+
+`--federated-addr` enables the mTLS federated MCP endpoint (🎯T15.3).
+An empty value disables federation entirely; the daemon makes no
+outbound peer calls and accepts no inbound mTLS connections.
 
 ### CLI subcommands
 
@@ -136,6 +163,9 @@ instead of failing silently.
 | `install-service` | `--exe` | Windows | Install mnemo as a Windows Service (auto-start, restart-on-failure, LocalSystem) | Needs review |
 | `uninstall-service` | — | Windows | Stop and remove the Windows Service + any legacy Scheduled Task | Needs review |
 | `diagnose` | `--addr`, `--log` | all | Manual health check across 9 dimensions; exits 1 on any FAIL | Needs review |
+| `print-endpoint` | `--dir` | all | Emit `~/.mnemo/endpoint/cert.pem` for paste-distribution to peers (generates on first call) | Needs review |
+| `print-federated-addr` | `--addr` | all | Emit the URL peers paste into their `linked_instances` entry (defaults to `https://<hostname>:19420/mcp`) | Needs review |
+| `ping-peer` | `--tool`, `<name>` | all | Invoke a tool (default `mnemo_stats`) on a configured federation peer; manual smoke test | Needs review |
 
 Subcommand history: v0.22.0 shipped SCM-backed `install-service` /
 `uninstall-service`; v0.23.0 replaced them with Scheduled-Task-based
@@ -715,7 +745,15 @@ Optional config file at `~/.mnemo/config.json` (since v0.15.0):
 ```json
 {
   "workspace_roots": ["/Users/you/work"],
-  "extra_project_dirs": []
+  "extra_project_dirs": [],
+  "synthesis_roots": [],
+  "linked_instances": [
+    {
+      "name": "alice",
+      "url": "https://alice.example:19420/mcp",
+      "peer_cert": "alice"
+    }
+  ]
 }
 ```
 
@@ -728,6 +766,15 @@ Optional config file at `~/.mnemo/config.json` (since v0.15.0):
   to index beyond `~/.claude/projects/`. Missing or unavailable
   entries (e.g. an unmounted SMB share) are skipped at scan time
   with a warning (v0.18.0, partial 🎯T15).
+- `synthesis_roots` — filesystem roots walked by the synthesis-doc
+  indexer for analysis/research/design/planning docs. Empty list
+  disables synthesis-doc ingest.
+- `linked_instances` — federation peers (🎯T15, since v0.29.0).
+  Each entry has a unique `name`, an `https://` URL, and a
+  `peer_cert` that is either the basename of a file under
+  `~/.mnemo/peers/` or an inline PEM block. Missing or empty
+  disables federation entirely. Validation fails loud at startup
+  on duplicate names, non-https URLs, or unresolvable certs.
 
 All other configuration is via CLI flags. **Stability**: Fluid — the
 config file is new and its schema may grow before 1.0.
@@ -736,9 +783,52 @@ config file is new and its schema may grow before 1.0.
 
 - Database location: `~/.mnemo/mnemo.db`
 - Transcript source: `~/.claude/projects/` (JSONL files)
+- Federation endpoint material: `~/.mnemo/endpoint/{cert.pem,key.pem}`
+  (key mode 0600). Self-signed ECDSA P-256, 10-year validity,
+  regenerated automatically on corruption or expiry. Generated lazily
+  on first daemon start or first `mnemo print-endpoint` invocation.
+- Trusted peer certs: `~/.mnemo/peers/<name>.pem`. One file per peer,
+  containing a single CERTIFICATE PEM block. Malformed entries are
+  skipped with a warning at startup; the daemon continues.
 
-Both paths are hardcoded. **Stability**: Needs review — may become
-configurable before 1.0.
+Database and transcript paths are hardcoded. **Stability**: Needs
+review — may become configurable before 1.0. Federation paths
+(endpoint, peers) are also hardcoded under `~/.mnemo/`; **Stability**:
+Needs review.
+
+### Federation response shape (FanoutEnvelope)
+
+When `linked_instances` is configured, read-shaped tools wrap their
+result in a `FanoutEnvelope` JSON object. Empty federation produces
+the original local response verbatim — backwards-compatible for
+local-only deployments.
+
+```json
+{
+  "local": <original local result, JSON if parseable, else string>,
+  "peers": [
+    {"instance": "alice", "result": <peer's parsed result>}
+  ],
+  "warnings": [
+    {
+      "instance": "bob",
+      "error_kind": "timeout",
+      "message": "federation: peer call timed out: \"bob\": ..."
+    }
+  ]
+}
+```
+
+`error_kind` values: `timeout`, `connection_refused`, `tls_handshake`,
+`server_error`, `malformed_response`, `connect_failed`,
+`unknown_instance`, `unknown`. Peers are sorted by instance name for
+deterministic ordering. Tools that bypass federation: `mnemo_self`,
+`mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
+`mnemo_restore`, `mnemo_whatsup`, `mnemo_docs`, `mnemo_synthesis`,
+`mnemo_permissions`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
+`mnemo_chain`. **Stability**: Fluid — envelope shape may evolve
+(per-record attribution vs envelope wrapping; rank normalisation
+across instances) before 1.0.
 
 ## Gaps and prerequisites
 

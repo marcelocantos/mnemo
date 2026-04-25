@@ -393,6 +393,42 @@ The nonce appears in your transcript and is detected during ingestion.
 Use the resolved session ID with `mnemo_read_session` to read your own
 transcript.
 
+## Federation across linked instances
+
+If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
+tools (`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
+`mnemo_decisions`, `mnemo_commits`, `mnemo_prs`, `mnemo_memories`,
+`mnemo_who_ran`, `mnemo_audit`, `mnemo_targets`, `mnemo_plans`,
+`mnemo_skills`, `mnemo_configs`, `mnemo_ci`, `mnemo_images`,
+`mnemo_discover_patterns`) wrap their result in a `FanoutEnvelope`
+attributing per-instance results:
+
+```json
+{
+  "local": <local result>,
+  "peers": [{"instance": "alice", "result": <alice's result>}],
+  "warnings": [{"instance": "bob", "error_kind": "timeout", "message": "..."}]
+}
+```
+
+`error_kind` values: `timeout`, `connection_refused`, `tls_handshake`,
+`server_error`, `malformed_response`, `connect_failed`,
+`unknown_instance`, `unknown`. Slow or offline peers drop into
+`warnings[]` with a typed kind; the local response always returns.
+Per-peer timeout default 5s.
+
+When `linked_instances` is empty or absent, all tools return their
+original local-only response shape unchanged. Write- and
+control-shaped tools (`mnemo_self`, `mnemo_define`, `mnemo_evaluate`,
+`mnemo_list_templates`, `mnemo_restore`, `mnemo_whatsup`,
+`mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
+`mnemo_stats`, `mnemo_status`, `mnemo_chain`) bypass federation
+entirely.
+
+Setup is documented in the README under "Federation across linked
+instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,
+`mnemo ping-peer <name>` are the operator-facing CLI tools.
+
 ## Index freshness
 
 **Invariant: `mnemo_*` tools reflect the full on-disk corpus at the time

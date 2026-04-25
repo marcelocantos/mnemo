@@ -227,6 +227,89 @@ mid-session are not picked up.
 For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
 or run `mnemo --help-agent`.
 
+## Federation across linked instances
+
+Multiple mnemo daemons (different machines, different Claude Code
+projects) can be peered so a single query reaches every host's index.
+mTLS authentication, per-peer pinned trust, parallel fan-out, graceful
+degradation under peer failure.
+
+### Setup
+
+On each host:
+
+1. Generate the local mTLS material and print the public cert:
+
+   ```bash
+   mnemo print-endpoint > /tmp/<hostname>.pem
+   ```
+
+   First invocation generates `~/.mnemo/endpoint/{cert.pem,key.pem}`
+   (key mode 0600, ECDSA P-256, 10-year validity, regenerated on
+   corruption or expiry).
+
+2. Distribute that PEM to peer hosts. Each peer drops it into its
+   own `~/.mnemo/peers/<name>.pem` (any name is fine; it's the
+   filename the peer uses to refer to this host).
+
+3. Print this host's federation URL:
+
+   ```bash
+   mnemo print-federated-addr
+   # → https://<hostname>:19420/mcp
+   ```
+
+4. On each peer, declare the link in `~/.mnemo/config.json`:
+
+   ```json
+   {
+     "linked_instances": [
+       {
+         "name": "alice",
+         "url": "https://alice.example:19420/mcp",
+         "peer_cert": "alice"
+       }
+     ]
+   }
+   ```
+
+   `peer_cert` is either the basename of the file under
+   `~/.mnemo/peers/` (without `.pem`) or an inline PEM block. Validation
+   fails loud at startup on duplicate names, non-https URLs, or
+   unresolvable certs.
+
+5. Restart the daemon (`brew services restart mnemo`).
+
+6. Verify with `mnemo ping-peer <name>` — invokes `mnemo_stats` on the
+   peer over mTLS and prints the response.
+
+### Behaviour
+
+When `linked_instances` is non-empty, 16 read-shaped tools wrap their
+response in a `FanoutEnvelope`:
+
+```json
+{
+  "local": <local result>,
+  "peers": [{"instance": "alice", "result": <alice's result>}],
+  "warnings": [{"instance": "bob", "error_kind": "timeout", "message": "..."}]
+}
+```
+
+Slow or offline peers drop into `warnings[]` with a typed
+`error_kind` (`timeout`, `connection_refused`, `tls_handshake`,
+`server_error`, `malformed_response`, `connect_failed`); the local
+response returns regardless. Per-peer timeout default 5s.
+
+Write- and control-shaped tools (`mnemo_self`, template
+register/evaluate, `mnemo_restore`, `mnemo_whatsup`, `mnemo_docs`,
+`mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`, `mnemo_stats`,
+`mnemo_status`, `mnemo_chain`) bypass federation entirely.
+
+When `linked_instances` is empty or absent, federation is disabled and
+all tools return their original local-only response shape unchanged
+(backwards-compatible).
+
 ## Workflows mnemo enables
 
 mnemo's tools are building blocks. Some examples of what you can build
