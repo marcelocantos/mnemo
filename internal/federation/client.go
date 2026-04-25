@@ -215,7 +215,7 @@ func classifyTransportError(name string, err error, callCtx, parentCtx context.C
 	}
 	msg := err.Error()
 	switch {
-	case containsAny(msg, "connection refused"):
+	case containsAny(msg, "connection refused", "connectex", "actively refused"):
 		return fmt.Errorf("%w: %q: %v", ErrConnectionRefused, name, err)
 	case containsAny(msg, "tls:", "x509:", "remote error", "bad certificate", "certificate required"):
 		return fmt.Errorf("%w: %q: %v", ErrTLSHandshake, name, err)
