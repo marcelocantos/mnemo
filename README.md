@@ -131,6 +131,15 @@ installer.
 
 Logs on macOS: `$(brew --prefix)/var/log/mnemo.log`.
 
+> **PATH note for service deployments**: mnemo's compactor shells out
+> to `claude -p`. Services (launchd, systemd) inherit a minimal
+> `PATH` that typically excludes the `claude` binary. The Homebrew
+> formula's service block sets `PATH` to include
+> `$(brew --prefix)/bin` and `~/.claude/local` automatically. If you
+> run mnemo via a custom plist or systemd unit, set `PATH` explicitly
+> to include the directory where `claude` is installed. Without it,
+> compaction will fail with a logged ERROR.
+
 **Manually**:
 
 ```bash
