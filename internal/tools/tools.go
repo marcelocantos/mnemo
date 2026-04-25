@@ -396,6 +396,19 @@ Returns candidate features with evidence counts, example sessions, and suggested
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("min_occurrences", mcp.Description("Minimum pattern occurrences to report (default 3)")),
 		),
+		mcp.NewTool("mnemo_session_structure",
+			mcp.WithDescription(`Return a structural summary of a session's entry types and content-block shapes.
+
+Answers "what is in this session?" without reading full transcript text. Returns:
+- entry_types: count per JSONL entry type (user, assistant, system, progress, ...)
+- assistant_stop_reasons: count per stop_reason (end_turn, tool_use, max_tokens, ...)
+- system_subtypes: count per $.subtype for system entries
+- content_block_kinds: count per content-block type (text, tool_use, tool_result, thinking)
+- tool_names: count per tool name in tool_use blocks
+
+Use this to quickly understand a session's shape before deep-reading it, to compare session structures, or to verify that a session contains the content type you expect.`),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (exact or prefix, consistent with mnemo_read_session)")),
+		),
 		mcp.NewTool("mnemo_images",
 			mcp.WithDescription(`Search images captured from Claude Code transcripts. Three search modes: (1) text (default) — FTS5 over AI descriptions and OCR text; (2) semantic — embed the query text and find images by meaning using CLIP k-NN (requires embed backend); (3) similar — find visually similar images given an image ID. Use 'text' to find images by paraphrase, 'semantic' for conceptual matches like "architecture diagram", and 'similar' to browse related screenshots.`),
 			mcp.WithString("query", mcp.Description("Search query. Used in 'text' and 'semantic' modes. Omit to list recent (text mode).")),
@@ -495,6 +508,8 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.discoverPatterns(args)
 	case "mnemo_images":
 		return ch.images(args)
+	case "mnemo_session_structure":
+		return ch.sessionStructure(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1746,4 +1761,20 @@ func (h *callHandler) images(args map[string]any) (string, bool, error) {
 		b.WriteByte('\n')
 	}
 	return b.String(), false, nil
+}
+
+func (h *callHandler) sessionStructure(args map[string]any) (string, bool, error) {
+	sessionID, _ := args["session_id"].(string)
+	if sessionID == "" {
+		return "session_id is required", true, nil
+	}
+	result, err := h.mem.SessionStructure(sessionID)
+	if err != nil {
+		return fmt.Sprintf("session_structure failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }
