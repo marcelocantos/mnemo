@@ -211,10 +211,11 @@ targets:
     achieved: 2026-04-25
   T15.2:
     name: Config supports a linked_instances list of peer mnemo endpoints
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
+    demonstration: store.Config.LinkedInstances field with LinkedInstance{Name, URL, PeerCert} parses ~/.mnemo/config.json. Validation enforces unique Name, https-only URL, and resolvable PeerCert (name under ~/.mnemo/peers/ OR inline PEM containing a parseable CERTIFICATE block) at LoadConfig time. 16 sub-test cases verify the happy paths and every documented failure mode (duplicate name names both indexes; URL/PEM rejection messages name the offending entry). All tests green; full make bullseye green except expected dirty-tree of new files.
     acceptance:
     - store.Config gains a LinkedInstances []LinkedInstance field with Name (string), URL (string, https only), and PeerCert (name of cert under ~/.mnemo/peers/ OR inline PEM).
     - ~/.mnemo/config.json parses cleanly; an absent field is zero-value and disables federation entirely.
@@ -228,6 +229,7 @@ targets:
     - config
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.3:
     name: mnemo serves a federated, mTLS-authenticated, read-only MCP endpoint for peer queries
     status: identified
