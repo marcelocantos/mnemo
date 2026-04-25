@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1289,17 +1290,36 @@ func (h *callHandler) restore(args map[string]any) (string, bool, error) {
 		}
 		if c.PayloadJSON != "" && c.PayloadJSON != "{}" {
 			var payload struct {
-				Targets     []string `json:"targets"`
-				Files       []string `json:"files"`
-				OpenThreads []string `json:"open_threads"`
-				Decisions   []struct {
+				Targets           []string          `json:"targets"`
+				TargetsActive     []string          `json:"targets_active"`
+				TargetsProgressed map[string]string `json:"targets_progressed"`
+				TargetsNext       string            `json:"targets_next"`
+				Files             []string          `json:"files"`
+				OpenThreads       []string          `json:"open_threads"`
+				Decisions         []struct {
 					What string `json:"what"`
 					Why  string `json:"why"`
 				} `json:"decisions"`
 			}
 			if err := json.Unmarshal([]byte(c.PayloadJSON), &payload); err == nil {
-				if len(payload.Targets) > 0 {
+				if len(payload.TargetsActive) > 0 {
+					fmt.Fprintf(&b, "Targets active: %s\n", strings.Join(payload.TargetsActive, ", "))
+				} else if len(payload.Targets) > 0 {
 					fmt.Fprintf(&b, "Targets: %s\n", strings.Join(payload.Targets, ", "))
+				}
+				if len(payload.TargetsProgressed) > 0 {
+					ids := make([]string, 0, len(payload.TargetsProgressed))
+					for id := range payload.TargetsProgressed {
+						ids = append(ids, id)
+					}
+					sort.Strings(ids)
+					b.WriteString("Targets progressed:\n")
+					for _, id := range ids {
+						fmt.Fprintf(&b, "  - %s: %s\n", id, payload.TargetsProgressed[id])
+					}
+				}
+				if payload.TargetsNext != "" {
+					fmt.Fprintf(&b, "Next target: %s\n", payload.TargetsNext)
 				}
 				if len(payload.Files) > 0 {
 					fmt.Fprintf(&b, "Files: %s\n", strings.Join(payload.Files, ", "))

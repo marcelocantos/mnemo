@@ -122,7 +122,7 @@ func TestCompactRoundTrip(t *testing.T) {
 	}}
 
 	c := New(store, llm, Config{})
-	got, err := c.Compact(context.Background(), "", "sess-1")
+	got, err := c.Compact(context.Background(), "", "sess-1", nil)
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestCompactPicksUpAfterLatest(t *testing.T) {
 		Text: `{"targets":[],"decisions":[],"files":[],"open_threads":[],"summary":"second span"}`,
 	}}
 	c := New(s, llm, Config{})
-	got, err := c.Compact(context.Background(), "", "sess-1")
+	got, err := c.Compact(context.Background(), "", "sess-1", nil)
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestCompactNothingToDo(t *testing.T) {
 	llm := &stubLLM{}
 
 	c := New(s, llm, Config{})
-	_, err := c.Compact(context.Background(), "", "sess-1")
+	_, err := c.Compact(context.Background(), "", "sess-1", nil)
 	if !errors.Is(err, ErrNothingToCompact) {
 		t.Fatalf("expected ErrNothingToCompact, got %v", err)
 	}
@@ -242,7 +242,7 @@ func TestCompactBudgetExceeded(t *testing.T) {
 
 	llm := &stubLLM{response: LLMResult{Text: `{"summary":"should not run"}`}}
 	c := New(s, llm, Config{})
-	_, err = c.Compact(context.Background(), "", "sess-1")
+	_, err = c.Compact(context.Background(), "", "sess-1", nil)
 	if !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
 	}
@@ -268,7 +268,7 @@ func TestCompactBudgetUnmeasurableAllowed(t *testing.T) {
 		Text: `{"summary":"first"}`, PromptTokens: 50, OutputTokens: 20,
 	}}
 	c := New(s, llm, Config{})
-	if _, err := c.Compact(context.Background(), "", "sess-1"); err != nil {
+	if _, err := c.Compact(context.Background(), "", "sess-1", nil); err != nil {
 		t.Fatalf("Compact should succeed when session tokens unknown: %v", err)
 	}
 	if llm.calls != 1 {
@@ -302,5 +302,92 @@ func TestRenderTranscriptTruncates(t *testing.T) {
 	got := renderTranscript(msgs, 50)
 	if !strings.Contains(got, "truncated") {
 		t.Fatalf("expected truncation marker, got: %q", got)
+	}
+}
+
+func TestBuildUserPrompt_NilTargetContext(t *testing.T) {
+	got := buildUserPrompt(nil, "[user] hello\n")
+	if strings.Contains(got, "Bullseye target graph") {
+		t.Errorf("nil target context should not produce a graph section: %q", got)
+	}
+	if !strings.Contains(got, "[user] hello") {
+		t.Errorf("transcript missing from prompt: %q", got)
+	}
+}
+
+func TestBuildUserPrompt_WithTargets(t *testing.T) {
+	tc := &TargetContext{
+		RepoRoot: "/tmp/repo",
+		Active: []TargetSnapshot{
+			{ID: "T1.4", Name: "Target-aware compaction", Status: "identified"},
+		},
+		Achieved: []TargetSnapshot{
+			{ID: "T10", Name: "Live context compaction", Status: "achieved"},
+		},
+		FrontierIDs: []string{"T1.4"},
+	}
+	got := buildUserPrompt(tc, "[user] working on T1.4\n")
+
+	for _, want := range []string{
+		"Bullseye target graph for this repo (/tmp/repo):",
+		"Active:",
+		"T1.4 [identified] Target-aware compaction",
+		"Achieved:",
+		"T10 Live context compaction",
+		"Frontier (unblocked active): T1.4",
+		"[user] working on T1.4",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q\nfull prompt:\n%s", want, got)
+		}
+	}
+}
+
+func TestCompactRoundTripWithTargets(t *testing.T) {
+	s := &fakeStore{
+		session: "sess-1",
+		msgs: []store.SessionMessage{
+			{ID: 1, Role: "user", Text: "Wrap up T1.4"},
+		},
+	}
+	llm := &stubLLM{response: LLMResult{
+		Text: `{
+  "targets": ["T1.4"],
+  "targets_active": ["T1.4"],
+  "targets_progressed": {"T1.4": "compactor reads bullseye.yaml"},
+  "targets_next": "T1.5",
+  "decisions": [],
+  "files": [],
+  "open_threads": [],
+  "summary": "wrapping T1.4"
+}`,
+	}}
+
+	tc := &TargetContext{
+		RepoRoot: "/some/repo",
+		Active:   []TargetSnapshot{{ID: "T1.4", Name: "Target-aware compaction", Status: "identified"}},
+	}
+	c := New(s, llm, Config{})
+	if _, err := c.Compact(context.Background(), "", "sess-1", tc); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !strings.Contains(llm.lastUser, "Bullseye target graph") {
+		t.Errorf("expected target-graph preface in prompt, got: %q", llm.lastUser)
+	}
+	if len(s.compacts) != 1 {
+		t.Fatalf("expected 1 compaction, got %d", len(s.compacts))
+	}
+	parsed, _, err := parsePayload(s.compacts[0].PayloadJSON)
+	if err != nil {
+		t.Fatalf("parsePayload: %v", err)
+	}
+	if len(parsed.TargetsActive) != 1 || parsed.TargetsActive[0] != "T1.4" {
+		t.Errorf("TargetsActive = %v, want [T1.4]", parsed.TargetsActive)
+	}
+	if parsed.TargetsProgressed["T1.4"] != "compactor reads bullseye.yaml" {
+		t.Errorf("TargetsProgressed[T1.4] = %q", parsed.TargetsProgressed["T1.4"])
+	}
+	if parsed.TargetsNext != "T1.5" {
+		t.Errorf("TargetsNext = %q, want T1.5", parsed.TargetsNext)
 	}
 }

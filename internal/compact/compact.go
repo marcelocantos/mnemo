@@ -36,18 +36,48 @@ type LLMCaller interface {
 // Payload is the structured extraction the compactor expects the LLM
 // to emit. Shape is stable across backends; backends that cannot emit
 // strict JSON are wrapped in a normalising adapter.
+//
+// The targets_active / targets_progressed / targets_next fields land
+// only when the session's CWD contains a bullseye.yaml the compactor
+// could read. They are omitempty so non-bullseye repos produce the
+// pre-🎯T1.4 payload shape unchanged.
 type Payload struct {
-	Targets     []string   `json:"targets"`
-	Decisions   []Decision `json:"decisions"`
-	Files       []string   `json:"files"`
-	OpenThreads []string   `json:"open_threads"`
-	Summary     string     `json:"summary"`
+	Targets           []string          `json:"targets"`
+	TargetsActive     []string          `json:"targets_active,omitempty"`
+	TargetsProgressed map[string]string `json:"targets_progressed,omitempty"`
+	TargetsNext       string            `json:"targets_next,omitempty"`
+	Decisions         []Decision        `json:"decisions"`
+	Files             []string          `json:"files"`
+	OpenThreads       []string          `json:"open_threads"`
+	Summary           string            `json:"summary"`
 }
 
 // Decision records a choice made during the session.
 type Decision struct {
 	What string `json:"what"`
 	Why  string `json:"why"`
+}
+
+// TargetSnapshot is one row of the target graph passed into the
+// compactor's prompt so the summariser can populate the targets_*
+// fields. The compactor doesn't know about bullseye's YAML schema —
+// the watcher resolves the graph and hands it down as a flat list.
+type TargetSnapshot struct {
+	ID     string
+	Name   string
+	Status string
+}
+
+// TargetContext is the optional target-graph anchor for a compaction
+// span. Empty fields are tolerated — the prompt only mentions a
+// section when it has content. A nil *TargetContext means "no graph
+// available" (non-bullseye repo, missing file, parse error already
+// logged): the compactor falls back to its pre-🎯T1.4 behaviour.
+type TargetContext struct {
+	RepoRoot    string
+	Active      []TargetSnapshot
+	Achieved    []TargetSnapshot
+	FrontierIDs []string
 }
 
 // SystemPrompt is the system message sent to the summariser model.
@@ -57,6 +87,9 @@ const SystemPrompt = `You are a session compactor. Given transcript messages, ou
 
 {
   "targets": ["T10", ...],
+  "targets_active": ["T10", ...],
+  "targets_progressed": {"T3": "achieved — tool X implemented"},
+  "targets_next": "T9.1",
   "decisions": [{"what": "...", "why": "..."}, ...],
   "files": ["path/to/file.go", ...],
   "open_threads": ["unfinished work", ...],
@@ -65,8 +98,11 @@ const SystemPrompt = `You are a session compactor. Given transcript messages, ou
 
 Rules:
 - Output JSON only. No markdown fences, no prose commentary, no leading/trailing whitespace.
-- Omit fields with no entries by using empty arrays, not nulls.
-- "targets" are bullseye target IDs (e.g. T10, T9.4) explicitly discussed or worked on.
+- Omit fields with no entries by using empty arrays, not nulls. Omit object/string fields entirely (or set to "") when there is nothing to say.
+- "targets" are bullseye target IDs (e.g. T10, T9.4) explicitly discussed or worked on in this span. Include legacy unprefixed form for backwards compatibility.
+- "targets_active" are IDs from the supplied target graph that the session moved on or treated as in-flight during this span.
+- "targets_progressed" is a map from target ID to a one-line progress note (e.g. "achieved — X landed", "blocked by Y", "context refreshed"). Only include entries where progress is observable in the span.
+- "targets_next" is the single ID the session is most likely to pick up next, drawn from the supplied frontier or from explicit user direction. Empty string if unclear.
 - "decisions" capture choices that future sessions need to remember — include the rationale.
 - "files" are paths touched, reviewed, or named as load-bearing.
 - "open_threads" are tasks started but not finished, and questions raised but not answered.
@@ -173,7 +209,11 @@ func (c *Compactor) checkBudget(sessionID string) error {
 // driving this session. It is recorded on the compaction so that
 // mnemo_restore can resolve session → connection → prior compactions
 // across /clear boundaries without needing a chain heuristic.
-func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string) (*store.Compaction, error) {
+//
+// targets, when non-nil, anchors the summariser's output in the
+// repo's bullseye target graph (🎯T1.4). The watcher resolves it from
+// the session's CWD; nil falls back to the pre-graph compaction shape.
+func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string, targets *TargetContext) (*store.Compaction, error) {
 	if err := c.checkBudget(sessionID); err != nil {
 		return nil, err
 	}
@@ -197,7 +237,7 @@ func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string)
 	}
 
 	transcript := renderTranscript(msgs, c.maxChars)
-	userPrompt := "Compact the following transcript span:\n\n" + transcript
+	userPrompt := buildUserPrompt(targets, transcript)
 
 	res, err := c.caller.Call(ctx, SystemPrompt, userPrompt)
 	if err != nil {
@@ -242,6 +282,40 @@ func filterNew(msgs []store.SessionMessage, fromID int64) []store.SessionMessage
 		out = append(out, m)
 	}
 	return out
+}
+
+// buildUserPrompt assembles the compaction user message: an optional
+// target-graph preface (when the session is inside a bullseye repo),
+// then the rendered transcript span. The graph section is verbatim
+// data — no instructions — because rules live in SystemPrompt and
+// duplicating them here would let the two drift.
+func buildUserPrompt(tc *TargetContext, transcript string) string {
+	var b strings.Builder
+	if tc != nil && (len(tc.Active) > 0 || len(tc.Achieved) > 0) {
+		b.WriteString("Bullseye target graph for this repo (")
+		b.WriteString(tc.RepoRoot)
+		b.WriteString("):\n")
+		if len(tc.Active) > 0 {
+			b.WriteString("Active:\n")
+			for _, t := range tc.Active {
+				fmt.Fprintf(&b, "  - %s [%s] %s\n", t.ID, t.Status, t.Name)
+			}
+		}
+		if len(tc.Achieved) > 0 {
+			b.WriteString("Achieved:\n")
+			for _, t := range tc.Achieved {
+				fmt.Fprintf(&b, "  - %s %s\n", t.ID, t.Name)
+			}
+		}
+		if len(tc.FrontierIDs) > 0 {
+			fmt.Fprintf(&b, "Frontier (unblocked active): %s\n",
+				strings.Join(tc.FrontierIDs, ", "))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Compact the following transcript span:\n\n")
+	b.WriteString(transcript)
+	return b.String()
 }
 
 // renderTranscript formats messages for the LLM prompt, tail-truncating
