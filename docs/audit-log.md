@@ -183,7 +183,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-25 — /release v0.27.0
 
-- **Commit**: `pending`
+- **Commit**: `d0eb33e`
 - **Outcome**: Released v0.27.0. Trim `mnemo_status` defaults so
   routine calls stay inline in Claude Code (under 25KB tool-result
   threshold). User reported a 74KB response from `mnemo_status`
