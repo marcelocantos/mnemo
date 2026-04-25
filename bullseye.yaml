@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 targets:
   T1:
     name: Broader memory beyond transcripts
@@ -56,7 +56,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - Commits from repos in session_meta indexed automatically
@@ -76,7 +76,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - PRs and issues from repos in session_meta indexed automatically
@@ -135,7 +135,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     acceptance:
     - All sub-targets T15.1, T15.2, T15.3, T15.4, T15.5 are achieved.
     - Two mnemo daemons (separate hosts, or two local temp-dir instances for CI) are configured as each other's peers via `linked_instances` and each daemon's `~/.mnemo/peers/` holds the other's public cert.
@@ -189,10 +189,11 @@ targets:
     discovered: 2026-04-09
   T15.1:
     name: mnemo manages an mTLS endpoint file for authenticated peer access
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
+    demonstration: Ran `bin/mnemo print-endpoint --dir /tmp/...` against an empty dir — generated cert.pem (0644) + key.pem (0600) under endpoint/ and printed a 10-year self-signed ECDSA P-256 CERTIFICATE PEM (subject mnemo-colossus.lan, valid 2026→2036) to stdout. Re-ran the same command and confirmed reload (no regen warning, identical cert). Unit tests cover corrupt-cert regen, expired-cert regen, peer-dir parsing of valid + invalid + non-pem entries, key 0600 enforcement on first-run and after reload chmod.
     acceptance:
     - On first start, mnemo serve generates a self-signed X.509 cert + key pair at ~/.mnemo/endpoint/{cert.pem,key.pem} (mode 0600 on key).
     - On subsequent starts, existing cert/key are loaded. A corrupt or expired cert triggers regeneration with a warning.
@@ -207,12 +208,13 @@ targets:
     - auth
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.2:
     name: Config supports a linked_instances list of peer mnemo endpoints
     status: identified
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - store.Config gains a LinkedInstances []LinkedInstance field with Name (string), URL (string, https only), and PeerCert (name of cert under ~/.mnemo/peers/ OR inline PEM).
     - ~/.mnemo/config.json parses cleanly; an absent field is zero-value and disables federation entirely.
@@ -231,7 +233,7 @@ targets:
     status: identified
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo serve listens on a second configurable address (default :19420; flag `--federated-addr`; `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
     - 'Only read-shaped tools are exposed on the federated endpoint: mnemo_search, mnemo_sessions, mnemo_read_session, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, mnemo_memories, mnemo_skills, mnemo_configs, mnemo_usage, mnemo_audit, mnemo_targets, mnemo_plans, mnemo_who_ran, mnemo_ci, mnemo_query, mnemo_repos, mnemo_stats, mnemo_chain, mnemo_decisions, mnemo_images, mnemo_discover_patterns, mnemo_status. Write-shaped / control tools (mnemo_self, template writes, describers control, etc.) are absent from the federated tool set.'
@@ -253,7 +255,7 @@ targets:
     status: identified
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - An internal client package (e.g. internal/federation/client) exposes a CallTool(ctx, instance, toolName, args) -> result method that targets a LinkedInstance from T15.2.
     - mTLS handshake presents the local endpoint cert/key (T15.1) as client identity and trusts only the peer cert configured for that instance (not the whole trusted-peer set).
@@ -277,7 +279,7 @@ targets:
     status: identified
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - Read-shaped query tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, and others with per-record result shapes) issue local + per-peer calls in parallel via T15.4's client.
     - 'Every returned record carries an instance-source field (e.g. "local" for the host responder, "<peer name>" for peers). Response schemas extended in a backwards-compatible way: existing unattributed callers still parse.'
@@ -301,7 +303,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     acceptance:
     - 'Schema: session_chains(successor_id PK, predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at) with index on predecessor_id'
     - 'Ingest-time detection: when a new JSONL''s first non-meta user event contains <command-name>/clear</command-name>, look for a predecessor in the same project directory whose last event precedes the new file''s first event; insert the link with confidence bucketed as high (<2s), medium (2-5s), or none (>5s, no link recorded but boundary noted)'
@@ -334,7 +336,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - Every repo-level stream (targets, audit logs, plans, CI runs) performs a filesystem-walk backfill on daemon startup, not a session_meta-seeded scan
@@ -370,7 +372,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - 'Inline base64 images (type: image content blocks) are detected during ingest; base64 decoded and stored as binary BLOB in a dedicated images table'
@@ -417,7 +419,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 3.0
     acceptance:
     - Every image in the images table has an OCR pass (or recorded error); descriptions remain untouched — OCR is additive
@@ -455,7 +457,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - Every image in the images table has a CLIP/SigLIP-family embedding (or recorded error); additive to descriptions and OCR
@@ -857,7 +859,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - A non-technical Windows user downloads one .exe from the release page, double-clicks it, clicks Next through a standard Windows installer, and mnemo is running as a Windows Service with MCP registered in Claude Code's config — zero terminal commands required.
     - Uninstalling via Add/Remove Programs cleanly removes the service, binary, and MCP registration.
@@ -877,7 +879,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo.exe install-service registers mnemo as a Windows Service named "mnemo" with auto-start and restart-on-failure configured.
     - mnemo.exe uninstall-service stops and removes the service.
@@ -893,7 +895,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo.exe register-mcp adds/updates the mnemo entry in ~/.claude.json, preserving all other top-level keys and other mcpServers entries.
     - mnemo.exe unregister-mcp removes the mnemo entry (and removes mcpServers if it becomes empty).
@@ -908,7 +910,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - A .iss file in the repo builds into mnemo-<version>-windows-amd64-setup.exe when compiled with iscc.exe on a windows-latest runner.
     - 'The installer: elevates to admin, copies mnemo.exe to %ProgramFiles%\\mnemo\\, runs install-service, runs register-mcp as the invoking user (so ~/.claude.json is the user''s, not SYSTEM''s), and creates a Start Menu uninstall entry.'
@@ -939,7 +941,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     acceptance:
     - Config supports SynthesisRoots []string; defaults empty (backwards compatible)
     - docs table has a taxonomy column populated from path for paths matching docs/{papers,design,analysis,plans}/*.md and docs/{audit-log,convergence-report}.md
@@ -983,7 +985,7 @@ targets:
     status: achieved
     value: 9.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_discover_patterns tool identifies workaround sessions
@@ -1011,7 +1013,7 @@ targets:
     status: achieved
     value: 7.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_define stores named parameterised query template
@@ -1120,7 +1122,7 @@ targets:
     status: achieved
     value: 5.0
     cost: 3.0
-    observable: true
+    showcase: true
     actual_cost: 3.0
     acceptance:
     - For each live session (as identified by 🎯T9.5.1), mnemo can report current CPU, RSS, and IO metrics for the owning claude process
@@ -1139,7 +1141,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 2.0
-    observable: true
+    showcase: true
     acceptance:
     - mnemo can report, for any given session ID, whether a Claude Code process currently has its transcript JSONL file open
     - Liveness is surfaced as an annotation on session listings (mnemo_sessions, mnemo_status) and/or a dedicated lookup tool
@@ -1159,7 +1161,7 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_decisions searches decisions table by keyword
