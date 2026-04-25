@@ -237,4 +237,5 @@ jobs:
               log_path var/"log/mnemo.log"
               error_log_path var/"log/mnemo.log"
               working_dir HOMEBREW_PREFIX
+              environment_variables PATH: "#{HOMEBREW_PREFIX}/bin:#{ENV["HOME"]}/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin"
             end

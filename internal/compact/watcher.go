@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -254,6 +256,13 @@ func (w *connWorker) tick(ctx context.Context) {
 				"conn", w.connectionID, "session", sessionID)
 			w.budgetWarned = true
 		}
+	case errors.Is(err, exec.ErrNotFound):
+		slog.Error("compact: claude subprocess spawn failed — executable not found in PATH",
+			"err", err,
+			"path", os.Getenv("PATH"),
+			"conn", w.connectionID,
+			"session", sessionID,
+		)
 	default:
 		slog.Warn("compact: compaction failed",
 			"conn", w.connectionID, "session", sessionID, "err", err)

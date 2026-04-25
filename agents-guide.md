@@ -33,6 +33,16 @@ brew services start mnemo
 This starts mnemo on `:19419` via launchd and keeps it running across
 reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
 
+The Homebrew formula's service block sets `PATH` to
+`$(brew --prefix)/bin:~/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin`
+so that mnemo's compactor can find the `claude` binary. If you run
+mnemo via a different mechanism (custom launchctl plist, manual
+invocation), make sure `PATH` includes the directory containing
+`claude` — typically `/opt/homebrew/bin` (npm/bun install) or
+`~/.claude/local` (Anthropic's official installer). Without a `claude`
+binary on `PATH`, compaction fails and mnemo logs an ERROR:
+`compact: claude subprocess spawn failed — executable not found in PATH`.
+
 **Linux (systemd)** — create `~/.config/systemd/user/mnemo.service`:
 
 ```ini
@@ -42,12 +52,19 @@ Description=mnemo MCP server
 [Service]
 ExecStart=%h/.local/bin/mnemo
 Restart=always
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.claude/local
 
 [Install]
 WantedBy=default.target
 ```
 
 Then: `systemctl --user enable --now mnemo`
+
+> **Note for service deployments**: launchd and systemd both start
+> processes with a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`).
+> The `Environment=` line above adds `~/.claude/local` (Anthropic's
+> official install path). Add `/usr/local/bin` or other prefixes as
+> needed for your setup.
 
 **Manual** (any platform):
 
