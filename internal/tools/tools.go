@@ -420,6 +420,17 @@ Use this to quickly understand a session's shape before deep-reading it, to comp
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("search_fields", mcp.Description(`For text mode: which indexes to search: "both" (default), "description" (AI descriptions only), or "ocr" (extracted text only).`)),
 		),
+		mcp.NewTool("mnemo_tool_result",
+			mcp.WithDescription(`Return the raw tool-result payload for a specific tool invocation.
+
+Looks up the tool-result body stored at ingest time, identified by its tool_use_id within a session. Replaces the cat ~/.claude/projects/<project>/<session>/tool-results/<id>.txt workaround.
+
+Returns the full text, is_error flag, and total byte length. Use offset and truncate_len to page through large payloads.`),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (or unique prefix) containing the tool invocation.")),
+			mcp.WithString("tool_use_id", mcp.Required(), mcp.Description("The tool_use_id of the tool invocation whose result you want.")),
+			mcp.WithNumber("offset", mcp.Description("Skip the first N bytes of the result text (default 0).")),
+			mcp.WithNumber("truncate_len", mcp.Description("Maximum bytes to return (default: no limit). Use with offset to page.")),
+		),
 	}
 }
 
@@ -510,6 +521,8 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.images(args)
 	case "mnemo_session_structure":
 		return ch.sessionStructure(args)
+	case "mnemo_tool_result":
+		return ch.toolResult(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1777,4 +1790,43 @@ func (h *callHandler) sessionStructure(args map[string]any) (string, bool, error
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *callHandler) toolResult(args map[string]any) (string, bool, error) {
+	sessionID, _ := args["session_id"].(string)
+	if sessionID == "" {
+		return "session_id is required", true, nil
+	}
+	toolUseID, _ := args["tool_use_id"].(string)
+	if toolUseID == "" {
+		return "tool_use_id is required", true, nil
+	}
+	offset := 0
+	if o, ok := args["offset"].(float64); ok && o >= 0 {
+		offset = int(o)
+	}
+	truncateLen := 0
+	if t, ok := args["truncate_len"].(float64); ok && t > 0 {
+		truncateLen = int(t)
+	}
+
+	payload, err := h.mem.ToolResult(sessionID, toolUseID, offset, truncateLen)
+	if err != nil {
+		return fmt.Sprintf("tool_result lookup failed: %v", err), true, nil
+	}
+
+	var b strings.Builder
+	if payload.IsError {
+		b.WriteString("[error] ")
+	}
+	fmt.Fprintf(&b, "total_len=%d", payload.TotalLen)
+	if offset > 0 {
+		fmt.Fprintf(&b, " offset=%d", offset)
+	}
+	if payload.Truncated {
+		fmt.Fprintf(&b, " truncated=true")
+	}
+	b.WriteString("\n\n")
+	b.WriteString(payload.Text)
+	return b.String(), false, nil
 }

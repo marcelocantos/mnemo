@@ -44,6 +44,7 @@ type Backend interface {
 	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
 	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
+	ToolResult(sessionID, toolUseID string, offset, truncateLen int) (*ToolResultPayload, error)
 	ChainCompactions(sessionID string) ([]Compaction, error)
 	CompactionsForConnection(connectionID string) ([]Compaction, error)
 	SessionTokens(sessionID string) (int64, int64, error)
