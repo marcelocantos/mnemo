@@ -968,6 +968,36 @@ targets:
     context: 'The entries table has no uniqueness constraint on (session_id, msg_uuid) — only id is a key. Each backfill cycle re-reads JSONL files end-to-end and inserts every row again. Concrete evidence (session 39f9a984-... in -Users-marcelo-think): 125 lines on disk, 94 distinct uuids, 348 rows in mnemo (~3.7× bloat). Older messages have 6 copies; newer messages have 4 — the per-message copy count equals the number of backfill cycles run since the message was written, so storage and query cost grow without bound. All aggregate queries currently need COUNT(DISTINCT timestamp) or DISTINCT on uuid to produce correct counts. Likely fix: add UNIQUE(session_id, raw->>''$.uuid'') with INSERT OR IGNORE, plus a one-shot dedupe migration; or track last-indexed uuid/offset per session. Discovered while auditing skill usage on 2026-04-24.'
     origin: forked from skill-usage audit, 2026-04-24
     discovered: 2026-04-24
+  T36:
+    name: A design exists for mnemo as a team-shared index — contributors push their local sessions to a central mnemo per repo/org so a newcomer can pick up an ongoing program of work without personal archaeology
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A design doc lives at docs/design/team-mnemo.md and is committed to master.
+    - 'The doc names the central-mnemo deployment model: who runs the central instance, where it lives (self-host vs hosted), how contributors discover it, and how it relates to the existing per-user daemon (separate process? same binary in ''central mode''?).'
+    - 'The doc specifies the push protocol: which session entries get pushed (all? scoped by repo? scoped by branch?), what triggers a push (on-demand subcommand vs background watcher vs git hook), and how the central instance attributes each entry to its author.'
+    - 'The doc specifies the pull/query model: do contributors query the central instance directly via MCP, or do they sync down a read-only mirror? How does that interact with the per-user Registry from 🎯T32?'
+    - 'The doc covers identity, trust, and access control: how a contributor authenticates to the central instance (mTLS reuse from 🎯T15.1? GitHub OIDC? something else), how repo/org membership maps to read/write permissions, and how a malicious or compromised contributor is contained.'
+    - 'The doc covers privacy: which transcript content is uploaded vs redacted (auto-memory? secrets? local file paths?), and how a contributor opts a session out of central capture before it ships.'
+    - 'The doc covers conflict and dedup: how the central instance handles the same session being pushed twice, sessions edited after upload (compaction, post-hoc tool-result rewrites), and entry-UUID collisions across contributors.'
+    - 'The doc explicitly states the relationship to 🎯T15 federation: is team-mnemo a special case of federation (one peer happens to be the team server) or a different shape (write-replication vs read-fanout)? Pick one with reasoning.'
+    - The doc decomposes the work into 4–8 concrete sub-targets ready to be raised under this target as 🎯T<N>.<M> children once the design is accepted.
+    context: |-
+      Raised 2026-04-25 from a user prompt. The use case: when working in a repo or org, every contributor pushes their local mnemo index to a central mnemo and queries it as well, so a person joining a program of work can pick up where others left off without having to do archaeology on Slack, commits, and PRs.
+
+      This is adjacent to but distinct from 🎯T15 federation. T15 is *peer-to-peer read fanout*: each contributor keeps a sovereign local index and queries multiple peers in parallel. Team-mnemo is *write-aggregation to a shared store*: the central index is the canonical surface for the team's collective memory. The two could compose (a contributor federates with their own machines AND with the team server) or one could subsume the other — that decision is part of the design.
+
+      Why this is research-shaped, not build-shaped: every question downstream of "should this exist" is contested — privacy (transcripts are intimate, they include stream-of-consciousness debugging), trust (a malicious contributor could poison shared memory), discoverability (how does Claude Code in a fresh clone know which central instance to query), and identity (mnemo today indexes one user's sessions; team-mnemo indexes many users' sessions and must attribute correctly). Design before code.
+
+      Sequencing: independent of T15.x. Could be tackled in parallel by a different agent or session. Likely benefits from T15.1's mTLS endpoint material (auth) and T15.5's fan-out shape (query model) once both land, but the design exercise can proceed without waiting for them.
+    tags:
+    - federation
+    - team
+    - design
+    - research
+    origin: user 2026-04-25 — "think about mnemo for teams"
+    discovered: 2026-04-25
   T4:
     name: Individual session transcript access
     status: achieved
