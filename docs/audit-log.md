@@ -338,7 +338,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-26 — /release v0.30.0
 
-- **Commit**: `pending`
+- **Commit**: `7d2ee8c`
 - **Outcome**: Released v0.30.0. Eight targets shipped in parallel
   via worktree-isolated agents. Four new MCP tools:
   `mnemo_session_structure` (🎯T28, structural counts),
