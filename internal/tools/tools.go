@@ -458,6 +458,16 @@ Returns the full text, is_error flag, and total byte length. Use offset and trun
 			mcp.WithNumber("offset", mcp.Description("Skip the first N bytes of the result text (default 0).")),
 			mcp.WithNumber("truncate_len", mcp.Description("Maximum bytes to return (default: no limit). Use with offset to page.")),
 		),
+		mcp.NewTool("mnemo_rework_history",
+			mcp.WithDescription(`Return prior rework attempts for a bullseye target, ordered most-recent first.
+
+Each result is one compaction span (a background-summarised session segment) in which the target appeared as actively worked on (in targets_active or targets_progressed). Provides: session ID, timestamp, repo, the per-target progress note if the compactor recorded one, the prose summary of the span, and any open threads left unresolved.
+
+Use this to build a rework diagnosis context: the bullseye_rework tool accepts the output as its mnemo_history parameter so the rework agent sees what was tried before, what failed, and what was left open — avoiding repeating the same failed approaches.`),
+			mcp.WithString("target_id", mcp.Required(), mcp.Description("Bullseye target ID (e.g. \"T1.5\"). Exact match against targets_active and targets_progressed keys.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment (optional).")),
+			mcp.WithNumber("limit", mcp.Description("Max attempts to return (default 20).")),
+		),
 	}
 }
 
@@ -554,6 +564,8 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.sessionStructure(args)
 	case "mnemo_tool_result":
 		return ch.toolResult(args)
+	case "mnemo_rework_history":
+		return ch.reworkHistory(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1930,4 +1942,49 @@ func (h *callHandler) locateUUID(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *callHandler) reworkHistory(args map[string]any) (string, bool, error) {
+	targetID, _ := args["target_id"].(string)
+	if targetID == "" {
+		return "target_id is required", true, nil
+	}
+	repo, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	attempts, err := h.mem.ReworkHistory(targetID, repo, limit)
+	if err != nil {
+		return fmt.Sprintf("rework_history failed: %v", err), true, nil
+	}
+	if len(attempts) == 0 {
+		return fmt.Sprintf("No prior rework attempts found for target %s.", targetID), false, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Prior rework attempts for %s (%d span(s)):\n\n", targetID, len(attempts))
+	for i, a := range attempts {
+		sid := a.SessionID
+		if len(sid) > 10 {
+			sid = sid[:10]
+		}
+		fmt.Fprintf(&b, "── Attempt %d  [%s]  %s", i+1, sid, a.GeneratedAt)
+		if a.Repo != "" {
+			fmt.Fprintf(&b, "  (%s)", a.Repo)
+		}
+		b.WriteString(" ──\n")
+		if a.Progress != "" {
+			fmt.Fprintf(&b, "Progress: %s\n", a.Progress)
+		}
+		if a.Summary != "" {
+			fmt.Fprintf(&b, "Summary: %s\n", a.Summary)
+		}
+		if len(a.OpenThreads) > 0 {
+			fmt.Fprintf(&b, "Open threads: %s\n", strings.Join(a.OpenThreads, "; "))
+		}
+		b.WriteByte('\n')
+	}
+	return b.String(), false, nil
 }

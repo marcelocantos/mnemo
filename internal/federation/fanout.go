@@ -45,6 +45,7 @@ var FanoutToolNames = map[string]struct{}{
 	"mnemo_ci":                {},
 	"mnemo_images":            {},
 	"mnemo_discover_patterns": {},
+	"mnemo_rework_history":    {},
 }
 
 // PeerResult holds the raw text response from one peer's instance of
