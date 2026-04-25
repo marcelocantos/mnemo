@@ -183,7 +183,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-25 — /release v0.25.0
 
-- **Commit**: `pending`
+- **Commit**: `b135e46`
 - **Outcome**: Released v0.25.0. Major architectural shift: the
   daemon now routes every MCP request to a per-user Store via a
   new `internal/registry/` package, keyed by a `?user=<name>` query
