@@ -227,44 +227,90 @@ func (w *connWorker) loadTargetContext(sessionID string) *TargetContext {
 	return tc
 }
 
+// tickOutcome enumerates the distinct outcomes of a single watcher tick.
+type tickOutcome string
+
+const (
+	outcomeCompacted        tickOutcome = "compacted"
+	outcomeNothingToCompact tickOutcome = "nothing_to_compact"
+	outcomeBudgetExceeded   tickOutcome = "budget_exceeded"
+	outcomeFailed           tickOutcome = "failed"
+	outcomeSkippedSelf      tickOutcome = "skipped_self"
+	outcomeSkippedNoSession tickOutcome = "skipped_no_session"
+)
+
 func (w *connWorker) tick(ctx context.Context) {
+	outcome, extra := w.runTick(ctx)
+
+	level := slog.LevelDebug
+	switch outcome {
+	case outcomeCompacted:
+		level = slog.LevelInfo
+	case outcomeBudgetExceeded:
+		level = slog.LevelInfo
+	case outcomeFailed:
+		level = slog.LevelWarn
+	}
+
+	args := []any{
+		"connection_id", w.connectionID,
+		"session_id", w.lastSessionID,
+		"outcome", string(outcome),
+	}
+	args = append(args, extra...)
+	slog.Log(ctx, level, "compact: tick", args...)
+}
+
+// runTick executes one compaction attempt for this connection and
+// returns the outcome along with any extra log fields.
+func (w *connWorker) runTick(ctx context.Context) (tickOutcome, []any) {
 	sessionID, err := w.src.CurrentSessionForConnection(w.connectionID)
 	if err != nil {
 		slog.Warn("compact: current session lookup failed",
 			"conn", w.connectionID, "err", err)
-		return
+		return outcomeFailed, []any{"err", err.Error()}
 	}
 	if sessionID == "" {
-		return // proxy connected but hasn't resolved a session yet
+		return outcomeSkippedNoSession, nil
 	}
 	if w.excludeCWD != "" {
 		cwd := w.src.SessionCWD(sessionID)
 		if cwd != "" && strings.HasPrefix(cwd, w.excludeCWD) {
-			return // summariser itself — skip to avoid recursion
+			w.lastSessionID = sessionID
+			return outcomeSkippedSelf, nil
 		}
 	}
 	w.lastSessionID = sessionID
 
 	tc := w.loadTargetContext(sessionID)
-	_, err = w.compactor.Compact(ctx, w.connectionID, sessionID, tc)
+	comp, err := w.compactor.Compact(ctx, w.connectionID, sessionID, tc)
 	switch {
-	case err == nil, errors.Is(err, ErrNothingToCompact):
-		// normal idle ticks
+	case err == nil:
+		return outcomeCompacted, []any{
+			"compaction_id", comp.ID,
+			"entry_id_to", comp.EntryIDTo,
+		}
+	case errors.Is(err, ErrNothingToCompact):
+		return outcomeNothingToCompact, nil
 	case errors.Is(err, ErrBudgetExceeded):
 		if !w.budgetWarned {
-			slog.Info("compact: connection over budget, skipping further compactions",
-				"conn", w.connectionID, "session", sessionID)
 			w.budgetWarned = true
 		}
+		return outcomeBudgetExceeded, nil
 	case errors.Is(err, exec.ErrNotFound):
+		// Distinct ERROR-level log for spawn-not-found (🎯T37) — the
+		// per-tick outcome line below at WARN is the routine
+		// observability surface; this extra ERROR line carries the
+		// resolved PATH so the failure is debuggable from one log
+		// alone, even when the user isn't tailing for outcomes.
 		slog.Error("compact: claude subprocess spawn failed — executable not found in PATH",
 			"err", err,
 			"path", os.Getenv("PATH"),
 			"conn", w.connectionID,
 			"session", sessionID,
 		)
+		return outcomeFailed, []any{"err", err.Error(), "path", os.Getenv("PATH")}
 	default:
-		slog.Warn("compact: compaction failed",
-			"conn", w.connectionID, "session", sessionID, "err", err)
+		return outcomeFailed, []any{"err", err.Error()}
 	}
 }
