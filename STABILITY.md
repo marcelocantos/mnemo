@@ -9,7 +9,22 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.27.0.
+Snapshot as of v0.28.0.
+
+**v0.28.0 note**: New `mnemo diagnose` subcommand — single-screen
+health report covering daemon process, HTTP MCP endpoint reachability,
+external tools (`gh` / `git` / `claude` / `uv` / `pdftotext` / `mutool` /
+`lsof` / `brew`) checked against BOTH the calling shell's PATH and
+the daemon's actual inherited PATH (the most common silent-failure
+mode), filesystem (~/.claude/projects readability + JSONL count,
+~/.mnemo writability), database (schema version, per-table row
+counts, per-stream `ingest_status` recency, opened read-only so it
+runs alongside the live daemon), index freshness (newest JSONL
+mtime vs newest indexed message timestamp with drift classification),
+configuration (workspace_roots / extra_project_dirs / synthesis_roots
+existence), Claude Code integration (`~/.claude.json` mnemo entry
+shape, recognises mcpbridge wrappers), and recent ERROR/WARN log
+lines. Exit code 1 on any FAIL so it's scriptable.
 
 **v0.27.0 note**: Trim `mnemo_status` defaults so a routine call no
 longer blows past Claude Code's 25KB inline tool-result threshold.
@@ -120,6 +135,7 @@ instead of failing silently.
 | `unregister-mcp` | `--config` | all | Remove mnemo entry from `~/.claude.json` (idempotent) | Needs review |
 | `install-service` | `--exe` | Windows | Install mnemo as a Windows Service (auto-start, restart-on-failure, LocalSystem) | Needs review |
 | `uninstall-service` | — | Windows | Stop and remove the Windows Service + any legacy Scheduled Task | Needs review |
+| `diagnose` | `--addr`, `--log` | all | Manual health check across 9 dimensions; exits 1 on any FAIL | Needs review |
 
 Subcommand history: v0.22.0 shipped SCM-backed `install-service` /
 `uninstall-service`; v0.23.0 replaced them with Scheduled-Task-based
