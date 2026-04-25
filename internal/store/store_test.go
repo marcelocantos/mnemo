@@ -1959,3 +1959,78 @@ func padMinutes(m int) string {
 	}
 	return string(rune('0'+m/10)) + string(rune('0'+m%10))
 }
+
+// msgWithUUID creates a user/assistant message entry with a uuid field.
+func msgWithUUID(typ, text, ts, uuid string) map[string]any {
+	return map[string]any{
+		"type":      typ,
+		"timestamp": ts,
+		"uuid":      uuid,
+		"message":   map[string]any{"content": text},
+	}
+}
+
+// TestIngestIdempotent verifies that indexing the same JSONL file twice
+// produces no duplicate rows in entries or messages — satisfying 🎯T35.
+func TestIngestIdempotent(t *testing.T) {
+	projectDir := t.TempDir()
+
+	entries := []map[string]any{
+		msgWithUUID("user", "How do I fix the auth bug?", "2026-04-01T10:00:00Z", "uuid-001"),
+		msgWithUUID("assistant", "Check the session token expiry.", "2026-04-01T10:00:05Z", "uuid-002"),
+		msgWithUUID("user", "That fixed it, thanks!", "2026-04-01T10:01:00Z", "uuid-003"),
+		// A file-history-snapshot entry: no uuid but has messageId, which
+		// the uuid generated column falls back to for deduplication.
+		{
+			"type":      "file-history-snapshot",
+			"messageId": "snapshot-mid-001",
+			"timestamp": "2026-04-01T10:01:01Z",
+			"snapshot":  map[string]any{"trackedFileBackups": map[string]any{}},
+		},
+	}
+
+	writeJSONL(t, projectDir, "myproject", "sess-idem", entries)
+
+	s := newTestStore(t, projectDir)
+
+	// First ingest.
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Count rows after first ingest.
+	var entriesAfterFirst, messagesAfterFirst int
+	s.db.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterFirst)
+	s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterFirst)
+
+	if entriesAfterFirst == 0 {
+		t.Fatal("expected entries after first ingest")
+	}
+
+	// Reset the in-memory offset so IngestAll re-reads the file from the
+	// beginning, simulating what happens after a schema-version rebuild
+	// (where ingest_state is wiped).
+	s.mu.Lock()
+	for k := range s.offsets {
+		delete(s.offsets, k)
+	}
+	s.mu.Unlock()
+	s.db.Exec("DELETE FROM ingest_state")
+
+	// Second ingest of the same file.
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Row counts must be identical — no duplicates introduced.
+	var entriesAfterSecond, messagesAfterSecond int
+	s.db.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterSecond)
+	s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterSecond)
+
+	if entriesAfterSecond != entriesAfterFirst {
+		t.Errorf("entries duplicated: first=%d second=%d", entriesAfterFirst, entriesAfterSecond)
+	}
+	if messagesAfterSecond != messagesAfterFirst {
+		t.Errorf("messages duplicated: first=%d second=%d", messagesAfterFirst, messagesAfterSecond)
+	}
+}
