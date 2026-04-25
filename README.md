@@ -185,12 +185,16 @@ mid-session are not picked up.
 | `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
 | `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
 | `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
+| `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
+| `mnemo_tool_result` | Raw tool-result payload by `(session_id, tool_use_id)` — supports byte offset + truncation |
+| `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
 
 ### Cross-project knowledge
 
 | Tool | Description |
 |---|---|
 | `mnemo_memories` | Search auto-memory files from all projects |
+| `mnemo_get_memory` | Read the raw markdown body of a named memory file (or list memories) |
 | `mnemo_skills` | Search skill files from `~/.claude/skills/` |
 | `mnemo_configs` | Search CLAUDE.md project instructions from all repos |
 | `mnemo_targets` | Search convergence targets from all repos |

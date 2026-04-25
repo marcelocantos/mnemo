@@ -335,3 +335,31 @@ maintenance activities. Append-only — newest entries at the bottom.
   repos; updated `discover.sh` to emit `merge_strategy` and
   branched the SKILL.md handling accordingly. Homebrew formula
   updated.
+
+## 2026-04-26 — /release v0.30.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.30.0. Eight targets shipped in parallel
+  via worktree-isolated agents. Four new MCP tools:
+  `mnemo_session_structure` (🎯T28, structural counts),
+  `mnemo_tool_result` (🎯T29, raw payload lookup with paging),
+  `mnemo_get_memory` (🎯T30, raw memory body or listing),
+  `mnemo_locate_uuid` (🎯T31, 6-arm uuid lookup with context).
+  Indexer is now idempotent (🎯T35) — schema bumped to 22 with a
+  UNIQUE(session_id, raw->>'$.uuid') constraint and INSERT OR
+  IGNORE; one-shot dedupe migration removes existing ~3.7× row
+  bloat from prior backfill cycles. Compactor's launchd PATH issue
+  fixed (🎯T37) — Homebrew formula service block now sets PATH so
+  `claudia.Task`'s `claude -p` exec can find the binary; spawn
+  failures emit a distinct `slog.Error` with the resolved PATH.
+  Watcher tick observability (🎯T38) — every tick emits a single
+  structured `compact: tick` log line with outcome
+  (compacted/nothing_to_compact/budget_exceeded/failed/skipped_*) at
+  DEBUG/INFO/WARN as appropriate. Team-mnemo design doc (🎯T36)
+  written at `docs/design/team-mnemo.md` proposing
+  write-aggregation layered on T15 federation. Skipped: T26 (sqlpipe
+  refactor — too invasive for parallel batch) and T33 (Windows EV
+  cert — needs paid procurement). Sequencing of merges produced
+  predictable conflicts at `Definitions()` in `internal/tools/tools.go`
+  (T28-T31) and at `internal/compact/watcher.go` (T37+T38), all
+  resolved manually. Homebrew formula updated.

@@ -9,7 +9,32 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.29.0.
+Snapshot as of v0.30.0.
+
+**v0.30.0 note**: Eight targets shipped in parallel. Four new MCP
+tools — `mnemo_session_structure(session_id)` (🎯T28, structural
+counts of entry types / stop_reasons / system subtypes / content-block
+kinds), `mnemo_tool_result(session_id, tool_use_id, offset?,
+truncate_len?)` (🎯T29, raw tool-result payload lookup with paging),
+`mnemo_get_memory(project, name?)` (🎯T30, raw memory file content;
+lists when name is omitted), `mnemo_locate_uuid(uuid,
+context_before?, context_after?)` (🎯T31, locate any entry by full or
+prefix UUID across six uuid sources: entry_uuid, parent_uuid,
+top_tool_use_id, parent_tool_use_id, content-block tool_use_id,
+content-block tool_result_id). Indexer is now idempotent (🎯T35) —
+schema bumped to **22** with a UNIQUE(session_id, raw->>'$.uuid')
+constraint + INSERT OR IGNORE; one-shot dedupe migration removes
+existing bloat (was ~3.7× on backfill-heavy sessions). Compactor's
+launchd PATH issue (🎯T37) — Homebrew formula service block now
+sets `PATH=#{HOMEBREW_PREFIX}/bin:#{ENV["HOME"]}/.claude/local:...`
+so `claudia.Task`'s `claude -p` subprocess can find the binary; spawn
+failures emit a distinct `slog.Error` with the resolved PATH. Watcher
+tick observability (🎯T38) — every tick emits a single structured
+`compact: tick` line with `outcome` (compacted / nothing_to_compact /
+budget_exceeded / failed / skipped_self / skipped_no_session) at
+DEBUG/INFO/WARN as appropriate. Team-mnemo design doc (🎯T36) lives
+at `docs/design/team-mnemo.md` — research-shaped target, no runtime
+change.
 
 **v0.29.0 note (🎯T15)**: Federation across linked mnemo instances.
 A second mTLS-authenticated MCP endpoint on `:19420` exposes a
@@ -591,6 +616,75 @@ embedding via a local Python helper). Backfill runs at startup; fresh
 images process on arrival throttled by a shared `runtime.NumCPU()`
 semaphore. **Stability**: Fluid — output format, score field
 interpretation, mode set, and descriptor vs OCR balance may evolve.
+
+#### mnemo_session_structure
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `session_id` | string | yes | Full ID or prefix (consistent with `mnemo_read_session`) | Needs review |
+
+**Added in v0.30.0** (🎯T28). Returns a structural summary of a
+session — counts of entry types (user/assistant/system/progress/...),
+assistant `stop_reason` values, system `subtype` values, content-block
+kinds (text/tool_use/tool_result/thinking), and tool names invoked
+inside `tool_use` blocks. Output is a single compact JSON object;
+shape designed to be diffable across sessions. Replaces the
+inline-Python `Counter()` JSONL introspection pattern observed in 16
+post-mnemo sessions. **Stability**: Needs review — shape may add
+fields (e.g. byte counts per kind) before 1.0.
+
+#### mnemo_tool_result
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `session_id` | string | yes | Full ID or prefix | Needs review |
+| `tool_use_id` | string | yes | Tool-use identifier from a prior tool_use block | Needs review |
+| `offset` | number | no | Byte offset into the payload (default 0) | Needs review |
+| `truncate_len` | number | no | Max bytes to return; 0 = full payload | Needs review |
+
+**Added in v0.30.0** (🎯T29). Returns the raw text of a single
+tool-result payload by `(session_id, tool_use_id)` lookup against the
+indexed `messages` table (O(1) via existing `idx_messages_tool_use_id`).
+Output prefixes `total_len=N`, optional `offset=N` and
+`truncated=true` markers, then a blank line and the (possibly sliced)
+payload. Replaces `cat ~/.claude/projects/<project>/<session>/tool-results/<id>.txt`
+as a workaround. **Stability**: Needs review — header format and
+default truncate behaviour may change.
+
+#### mnemo_get_memory
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `project` | string | yes | Project name or path fragment | Needs review |
+| `name` | string | no | Memory file name (frontmatter name OR file stem). Omit to list all memories for the project. | Needs review |
+
+**Added in v0.30.0** (🎯T30). Returns the raw markdown body of a
+named memory file; lists available memories when `name` is omitted.
+Project lookup uses the same substring matching as `mnemo_memories`.
+Name matching is case-insensitive against the YAML frontmatter `name`
+field OR the file stem (basename without `.md`). Replaces `cat
+/Users/.../memory/<name>.md` workarounds. **Stability**: Needs
+review — listing format may evolve.
+
+#### mnemo_locate_uuid
+
+| Parameter | Type | Required | Description | Stability |
+|---|---|---|---|---|
+| `uuid` | string | yes | Full UUID or prefix (≥ 8 chars usually unique) | Needs review |
+| `context_before` | number | no | Messages before the matched entry (default 3) | Needs review |
+| `context_after` | number | no | Messages after the matched entry (default 3) | Needs review |
+
+**Added in v0.30.0** (🎯T31). Locates an entry by UUID across all
+sessions via a 6-arm UNION SQL query covering: `entry_uuid`,
+`parent_uuid`, `top_tool_use_id`, `parent_tool_use_id`,
+content-block `tool_use_id`, content-block `tool_result_id`. Returns
+each match with `session_id`, `entry_id`, entry type, timestamp,
+`match_kind` (which arm matched), the full matched UUID, and the
+surrounding context window. Returns "not found" cleanly when no arm
+hits. Replaces Python-loop-over-JSONL workarounds for
+debugging session chaining and tracing tool_use_id retries.
+**Stability**: Needs review — output is structured JSON; shape may
+add e.g. confidence ranking before 1.0.
 
 ### Store / Backend interface methods
 
