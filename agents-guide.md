@@ -410,6 +410,62 @@ The nonce appears in your transcript and is detected during ingestion.
 Use the resolved session ID with `mnemo_read_session` to read your own
 transcript.
 
+### mnemo_session_structure
+
+Returns a structural summary of a session — counts of entry types,
+assistant `stop_reason` values, system `subtype` values, content-block
+kinds (text / tool_use / tool_result / thinking), and tool names
+invoked inside `tool_use` blocks. JSON output, compact enough to
+inspect directly. Use to quickly answer "what is in this session?"
+without deep-reading the transcript, or to compare session shapes.
+
+Parameters:
+- `session_id` (required) — full ID or prefix
+
+### mnemo_tool_result
+
+Returns the raw text payload of a single tool-result by
+`(session_id, tool_use_id)`. Output prefixes a header line
+(`total_len=N` plus optional `offset=N` / `truncated=true` markers),
+a blank line, then the (possibly sliced) payload. Use when
+`mnemo_read_session` shows a `tool_use` whose result you need to
+inspect in full — particularly large Bash/Read outputs that the
+inline display truncated.
+
+Parameters:
+- `session_id` (required) — full ID or prefix
+- `tool_use_id` (required) — the id from the prior `tool_use` block
+- `offset` — byte offset into the payload (default 0)
+- `truncate_len` — max bytes to return (0 = full payload)
+
+### mnemo_get_memory
+
+Returns the raw markdown body of a named memory file, or lists all
+memories for a project when `name` is omitted. Project matching is
+substring; name matching is case-insensitive against the YAML
+frontmatter `name` field OR the file stem. Use when you know the
+project and the memory name and want the body directly.
+
+Parameters:
+- `project` (required) — project name or path fragment
+- `name` — memory name; omit to list available memories
+
+### mnemo_locate_uuid
+
+Locates an entry by full or prefix UUID across all sessions. Searches
+six uuid sources: `entry_uuid`, `parent_uuid`, `top_tool_use_id`,
+`parent_tool_use_id`, content-block `tool_use_id`, content-block
+`tool_result_id`. Returns each match with `session_id`, `entry_id`,
+type, timestamp, `match_kind` (which arm matched), the full matched
+UUID, and surrounding context. Use to debug session chaining, trace
+tool_use_id retries, or resolve cross-session references when all you
+have is an opaque uuid.
+
+Parameters:
+- `uuid` (required) — full UUID or prefix (≥ 8 chars usually unique)
+- `context_before` — context messages before the match (default 3)
+- `context_after` — context messages after the match (default 3)
+
 ## Federation across linked instances
 
 If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
