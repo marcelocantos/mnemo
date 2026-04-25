@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -36,20 +37,15 @@ import (
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
 
-// stdioMigrationMessage is emitted when mnemo is launched with stdin
-// piped (i.e. by an MCP client expecting a stdio server) but cannot
-// bind its HTTP port because the brew-managed daemon already owns it.
-// This is the common upgrade hazard from v0.19.0: Claude Code's
-// stdio registration survived the upgrade and now launches the new
-// binary in an incompatible mode.
-const stdioMigrationMessage = `mnemo has migrated to HTTP MCP (🎯T27 in v0.20.0). Your Claude Code
-registration is out of date.
-
-The mnemo daemon is already running on http://localhost:19419/mcp
-(via brew services). Update your registration:
+// stdioMigrationManualHint is emitted only when auto-migration of
+// the user's ~/.claude.json fails. Normal launches via a legacy
+// stdio registration auto-rewrite the entry to HTTP and then exit
+// asking the user to restart the session.
+const stdioMigrationManualHint = `mnemo has migrated to HTTP MCP (🎯T27 in v0.20.0) but the
+auto-migration of your Claude Code config failed. Update by hand:
 
   claude mcp remove mnemo
-  claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+  claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<your-username>"
 
 Then restart this Claude Code session.`
 
@@ -57,7 +53,7 @@ Then restart this Claude Code session.`
 var agentsGuide string
 
 const (
-	version     = "0.25.0"
+	version     = "0.26.0"
 	defaultAddr = ":19419"
 )
 
@@ -112,20 +108,71 @@ func main() {
 		return
 	}
 
-	// Detect a stale stdio MCP registration before opening the store.
-	// If our stdin looks piped and the target port is already bound,
-	// the caller is almost certainly Claude Code invoking this binary
-	// via an old stdio registration while the new HTTP daemon holds
-	// the port. Exit with a migration hint rather than silently
-	// failing on port-already-in-use.
-	if stdinPiped() && portInUse(*addr) {
-		fmt.Fprintln(os.Stderr, stdioMigrationMessage)
-		os.Exit(1)
+	// Detect a stale stdio MCP registration before opening the
+	// store. If stdin is piped, this binary was launched by an MCP
+	// client expecting a stdio server — but mnemo only speaks HTTP
+	// since v0.20.0. Auto-migrate the user's ~/.claude.json to the
+	// HTTP transport (and try to start the daemon if nothing's
+	// listening yet), then exit asking the user to restart their
+	// session. One restart instead of three terminal commands.
+	if stdinPiped() {
+		autoMigrateStdioAndExit(*addr)
 	}
 
 	if err := runServe(context.Background(), *addr); err != nil {
 		os.Exit(1)
 	}
+}
+
+// autoMigrateStdioAndExit rewrites the user's ~/.claude.json entry
+// for mnemo to the new HTTP transport (with ?user=<current-user>
+// embedded), best-effort starts the daemon if it isn't already
+// running, and exits — telling the user to restart their session.
+// On any failure path it falls back to printing the manual hint so
+// the user has a recovery route.
+func autoMigrateStdioAndExit(addr string) {
+	fmt.Fprintln(os.Stderr, "mnemo: detected legacy stdio registration; auto-migrating to HTTP...")
+
+	path, err := mcpconfig.ConfigPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mnemo: cannot find ~/.claude.json: %v\n\n%s\n", err, stdioMigrationManualHint)
+		os.Exit(1)
+	}
+	username, err := store.CurrentUsername()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mnemo: cannot resolve current user: %v\n\n%s\n", err, stdioMigrationManualHint)
+		os.Exit(1)
+	}
+	url := mcpconfig.URLForUser(username)
+	changed, err := mcpconfig.Register(path, url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mnemo: auto-migration failed: %v\n\n%s\n", err, stdioMigrationManualHint)
+		os.Exit(1)
+	}
+	if changed {
+		fmt.Fprintf(os.Stderr, "mnemo: ~/.claude.json updated to %s\n", url)
+	}
+
+	// If nothing's listening on the HTTP port yet, try to start the
+	// daemon via brew services. Best-effort — if brew isn't on PATH
+	// (common on Linux installs that built from source) we skip the
+	// start and the user gets a clean "please start mnemo" message
+	// next session.
+	if !portInUse(addr) {
+		if _, err := exec.LookPath("brew"); err == nil {
+			cmd := exec.Command("brew", "services", "start", "mnemo")
+			if err := cmd.Run(); err == nil {
+				fmt.Fprintln(os.Stderr, "mnemo: started daemon via `brew services start mnemo`")
+			} else {
+				fmt.Fprintf(os.Stderr, "mnemo: could not auto-start daemon (%v); run `brew services start mnemo` manually\n", err)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "mnemo: HTTP daemon not running; start it before restarting your session")
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "mnemo: restart this Claude Code session to pick up the new HTTP registration.")
+	os.Exit(1)
 }
 
 func cmdRegisterMCP(args []string) {

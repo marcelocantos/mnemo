@@ -181,6 +181,24 @@ maintenance activities. Append-only — newest entries at the bottom.
   cutting the real tag, per the new release-workflow-touch signal
   in the /release skill. Homebrew formula updated.
 
+## 2026-04-25 — /release v0.26.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.26.0. Auto-migrate stdio holdovers:
+  when mnemo is launched with stdin piped (legacy
+  `claude mcp add --transport stdio mnemo` registrations from
+  pre-v0.20.0 installs), the binary now rewrites the user's
+  `~/.claude.json` mnemo entry to the HTTP+`?user=<name>` shape
+  via the existing `mcpconfig.URLForUser` helper, best-effort
+  starts the daemon via `brew services start mnemo` if the port
+  is free, and exits with a friendly "restart this session" hint.
+  The previous behaviour was to print a 3-step manual fix and
+  exit (`claude mcp remove` → `claude mcp add` → restart). Falls
+  back to the manual hint on any failure path so users always
+  have a recovery route. Replaces the `stdioMigrationMessage`
+  constant with `stdioMigrationManualHint`. Pure UX change — no
+  protocol or schema impact. Homebrew formula updated.
+
 ## 2026-04-25 — /release v0.25.0
 
 - **Commit**: `b135e46`
