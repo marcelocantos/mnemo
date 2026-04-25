@@ -52,6 +52,12 @@ type Store struct {
 	// SMB mount. Mutated only via SetExtraProjectDirs.
 	extraProjectDirs []string
 
+	// synthesisRoots are filesystem roots walked by IngestSynthesis to
+	// index taxonomy-tagged synthesis docs (🎯T34). Unlike
+	// workspaceRoots, entries here do not require a .git marker — suits
+	// non-repo planning spaces. Mutated only via SetSynthesisRoots.
+	synthesisRoots []string
+
 	// liveness cache
 	liveMu        sync.Mutex
 	liveCache     map[string]int // sessionID → PID
@@ -93,6 +99,21 @@ func (s *Store) SetExtraProjectDirs(dirs []string) {
 		return
 	}
 	s.extraProjectDirs = append(s.extraProjectDirs[:0:0], dirs...)
+}
+
+// SetSynthesisRoots configures the filesystem roots walked by
+// IngestSynthesis to index taxonomy-tagged synthesis docs (🎯T34).
+// Unlike SetWorkspaceRoots, these roots are walked without a .git
+// requirement, so they may point at non-repo planning spaces such as
+// ~/think. Call once after Store.New.
+func (s *Store) SetSynthesisRoots(roots []string) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	if len(roots) == 0 {
+		s.synthesisRoots = nil
+		return
+	}
+	s.synthesisRoots = append(s.synthesisRoots[:0:0], roots...)
 }
 
 // projectDirs returns the full list of project directories to scan:
@@ -356,7 +377,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 20
+const schemaVersion = 21
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -734,7 +755,12 @@ func New(dbPath, projectDir string) (*Store, error) {
 			content_hash TEXT NOT NULL DEFAULT '',
 			size INTEGER NOT NULL DEFAULT 0,
 			mtime TEXT NOT NULL DEFAULT '',
-			indexed_at TEXT NOT NULL
+			indexed_at TEXT NOT NULL,
+			taxonomy TEXT NOT NULL DEFAULT '',
+			doc_date TEXT NOT NULL DEFAULT '',
+			doc_status TEXT NOT NULL DEFAULT '',
+			doc_target TEXT NOT NULL DEFAULT '',
+			doc_source TEXT NOT NULL DEFAULT ''
 		);
 	`)
 	if err != nil {
@@ -811,6 +837,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 		CREATE INDEX IF NOT EXISTS idx_image_descriptions_image ON image_descriptions(image_id);
 		CREATE INDEX IF NOT EXISTS idx_image_ocr_backend ON image_ocr(backend);
 		CREATE INDEX IF NOT EXISTS idx_image_embeddings_model ON image_embeddings(model);
+		CREATE INDEX IF NOT EXISTS idx_docs_taxonomy ON docs(taxonomy) WHERE taxonomy != '';
+		CREATE INDEX IF NOT EXISTS idx_docs_repo ON docs(repo);
 	`)
 	if err != nil {
 		db.Close()
@@ -1140,29 +1168,29 @@ func New(dbPath, projectDir string) (*Store, error) {
 			VALUES ('delete', old.image_id, old.text);
 		END;
 		CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
-			title, content, repo, kind,
+			title, content, repo, kind, taxonomy,
 			content=docs,
 			content_rowid=id
 		);
 		DROP TRIGGER IF EXISTS docs_ai;
 		CREATE TRIGGER docs_ai AFTER INSERT ON docs
 		BEGIN
-			INSERT INTO docs_fts(rowid, title, content, repo, kind)
-			VALUES (new.id, new.title, new.content, new.repo, new.kind);
+			INSERT INTO docs_fts(rowid, title, content, repo, kind, taxonomy)
+			VALUES (new.id, new.title, new.content, new.repo, new.kind, new.taxonomy);
 		END;
 		DROP TRIGGER IF EXISTS docs_au;
 		CREATE TRIGGER docs_au AFTER UPDATE ON docs
 		BEGIN
-			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind)
-			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind);
-			INSERT INTO docs_fts(rowid, title, content, repo, kind)
-			VALUES (new.id, new.title, new.content, new.repo, new.kind);
+			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind, taxonomy)
+			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind, old.taxonomy);
+			INSERT INTO docs_fts(rowid, title, content, repo, kind, taxonomy)
+			VALUES (new.id, new.title, new.content, new.repo, new.kind, new.taxonomy);
 		END;
 		DROP TRIGGER IF EXISTS docs_ad;
 		CREATE TRIGGER docs_ad AFTER DELETE ON docs
 		BEGIN
-			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind)
-			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind);
+			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind, taxonomy)
+			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind, old.taxonomy);
 		END;
 	`)
 	if err != nil {

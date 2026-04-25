@@ -11,14 +11,15 @@
 //	mnemo --addr :8080          # custom listen address
 //	mnemo register-mcp          # add mnemo to ~/.claude.json
 //	mnemo unregister-mcp        # remove mnemo from ~/.claude.json
-//	mnemo install-agent         # (Windows) register the per-user Scheduled Task
-//	mnemo uninstall-agent       # (Windows) remove the Scheduled Task
-//	claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+//	mnemo install-service       # (Windows) install mnemo as a Service
+//	mnemo uninstall-service     # (Windows) remove the Service
+//	claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<name>"
 package main
 
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,8 +30,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
+	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
 )
@@ -56,7 +57,7 @@ Then restart this Claude Code session.`
 var agentsGuide string
 
 const (
-	version     = "0.24.0"
+	version     = "0.25.0"
 	defaultAddr = ":19419"
 )
 
@@ -73,11 +74,11 @@ func main() {
 		case "unregister-mcp":
 			cmdUnregisterMCP(os.Args[2:])
 			return
-		case "install-agent":
-			cmdInstallAgent(os.Args[2:])
+		case "install-service":
+			cmdInstallService(os.Args[2:])
 			return
-		case "uninstall-agent":
-			cmdUninstallAgent(os.Args[2:])
+		case "uninstall-service":
+			cmdUninstallService(os.Args[2:])
 			return
 		}
 	}
@@ -100,6 +101,17 @@ func main() {
 		return
 	}
 
+	// On Windows, if the SCM launched this process (no interactive
+	// session), hand off to the service control dispatcher, which
+	// calls runServe with a cancellable context driven by SCM events.
+	if handled, err := runAsServiceIfUnderSCM(*addr); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "service run failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Detect a stale stdio MCP registration before opening the store.
 	// If our stdin looks piped and the target port is already bound,
 	// the caller is almost certainly Claude Code invoking this binary
@@ -118,9 +130,25 @@ func main() {
 
 func cmdRegisterMCP(args []string) {
 	fs := flag.NewFlagSet("register-mcp", flag.ExitOnError)
-	url := fs.String("url", mcpconfig.DefaultURL, "MCP endpoint URL to register")
+	urlFlag := fs.String("url", "", "MCP endpoint URL to register (default: localhost:19419/mcp?user=<current>)")
+	userFlag := fs.String("user", "", "username to embed as ?user= in the default URL (default: current OS user)")
 	configPath := fs.String("config", "", "Claude Code config path (default ~/.claude.json)")
 	_ = fs.Parse(args)
+
+	url := *urlFlag
+	if url == "" {
+		username := *userFlag
+		if username == "" {
+			u, err := store.CurrentUsername()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "register-mcp: %v\n", err)
+				os.Exit(1)
+			}
+			username = u
+		}
+		url = mcpconfig.URLForUser(username)
+	}
+
 	path := *configPath
 	if path == "" {
 		p, err := mcpconfig.ConfigPath()
@@ -130,13 +158,13 @@ func cmdRegisterMCP(args []string) {
 		}
 		path = p
 	}
-	changed, err := mcpconfig.Register(path, *url)
+	changed, err := mcpconfig.Register(path, url)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "register-mcp: %v\n", err)
 		os.Exit(1)
 	}
 	if changed {
-		fmt.Printf("mnemo MCP registered in %s\n", path)
+		fmt.Printf("mnemo MCP registered in %s (url=%s)\n", path, url)
 	} else {
 		fmt.Printf("mnemo MCP already registered in %s\n", path)
 	}
@@ -167,16 +195,16 @@ func cmdUnregisterMCP(args []string) {
 	}
 }
 
-func cmdInstallAgent(args []string) {
-	if err := installAgent(args); err != nil {
-		fmt.Fprintf(os.Stderr, "install-agent: %v\n", err)
+func cmdInstallService(args []string) {
+	if err := installService(args); err != nil {
+		fmt.Fprintf(os.Stderr, "install-service: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func cmdUninstallAgent(args []string) {
-	if err := uninstallAgent(args); err != nil {
-		fmt.Fprintf(os.Stderr, "uninstall-agent: %v\n", err)
+func cmdUninstallService(args []string) {
+	if err := uninstallService(args); err != nil {
+		fmt.Fprintf(os.Stderr, "uninstall-service: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -213,126 +241,70 @@ func runServe(ctx context.Context, addr string) error {
 		Level: slog.LevelInfo,
 	})))
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot determine home directory: %v\n", err)
-		return err
-	}
-
-	projectDir := filepath.Join(homeDir, ".claude", "projects")
-	dbPath := filepath.Join(homeDir, ".mnemo", "mnemo.db")
-
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "cannot create db directory: %v\n", err)
-		return err
-	}
-
-	mem, err := store.New(dbPath, projectDir)
-	if err != nil {
-		slog.Error("failed to open store", "err", err)
-		return err
-	}
-	defer mem.Close()
-
-	// Load ~/.mnemo/config.json and configure workspace roots for
-	// repo-level ingest streams. Falls back to defaults when absent.
+	// Load ~/.mnemo/config.json once; it applies uniformly to every
+	// per-user Store spun up by the Registry. Per-user home paths are
+	// resolved lazily inside the Registry when the first request for
+	// each user arrives.
 	cfg, cfgErr := store.LoadConfig()
 	if cfgErr != nil {
 		slog.Warn("config load failed, using defaults", "err", cfgErr)
 	}
-	workspaceRoots := cfg.ResolvedWorkspaceRoots()
-	mem.SetWorkspaceRoots(workspaceRoots)
-	slog.Info("workspace roots configured", "roots", workspaceRoots)
-
-	// Configure extra Claude Code project directories (e.g. a Windows
-	// VM's projects dir exposed over SMB). Missing or unavailable
-	// entries are skipped at ingest/watch time rather than failing.
-	mem.SetExtraProjectDirs(cfg.ExtraProjectDirs)
+	slog.Info("workspace roots configured", "roots", cfg.ResolvedWorkspaceRoots())
 	if len(cfg.ExtraProjectDirs) > 0 {
 		slog.Info("extra project dirs configured", "dirs", cfg.ExtraProjectDirs)
 	}
 
-	// Ingest and watch in the background.
-	go func() {
-		slog.Info("ingesting transcripts", "dir", projectDir, "extras", len(cfg.ExtraProjectDirs))
-		if err := mem.IngestAll(); err != nil {
-			slog.Error("initial ingest failed", "err", err)
-		}
-		if stats, err := mem.Stats(); err == nil {
-			slog.Info("ingest complete", "sessions", stats.TotalSessions, "messages", stats.TotalMessages)
-		}
-		// Start background image description workers (no-op if no API key).
-		mem.StartImageDescriber()
-		// Start background image OCR workers (no-op if no backend available).
-		mem.StartImageOCR()
-		// Start background image embedding workers (no-op if uv/embed script not found).
-		mem.StartImageEmbedder()
-		if err := mem.IngestMemories(); err != nil {
-			slog.Error("memory ingest failed", "err", err)
-		}
-		if err := mem.IngestSkills(); err != nil {
-			slog.Error("skill ingest failed", "err", err)
-		}
-		if err := mem.IngestClaudeConfigs(); err != nil {
-			slog.Error("claude config ingest failed", "err", err)
-		}
-		if err := mem.IngestAuditLogs(); err != nil {
-			slog.Error("audit log ingest failed", "err", err)
-		}
-		if err := mem.IngestTargets(); err != nil {
-			slog.Error("target ingest failed", "err", err)
-		}
-		if err := mem.IngestPlans(); err != nil {
-			slog.Error("plan ingest failed", "err", err)
-		}
-		if err := mem.IngestDocs(); err != nil {
-			slog.Error("doc ingest failed", "err", err)
-		}
-		if err := mem.Watch(); err != nil {
-			slog.Error("watcher failed", "err", err)
-		}
-	}()
+	// The compactor watcher needs mnemo's own source tree to invoke
+	// claudia, regardless of whose transcripts are being compacted.
+	// Resolve via the process owner's home (not each indexed user's).
+	procHome, _ := os.UserHomeDir()
+	mnemoRepoDir := filepath.Join(procHome, "work", "github.com", "marcelocantos", "mnemo")
 
-	// Start background compaction watcher.
-	go func() {
-		mnemoDir, _ := os.UserHomeDir()
-		mnemoRepoDir := filepath.Join(mnemoDir, "work", "github.com", "marcelocantos", "mnemo")
-		caller := compact.NewClaudiaCaller(mnemoRepoDir, "sonnet")
-		compactor := compact.New(mem, caller, compact.Config{})
-		watcher := compact.NewWatcher(mem, compactor, compact.WatcherConfig{}, mnemoRepoDir)
-		slog.Info("compact: watcher starting")
-		watcher.Run(ctx)
-	}()
+	reg := registry.NewRegistry(ctx, cfg, mnemoRepoDir)
+	defer reg.Close()
 
-	// Poll CI runs periodically (every 5 minutes).
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			if err := mem.PollCI(); err != nil {
-				slog.Warn("CI poll failed", "err", err)
+	// Determine the default username — used when a request arrives
+	// without an explicit ?user=<name> query parameter. On a Windows
+	// Service deployment (running as LocalSystem) there is no
+	// sensible default, so every request MUST carry a user.
+	defaultUser, defErr := store.DefaultUsername()
+	if defErr != nil {
+		slog.Info("no default user — requests must include ?user=<name>", "reason", defErr)
+	} else {
+		slog.Info("default user", "user", defaultUser)
+	}
+
+	// Resolver threaded into tools.Handler. If the inbound request
+	// carried no ?user= parameter, fall back to the process default
+	// (empty on a service deployment, which produces a useful error).
+	resolve := func(username string) (store.Backend, error) {
+		if username == "" {
+			if defErr != nil {
+				return nil, errors.New(
+					"no user identity on request; add ?user=<name> to the MCP URL",
+				)
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+			username = defaultUser
 		}
-	}()
+		return reg.ForUser(username)
+	}
 
 	// Build the MCP server, register every tool, and expose it as an
 	// HTTP streamable endpoint. Stateful mode lets clients maintain an
 	// Mcp-Session-Id across requests — the value we thread through to
-	// mnemo_self for session binding.
+	// mnemo_self for session binding. WithHTTPContextFunc captures the
+	// ?user=<name> query parameter onto every request's ctx so tool
+	// handlers can look up the right user's store.
 	mcp := server.NewMCPServer(
 		"mnemo",
 		version,
 		server.WithToolCapabilities(true),
 	)
-	tools.NewHandler(mem).RegisterTools(mcp)
+	tools.NewHandler(resolve).RegisterTools(mcp)
 
 	httpSrv := server.NewStreamableHTTPServer(mcp,
 		server.WithStateful(true),
+		server.WithHTTPContextFunc(tools.UsernameContextFunc),
 	)
 
 	slog.Info("mnemo serve starting", "version", version, "addr", addr)

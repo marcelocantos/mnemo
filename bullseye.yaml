@@ -933,6 +933,35 @@ targets:
     context: v0.22.0 ships an unsigned installer. Windows SmartScreen shows 'unrecognized publisher' on first run, which non-technical users read as 'unsafe' and abort. Fix requires an EV cert (~$300/yr issued to a verifiable legal entity) plus signtool integration in release.yml.
     origin: manual
     discovered: 2026-04-21
+  T34:
+    name: mnemo indexes synthesis docs across configurable roots with taxonomy awareness
+    status: converging
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - Config supports SynthesisRoots []string; defaults empty (backwards compatible)
+    - docs table has a taxonomy column populated from path for paths matching docs/{papers,design,analysis,plans}/*.md and docs/{audit-log,convergence-report}.md
+    - IngestSynthesis walks each SynthesisRoot (incl. non-repo dirs) and indexes taxonomy-matching docs; respects common junk-dir skips (.git, node_modules, vendor, target, build, dist)
+    - IngestDocs continues to ingest repo docs; now also populates taxonomy when path matches
+    - 'New mnemo_synthesis MCP tool supports query + optional taxonomy + repo filters + limit; results include taxonomy, repo, path, date (from Date: inline metadata when present)'
+    - Unit test covers path-to-taxonomy inference for all 6 kinds
+    - Integration test exercises IngestSynthesis against a temp tree containing repo and non-repo roots
+    context: 'User has established a four-dir synthesis-doc taxonomy (papers/design/analysis/plans) in ~/.claude/CLAUDE.md, with audit-log.md and convergence-report.md as adjacent snapshot artifacts. Synthesis docs live in repos under ~/work AND in non-repo planning space under ~/think. Goal: give mnemo a taxonomy-aware query surface so a future /synth portfolio skill (or any cross-repo synthesis query) has the same ergonomics as mnemo_search. Builds on existing IngestDocs infrastructure — does not replace it.'
+    origin: 'user request 2026-04-24: integrate Karpathy wiki ideas into existing system; synthesis docs stay in repos but mnemo provides global query layer'
+    discovered: 2026-04-24
+  T35:
+    name: Indexer is idempotent — re-reading a transcript file does not duplicate rows in entries
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - No (session_id, msg_uuid) pair appears in the entries table more than once after any number of backfill cycles.
+    - A migration deduplicates existing rows so total row count for each session matches the distinct-uuid count plus uuid-less entries.
+    - Indexing the same JSONL file twice in a row produces zero net inserts on the second pass.
+    context: 'The entries table has no uniqueness constraint on (session_id, msg_uuid) — only id is a key. Each backfill cycle re-reads JSONL files end-to-end and inserts every row again. Concrete evidence (session 39f9a984-... in -Users-marcelo-think): 125 lines on disk, 94 distinct uuids, 348 rows in mnemo (~3.7× bloat). Older messages have 6 copies; newer messages have 4 — the per-message copy count equals the number of backfill cycles run since the message was written, so storage and query cost grow without bound. All aggregate queries currently need COUNT(DISTINCT timestamp) or DISTINCT on uuid to produce correct counts. Likely fix: add UNIQUE(session_id, raw->>''$.uuid'') with INSERT OR IGNORE, plus a one-shot dedupe migration; or track last-indexed uuid/offset per session. Discovered while auditing skill usage on 2026-04-24.'
+    origin: forked from skill-usage audit, 2026-04-24
+    discovered: 2026-04-24
   T4:
     name: Individual session transcript access
     status: achieved

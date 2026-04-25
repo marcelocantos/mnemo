@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -16,14 +18,33 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
-// Handler handles tool calls using a store backend.
+// Handler handles tool calls, dispatching each incoming call to the
+// per-user Store resolved from the call's Username. The resolver is
+// injected so the tools package does not need to import the
+// registry package (which would create an awkward dependency
+// hierarchy in tests and future refactors). seen deduplicates the
+// first-call RecordConnectionOpen per (username, MCP session) pair.
 type Handler struct {
-	mem store.Backend
+	resolve func(username string) (store.Backend, error)
+	seen    sync.Map
 }
 
-// NewHandler creates a tool handler backed by the given store.
-func NewHandler(mem store.Backend) *Handler {
-	return &Handler{mem: mem}
+// NewHandler creates a tool handler that resolves each call's
+// backing Store by username via the supplied resolver. Main wires
+// this up to Registry.ForUser.
+func NewHandler(resolve func(string) (store.Backend, error)) *Handler {
+	return &Handler{resolve: resolve}
+}
+
+// callHandler is the per-call delegate that owns the user-resolved
+// Store for the lifetime of one tool invocation. Every per-tool
+// method is defined on *callHandler so the method bodies read
+// naturally as `h.mem.Search(...)` without threading the store
+// through every signature. Call() builds the callHandler once and
+// dispatches into the switch.
+type callHandler struct {
+	mem store.Backend
+	cc  CallContext
 }
 
 // Definitions returns the MCP tool definitions.
@@ -224,6 +245,17 @@ Returns per-period breakdown and totals. Cost estimates use published Anthropic 
 			mcp.WithString("kind", mcp.Description("Filter by file kind: md, txt, pdf")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_synthesis",
+			mcp.WithDescription(`Search across synthesis documents — analysis, research, design, and planning artifacts that follow the four-dir taxonomy (docs/{papers,design,analysis,plans}) plus docs/audit-log.md and docs/convergence-report.md. Indexed from workspace repos and additional synthesis roots (e.g. ~/think).
+
+Use this instead of mnemo_docs when you want a global view of the user's thinking: cross-repo research themes, recurring design decisions, target retros, external-material summaries. Results include the inferred taxonomy, inline metadata (Date, Status, Target, Source) when present, and the full document content.
+
+Taxonomy values: paper | design | analysis | plans | audit-log | convergence-report.`),
+			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
+			mcp.WithString("taxonomy", mcp.Description("Filter by taxonomy: paper, design, analysis, plans, audit-log, convergence-report")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		),
 		mcp.NewTool("mnemo_who_ran",
 			mcp.WithDescription(`Find sessions that ran a specific shell command. Searches Bash tool_use entries by command pattern, returning session ID, repo, matched command, and timestamp. Useful for tracing when and where a command was last executed across all sessions.`),
 			mcp.WithString("pattern", mcp.Required(), mcp.Description("Command substring to match (LIKE match, case-insensitive)")),
@@ -386,75 +418,88 @@ Returns candidate features with evidence counts, example sessions, and suggested
 // Code session to its owning MCP session, which the compactor and
 // mnemo_restore rely on for /clear-boundary context preservation.
 func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string, bool, error) {
+	mem, err := h.resolve(cc.Username)
+	if err != nil {
+		return fmt.Sprintf("resolve user %q: %v", cc.Username, err), true, nil
+	}
+	if cc.MCPSessionID != "" {
+		key := cc.Username + "\x00" + cc.MCPSessionID
+		if _, loaded := h.seen.LoadOrStore(key, struct{}{}); !loaded {
+			mem.RecordConnectionOpen(cc.MCPSessionID, 0, time.Now())
+		}
+	}
+	ch := &callHandler{mem: mem, cc: cc}
 	switch name {
 	case "mnemo_search":
-		return h.search(args)
+		return ch.search(args)
 	case "mnemo_sessions":
-		return h.sessions(args)
+		return ch.sessions(args)
 	case "mnemo_read_session":
-		return h.readSession(args)
+		return ch.readSession(args)
 	case "mnemo_query":
-		return h.query(args)
+		return ch.query(args)
 	case "mnemo_repos":
-		return h.repos(args)
+		return ch.repos(args)
 	case "mnemo_recent_activity":
-		return h.recentActivity(args)
+		return ch.recentActivity(args)
 	case "mnemo_status":
-		return h.status(args)
+		return ch.status(args)
 	case "mnemo_stats":
-		return h.stats()
+		return ch.stats()
 	case "mnemo_memories":
-		return h.memories(args)
+		return ch.memories(args)
 	case "mnemo_skills":
-		return h.skills(args)
+		return ch.skills(args)
 	case "mnemo_usage":
-		return h.usage(args)
+		return ch.usage(args)
 	case "mnemo_configs":
-		return h.configs(args)
+		return ch.configs(args)
 	case "mnemo_audit":
-		return h.auditLogs(args)
+		return ch.auditLogs(args)
 	case "mnemo_targets":
-		return h.targets(args)
+		return ch.targets(args)
 	case "mnemo_plans":
-		return h.plans(args)
+		return ch.plans(args)
 	case "mnemo_docs":
-		return h.docs(args)
+		return ch.docs(args)
+	case "mnemo_synthesis":
+		return ch.synthesis(args)
 	case "mnemo_who_ran":
-		return h.whoRan(args)
+		return ch.whoRan(args)
 	case "mnemo_permissions":
-		return h.permissions(args)
+		return ch.permissions(args)
 	case "mnemo_prs":
-		return h.prs(args)
+		return ch.prs(args)
 	case "mnemo_ci":
-		return h.ci(args)
+		return ch.ci(args)
 	case "mnemo_commits":
-		return h.commits(args)
+		return ch.commits(args)
 	case "mnemo_decisions":
-		return h.decisions(args)
+		return ch.decisions(args)
 	case "mnemo_restore":
-		return h.restore(args)
+		return ch.restore(args)
 	case "mnemo_chain":
-		return h.chain(args)
+		return ch.chain(args)
 	case "mnemo_self":
-		return h.self(cc, args)
+		return ch.self(args)
 	case "mnemo_whatsup":
-		return h.whatsup(args)
+		return ch.whatsup(args)
 	case "mnemo_define":
-		return h.defineTemplate(args)
+		return ch.defineTemplate(args)
 	case "mnemo_evaluate":
-		return h.evaluateTemplate(args)
+		return ch.evaluateTemplate(args)
 	case "mnemo_list_templates":
-		return h.listTemplates()
+		return ch.listTemplates()
 	case "mnemo_discover_patterns":
-		return h.discoverPatterns(args)
+		return ch.discoverPatterns(args)
 	case "mnemo_images":
-		return h.images(args)
+		return ch.images(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
 }
 
-func (h *Handler) search(args map[string]any) (string, bool, error) {
+func (h *callHandler) search(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	limit := 20
 	if l, ok := args["limit"].(float64); ok && l > 0 {
@@ -505,7 +550,7 @@ func (h *Handler) search(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) sessions(args map[string]any) (string, bool, error) {
+func (h *callHandler) sessions(args map[string]any) (string, bool, error) {
 	sessionType, _ := args["session_type"].(string)
 	minMessages := 6
 	if m, ok := args["min_messages"].(float64); ok && m >= 0 {
@@ -561,7 +606,7 @@ func (h *Handler) sessions(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) readSession(args map[string]any) (string, bool, error) {
+func (h *callHandler) readSession(args map[string]any) (string, bool, error) {
 	sessionID, _ := args["session_id"].(string)
 	if sessionID == "" {
 		return "session_id is required", true, nil
@@ -595,7 +640,7 @@ func (h *Handler) readSession(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) query(args map[string]any) (string, bool, error) {
+func (h *callHandler) query(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
 		return "query is required", true, nil
@@ -619,7 +664,7 @@ func (h *Handler) query(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) repos(args map[string]any) (string, bool, error) {
+func (h *callHandler) repos(args map[string]any) (string, bool, error) {
 	filter, _ := args["filter"].(string)
 
 	repos, err := h.mem.ListRepos(filter)
@@ -642,7 +687,7 @@ func (h *Handler) repos(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) stats() (string, bool, error) {
+func (h *callHandler) stats() (string, bool, error) {
 	stats, err := h.mem.Stats()
 	if err != nil {
 		return fmt.Sprintf("stats failed: %v", err), true, nil
@@ -670,7 +715,7 @@ func (h *Handler) stats() (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) status(args map[string]any) (string, bool, error) {
+func (h *callHandler) status(args map[string]any) (string, bool, error) {
 	days := 7
 	if d, ok := args["days"].(float64); ok && d > 0 {
 		days = int(d)
@@ -704,7 +749,7 @@ func (h *Handler) status(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) recentActivity(args map[string]any) (string, bool, error) {
+func (h *callHandler) recentActivity(args map[string]any) (string, bool, error) {
 	days := 7
 	if d, ok := args["days"].(float64); ok && d > 0 {
 		days = int(d)
@@ -726,7 +771,7 @@ func (h *Handler) recentActivity(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) memories(args map[string]any) (string, bool, error) {
+func (h *callHandler) memories(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	memType, _ := args["type"].(string)
 	project, _ := args["project"].(string)
@@ -759,7 +804,7 @@ func (h *Handler) memories(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) skills(args map[string]any) (string, bool, error) {
+func (h *callHandler) skills(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	limit := 20
 	if l, ok := args["limit"].(float64); ok && l > 0 {
@@ -781,7 +826,7 @@ func (h *Handler) skills(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) configs(args map[string]any) (string, bool, error) {
+func (h *callHandler) configs(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repoFilter, _ := args["repo"].(string)
 	limit := 20
@@ -804,7 +849,7 @@ func (h *Handler) configs(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) usage(args map[string]any) (string, bool, error) {
+func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	days := 30
 	if d, ok := args["days"].(float64); ok && d > 0 {
 		days = int(d)
@@ -828,7 +873,7 @@ func (h *Handler) usage(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) auditLogs(args map[string]any) (string, bool, error) {
+func (h *callHandler) auditLogs(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	skill, _ := args["skill"].(string)
@@ -852,7 +897,7 @@ func (h *Handler) auditLogs(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) targets(args map[string]any) (string, bool, error) {
+func (h *callHandler) targets(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	status, _ := args["status"].(string)
@@ -888,7 +933,7 @@ func (h *Handler) targets(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) plans(args map[string]any) (string, bool, error) {
+func (h *callHandler) plans(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repoFilter, _ := args["repo"].(string)
 	limit := 20
@@ -915,7 +960,7 @@ func (h *Handler) plans(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) docs(args map[string]any) (string, bool, error) {
+func (h *callHandler) docs(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repoFilter, _ := args["repo"].(string)
 	kind, _ := args["kind"].(string)
@@ -950,7 +995,54 @@ func (h *Handler) docs(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) permissions(args map[string]any) (string, bool, error) {
+func (h *callHandler) synthesis(args map[string]any) (string, bool, error) {
+	query, _ := args["query"].(string)
+	taxonomy, _ := args["taxonomy"].(string)
+	repoFilter, _ := args["repo"].(string)
+	limit := 20
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	results, err := h.mem.SearchSynthesis(query, taxonomy, repoFilter, limit)
+	if err != nil {
+		return fmt.Sprintf("synthesis search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No synthesis docs found.", false, nil
+	}
+
+	var b strings.Builder
+	for _, d := range results {
+		title := d.Title
+		if title == "" {
+			title = filepath.Base(d.FilePath)
+		}
+		fmt.Fprintf(&b, "## %s [%s] (%s)\n", title, d.Taxonomy, d.Repo)
+		fmt.Fprintf(&b, "**Path**: %s\n", d.FilePath)
+		if d.DocDate != "" {
+			fmt.Fprintf(&b, "**Date**: %s  ", d.DocDate)
+		}
+		if d.DocStatus != "" {
+			fmt.Fprintf(&b, "**Status**: %s  ", d.DocStatus)
+		}
+		if d.DocTarget != "" {
+			fmt.Fprintf(&b, "**Target**: %s  ", d.DocTarget)
+		}
+		if d.DocSource != "" {
+			fmt.Fprintf(&b, "**Source**: %s", d.DocSource)
+		}
+		fmt.Fprintf(&b, "\n\n")
+		content := d.Content
+		if len(content) > 2000 {
+			content = content[:2000] + "\n…(truncated)"
+		}
+		fmt.Fprintf(&b, "%s\n\n", content)
+	}
+	return b.String(), false, nil
+}
+
+func (h *callHandler) permissions(args map[string]any) (string, bool, error) {
 	days := 30
 	if d, ok := args["days"].(float64); ok && d > 0 {
 		days = int(d)
@@ -976,7 +1068,7 @@ func (h *Handler) permissions(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) prs(args map[string]any) (string, bool, error) {
+func (h *callHandler) prs(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	state, _ := args["state"].(string)
@@ -1004,7 +1096,7 @@ func (h *Handler) prs(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) ci(args map[string]any) (string, bool, error) {
+func (h *callHandler) ci(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	conclusion, _ := args["conclusion"].(string)
@@ -1030,7 +1122,7 @@ func (h *Handler) ci(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) commits(args map[string]any) (string, bool, error) {
+func (h *callHandler) commits(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	author, _ := args["author"].(string)
@@ -1056,7 +1148,7 @@ func (h *Handler) commits(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) decisions(args map[string]any) (string, bool, error) {
+func (h *callHandler) decisions(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
 	days := 30
@@ -1081,7 +1173,8 @@ func (h *Handler) decisions(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) self(cc CallContext, args map[string]any) (string, bool, error) {
+func (h *callHandler) self(args map[string]any) (string, bool, error) {
+	cc := h.cc
 	nonce, _ := args["nonce"].(string)
 
 	if nonce == "" {
@@ -1108,7 +1201,7 @@ func (h *Handler) self(cc CallContext, args map[string]any) (string, bool, error
 	return fmt.Sprintf("session_id: %s", sessionID), false, nil
 }
 
-func (h *Handler) whoRan(args map[string]any) (string, bool, error) {
+func (h *callHandler) whoRan(args map[string]any) (string, bool, error) {
 	pattern, _ := args["pattern"].(string)
 	if pattern == "" {
 		return "pattern is required", true, nil
@@ -1136,7 +1229,7 @@ func (h *Handler) whoRan(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) restore(args map[string]any) (string, bool, error) {
+func (h *callHandler) restore(args map[string]any) (string, bool, error) {
 	sessionID, _ := args["session_id"].(string)
 	if sessionID == "" {
 		return "session_id is required", true, nil
@@ -1238,7 +1331,7 @@ func (h *Handler) restore(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) chain(args map[string]any) (string, bool, error) {
+func (h *callHandler) chain(args map[string]any) (string, bool, error) {
 	sessionID, _ := args["session_id"].(string)
 	if sessionID == "" {
 		return "session_id is required", true, nil
@@ -1320,7 +1413,7 @@ func (h *Handler) chain(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) whatsup(args map[string]any) (string, bool, error) {
+func (h *callHandler) whatsup(args map[string]any) (string, bool, error) {
 	postmortem, _ := args["postmortem"].(bool)
 	result, err := h.mem.Whatsup(postmortem)
 	if err != nil {
@@ -1401,7 +1494,7 @@ func (h *Handler) whatsup(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) defineTemplate(args map[string]any) (string, bool, error) {
+func (h *callHandler) defineTemplate(args map[string]any) (string, bool, error) {
 	name, _ := args["name"].(string)
 	if name == "" {
 		return "name is required", true, nil
@@ -1432,7 +1525,7 @@ func (h *Handler) defineTemplate(args map[string]any) (string, bool, error) {
 	return fmt.Sprintf("Template %q saved.", name), false, nil
 }
 
-func (h *Handler) evaluateTemplate(args map[string]any) (string, bool, error) {
+func (h *callHandler) evaluateTemplate(args map[string]any) (string, bool, error) {
 	name, _ := args["name"].(string)
 	if name == "" {
 		return "name is required", true, nil
@@ -1465,7 +1558,7 @@ func (h *Handler) evaluateTemplate(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) listTemplates() (string, bool, error) {
+func (h *callHandler) listTemplates() (string, bool, error) {
 	templates, err := h.mem.ListTemplates()
 	if err != nil {
 		return fmt.Sprintf("list templates failed: %v", err), true, nil
@@ -1480,7 +1573,7 @@ func (h *Handler) listTemplates() (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *Handler) discoverPatterns(args map[string]any) (string, bool, error) {
+func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error) {
 	days := 90
 	if d, ok := args["days"].(float64); ok && d > 0 {
 		days = int(d)
@@ -1520,7 +1613,7 @@ func (h *Handler) discoverPatterns(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *Handler) images(args map[string]any) (string, bool, error) {
+func (h *callHandler) images(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	mode, _ := args["mode"].(string)
 	repo, _ := args["repo"].(string)

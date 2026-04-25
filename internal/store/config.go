@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config holds runtime configuration loaded from ~/.mnemo/config.json.
@@ -28,6 +29,16 @@ type Config struct {
 	// dir exposed via SMB mount. Missing or unavailable entries are
 	// skipped at ingest/watch time rather than failing.
 	ExtraProjectDirs []string `json:"extra_project_dirs,omitempty"`
+
+	// SynthesisRoots are filesystem roots walked by the synthesis-doc
+	// indexer (🎯T34) to index analysis/research/design/planning docs
+	// under docs/{papers,design,analysis,plans}/ plus docs/audit-log.md
+	// and docs/convergence-report.md. Unlike WorkspaceRoots, these roots
+	// do not require a .git marker — suitable for non-repo planning
+	// spaces such as ~/think. Entries support ~ for the user's home.
+	// An empty list disables synthesis-doc ingest (repo-level docs are
+	// still indexed via WorkspaceRoots + IngestDocs).
+	SynthesisRoots []string `json:"synthesis_roots,omitempty"`
 }
 
 // LoadConfig reads ~/.mnemo/config.json. Returns a zero Config if the
@@ -74,4 +85,31 @@ func (c Config) ResolvedWorkspaceRoots() []string {
 		return DefaultWorkspaceRoots()
 	}
 	return c.WorkspaceRoots
+}
+
+// ResolvedSynthesisRoots returns SynthesisRoots with ~ expanded to the
+// user's home directory. Unset entries return an empty slice (the
+// indexer skips synthesis ingest entirely when no roots are configured;
+// there is no default, unlike WorkspaceRoots).
+func (c Config) ResolvedSynthesisRoots() []string {
+	if len(c.SynthesisRoots) == 0 {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	out := make([]string, 0, len(c.SynthesisRoots))
+	for _, r := range c.SynthesisRoots {
+		if r == "" {
+			continue
+		}
+		if home != "" {
+			switch {
+			case r == "~":
+				r = home
+			case strings.HasPrefix(r, "~/"):
+				r = filepath.Join(home, r[2:])
+			}
+		}
+		out = append(out, r)
+	}
+	return out
 }

@@ -1,0 +1,214 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+// Package registry owns the per-user Store lifecycle.
+//
+// Each incoming MCP request carries an implicit or explicit user
+// identity (via ?user=<name> or the process owner). Registry maps
+// those identities to lazily-created Store instances and per-user
+// background workers (ingest, watcher, compactor, CI polling).
+//
+// Registry lives in its own package rather than inside internal/store
+// because it imports internal/compact, which imports internal/store —
+// a store-owned Registry would create a dependency cycle.
+package registry
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/store"
+)
+
+// Registry holds per-user Store instances plus their background
+// workers. Stores are created lazily on first access via ForUser —
+// this keeps a Windows-Service mnemo daemon (running as LocalSystem)
+// idle until a request arrives carrying `?user=<name>`, at which
+// point that user's transcript tree, database, and workers spin up.
+//
+// Multiple concurrent requests for the same user share a single
+// Store instance. Registry.Close waits for every user's workers to
+// drain and closes every Store.
+type Registry struct {
+	mu             sync.Mutex
+	baseCtx        context.Context
+	cancel         context.CancelFunc
+	stores         map[string]*userEntry
+	cfg            store.Config
+	mnemoRepoDir   string
+	compactorModel string
+}
+
+// userEntry tracks one user's Store plus its background goroutines.
+// workers lets Close wait for them to drain before the Store is
+// actually closed.
+type userEntry struct {
+	store   *store.Store
+	workers sync.WaitGroup
+}
+
+// NewRegistry builds an empty Registry. The baseCtx is cancelled on
+// Close and is the parent of every per-user worker context.
+// mnemoRepoDir is passed to the compactor watcher (it's the same for
+// every user — the compactor spawns claudia against mnemo's source
+// tree regardless of whose transcripts are being compacted).
+func NewRegistry(parent context.Context, cfg store.Config, mnemoRepoDir string) *Registry {
+	ctx, cancel := context.WithCancel(parent)
+	return &Registry{
+		baseCtx:        ctx,
+		cancel:         cancel,
+		stores:         map[string]*userEntry{},
+		cfg:            cfg,
+		mnemoRepoDir:   mnemoRepoDir,
+		compactorModel: "sonnet",
+	}
+}
+
+// ForUser returns the Store for the given username, creating it on
+// first access. The empty username resolves to the process's home
+// directory (useful for foreground / brew-services runs where the
+// default identity is implicit).
+//
+// Callers that must never silently index SYSTEM's profile should
+// reject the empty username up-front via DefaultUsername.
+func (r *Registry) ForUser(username string) (*store.Store, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.stores == nil {
+		return nil, fmt.Errorf("registry is closed")
+	}
+	if e, ok := r.stores[username]; ok {
+		return e.store, nil
+	}
+
+	home, err := store.ResolveHomeFor(username)
+	if err != nil {
+		return nil, err
+	}
+
+	projectDir := filepath.Join(home, ".claude", "projects")
+	dbPath := filepath.Join(home, ".mnemo", "mnemo.db")
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+
+	s, err := store.New(dbPath, projectDir)
+	if err != nil {
+		return nil, fmt.Errorf("open store for %q: %w", username, err)
+	}
+	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
+	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
+	s.SetSynthesisRoots(r.cfg.ResolvedSynthesisRoots())
+
+	e := &userEntry{store: s}
+	r.stores[username] = e
+	r.startWorkers(username, projectDir, e)
+	return s, nil
+}
+
+// startWorkers kicks off the per-user ingest / watcher / compactor /
+// CI-poll goroutines. Each goroutine runs until r.baseCtx is
+// cancelled (Registry.Close) or until it hits a terminal error.
+func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
+	logger := slog.Default().With("user", username)
+
+	// Ingest + watcher + image workers + repo-level ingest streams.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		logger.Info("ingesting transcripts", "dir", projectDir)
+		if err := e.store.IngestAll(); err != nil {
+			logger.Error("initial ingest failed", "err", err)
+		}
+		if stats, err := e.store.Stats(); err == nil {
+			logger.Info("ingest complete",
+				"sessions", stats.TotalSessions,
+				"messages", stats.TotalMessages)
+		}
+		e.store.StartImageDescriber()
+		e.store.StartImageOCR()
+		e.store.StartImageEmbedder()
+		if err := e.store.IngestMemories(); err != nil {
+			logger.Error("memory ingest failed", "err", err)
+		}
+		if err := e.store.IngestSkills(); err != nil {
+			logger.Error("skill ingest failed", "err", err)
+		}
+		if err := e.store.IngestClaudeConfigs(); err != nil {
+			logger.Error("claude config ingest failed", "err", err)
+		}
+		if err := e.store.IngestAuditLogs(); err != nil {
+			logger.Error("audit log ingest failed", "err", err)
+		}
+		if err := e.store.IngestTargets(); err != nil {
+			logger.Error("target ingest failed", "err", err)
+		}
+		if err := e.store.IngestPlans(); err != nil {
+			logger.Error("plan ingest failed", "err", err)
+		}
+		if err := e.store.IngestDocs(); err != nil {
+			logger.Error("doc ingest failed", "err", err)
+		}
+		if err := e.store.IngestSynthesis(); err != nil {
+			logger.Error("synthesis ingest failed", "err", err)
+		}
+		if err := e.store.Watch(); err != nil {
+			logger.Error("watcher failed", "err", err)
+		}
+	}()
+
+	// Compaction watcher.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		caller := compact.NewClaudiaCaller(r.mnemoRepoDir, r.compactorModel)
+		compactor := compact.New(e.store, caller, compact.Config{})
+		watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{}, r.mnemoRepoDir)
+		logger.Info("compact: watcher starting")
+		watcher.Run(r.baseCtx)
+	}()
+
+	// CI polling.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			if err := e.store.PollCI(); err != nil {
+				logger.Warn("CI poll failed", "err", err)
+			}
+			select {
+			case <-r.baseCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+// Close cancels every worker context and closes every Store. Safe to
+// call once.
+func (r *Registry) Close() {
+	r.mu.Lock()
+	r.cancel()
+	entries := make([]*userEntry, 0, len(r.stores))
+	for _, e := range r.stores {
+		entries = append(entries, e)
+	}
+	r.stores = nil
+	r.mu.Unlock()
+
+	for _, e := range entries {
+		e.workers.Wait()
+		_ = e.store.Close()
+	}
+}

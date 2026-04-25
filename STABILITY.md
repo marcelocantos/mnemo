@@ -9,7 +9,27 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.24.0.
+Snapshot as of v0.25.0.
+
+**v0.25.0 note (🎯T32 groundwork)**: Per-user Registry + Windows
+Service. The daemon no longer runs as a singleton tied to one home
+directory; it holds a Registry of per-user Stores keyed by the
+`?user=<name>` query parameter on the MCP URL. First request for
+each user lazily spins up that user's Store, ingest workers,
+watcher, and compactor. On macOS / Linux / brew-services, `?user=`
+is optional and defaults to the daemon's own user; on Windows it's
+required because the Windows Service runs as LocalSystem and has
+no implicit identity. Replaces the v0.23.0 Scheduled Task (which
+died on battery / sleep / 3-day timeout defaults) and the v0.24.0
+`-H=windowsgui` workaround. Upgrade installers tear down any
+legacy Scheduled Task automatically. The `register-mcp` subcommand
+now writes an MCP URL with `?user=<current-user>` embedded; legacy
+URLs without the parameter still work on non-service deployments.
+New CLI subcommands: `install-service` / `uninstall-service`
+(replacing v0.23/v0.24's `install-agent` / `uninstall-agent`).
+Internal: new `internal/registry/` package and
+`internal/store/homedir.go` for cross-platform username → home
+resolution.
 
 **v0.24.0 note (🎯T32 groundwork)**: Suppress the console window the
 Windows Scheduled Task was popping on logon. mnemo.exe is now built
@@ -76,19 +96,19 @@ instead of failing silently.
 
 | Subcommand | Flags | Platform | Description | Stability |
 |---|---|---|---|---|
-| `register-mcp` | `--url`, `--config` | all | Add mnemo entry to `~/.claude.json` (idempotent) | Needs review |
+| `register-mcp` | `--url`, `--user`, `--config` | all | Add mnemo entry to `~/.claude.json`; default URL embeds `?user=<current>` | Needs review |
 | `unregister-mcp` | `--config` | all | Remove mnemo entry from `~/.claude.json` (idempotent) | Needs review |
-| `install-agent` | `--exe` | Windows | Register mnemo as a per-user Scheduled Task triggered AtLogon | Needs review |
-| `uninstall-agent` | — | Windows | Remove the Scheduled Task (and any v0.22.0 Service of the same name) | Needs review |
+| `install-service` | `--exe` | Windows | Install mnemo as a Windows Service (auto-start, restart-on-failure, LocalSystem) | Needs review |
+| `uninstall-service` | — | Windows | Stop and remove the Windows Service + any legacy Scheduled Task | Needs review |
 
-Subcommands are new in v0.22.0 — API shape and flag set may evolve
-before 1.0 as end-user feedback arrives. Non-Windows invocations of
-the `*-agent` subcommands return a helpful error pointing at brew
-services / systemd instead. v0.22.0 shipped `install-service` /
-`uninstall-service` variants backed by the Windows Service Control
-Manager; v0.23.0 replaced them with the Scheduled Task approach
-because the Service ran as LocalSystem and could not reach the
-installing user's `~/.claude/projects/`.
+Subcommand history: v0.22.0 shipped SCM-backed `install-service` /
+`uninstall-service`; v0.23.0 replaced them with Scheduled-Task-based
+`install-agent` / `uninstall-agent` (LocalSystem profile lookup
+issues); v0.25.0 restores `install-service` / `uninstall-service`
+names backed by the Windows Service, with the LocalSystem problem
+now solved via the Registry's explicit `?user=<name>` routing.
+Non-Windows invocations of the `*-service` subcommands return a
+helpful error pointing at brew services / systemd instead.
 
 ### MCP tools
 
