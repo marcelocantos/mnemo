@@ -15,6 +15,8 @@
 //	mnemo uninstall-service     # (Windows) remove the Service
 //	mnemo diagnose              # health check: tools, paths, db, freshness, integration
 //	mnemo print-endpoint        # print this host's mTLS public cert (for federated peer trust)
+//	mnemo print-federated-addr  # print the URL peers paste into linked_instances
+//	mnemo ping-peer <name>      # call mnemo_stats on a configured peer (smoke-test federation)
 //	claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<name>"
 package main
 
@@ -32,6 +34,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/endpoint"
@@ -91,6 +94,9 @@ func main() {
 		case "print-federated-addr":
 			cmdPrintFederatedAddr(os.Args[2:])
 			return
+		case "ping-peer":
+			cmdPingPeer(os.Args[2:])
+			return
 		}
 	}
 
@@ -138,6 +144,65 @@ func main() {
 
 	if err := runServe(context.Background(), *addr, *federatedAddr); err != nil {
 		os.Exit(1)
+	}
+}
+
+// cmdPingPeer dials a configured federation peer and runs mnemo_stats
+// against it, printing the peer's response (or a typed error) for
+// manual verification (🎯T15.4). Reads ~/.mnemo/config.json for the
+// LinkedInstances list and ~/.mnemo/endpoint/* for the local mTLS
+// material; the peer name argument selects which entry to call.
+func cmdPingPeer(args []string) {
+	fs := flag.NewFlagSet("ping-peer", flag.ExitOnError)
+	tool := fs.String("tool", "mnemo_stats", "tool name to invoke on the peer")
+	_ = fs.Parse(args)
+
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: mnemo ping-peer [--tool=NAME] <peer-name>")
+		os.Exit(2)
+	}
+	peerName := fs.Arg(0)
+
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ping-peer: %v\n", err)
+		os.Exit(1)
+	}
+	if len(cfg.LinkedInstances) == 0 {
+		fmt.Fprintln(os.Stderr, "ping-peer: no linked_instances configured in ~/.mnemo/config.json")
+		os.Exit(1)
+	}
+	mnemoDir, err := endpoint.DefaultDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ping-peer: %v\n", err)
+		os.Exit(1)
+	}
+	ep, err := endpoint.Load(mnemoDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ping-peer: load endpoint: %v\n", err)
+		os.Exit(1)
+	}
+	client, err := federation.NewClient(ep, cfg.LinkedInstances)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ping-peer: %v\n", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := client.CallTool(ctx, peerName, *tool, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ping-peer: %v\n", err)
+		os.Exit(1)
+	}
+	if res.IsError {
+		fmt.Fprintf(os.Stderr, "ping-peer: peer returned error\n")
+	}
+	for _, c := range res.Content {
+		if t, ok := c.(mcp.TextContent); ok {
+			fmt.Println(t.Text)
+		}
 	}
 }
 

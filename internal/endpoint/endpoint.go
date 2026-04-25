@@ -200,6 +200,37 @@ func (e *Endpoint) ClientTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
+// PinnedClientTLSConfig returns a tls.Config that mirrors
+// ClientTLSConfig but trusts ONLY the given peer cert — used for
+// per-instance federation calls (🎯T15.4) where each LinkedInstance
+// has its own pinned trust anchor rather than the union pool.
+func (e *Endpoint) PinnedClientTLSConfig(peerCert *x509.Certificate) (*tls.Config, error) {
+	cert, err := e.TLSCertificate()
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(peerCert)
+	return &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("server presented no certificate")
+			}
+			peer, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("parse server cert: %w", err)
+			}
+			if _, err := peer.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+				return fmt.Errorf("server cert not pinned for this peer: %w", err)
+			}
+			return nil
+		},
+	}, nil
+}
+
 // DefaultDir returns ~/.mnemo for the calling process's home.
 func DefaultDir() (string, error) {
 	home, err := os.UserHomeDir()

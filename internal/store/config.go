@@ -142,35 +142,48 @@ func (c Config) validateLinkedInstances(peersDir string) error {
 	return nil
 }
 
-// validatePeerCert resolves a PeerCert value: if it parses as PEM
-// containing a CERTIFICATE block we treat it as inline; otherwise we
-// look it up under peersDir/<value>.pem. Either path must produce a
-// valid X.509 certificate.
+// validatePeerCert resolves and parses li.PeerCert via the same logic
+// as ResolvePeerCert; the validation pass is just "did this resolve".
 func validatePeerCert(name, value, peersDir string) error {
-	if looksLikeInlinePEM(value) {
-		block, _ := pem.Decode([]byte(value))
+	li := LinkedInstance{Name: name, PeerCert: value}
+	if _, err := li.ResolvePeerCert(peersDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ResolvePeerCert returns the parsed X.509 certificate for
+// li.PeerCert. If PeerCert contains a "-----BEGIN" marker it is
+// treated as inline PEM; otherwise it is treated as a basename to
+// resolve under peersDir/<name>.pem. Errors include the instance
+// name so they make sense in startup logs.
+func (li LinkedInstance) ResolvePeerCert(peersDir string) (*x509.Certificate, error) {
+	if looksLikeInlinePEM(li.PeerCert) {
+		block, _ := pem.Decode([]byte(li.PeerCert))
 		if block == nil || block.Type != "CERTIFICATE" {
-			return fmt.Errorf("linked_instances[%q]: inline peer_cert is not a CERTIFICATE PEM block", name)
+			return nil, fmt.Errorf("linked_instances[%q]: inline peer_cert is not a CERTIFICATE PEM block", li.Name)
 		}
-		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return fmt.Errorf("linked_instances[%q]: parse inline peer_cert: %w", name, err)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("linked_instances[%q]: parse inline peer_cert: %w", li.Name, err)
 		}
-		return nil
+		return cert, nil
 	}
 
-	path := filepath.Join(peersDir, value+".pem")
+	path := filepath.Join(peersDir, li.PeerCert+".pem")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("linked_instances[%q]: peer_cert %q not found at %s: %w", name, value, path, err)
+		return nil, fmt.Errorf("linked_instances[%q]: peer_cert %q not found at %s: %w", li.Name, li.PeerCert, path, err)
 	}
 	block, _ := pem.Decode(data)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return fmt.Errorf("linked_instances[%q]: peer_cert %s: no CERTIFICATE PEM block", name, path)
+		return nil, fmt.Errorf("linked_instances[%q]: peer_cert %s: no CERTIFICATE PEM block", li.Name, path)
 	}
-	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-		return fmt.Errorf("linked_instances[%q]: parse peer_cert %s: %w", name, path, err)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("linked_instances[%q]: parse peer_cert %s: %w", li.Name, path, err)
 	}
-	return nil
+	return cert, nil
 }
 
 func looksLikeInlinePEM(s string) bool {
