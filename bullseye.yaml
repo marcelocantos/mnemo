@@ -1009,6 +1009,50 @@ targets:
     - research
     origin: user 2026-04-25 — "think about mnemo for teams"
     discovered: 2026-04-25
+  T37:
+    name: The compactor's claudia.Task subprocess can find and execute the Claude CLI when mnemo is launched by launchd
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The launchd plist (or a wrapper script) sets PATH to include the directory containing the `claude` binary (or the equivalent shim that resolves the zsh `claude` function), so `claudia.Task` does not fail with "executable file not found"
+    - A successful compaction lands in the `compactions` table within one watcher tick of an active session producing new substantive messages
+    - mnemo logs a clear, single-line ERROR (not a generic Warn) when the LLM subprocess fails to spawn, including the resolved PATH it tried, so the failure is debuggable from the log alone
+    - Documentation (README or agent-guide) records the PATH requirement so users running mnemo as a launchd/systemd service know what to set
+    context: |-
+      Discovered 2026-04-25 while attempting to demonstrate bullseye 🎯T1.4 (target-aware context compaction). The bullseye-side wiring is correct — `watcher.go:loadTargetContext` reads `bullseye.yaml` and passes a `TargetContext` into `Compactor.Compact()`, which injects the Active/Achieved/Frontier sections into the LLM user prompt — but the `compactions` table on this laptop has zero rows and the log shows no `compact: tick fired` or `compact: compaction failed` entries since the daemon last started.
+
+      Root cause analysis on this laptop:
+      - `claude` is defined as a zsh function in `~/.zshrc`, not a binary on PATH (it wraps the `c` helper).
+      - mnemo runs under launchd with `PATH=/usr/bin:/bin:/usr/sbin:/sbin` (the launchd default) — even if `claude` were a binary at `/opt/homebrew/bin/claude`, mnemo wouldn't find it.
+      - `claudia.Task` shells out to `claude -p`. The exec fails silently from the user's perspective because the watcher's tick error path is `slog.Warn("compact: compaction failed", ...)`, and recent logs show no such warnings either — suggesting the watcher may also be returning early before reaching the LLM call (no live `OpenConnections` reported by mcpbridge, perhaps).
+
+      The two-part fix: (a) ensure `claude` is reachable from mnemo's launchd-spawned process via an explicit PATH or wrapper, and (b) raise visibility on subprocess-spawn failures so the next time this happens it's diagnosable from one log line.
+    tags:
+    - compaction
+    - launchd
+    - ops
+    origin: forked-from bullseye 🎯T1.4 demonstration attempt
+    discovered: 2026-04-25
+  T38:
+    name: Watcher tick logs are observable — each tick records its outcome (compacted / nothing-to-compact / budget-exceeded / failed) at a level that a human can scan without enabling debug
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Each watcher tick emits a single structured log line with: connection_id, session_id, outcome (one of: compacted, nothing_to_compact, budget_exceeded, failed, skipped_self, skipped_no_session), and (for compacted) the new compaction id and entry_id_to'
+    - Routine `nothing_to_compact` outcomes are logged at DEBUG; non-routine outcomes (compacted, failed, budget_exceeded) at INFO/WARN as appropriate
+    - A user inspecting `mnemo.log` after 10 minutes of activity can answer "did the compactor fire? for which sessions? did anything fail?" without grepping a SQLite database
+    - The existing silent early-returns in `connWorker.tick` (no session, excludeCWD match) emit at DEBUG with a reason code rather than returning silently
+    context: |-
+      Discovered 2026-04-25 alongside the launchd-PATH issue while debugging why no compactions were appearing. The current watcher logs only the start-up line and the `compact: compaction failed` warning on error; the routine path (tick fires → nothing to compact → return) is silent, and so are several early-exit branches in `connWorker.tick` (no session yet, excludeCWD match). With nothing in between "watcher started" and "compaction failed", a user with zero compactions in the table cannot tell whether the watcher is even ticking. Adding a DEBUG-level structured log per tick (with an outcome code) makes the live state diagnosable from the log alone.
+
+      This is a small change with a high diagnostic payoff. Pair with the launchd-PATH target above — together they make compaction failures observable and recoverable instead of silent.
+    tags:
+    - compaction
+    - observability
+    origin: forked-from bullseye 🎯T1.4 demonstration attempt
+    discovered: 2026-04-25
   T4:
     name: Individual session transcript access
     status: achieved
