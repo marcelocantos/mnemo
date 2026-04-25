@@ -854,7 +854,7 @@ targets:
     discovered: 2026-04-19
   T32:
     name: Non-technical Windows users install mnemo via a double-click installer, with no terminal required
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
@@ -871,6 +871,7 @@ targets:
     - T33
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T32.1:
     name: mnemo runs as a native Windows Service (auto-start on boot, restart on failure, logs to Windows Event Log)
     status: achieved

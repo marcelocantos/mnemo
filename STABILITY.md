@@ -9,7 +9,17 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.25.0.
+Snapshot as of v0.26.0.
+
+**v0.26.0 note**: Auto-migration from legacy stdio registrations.
+mnemo launched with stdin piped (i.e. invoked by Claude Code's
+old `claude mcp add --transport stdio mnemo` registration) now
+rewrites `~/.claude.json` in place to the HTTP+`?user=<name>`
+shape used since v0.25.0, best-effort starts the daemon via
+`brew services start mnemo` if nothing's listening yet, and exits
+asking the user to restart their session. One restart instead of
+three terminal commands. Falls back to the manual hint on any
+failure path. No CLI or MCP surface change.
 
 **v0.25.0 note (🎯T32 groundwork)**: Per-user Registry + Windows
 Service. The daemon no longer runs as a singleton tied to one home
