@@ -1009,6 +1009,24 @@ targets:
     - research
     origin: user 2026-04-25 — "think about mnemo for teams"
     discovered: 2026-04-25
+  T37:
+    name: The compactor's claudia.Task subprocess can find and execute the Claude CLI when mnemo is launched by launchd
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The launchd plist (or a wrapper script) sets PATH to include the directory containing the claude binary, so claudia.Task does not fail with 'executable file not found'.
+    - mnemo logs a clear, single-line ERROR (not a generic Warn) when the LLM subprocess fails to spawn, including the resolved PATH it tried, so the failure is debuggable from the log alone.
+    - Documentation (README or agent-guide) records the PATH requirement so users running mnemo as a launchd/systemd service know what to set.
+    context: claude is defined as a zsh function in ~/.zshrc (wraps the c helper); some setups have a binary at /opt/homebrew/bin/claude or ~/.claude/local/claude. mnemo runs under launchd with default PATH=/usr/bin:/bin:/usr/sbin:/sbin — even a binary at /opt/homebrew/bin/claude is unreachable. claudia.Task (in github.com/marcelocantos/claudia) shells out to claude -p. Exec failure was silent because the watcher's error path was slog.Warn.
+    tags:
+    - compactor
+    - launchd
+    - path
+    - observability
+    origin: manual
+    discovered: 2026-04-26
+    achieved: 2026-04-26
   T4:
     name: Individual session transcript access
     status: achieved
