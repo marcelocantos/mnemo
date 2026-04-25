@@ -232,10 +232,11 @@ targets:
     achieved: 2026-04-25
   T15.3:
     name: mnemo serves a federated, mTLS-authenticated, read-only MCP endpoint for peer queries
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
+    demonstration: Stood up two in-process mnemo hosts in temp dirs with cross-trusted peer certs and a real tls.Listen socket. TestFederatedRoundTrip ran a full mark3labs/mcp-go streamable-HTTP client through Initialize + ListTools over mTLS and asserted the returned tool set is exactly tools.FederatedToolNames (23 read-only tools) — confirmed that mnemo_self, mnemo_define, mnemo_evaluate, mnemo_list_templates, mnemo_restore, mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions are absent. TestFederatedRejectsUntrustedClient confirmed the TLS handshake fails with "bad certificate" when the client's cert is not in the server's trusted-peer pool. Smoke-ran `bin/mnemo print-federated-addr` and confirmed it emits https://colossus.lan:19420/mcp by default and respects --addr overrides for both port-only (--addr=:9000 → colossus.lan:9000) and host:port (foo.example:443).
     acceptance:
     - mnemo serve listens on a second configurable address (default :19420; flag `--federated-addr`; `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
     - 'Only read-shaped tools are exposed on the federated endpoint: mnemo_search, mnemo_sessions, mnemo_read_session, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, mnemo_memories, mnemo_skills, mnemo_configs, mnemo_usage, mnemo_audit, mnemo_targets, mnemo_plans, mnemo_who_ran, mnemo_ci, mnemo_query, mnemo_repos, mnemo_stats, mnemo_chain, mnemo_decisions, mnemo_images, mnemo_discover_patterns, mnemo_status. Write-shaped / control tools (mnemo_self, template writes, describers control, etc.) are absent from the federated tool set.'
@@ -252,6 +253,7 @@ targets:
     - mTLS
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T15.4:
     name: mnemo invokes read-tools on a configured peer over mTLS with timeout and graceful failure
     status: identified
