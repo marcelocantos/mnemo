@@ -132,10 +132,14 @@ targets:
     achieved: 2026-04-07
   T15:
     name: Federated queries across linked mnemo instances expose session history from every host as one searchable surface
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     showcase: true
+    demonstration: |-
+      All five T15 leaves shipped: T15.1 (mTLS endpoint material under ~/.mnemo/endpoint/ + peer trust store under ~/.mnemo/peers/), T15.2 (linked_instances config with strict validation), T15.3 (federated read-only mTLS MCP endpoint on :19420 exposing 23 read-only tools, all write/control tools absent), T15.4 (federation client with per-peer pinned mTLS, persistent http.Client per peer, 5s default timeout, seven typed error sentinels), T15.5 (Fanout + MergePeerResults wired into runServe behind the linked_instances config gate).
+
+      End-to-end umbrella acceptance demonstrated by the federation test suite (16 tests, all green): TestFanoutMergesAttributedResults stands up two stub mTLS-cross-trusted peer daemons each returning a distinct mnemo_search payload and asserts the merged FanoutEnvelope contains local + alice + bob attribution. TestFanoutGracefulDegradationOnSlowPeer pauses one peer 500ms with a 100ms timeout and confirms the response returns in <400ms with the fast peer's results plus a structured PeerWarning{Instance:"slow", ErrorKind:"timeout"} naming the stalled peer. TestFederatedRoundTrip + TestFederatedRejectsUntrustedClient verify the server-side read/write boundary and TLS rejection of un-pinned client certs. CLI surface ships: `mnemo print-endpoint`, `mnemo print-federated-addr`, `mnemo ping-peer <name>`.
     acceptance:
     - All sub-targets T15.1, T15.2, T15.3, T15.4, T15.5 are achieved.
     - Two mnemo daemons (separate hosts, or two local temp-dir instances for CI) are configured as each other's peers via `linked_instances` and each daemon's `~/.mnemo/peers/` holds the other's public cert.
@@ -187,6 +191,7 @@ targets:
     - pigeon
     origin: 'conversation: user wants unified transcript search across macOS and Windows VM environments'
     discovered: 2026-04-09
+    achieved: 2026-04-25
   T15.1:
     name: mnemo manages an mTLS endpoint file for authenticated peer access
     status: achieved
@@ -282,10 +287,11 @@ targets:
     achieved: 2026-04-25
   T15.5:
     name: Query-shaped MCP tools fan out to linked peers in parallel and return merged, attributed results
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
+    demonstration: 'Demonstrated end-to-end via TestFanoutMergesAttributedResults: stood up two stub federated peers in temp dirs (each returning a distinct mnemo_search payload — alpha-from-alice, beta-from-bob), wired a Client with both as LinkedInstances, called Fanout("mnemo_search"), and asserted the FanoutEnvelope JSON returned local + both peers correctly attributed with no warnings. Graceful-degradation demonstrated via TestFanoutGracefulDegradationOnSlowPeer: same setup with a 500ms-delayed slow peer plus a fast peer and a 100ms per-peer timeout — Fanout returned in <400ms with the fast peer''s results and one PeerWarning{Instance:"slow", ErrorKind:"timeout"}, confirming a paused peer does not stall the local response. Backwards-compat verified by TestMergePeerResultsNoPeersIsPassThrough — when no peers are configured the wrapper returns the local text byte-for-byte unchanged. The wrapper is wired into main.go''s runServe behind the linked_instances config gate; tools NOT in FanoutToolNames (mnemo_self, mnemo_define, mnemo_evaluate, mnemo_query, mnemo_stats, mnemo_status, mnemo_chain, mnemo_restore, mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions) bypass federation entirely.'
     acceptance:
     - Read-shaped query tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, and others with per-record result shapes) issue local + per-peer calls in parallel via T15.4's client.
     - 'Every returned record carries an instance-source field (e.g. "local" for the host responder, "<peer name>" for peers). Response schemas extended in a backwards-compatible way: existing unattributed callers still parse.'
@@ -304,6 +310,7 @@ targets:
     - attribution
     origin: decomposition of T15 (2026-04-19)
     discovered: 2026-04-19
+    achieved: 2026-04-25
   T16:
     name: Session chains link /clear-bounded transcripts into work spans
     status: achieved
