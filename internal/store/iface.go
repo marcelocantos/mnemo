@@ -55,4 +55,5 @@ type Backend interface {
 	ConnectionsForSession(sessionID string) ([]ConnectionSession, error)
 	InferChainHeuristic(sessionID string, limit int) ([]ChainCandidate, error)
 	SessionStructure(sessionID string) (*SessionStructure, error)
+	LocateUUID(prefix string, contextBefore, contextAfter int) ([]UUIDMatch, error)
 }
