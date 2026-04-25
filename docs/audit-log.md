@@ -183,7 +183,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-25 — /release v0.26.0
 
-- **Commit**: `pending`
+- **Commit**: `aabd560`
 - **Outcome**: Released v0.26.0. Auto-migrate stdio holdovers:
   when mnemo is launched with stdin piped (legacy
   `claude mcp add --transport stdio mnemo` registrations from
