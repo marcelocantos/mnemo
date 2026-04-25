@@ -1524,6 +1524,45 @@ func (s *Store) queryMemories(q string, args ...any) ([]MemoryInfo, error) {
 	return results, nil
 }
 
+// GetMemory retrieves a single named memory file for a project.
+// project is matched as a substring of the stored project value (consistent
+// with SearchMemories). name is matched case-insensitively as a substring
+// of either the frontmatter name field or the file base name (without .md).
+// Returns nil without error when the project or memory is not found.
+func (s *Store) GetMemory(project, name string) (*MemoryInfo, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if project == "" {
+		return nil, fmt.Errorf("project is required")
+	}
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
+	// Retrieve all memories for the project, then match name in Go.
+	q := `SELECT id, project, file_path, name, description, memory_type, content, updated_at
+		FROM memories
+		WHERE project LIKE ?
+		ORDER BY updated_at DESC`
+	candidates, err := s.queryMemories(q, "%"+project+"%")
+	if err != nil {
+		return nil, err
+	}
+
+	nameLower := strings.ToLower(name)
+	for i := range candidates {
+		m := &candidates[i]
+		// Match against frontmatter name or file base name (stem).
+		stem := strings.TrimSuffix(filepath.Base(m.FilePath), ".md")
+		if strings.Contains(strings.ToLower(m.Name), nameLower) ||
+			strings.Contains(strings.ToLower(stem), nameLower) {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
 // SkillInfo holds a single skill record from the index.
 type SkillInfo struct {
 	ID          int    `json:"id"`

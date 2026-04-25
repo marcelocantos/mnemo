@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -1228,6 +1229,115 @@ The revised protocol uses ECDH key exchange after QR scan.
 	}
 	if results[0].Name != "QR transfer protocol (revised)" {
 		t.Errorf("expected updated name, got %q", results[0].Name)
+	}
+}
+
+func TestGetMemory(t *testing.T) {
+	projectDir := t.TempDir()
+
+	memDir := filepath.Join(projectDir, "myproject", "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Memory file with frontmatter.
+	topicContent := `---
+name: QR transfer protocol
+description: Design decisions for QR-based session transfer
+type: project
+---
+
+The QR transfer uses a token-based handoff.
+`
+	if err := os.WriteFile(filepath.Join(memDir, "qr_transfer.md"), []byte(topicContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// MEMORY.md index file (no frontmatter, plain markdown).
+	indexContent := "- [QR transfer](qr_transfer.md) — QR-based session transfer design\n"
+	if err := os.WriteFile(filepath.Join(memDir, "MEMORY.md"), []byte(indexContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeJSONL(t, projectDir, "myproject", "sess-get-mem", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestMemories(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retrieve by frontmatter name substring.
+	m, err := s.GetMemory("myproject", "QR transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil {
+		t.Fatal("expected memory, got nil")
+	}
+	if m.Name != "QR transfer protocol" {
+		t.Errorf("expected name %q, got %q", "QR transfer protocol", m.Name)
+	}
+	if m.MemoryType != "project" {
+		t.Errorf("expected type %q, got %q", "project", m.MemoryType)
+	}
+	if !strings.Contains(m.Content, "token-based handoff") {
+		t.Errorf("expected content to contain 'token-based handoff', got %q", m.Content)
+	}
+
+	// Retrieve by file stem (case-insensitive).
+	m2, err := s.GetMemory("myproject", "qr_transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m2 == nil {
+		t.Fatal("expected memory via file stem lookup, got nil")
+	}
+	if m2.Name != "QR transfer protocol" {
+		t.Errorf("expected name via stem %q, got %q", "QR transfer protocol", m2.Name)
+	}
+
+	// Retrieve MEMORY.md by file stem.
+	mIdx, err := s.GetMemory("myproject", "MEMORY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mIdx == nil {
+		t.Fatal("expected MEMORY.md to be retrievable by stem, got nil")
+	}
+
+	// Not found — wrong name.
+	mMissing, err := s.GetMemory("myproject", "nonexistent_memory_xyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mMissing != nil {
+		t.Errorf("expected nil for unknown memory, got %+v", mMissing)
+	}
+
+	// Not found — wrong project.
+	mWrongProj, err := s.GetMemory("no-such-project", "QR transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mWrongProj != nil {
+		t.Errorf("expected nil for unknown project, got %+v", mWrongProj)
+	}
+
+	// Error — empty project.
+	_, errEmpty := s.GetMemory("", "QR transfer")
+	if errEmpty == nil {
+		t.Error("expected error for empty project, got nil")
+	}
+
+	// Error — empty name.
+	_, errEmptyName := s.GetMemory("myproject", "")
+	if errEmptyName == nil {
+		t.Error("expected error for empty name, got nil")
 	}
 }
 

@@ -199,6 +199,15 @@ Use this to find decisions, preferences, and context captured in any project —
 			mcp.WithString("project", mcp.Description("Filter by project name substring")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_get_memory",
+			mcp.WithDescription(`Return the raw markdown content of a named memory file, or list available memories when name is omitted.
+
+Replaces the cat ~/.claude/projects/<project>/memory/<name>.md workaround. Project is matched as a substring (consistent with mnemo_memories). Name is matched case-insensitively against the frontmatter name field and the file base name (without .md extension).
+
+When name is omitted, returns a list of all memories for the project with their name, type, and description.`),
+			mcp.WithString("project", mcp.Required(), mcp.Description(`Project to look up. Accepts bare name ("mnemo"), org/repo fragment ("marcelocantos/mnemo"), or path fragment ("-Users-marcelo-work-github-com-marcelocantos-mnemo").`)),
+			mcp.WithString("name", mcp.Description("Memory name to retrieve (matches frontmatter name or file stem). Omit to list available memories.")),
+		),
 		mcp.NewTool("mnemo_usage",
 			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
 
@@ -473,6 +482,8 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.stats()
 	case "mnemo_memories":
 		return ch.memories(args)
+	case "mnemo_get_memory":
+		return ch.getMemory(args)
 	case "mnemo_skills":
 		return ch.skills(args)
 	case "mnemo_usage":
@@ -831,6 +842,47 @@ func (h *callHandler) memories(args map[string]any) (string, bool, error) {
 			m.Name, m.MemoryType, proj, m.Description, m.Content)
 	}
 	return b.String(), false, nil
+}
+
+func (h *callHandler) getMemory(args map[string]any) (string, bool, error) {
+	project, _ := args["project"].(string)
+	name, _ := args["name"].(string)
+
+	if project == "" {
+		return "project is required", true, nil
+	}
+
+	// When name is omitted, list all memories for the project.
+	if name == "" {
+		results, err := h.mem.SearchMemories("", "", project, 100)
+		if err != nil {
+			return fmt.Sprintf("memory list failed: %v", err), true, nil
+		}
+		if len(results) == 0 {
+			return fmt.Sprintf("No memories found for project %q.", project), false, nil
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Memories for project %q:\n\n", project)
+		for _, m := range results {
+			fmt.Fprintf(&b, "- **%s** [%s]: %s\n", m.Name, m.MemoryType, m.Description)
+		}
+		return b.String(), false, nil
+	}
+
+	m, err := h.mem.GetMemory(project, name)
+	if err != nil {
+		return fmt.Sprintf("get memory failed: %v", err), true, nil
+	}
+	if m == nil {
+		// Check whether the project itself exists.
+		all, listErr := h.mem.SearchMemories("", "", project, 1)
+		if listErr == nil && len(all) == 0 {
+			return fmt.Sprintf("Project %q not found.", project), false, nil
+		}
+		return fmt.Sprintf("Memory %q not found in project %q.", name, project), false, nil
+	}
+
+	return m.Content, false, nil
 }
 
 func (h *callHandler) skills(args map[string]any) (string, bool, error) {
