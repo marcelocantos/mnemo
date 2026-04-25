@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/endpoint"
+	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -56,8 +58,9 @@ Then restart this Claude Code session.`
 var agentsGuide string
 
 const (
-	version     = "0.28.0"
-	defaultAddr = ":19419"
+	version              = "0.28.0"
+	defaultAddr          = ":19419"
+	defaultFederatedAddr = ":19420"
 )
 
 func main() {
@@ -85,12 +88,17 @@ func main() {
 		case "print-endpoint":
 			cmdPrintEndpoint(os.Args[2:])
 			return
+		case "print-federated-addr":
+			cmdPrintFederatedAddr(os.Args[2:])
+			return
 		}
 	}
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	helpAgent := flag.Bool("help-agent", false, "print agent guide and exit")
 	addr := flag.String("addr", defaultAddr, "HTTP listen address")
+	federatedAddr := flag.String("federated-addr", defaultFederatedAddr,
+		"mTLS federated listen address (empty disables federation)")
 	flag.Parse()
 
 	if *showVersion {
@@ -109,7 +117,7 @@ func main() {
 	// On Windows, if the SCM launched this process (no interactive
 	// session), hand off to the service control dispatcher, which
 	// calls runServe with a cancellable context driven by SCM events.
-	if handled, err := runAsServiceIfUnderSCM(*addr); handled {
+	if handled, err := runAsServiceIfUnderSCM(*addr, *federatedAddr); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "service run failed: %v\n", err)
 			os.Exit(1)
@@ -128,9 +136,36 @@ func main() {
 		autoMigrateStdioAndExit(*addr)
 	}
 
-	if err := runServe(context.Background(), *addr); err != nil {
+	if err := runServe(context.Background(), *addr, *federatedAddr); err != nil {
 		os.Exit(1)
 	}
+}
+
+// cmdPrintFederatedAddr emits the URL peers should put in their
+// linked_instances entry to reach this host's federated MCP endpoint
+// (🎯T15.3). Defaults to https://<hostname>:19420/mcp; --addr lets
+// the user override the host:port portion (handy when the daemon
+// listens on a non-default port or the public name differs).
+func cmdPrintFederatedAddr(args []string) {
+	fs := flag.NewFlagSet("print-federated-addr", flag.ExitOnError)
+	addrFlag := fs.String("addr", defaultFederatedAddr,
+		"federated listen address — port portion is used as-is, host portion defaults to os.Hostname()")
+	_ = fs.Parse(args)
+
+	host, _, err := net.SplitHostPort(*addrFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "print-federated-addr: parse %q: %v\n", *addrFlag, err)
+		os.Exit(1)
+	}
+	if host == "" {
+		host, err = os.Hostname()
+		if err != nil || host == "" {
+			fmt.Fprintf(os.Stderr, "print-federated-addr: cannot determine hostname; pass --addr=host:port\n")
+			os.Exit(1)
+		}
+	}
+	_, port, _ := net.SplitHostPort(*addrFlag)
+	fmt.Printf("https://%s:%s/mcp\n", host, port)
 }
 
 // autoMigrateStdioAndExit rewrites the user's ~/.claude.json entry
@@ -321,7 +356,13 @@ func portInUse(addr string) bool {
 // serves the MCP protocol over HTTP until ctx is cancelled or the
 // server fails. Used by both the foreground launcher and the Windows
 // Service handler.
-func runServe(ctx context.Context, addr string) error {
+//
+// If federatedAddr is non-empty, a second mTLS listener is started in
+// parallel that exposes the read-only tool subset to peer mnemo
+// instances (🎯T15.3). An empty federatedAddr disables federation
+// entirely; the daemon makes no outbound peer calls and accepts no
+// inbound mTLS connections.
+func runServe(ctx context.Context, addr, federatedAddr string) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -394,11 +435,29 @@ func runServe(ctx context.Context, addr string) error {
 
 	slog.Info("mnemo serve starting", "version", version, "addr", addr)
 
-	// Run the HTTP server in a goroutine so we can react to ctx
+	// Run the local HTTP server in a goroutine so we can react to ctx
 	// cancellation (triggered by the Windows Service handler on SCM
 	// Stop, or never triggered in the foreground case).
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Start(addr) }()
+
+	// Optionally start the federated mTLS server in parallel
+	// (🎯T15.3). A startup failure here is non-fatal — we log and
+	// continue serving local clients, so a missing endpoint cert or a
+	// busy federated port doesn't take down the daemon.
+	var fedSrv *http.Server
+	if federatedAddr != "" {
+		mnemoDir, err := endpoint.DefaultDir()
+		if err != nil {
+			slog.Warn("federated listener disabled", "err", err)
+		} else {
+			fedSrv, err = federation.Start(ctx, mnemoDir, federatedAddr, version,
+				tools.NewHandler(resolve))
+			if err != nil {
+				slog.Warn("federated listener disabled", "err", err)
+			}
+		}
+	}
 
 	select {
 	case err := <-errCh:
@@ -410,6 +469,11 @@ func runServe(ctx context.Context, addr string) error {
 		defer cancel()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			slog.Warn("HTTP shutdown error", "err", err)
+		}
+		if fedSrv != nil {
+			if err := fedSrv.Shutdown(shutdownCtx); err != nil {
+				slog.Warn("federated HTTP shutdown error", "err", err)
+			}
 		}
 		return nil
 	}

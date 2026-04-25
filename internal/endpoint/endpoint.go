@@ -25,6 +25,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -132,6 +133,70 @@ func Load(mnemoDir string) (*Endpoint, error) {
 		PeerNames:    names,
 		EndpointDir:  epDir,
 		PeersDir:     peersDir,
+	}, nil
+}
+
+// TLSCertificate returns the daemon's identity as a tls.Certificate,
+// reusing the in-memory PEM bytes loaded by Load. Suitable for both
+// server-side and client-side mTLS handshakes.
+func (e *Endpoint) TLSCertificate() (tls.Certificate, error) {
+	cert, err := tls.X509KeyPair(e.CertPEM, e.KeyPEM)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("build tls.Certificate: %w", err)
+	}
+	return cert, nil
+}
+
+// ServerTLSConfig returns a tls.Config wired for mTLS as the server:
+// the daemon presents its own cert as identity, and clients must
+// present a cert that chains to one in the trusted-peer pool.
+func (e *Endpoint) ServerTLSConfig() (*tls.Config, error) {
+	cert, err := e.TLSCertificate()
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    e.TrustedPeers,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
+
+// ClientTLSConfig returns a tls.Config wired for mTLS as the client.
+//
+// The daemon presents its own cert as identity. The server it dials
+// is authenticated by *cert pinning*: the server's cert must verify
+// against the trusted-peer pool, but no hostname/SAN check is run.
+// This matches mnemo's federation trust model — each peer's exact
+// cert is hand-placed under ~/.mnemo/peers/ — so trust is per
+// key-holder, not per DNS name. Hostname verification would just
+// force operators to keep cert SANs in lockstep with the URL host
+// they happen to dial, which is a chronic source of breakage and
+// adds nothing security-wise once you already trust the cert.
+func (e *Endpoint) ClientTLSConfig() (*tls.Config, error) {
+	cert, err := e.TLSCertificate()
+	if err != nil {
+		return nil, err
+	}
+	pool := e.TrustedPeers
+	return &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true, // hostname check disabled; pinning below is the verification.
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("server presented no certificate")
+			}
+			peer, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("parse server cert: %w", err)
+			}
+			if _, err := peer.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+				return fmt.Errorf("server cert not in trusted-peer pool: %w", err)
+			}
+			return nil
+		},
 	}, nil
 }
 
