@@ -377,7 +377,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 21
+const schemaVersion = 22
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -437,6 +437,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 			timestamp TEXT,
 			raw BLOB,
 			-- Virtual columns for high-query entry-level fields.
+			uuid TEXT GENERATED ALWAYS AS (COALESCE(raw->>'$.uuid', raw->>'$.messageId')),
 			model TEXT GENERATED ALWAYS AS (raw->>'$.message.model'),
 			stop_reason TEXT GENERATED ALWAYS AS (raw->>'$.message.stop_reason'),
 			input_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.input_tokens')),
@@ -771,6 +772,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 	// Create indexes.
 	_, err = db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_session_uuid ON entries(session_id, uuid) WHERE uuid IS NOT NULL;
 		CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project);
 		CREATE INDEX IF NOT EXISTS idx_entries_type ON entries(type);
 		CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
@@ -3270,7 +3272,7 @@ func (s *Store) IngestAll() error {
 }
 
 const (
-	entryInsertSQL = `INSERT INTO entries
+	entryInsertSQL = `INSERT OR IGNORE INTO entries
 		(session_id, project, type, timestamp, raw)
 		VALUES (?, ?, ?, ?, jsonb(?))`
 	messageInsertSQL = `INSERT INTO messages
@@ -3366,6 +3368,8 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				"eta", eta.Round(time.Second))
 		}
 		// Insert all raw entries and build entryIdx→entryID map.
+		// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
+		// only record the entry ID when a row was actually inserted.
 		entryIDs := make(map[int]int64, len(pf.entries))
 		for i, e := range pf.entries {
 			result, err := ws.entryStmt.Exec(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
@@ -3373,18 +3377,25 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
 				continue
 			}
-			if id, err := result.LastInsertId(); err == nil {
-				entryIDs[i] = id
+			n, _ := result.RowsAffected()
+			if n > 0 {
+				if id, err := result.LastInsertId(); err == nil {
+					entryIDs[i] = id
+				}
 			}
 		}
 
 		// Insert content block messages linked to their entries.
+		// Skip messages whose entry was a duplicate (INSERT OR IGNORE, entryID == 0).
 		for _, m := range pf.messages {
+			entryID := entryIDs[m.entryIdx]
+			if entryID == 0 {
+				continue // entry was duplicate — skip associated messages
+			}
 			var toolInput any
 			if m.toolInput != nil {
 				toolInput = string(m.toolInput)
 			}
-			entryID := entryIDs[m.entryIdx]
 			ws.msgStmt.Exec(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 				m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
 
@@ -5571,14 +5582,19 @@ func (s *Store) ingestFile(path string) error {
 		}
 
 		// Insert every JSONL line into entries table.
+		// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
+		// only record the entry ID when a row was actually inserted.
 		var entryID int64
 		result, entryErr := ws.entryStmt.Exec(sessionID, project, entry.Type, ts, string(line))
 		if entryErr == nil {
-			entryID, _ = result.LastInsertId()
+			if n, _ := result.RowsAffected(); n > 0 {
+				entryID, _ = result.LastInsertId()
+			}
 		}
 
 		// Only extract content blocks for user/assistant messages.
-		if entry.Type != "user" && entry.Type != "assistant" {
+		// Skip if the entry was a duplicate (INSERT OR IGNORE, entryID == 0).
+		if entry.Type != "user" && entry.Type != "assistant" || entryID == 0 {
 			goto yieldCheck
 		}
 
