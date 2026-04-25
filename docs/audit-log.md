@@ -183,7 +183,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-25 — /release v0.28.0
 
-- **Commit**: `pending`
+- **Commit**: `7e280ed`
 - **Outcome**: Released v0.28.0. New `mnemo diagnose` subcommand —
   manual single-screen health report covering nine dimensions:
   (1) daemon process (PID, listening port, inherited PATH from
