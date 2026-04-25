@@ -89,11 +89,11 @@ X / other Windows-on-ARM devices — and double-click it. The
 installer:
 
 - copies `mnemo.exe` to `C:\Program Files\mnemo\`,
-- registers mnemo as a per-user Scheduled Task that starts
-  automatically at logon and runs in your session (not as a
-  LocalSystem service),
-- patches `%USERPROFILE%\.claude.json` so Claude Code picks up mnemo
-  on its next session,
+- registers mnemo as a Windows Service (auto-start on boot,
+  restart-on-failure, survives logoff / battery / sleep),
+- patches `%USERPROFILE%\.claude.json` with an MCP URL that includes
+  `?user=<your username>` so the service routes requests to your
+  home directory correctly,
 - shows up in **Add/Remove Programs** as `mnemo` for a clean uninstall.
 
 No terminal required. Restart your Claude Code session after install.
@@ -122,10 +122,12 @@ on Windows; transcript indexing and all query tools work identically.
 brew services start mnemo       # macOS / Linuxbrew
 ```
 
-On Windows the installer already registers mnemo as a per-user
-Scheduled Task (`schtasks /query /tn mnemo` to inspect, Task
-Scheduler to manage). The task runs mnemo in your logon session so
-it indexes the transcripts under `%USERPROFILE%\.claude\projects\`.
+On Windows the installer registers mnemo as a Windows Service
+(`sc query mnemo` to inspect, services.msc to manage). The service
+runs as LocalSystem and routes each request to the right user's
+home based on the `?user=<name>` query parameter on the MCP URL —
+written into `%USERPROFILE%\.claude.json` automatically by the
+installer.
 
 Logs on macOS: `$(brew --prefix)/var/log/mnemo.log`.
 

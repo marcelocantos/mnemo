@@ -76,34 +76,39 @@ Source: "{#SourceDir}\mnemo.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-; Register the per-user Scheduled Task that runs mnemo at logon.
-; `runasoriginaluser` is critical: the task must be registered for
-; the real user's account (not the installer's elevated admin
-; context), otherwise the task would run in the wrong user profile
-; and os.UserHomeDir() would point at the wrong ~/.claude/projects/.
-; install-agent also cleans up any v0.22.0-era Windows Service of
-; the same name, so upgrading in place works.
-Filename: "{app}\mnemo.exe"; Parameters: "install-agent"; \
-  StatusMsg: "Registering mnemo user agent..."; \
-  Flags: runhidden waituntilterminated runasoriginaluser
+; Install the mnemo Windows Service (elevated — default installer
+; context). install-service also tears down any legacy v0.23/v0.24
+; Scheduled Task of the same name so upgrades are clean.
+Filename: "{app}\mnemo.exe"; Parameters: "install-service"; \
+  StatusMsg: "Installing mnemo Windows Service..."; \
+  Flags: runhidden waituntilterminated
 
-; MCP registration (also as the original user, so the right
-; ~/.claude.json is patched).
+; Start the service immediately so the user does not need to
+; reboot. Tolerate failure (already-running on upgrade).
+Filename: "{sys}\net.exe"; Parameters: "start mnemo"; \
+  StatusMsg: "Starting mnemo service..."; \
+  Flags: runhidden waituntilterminated
+
+; MCP registration (as the original user so the right
+; ~/.claude.json is patched). The default URL embeds
+; ?user=<current-user> so the daemon's per-user Registry resolves
+; to the right home — critical because the service itself runs as
+; LocalSystem and has no user identity of its own.
 Filename: "{app}\mnemo.exe"; Parameters: "register-mcp"; \
   StatusMsg: "Registering mnemo with Claude Code..."; \
   Flags: runhidden waituntilterminated runasoriginaluser
 
 [UninstallRun]
-; Remove the Scheduled Task (and any v0.22.0-era Service of the same
-; name). We deliberately DO NOT invoke `mnemo unregister-mcp` at
-; uninstall: Inno Setup's [UninstallRun] section does not support
+; Stop and remove the Windows Service (also tears down any legacy
+; Scheduled Task). We deliberately DO NOT invoke `mnemo unregister-mcp`
+; at uninstall: Inno Setup's [UninstallRun] section does not support
 ; the `runasoriginaluser` flag, so the command would run as the
 ; elevated uninstaller account and patch the wrong ~/.claude.json.
 ; The stale entry in the real user's config is harmless — Claude
 ; Code will fail to connect and move on. Users who want a clean
 ; config can run `mnemo unregister-mcp` themselves before
-; uninstalling, or delete the mnemo entry by hand afterwards.
-Filename: "{app}\mnemo.exe"; Parameters: "uninstall-agent"; \
+; uninstalling.
+Filename: "{app}\mnemo.exe"; Parameters: "uninstall-service"; \
   Flags: runhidden waituntilterminated; \
   RunOnceId: "MnemoUninstallService"
 

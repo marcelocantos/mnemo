@@ -24,6 +24,7 @@ type Backend interface {
 	SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error)
 	SearchPlans(query string, repo string, limit int) ([]PlanInfo, error)
 	SearchDocs(query string, repo string, kind string, limit int) ([]DocInfo, error)
+	SearchSynthesis(query string, taxonomy string, repo string, limit int) ([]DocInfo, error)
 	WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error)
 	Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error)
 	SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error)

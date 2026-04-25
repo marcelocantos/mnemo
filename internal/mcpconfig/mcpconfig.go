@@ -22,10 +22,23 @@ import (
 	"path/filepath"
 )
 
-// DefaultURL is the HTTP MCP endpoint used by the brew-managed and
-// Windows-Service-managed daemons. Must stay aligned with defaultAddr
-// in main.go.
+// DefaultURL is the HTTP MCP endpoint used when no user identity is
+// available. Most callers should prefer URLForUser, which embeds an
+// explicit `?user=<name>` so the daemon's per-user Registry resolves
+// to the right home directory.
 const DefaultURL = "http://localhost:19419/mcp"
+
+// URLForUser returns the MCP endpoint with `?user=<username>`
+// appended, suitable for writing into ~/.claude.json. The caller
+// resolves the username (typically the OS current user) before
+// calling. The daemon's HTTPContextFunc strips the parameter into a
+// per-request ctx value used by the Registry.
+func URLForUser(username string) string {
+	if username == "" {
+		return DefaultURL
+	}
+	return DefaultURL + "?user=" + username
+}
 
 // ConfigPath returns the Claude Code user config file path.
 // On every supported platform this is ~/.claude.json.

@@ -181,6 +181,36 @@ maintenance activities. Append-only — newest entries at the bottom.
   cutting the real tag, per the new release-workflow-touch signal
   in the /release skill. Homebrew formula updated.
 
+## 2026-04-25 — /release v0.25.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.25.0. Major architectural shift: the
+  daemon now routes every MCP request to a per-user Store via a
+  new `internal/registry/` package, keyed by a `?user=<name>` query
+  parameter on the MCP URL. First request for each user lazily
+  creates that user's Store and per-user background workers
+  (ingest, watcher, compactor, CI poll); `Registry.Close` drains
+  them on shutdown. Tools package refactored: `Handler` holds a
+  resolver injected by main; per-call `callHandler` (built inside
+  `Handler.Call`) owns the resolved `store.Backend` for one
+  invocation — 31 method receivers moved from `*Handler` to
+  `*callHandler`, `mnemo_self` now reads its session ID from
+  `h.cc`. HTTPContextFunc wired on the StreamableHTTPServer pulls
+  `?user=<name>` off the URL into a ctx value consumed by
+  RegisterTools. New `internal/store/homedir.go` resolves
+  username → home directory (via `os/user.Lookup` on all platforms);
+  `DefaultUsername()` returns `ErrNoDefaultUser` on Windows
+  Services so ambiguous requests fail loudly rather than silently
+  indexing LocalSystem's profile. Replaces the v0.23.0 Scheduled
+  Task (died overnight on battery/sleep) and v0.24.0
+  `-H=windowsgui` workaround. `service_windows.go` restored with
+  install-service/uninstall-service (plus legacy Scheduled Task
+  cleanup for in-place upgrades); `agent_*.go` removed. The
+  installer's `register-mcp` step now writes an MCP URL with
+  `?user=<current-user>` so the daemon can route correctly from
+  the first call. Will be validated via a v0.25.0-rc.1 prerelease
+  per the release-workflow-touch signal. Homebrew formula updated.
+
 ## 2026-04-22 — /release v0.24.0
 
 - **Commit**: `46126f6`

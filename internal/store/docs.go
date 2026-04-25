@@ -18,7 +18,10 @@ import (
 	"unicode/utf8"
 )
 
-// DocInfo is a single indexed documentation file.
+// DocInfo is a single indexed documentation file. Synthesis-specific
+// fields (Taxonomy, DocDate, DocStatus, DocTarget, DocSource) are
+// populated when the file_path matches the synthesis-doc layout (see
+// classifyTaxonomy); otherwise they are empty strings.
 type DocInfo struct {
 	ID          int64  `json:"id"`
 	Repo        string `json:"repo"`
@@ -30,6 +33,11 @@ type DocInfo struct {
 	Size        int64  `json:"size"`
 	MTime       string `json:"mtime"`
 	IndexedAt   string `json:"indexed_at"`
+	Taxonomy    string `json:"taxonomy,omitempty"`
+	DocDate     string `json:"doc_date,omitempty"`
+	DocStatus   string `json:"doc_status,omitempty"`
+	DocTarget   string `json:"doc_target,omitempty"`
+	DocSource   string `json:"doc_source,omitempty"`
 }
 
 // docDirs are the directories (relative to repo root) searched for documentation.
@@ -379,9 +387,19 @@ func (s *Store) ingestDocFileLocked(path, repo string) (indexed, skipped int) {
 	now := time.Now().Format(time.RFC3339)
 	mtime := fi.ModTime().Format(time.RFC3339)
 
+	// Synthesis-doc metadata: taxonomy inferred from path, inline fields
+	// parsed from the first lines of the content. Non-matching paths get
+	// empty strings and are unaffected by mnemo_synthesis queries.
+	taxonomy, _ := classifyTaxonomy(path)
+	var meta inlineMetadata
+	if taxonomy != "" && ext == ".md" {
+		meta = parseInlineMetadata(content)
+	}
+
 	_, err = s.db.Exec(`
-		INSERT INTO docs (repo, file_path, kind, title, content, content_hash, size, mtime, indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
+			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
 			repo         = excluded.repo,
 			kind         = excluded.kind,
@@ -390,8 +408,14 @@ func (s *Store) ingestDocFileLocked(path, repo string) (indexed, skipped int) {
 			content_hash = excluded.content_hash,
 			size         = excluded.size,
 			mtime        = excluded.mtime,
-			indexed_at   = excluded.indexed_at
-	`, repo, path, kind, title, content, hash, fi.Size(), mtime, now)
+			indexed_at   = excluded.indexed_at,
+			taxonomy     = excluded.taxonomy,
+			doc_date     = excluded.doc_date,
+			doc_status   = excluded.doc_status,
+			doc_target   = excluded.doc_target,
+			doc_source   = excluded.doc_source
+	`, repo, path, kind, title, content, hash, fi.Size(), mtime, now,
+		taxonomy, meta.Date, meta.Status, meta.Target, meta.Source)
 	if err != nil {
 		slog.Error("insert doc failed", "file", path, "err", err)
 		return
