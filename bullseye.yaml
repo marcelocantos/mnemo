@@ -986,7 +986,7 @@ targets:
     achieved: 2026-04-26
   T36:
     name: A design exists for mnemo as a team-shared index — contributors push their local sessions to a central mnemo per repo/org so a newcomer can pick up an ongoing program of work without personal archaeology
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1014,6 +1014,7 @@ targets:
     - research
     origin: user 2026-04-25 — "think about mnemo for teams"
     discovered: 2026-04-25
+    achieved: 2026-04-26
   T37:
     name: The compactor's claudia.Task subprocess can find and execute the Claude CLI when mnemo is launched by launchd
     status: achieved
