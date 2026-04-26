@@ -366,7 +366,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-26 — /release v0.31.0
 
-- **Commit**: `pending`
+- **Commit**: `a0483ba`
 - **Outcome**: Released v0.31.0. Two-target follow-up to v0.30.0:
   🎯T40 (mnemo_repos returns CLAUDE.md first-paragraph summary
   + last-commit date — at-a-glance project view sufficient to
