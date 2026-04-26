@@ -395,7 +395,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-26 — /release v0.32.0
 
-- **Commit**: `pending`
+- **Commit**: `e8a2063`
 - **Outcome**: Released v0.32.0. Two-commit reliability/test
   release. **MCP keepalive fix** (#64): the local streamable-HTTP
   MCP server (`:19419`) and the federated mTLS endpoint (`:19420`)
