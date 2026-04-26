@@ -766,7 +766,14 @@ func (h *callHandler) repos(args map[string]any) (string, bool, error) {
 		fmt.Fprintf(&b, "%-45s  %4d sessions  %s %s  %s\n",
 			r.Repo, r.Sessions, dateLabel, dateCol, r.Path)
 		if r.Summary != "" {
-			fmt.Fprintf(&b, "    %s\n", r.Summary)
+			marker := ""
+			switch r.SummaryVerdict {
+			case "stale":
+				marker = "  [stale, reviewed " + r.SummaryReviewedAt + "]"
+			case "rewritten":
+				marker = "  [needs rewrite, reviewed " + r.SummaryReviewedAt + "]"
+			}
+			fmt.Fprintf(&b, "    %s%s\n", r.Summary, marker)
 		}
 	}
 	return b.String(), false, nil
