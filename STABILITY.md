@@ -9,7 +9,29 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.30.0.
+Snapshot as of v0.31.0.
+
+**v0.31.0 note**: Two-target follow-up to v0.30.0. **`mnemo_repos`
+gains four new per-repo fields** (🎯T40): `Summary` (first
+non-blank, non-heading sentence of the repo's root CLAUDE.md, capped
+at 120 chars), `LastCommit` (MAX commit_date from indexed
+git_commits, second precision), `SummaryVerdict` (latest LLM-review
+verdict — see below), `SummaryReviewedAt` (timestamp of that
+verdict). Output is now sufficient to replace an externally
+maintained `active-projects.md` for the at-a-glance scan; the tool
+description calls out this use case. **New background reviewer
+worker** (🎯T41): per-user goroutine, ticks every 10 minutes with
+60s startup delay, scans every repo with an indexed CLAUDE.md, and
+when a cheap-signal trigger fires (≥500 entries since last review,
+OR ≥50 entries AND ≥24h since last review) invokes `claudia.Task`
+to compare the existing summary against recent activity. Verdict is
+one of `current` / `stale` / `rewritten`, recorded in the new
+`claude_md_reviews` table with optional `proposed_summary` /
+`proposed_claude_md`. Schema bump 22 → **23**. Nothing
+auto-applies; `mnemo_repos` annotates summaries with `[stale,
+reviewed <ts>]` or `[needs rewrite, reviewed <ts>]` markers.
+**Stability**: Fluid — trigger thresholds, verdict vocabulary, and
+the marker rendering may evolve before 1.0.
 
 **v0.30.0 note**: Eight targets shipped in parallel. Four new MCP
 tools — `mnemo_session_structure(session_id)` (🎯T28, structural

@@ -363,3 +363,32 @@ maintenance activities. Append-only — newest entries at the bottom.
   predictable conflicts at `Definitions()` in `internal/tools/tools.go`
   (T28-T31) and at `internal/compact/watcher.go` (T37+T38), all
   resolved manually. Homebrew formula updated.
+
+## 2026-04-26 — /release v0.31.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.31.0. Two-target follow-up to v0.30.0:
+  🎯T40 (mnemo_repos returns CLAUDE.md first-paragraph summary
+  + last-commit date — at-a-glance project view sufficient to
+  replace an externally maintained active-projects.md, summaries
+  auto-refresh on CLAUDE.md re-index) and 🎯T41 (background
+  reviewer worker that ticks every 10 minutes per user, gates on
+  a cheap signal — entries since last review crossing high
+  threshold of 500 OR low threshold of 50 with ≥24h age — and
+  on trigger invokes claudia.Task to compare the existing
+  summary against recent activity, recording a verdict of
+  current/stale/rewritten plus optional proposed rewrites in
+  the new claude_md_reviews table; nothing auto-applies, only
+  surfaces via mnemo_repos as `[stale, reviewed <ts>]` markers).
+  Schema bump 22 → 23 for the reviews table. New internal
+  packages: internal/reviewer/ (worker + LLM bridge) and
+  internal/storetest/ (cross-package fixture helpers). One
+  trivial gofmt fix on internal/store/store.go bundled in.
+  Targets housekeeping: 🎯T39 raised (Homebrew formula's
+  `serve` arg is a phantom subcommand), 🎯T42 set aside
+  (cross-session message bus design didn't fit the actual
+  cross-repo agent coordination use case — Claude Code agents
+  are turn-driven, not event-driven, and pull-based bus alone
+  can't deliver real-time wakeup), 🎯T43 raised (review-worker
+  scale hardening for when multi-user / cold-start cost matters).
+  Homebrew formula updated.

@@ -1144,9 +1144,10 @@ targets:
     achieved: 2026-04-26
   T42:
     name: mnemo provides a cross-session message bus for Claude Code agents
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    set_aside_reason: 'Won''t fix — wrong shape for the actual use case. Acceptance was a pull-based message bus assuming long-lived listener sessions. Real use case is cross-repo agent coordination ("A finishes its bit, B resumes") which Claude Code agents can''t satisfy via pull (no event loop between turns) or via RemoteTrigger composition (RemoteTrigger spawns sessions on Anthropic''s hosted infrastructure, which can''t reach localhost mnemo without the federated mTLS endpoint AND can''t push back to local sessions either). PR #59 was opened, then closed during the design discussion. Retired-then-set-aside because the original retire was premature: the work landed on a feature branch that we then killed before merging, so no production change. If a future design surfaces a primitive that genuinely fits the coordination use case, raise it as a fresh target rather than reviving this one.'
     acceptance:
     - mnemo exposes mnemo_message_post(topic, body, reply_to?) — posts a message to a topic
     - mnemo exposes mnemo_message_recv(topic, since?, mark_read?) — pulls messages from a topic, optionally marking read
