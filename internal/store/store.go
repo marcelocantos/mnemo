@@ -2831,6 +2831,109 @@ func (s *Store) SearchDecisions(query string, repo string, days int, limit int) 
 	return results, nil
 }
 
+// ReworkAttempt is one compaction span that touched a given target,
+// indicating a prior work or rework cycle. Returned by ReworkHistory.
+type ReworkAttempt struct {
+	SessionID   string `json:"session_id"`
+	GeneratedAt string `json:"generated_at"`
+	Repo        string `json:"repo,omitempty"`
+	// Progress is the targets_progressed note for this target, if present.
+	Progress string `json:"progress,omitempty"`
+	// Summary is the compaction's prose abstract.
+	Summary string `json:"summary,omitempty"`
+	// OpenThreads lists unresolved items recorded in the span.
+	OpenThreads []string `json:"open_threads,omitempty"`
+}
+
+// ReworkHistory returns compaction spans that actively worked on targetID,
+// ordered most-recent first. A span qualifies when targetID appears in
+// targets_active or targets_progressed. Optional repo filter is a substring
+// match against session_meta.repo.
+func (s *Store) ReworkHistory(targetID string, repo string, limit int) ([]ReworkAttempt, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	// Use a LIKE pre-filter on payload_json for speed (target IDs are
+	// short alphanumeric tokens), then verify membership precisely via
+	// json_each in a CASE expression to avoid false positives from
+	// substring collisions (e.g. "T1" matching "T10").
+	like := `%"` + targetID + `"%`
+	q := `
+		SELECT c.session_id, c.generated_at, COALESCE(sm.repo, ''), c.payload_json, c.summary
+		FROM compactions c
+		LEFT JOIN session_meta sm ON sm.session_id = c.session_id
+		WHERE c.payload_json LIKE ?`
+	args := []any{like}
+	if repo != "" {
+		q += ` AND sm.repo LIKE ?`
+		args = append(args, "%"+repo+"%")
+	}
+	q += ` ORDER BY c.generated_at DESC, c.id DESC LIMIT ?`
+	args = append(args, limit*5) // over-fetch to allow post-filter
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rework history query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ReworkAttempt
+	for rows.Next() && len(out) < limit {
+		var sessionID, generatedAt, repoVal, payloadJSON, summary string
+		if err := rows.Scan(&sessionID, &generatedAt, &repoVal, &payloadJSON, &summary); err != nil {
+			continue
+		}
+		// Decode payload to verify precise membership and extract fields.
+		var payload struct {
+			TargetsActive     []string          `json:"targets_active"`
+			Targets           []string          `json:"targets"`
+			TargetsProgressed map[string]string `json:"targets_progressed"`
+			OpenThreads       []string          `json:"open_threads"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			continue
+		}
+		active := payload.TargetsActive
+		if len(active) == 0 {
+			active = payload.Targets
+		}
+		found := false
+		for _, id := range active {
+			if id == targetID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if _, ok := payload.TargetsProgressed[targetID]; ok {
+				found = true
+			}
+		}
+		if !found {
+			continue
+		}
+		attempt := ReworkAttempt{
+			SessionID:   sessionID,
+			GeneratedAt: generatedAt,
+			Repo:        repoVal,
+			Summary:     summary,
+			OpenThreads: payload.OpenThreads,
+		}
+		if note, ok := payload.TargetsProgressed[targetID]; ok {
+			attempt.Progress = note
+		}
+		out = append(out, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rework history scan: %w", err)
+	}
+	return out, nil
+}
+
 // proposalPhrases are patterns that indicate an assistant is proposing a course of action.
 var proposalPhrases = []string{
 	"i'll ", "i will ", "let me ", "i propose ", "i suggest ", "should we ",

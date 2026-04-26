@@ -56,4 +56,5 @@ type Backend interface {
 	InferChainHeuristic(sessionID string, limit int) ([]ChainCandidate, error)
 	SessionStructure(sessionID string) (*SessionStructure, error)
 	LocateUUID(prefix string, contextBefore, contextAfter int) ([]UUIDMatch, error)
+	ReworkHistory(targetID string, repo string, limit int) ([]ReworkAttempt, error)
 }
