@@ -57,4 +57,8 @@ type Backend interface {
 	SessionStructure(sessionID string) (*SessionStructure, error)
 	LocateUUID(prefix string, contextBefore, contextAfter int) ([]UUIDMatch, error)
 	ReworkHistory(targetID string, repo string, limit int) ([]ReworkAttempt, error)
+	PostBusMessage(topic, body, postedBy string, replyTo *int64) (int64, error)
+	RecvBusMessages(topic, since string, markRead bool, limit int) ([]BusMessage, error)
+	ListBusMessages(topic string, unreadOnly bool, limit int) ([]BusMessage, error)
+	ListBusTopics() ([]BusTopic, error)
 }

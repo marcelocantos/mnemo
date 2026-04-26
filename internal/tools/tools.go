@@ -438,6 +438,44 @@ Returns a structured result with session_id, entry_id, entry type, timestamp, ma
 			mcp.WithNumber("context_before", mcp.Description("Number of messages before the entry to include (default 3)")),
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after the entry to include (default 3)")),
 		),
+		mcp.NewTool("mnemo_message_post",
+			mcp.WithDescription(`Post a message to a topic on the cross-session bus (🎯T42). Returns the new message id.
+
+Topics:
+- Freeform name: "deploy-watch", "team-broadcast", etc.
+- Session-derived addressing (resolved at write/read time):
+  - "session:<uuid>"  — exact session
+  - "session:repo=NAME"  — most-recently-active session matching that repo
+  - "session:latest@/path"  — most-recently-active session whose cwd is under /path
+
+Use this when one Claude Code session needs to leave a note for another session — typically paired with mnemo_message_recv via a UserPromptSubmit hook, a polite poll, or a /loop watcher.`),
+			mcp.WithString("topic", mcp.Required(), mcp.Description("Topic — freeform or session-derived (see description)")),
+			mcp.WithString("body", mcp.Required(), mcp.Description("Message body (free text)")),
+			mcp.WithString("posted_by", mcp.Description("Optional session_id of the poster")),
+			mcp.WithNumber("reply_to", mcp.Description("Optional id of an earlier message this one replies to")),
+		),
+		mcp.NewTool("mnemo_message_recv",
+			mcp.WithDescription(`Pull messages from a topic on the cross-session bus, optionally marking them read. Returns messages in oldest-first order.
+
+The since parameter is exclusive — pass the posted_at timestamp from the most recent prior recv to get only newer messages (cursor-style polling). Empty since returns all messages on the topic.
+
+mark_read defaults to true: once a message is consumed via recv, its read_at is set to "now" and it won't appear in subsequent unread-only filters. To browse without consuming, use mnemo_message_list instead.`),
+			mcp.WithString("topic", mcp.Required(), mcp.Description("Topic — same forms as mnemo_message_post")),
+			mcp.WithString("since", mcp.Description("RFC3339 timestamp, exclusive lower bound on posted_at")),
+			mcp.WithBoolean("mark_read", mcp.Description("Mark returned messages as read (default true)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 100)")),
+		),
+		mcp.NewTool("mnemo_message_list",
+			mcp.WithDescription(`Browse messages without modifying their read state. Returns newest-first.
+
+Use this for the "what's queued for me?" inspect view. To consume messages (mark them read), use mnemo_message_recv instead.`),
+			mcp.WithString("topic", mcp.Description("Topic to filter to. Omit to list across every topic.")),
+			mcp.WithBoolean("unread_only", mcp.Description("Filter to messages where read_at is NULL (default false)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 100)")),
+		),
+		mcp.NewTool("mnemo_topic_list",
+			mcp.WithDescription(`List active topics on the cross-session bus with message counts, unread counts, and most-recent posted_at. Sorted by recency.`),
+		),
 		mcp.NewTool("mnemo_images",
 			mcp.WithDescription(`Search images captured from Claude Code transcripts. Three search modes: (1) text (default) — FTS5 over AI descriptions and OCR text; (2) semantic — embed the query text and find images by meaning using CLIP k-NN (requires embed backend); (3) similar — find visually similar images given an image ID. Use 'text' to find images by paraphrase, 'semantic' for conceptual matches like "architecture diagram", and 'similar' to browse related screenshots.`),
 			mcp.WithString("query", mcp.Description("Search query. Used in 'text' and 'semantic' modes. Omit to list recent (text mode).")),
@@ -568,6 +606,14 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.toolResult(args)
 	case "mnemo_rework_history":
 		return ch.reworkHistory(args)
+	case "mnemo_message_post":
+		return ch.messagePost(args)
+	case "mnemo_message_recv":
+		return ch.messageRecv(args)
+	case "mnemo_message_list":
+		return ch.messageList(args)
+	case "mnemo_topic_list":
+		return ch.topicList()
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -2007,4 +2053,81 @@ func (h *callHandler) reworkHistory(args map[string]any) (string, bool, error) {
 		b.WriteByte('\n')
 	}
 	return b.String(), false, nil
+}
+
+func (h *callHandler) messagePost(args map[string]any) (string, bool, error) {
+	topic, _ := args["topic"].(string)
+	body, _ := args["body"].(string)
+	if topic == "" || body == "" {
+		return "topic and body are required", true, nil
+	}
+	postedBy, _ := args["posted_by"].(string)
+	var replyTo *int64
+	if rt, ok := args["reply_to"].(float64); ok && rt > 0 {
+		v := int64(rt)
+		replyTo = &v
+	}
+	id, err := h.mem.PostBusMessage(topic, body, postedBy, replyTo)
+	if err != nil {
+		return fmt.Sprintf("message_post failed: %v", err), true, nil
+	}
+	return fmt.Sprintf("posted id=%d topic=%s", id, topic), false, nil
+}
+
+func (h *callHandler) messageRecv(args map[string]any) (string, bool, error) {
+	topic, _ := args["topic"].(string)
+	if topic == "" {
+		return "topic is required", true, nil
+	}
+	since, _ := args["since"].(string)
+	markRead := true
+	if mr, ok := args["mark_read"].(bool); ok {
+		markRead = mr
+	}
+	limit := 0
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	msgs, err := h.mem.RecvBusMessages(topic, since, markRead, limit)
+	if err != nil {
+		return fmt.Sprintf("message_recv failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(msgs, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) messageList(args map[string]any) (string, bool, error) {
+	topic, _ := args["topic"].(string)
+	unreadOnly := false
+	if u, ok := args["unread_only"].(bool); ok {
+		unreadOnly = u
+	}
+	limit := 0
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	msgs, err := h.mem.ListBusMessages(topic, unreadOnly, limit)
+	if err != nil {
+		return fmt.Sprintf("message_list failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(msgs, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) topicList() (string, bool, error) {
+	topics, err := h.mem.ListBusTopics()
+	if err != nil {
+		return fmt.Sprintf("topic_list failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(topics, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }

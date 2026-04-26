@@ -1144,7 +1144,7 @@ targets:
     achieved: 2026-04-26
   T42:
     name: mnemo provides a cross-session message bus for Claude Code agents
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1167,6 +1167,36 @@ targets:
 
       Forms a sister capability to 🎯T40 (mnemo_repos enrichment) — both extend mnemo's surface to absorb responsibilities currently scattered across other tools or unfilled.
     origin: discovered while exploring whether Claude sessions can message each other's agents — user proposed mnemo as the host since jevons is too heavyweight
+    discovered: 2026-04-26
+    achieved: 2026-04-26
+  T43:
+    name: The CLAUDE.md review worker scales — its per-tick LLM cost is observable, bounded by configured limits, and stays sane on hosts indexing many repos or serving many users
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Each Tick emits a structured log line summarising the pass: repos_scanned, repos_skipped (no CLAUDE.md), repos_triggered, llm_calls_made, llm_calls_failed, total_cost_usd, elapsed.'
+    - A daily/weekly cumulative cost is queryable via mnemo_query against the claude_md_reviews table (or a sibling), so the user can answer 'how much has the reviewer cost me this month?' in one SQL.
+    - A per-Tick budget cap (configurable, default e.g. 10 LLM calls per tick) prevents a cold-start situation (50 repos with no prior review) from firing 50 simultaneous LLM calls. Excess repos are deferred to the next tick.
+    - When the per-user Registry has N users each with M repos, the total LLM call rate is bounded by min(N*M_triggered, global_per_minute_cap) — so a multi-user host (e.g. team-mnemo per 🎯T36) cannot inadvertently fan out into a runaway cost.
+    context: |-
+      Raised 2026-04-26 from the open question at the end of the T41 PR thread. T41 ships a per-user reviewer worker that ticks every 10 minutes and, on trigger, fires an LLM per qualifying repo sequentially within the tick. That works fine on a single-user laptop with 30 indexed repos. It scales badly along two axes:
+
+      1. **Cold start within one user**: a fresh install with N repos and no prior reviews hits the "no prior review + low_threshold" trigger for every repo on the first tick. N parallel-ish LLM calls, all serialised within one tick. For N=30 that's potentially 30 claude -p invocations in sequence — minutes of wall time and tens of cents per tick.
+
+      2. **Multi-user scale (🎯T36 territory)**: the Registry spins up one reviewer goroutine per user. On a team-mnemo host serving 20 contributors, that's 20 reviewer goroutines all ticking, each with their own repo set. The total LLM call rate is unbounded — a busy month could push hundreds of dollars.
+
+      The right shape is: (a) observability first so we can see the actual rate before guessing thresholds, then (b) per-tick caps + global rate limit. Per-tick cap is mechanical — defer excess to next tick. Global rate limit is fancier (semaphore shared across users? token-bucket per host?) — design that part when team-mnemo data motivates it.
+
+      Also worth surfacing the cumulative cost: claude_md_reviews already stores per-row LLM metadata implicitly via the LLMResult — but we'd need to persist cost_usd / prompt_tokens / output_tokens to enable the "how much has this cost me?" query.
+
+      **Sequencing:** independent of T36 (the observability + per-tick cap work standalone). The global rate limit work depends on T36 substance (or any multi-user deployment) to know what to bound.
+    tags:
+    - reviewer
+    - scale
+    - observability
+    - cost-control
+    origin: 'forked-from 🎯T41 — open scale question at PR #58 close'
     discovered: 2026-04-26
   T5:
     name: Self-improving tool discovery

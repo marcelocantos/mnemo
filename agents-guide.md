@@ -466,6 +466,79 @@ Parameters:
 - `context_before` — context messages before the match (default 3)
 - `context_after` — context messages after the match (default 3)
 
+## Cross-session message bus
+
+🎯T42. Sessions can leave each other notes via mnemo's message bus —
+useful for "session A finished the deploy, tell session B" or "ping
+the most recently active session in repo X". Pull-based: there's no
+event loop in Claude Code, so a session can't be interrupted
+mid-turn.
+
+Tools:
+- `mnemo_message_post(topic, body, posted_by?, reply_to?)` — post
+- `mnemo_message_recv(topic, since?, mark_read?, limit?)` — pull (consumes by default)
+- `mnemo_message_list(topic?, unread_only?, limit?)` — browse without consuming
+- `mnemo_topic_list()` — discover active topics
+
+Topics are either freeform names (`deploy-watch`, `team-broadcast`)
+or session-derived addresses that resolve at write/read time:
+
+- `session:<uuid>` — exact session
+- `session:repo=NAME` — most-recently-active session matching that repo
+- `session:latest@/path` — most-recently-active session whose cwd is under /path
+
+Three usage patterns:
+
+1. **Polite poll.** Periodically call `mnemo_message_recv` for your
+   topic. Cheap and simple; latency is your poll interval. Good for
+   scripts.
+
+2. **`UserPromptSubmit` hook (the slick pattern).** A Claude Code
+   hook configured in `~/.claude/settings.json` calls
+   `mnemo_message_recv` on every user prompt and prepends new
+   messages to the user's prompt. Sessions feel each other naturally
+   — when you next type something, any messages waiting for you on
+   `session:<your-uuid>` arrive as part of your prompt context.
+
+   Example hook (settings.json):
+
+   ```json
+   {
+     "hooks": {
+       "UserPromptSubmit": [
+         {
+           "command": "mnemo-bus-prepend"
+         }
+       ]
+     }
+   }
+   ```
+
+   Where `mnemo-bus-prepend` is a small shell wrapper that calls the
+   MCP tool over HTTP and prepends any results to the prompt:
+
+   ```bash
+   #!/usr/bin/env bash
+   # mnemo-bus-prepend — UserPromptSubmit hook
+   set -euo pipefail
+   topic="session:$(cat ~/.claude/session-id 2>/dev/null || echo unknown)"
+   msgs=$(curl -s -X POST http://localhost:19419/mcp \
+       -H 'Content-Type: application/json' \
+       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"mnemo_message_recv\",\"arguments\":{\"topic\":\"$topic\",\"mark_read\":true}}}")
+   if [[ -n "$msgs" && "$msgs" != "[]" ]]; then
+       printf '[mnemo bus]\n%s\n\n' "$msgs"
+   fi
+   cat
+   ```
+
+   (Adjust to your hook contract — `~/.claude/session-id` is
+   placeholder; in practice use `mnemo_self` or env var.)
+
+3. **`/loop` watcher.** Use the `/loop` skill to call
+   `mnemo_message_recv` on a recurring schedule from a sidecar
+   session that just pumps the bus. Useful when you want a dedicated
+   "listener" session.
+
 ## Federation across linked instances
 
 If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped

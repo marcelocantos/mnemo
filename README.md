@@ -188,6 +188,7 @@ mid-session are not picked up.
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_tool_result` | Raw tool-result payload by `(session_id, tool_use_id)` — supports byte offset + truncation |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
+| `mnemo_message_post` / `mnemo_message_recv` / `mnemo_message_list` / `mnemo_topic_list` | Cross-session message bus (🎯T42) — sessions can leave each other notes; topics are freeform or session-derived (`session:repo=NAME`, `session:latest@/path`) |
 
 ### Cross-project knowledge
 

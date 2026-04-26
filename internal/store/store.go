@@ -394,7 +394,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 23
+const schemaVersion = 24
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -674,6 +674,35 @@ func New(dbPath, projectDir string) (*Store, error) {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		-- 🎯T42: cross-session message bus. Distinct from the
+		-- 'messages' table (which holds transcript content); name
+		-- prefix is intentional. Topic is freeform OR a canonical
+		-- session-derived form (session:<uuid>); the resolver maps
+		-- addressing forms (session:repo=X, session:latest@/path)
+		-- onto the canonical form at write/read time.
+		CREATE TABLE IF NOT EXISTS bus_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			topic TEXT NOT NULL,
+			posted_at TEXT NOT NULL,
+			posted_by TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL,
+			-- reply_to: id of another bus_message this one replies
+			-- to. Stored as a plain integer (not FK-enforced) so a
+			-- referenced message can be deleted without cascading
+			-- breakage; the resolver tolerates dangling reply_to.
+			reply_to INTEGER,
+			-- read_at: RFC3339 timestamp when first marked read by
+			-- a recv call with mark_read=true. NULL = unread.
+			-- Reading is destructive in semantics but non-destructive
+			-- in storage: the message persists, only its read flag
+			-- changes.
+			read_at TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_bus_messages_topic
+			ON bus_messages(topic, posted_at);
+		CREATE INDEX IF NOT EXISTS idx_bus_messages_unread
+			ON bus_messages(topic, posted_at) WHERE read_at IS NULL;
+
 		CREATE TABLE IF NOT EXISTS claude_md_reviews (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo TEXT NOT NULL,
