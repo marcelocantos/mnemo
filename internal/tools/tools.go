@@ -165,7 +165,9 @@ Tip: If you find yourself running the same complex query pattern repeatedly, sav
 			mcp.WithString("query", mcp.Required(), mcp.Description("SQL SELECT/WITH query, or sqldeep nested syntax (FROM ... SELECT { ... })")),
 		),
 		mcp.NewTool("mnemo_repos",
-			mcp.WithDescription(`List repositories that have been worked on in Claude Code sessions. Returns repo name, filesystem path, session count, and last activity. Use this to discover repo locations, find related projects, or get an overview of recent work.`),
+			mcp.WithDescription(`List repositories that have been worked on in Claude Code sessions. Returns, per repo: name, filesystem path, session count, last session activity, last git commit date, and a one-line summary derived from the repo's root CLAUDE.md (first non-blank, non-heading sentence, capped at ~120 chars).
+
+This is the canonical at-a-glance "what repos do I have and what is each one about?" view — sufficient to replace an externally-generated active-projects.md or similar overview file. Summaries refresh automatically when CLAUDE.md is re-indexed.`),
 			mcp.WithString("filter", mcp.Description(`Optional filter. Supports: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), path fragment ("/work/github"), or glob ("marcelocantos/sql*"). Omit to list all repos.`)),
 		),
 		mcp.NewTool("mnemo_stats",
@@ -753,8 +755,19 @@ func (h *callHandler) repos(args map[string]any) (string, bool, error) {
 		if len(lastActivity) > 19 {
 			lastActivity = lastActivity[:19]
 		}
-		fmt.Fprintf(&b, "%-45s  %4d sessions  %s  %s\n",
-			r.Repo, r.Sessions, lastActivity, r.Path)
+		// Date column shows last_commit when available (truer signal
+		// for "is this repo alive?"), falling back to last_activity.
+		dateCol := r.LastCommit
+		dateLabel := "commit"
+		if dateCol == "" {
+			dateCol = lastActivity
+			dateLabel = "session"
+		}
+		fmt.Fprintf(&b, "%-45s  %4d sessions  %s %s  %s\n",
+			r.Repo, r.Sessions, dateLabel, dateCol, r.Path)
+		if r.Summary != "" {
+			fmt.Fprintf(&b, "    %s\n", r.Summary)
+		}
 	}
 	return b.String(), false, nil
 }

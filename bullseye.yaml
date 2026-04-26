@@ -1095,7 +1095,7 @@ targets:
     achieved: 2026-04-07
   T40:
     name: mnemo_repos can replace active-projects.md as the at-a-glance project view
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1105,6 +1105,41 @@ targets:
     - Documentation (README or tool description) calls out this use case so future agents discover it instead of re-implementing an external generator
     context: 'active-projects.md is an auto-generated table of all repos that have a CLAUDE.md, sorted by last commit, with a one-line summary per repo pulled from CLAUDE.md. It is the primary ''what repos do I have and what is each one about'' view at session start. mnemo already indexes the underlying data — git commit history per repo, and CLAUDE.md files — but mnemo_repos today returns only name, path, session count, and last session activity. The two missing fields are CLAUDE.md first paragraph (or first line) and last commit date. Closing this gap lets the user retire active-projects.md and its update-active-projects launchd regenerator. How to apply: extend mnemo_repos with optional include_summary and include_last_commit flags that compose the existing indexed data. No new tool surface needed.'
     origin: discovered while pruning ~/think for Obsidian vault merge — active-projects.md flagged as redundant, user asked whether mnemo could close the gap
+    discovered: 2026-04-26
+    achieved: 2026-04-26
+  T41:
+    name: A repo's CLAUDE.md summary stays current — there is a defined pattern for periodically reviewing the first-paragraph summaries that mnemo_repos surfaces, so they don't silently drift away from what the project actually is
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A documented review pattern exists (skill, scheduled agent, or periodic prompt) that compares each repo's CLAUDE.md first-paragraph summary against the repo's actual current shape (recent commits, current README, current code) and flags or rewrites stale ones.
+    - The pattern is discoverable from mnemo's docs (README or agents-guide) so users adopt it instead of reading stale summaries indefinitely.
+    - 'Mechanism for surfacing staleness: either (a) the review skill itself emits a per-repo report of summaries that look stale with proposed rewrites, OR (b) mnemo_repos annotates each summary with an age/staleness signal (e.g. days since CLAUDE.md last touched, OR a ''last-reviewed'' timestamp written into the file).'
+    - The review pattern is bounded — it does not require reading every line of every repo on every run; it uses cheap signals (file mtime, last commit on CLAUDE.md, recent activity in the repo) to gate the expensive LLM review.
+    context: |-
+      Raised 2026-04-26 alongside 🎯T40. T40 makes mnemo_repos surface a one-line summary derived from each repo's CLAUDE.md. That solves the at-a-glance scan but introduces a freshness problem: summaries stop being right the moment the project pivots and CLAUDE.md gets rewritten. Without a review pattern, a stale summary is worse than no summary — it confidently misrepresents the project to every agent that reads it.
+
+      The active-projects.md generator this is replacing handled freshness implicitly: the launchd job re-extracted the summary on every run, so a CLAUDE.md edit propagated automatically within a day. mnemo_repos under T40 either has to do the same (re-extract on every call, cheap because it's already indexed) OR rely on the indexer's update path keeping summaries in sync (CLAUDE.md changes trigger re-indexing → summary auto-refreshes). That covers extraction freshness.
+
+      The harder freshness problem is content drift: CLAUDE.md itself gets stale. The first-paragraph hasn't changed in months but the project has. No automated extraction can catch that. Hence the need for a periodic *human-or-LLM* review pattern.
+
+      Possible shapes for the pattern (the design question):
+      1. **Periodic skill** — `/review-summaries` or similar, run weekly via the `/schedule` infrastructure. For each active repo, compares CLAUDE.md first paragraph against recent commit messages, recent session topics, and the current README; flags repos where the summary looks divergent and proposes a rewrite for user approval.
+      2. **mnemo_repos annotation** — surface a staleness signal per summary (e.g., 'CLAUDE.md unchanged for 90+ days, repo has had 50 commits since' is high-staleness; 'CLAUDE.md updated last week' is low). Agents reading mnemo_repos see the signal and decide whether to trust the summary.
+      3. **In-file convention** — CLAUDE.md gains a 'last-reviewed: YYYY-MM-DD' frontmatter field; mnemo_repos shows the age. A periodic review updates the field after a human/LLM check.
+
+      Cheap-signal gating is important because doing a full LLM review of every repo every week is expensive. The review pattern should only do the expensive comparison for repos where the cheap signals (CLAUDE.md mtime vs repo last commit, recent session activity, etc.) suggest divergence is plausible.
+
+      Sequencing: depends on 🎯T40 (need the summary surface to exist before reviewing it makes sense).
+    depends_on:
+    - T40
+    tags:
+    - mnemo_repos
+    - freshness
+    - claude-md
+    - ops
+    origin: user 2026-04-26 — "we need a pattern to periodically review these summaries and keep them up to date"
     discovered: 2026-04-26
   T5:
     name: Self-improving tool discovery

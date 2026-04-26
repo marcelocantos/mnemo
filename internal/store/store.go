@@ -170,6 +170,16 @@ type RepoInfo struct {
 	Path         string `json:"path"`
 	Sessions     int    `json:"sessions"`
 	LastActivity string `json:"last_activity"`
+	// Summary is the first non-blank, non-heading sentence of the
+	// repo's root CLAUDE.md, capped at ~120 chars. Empty when the
+	// repo has no indexed CLAUDE.md. Auto-refreshes on next ingest
+	// when the file changes.
+	Summary string `json:"summary,omitempty"`
+	// LastCommit is the timestamp of the most recent commit on any
+	// branch indexed for this repo, in the same format as
+	// LastActivity (UTC, second-precision). Empty when git history
+	// hasn't been indexed for this repo.
+	LastCommit string `json:"last_commit,omitempty"`
 }
 
 // RecentActivityInfo summarises recent session activity for a single repo.
@@ -4177,18 +4187,49 @@ func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
 		args = []any{pattern, pattern}
 	}
 
+	// CTE so the subselects below can reference display_repo.
+	// SQLite does not propagate outer-SELECT aliases into inline
+	// subqueries (unlike PostgreSQL), so a flat SELECT with inline
+	// sub-selects against the alias fails with "no such column".
+	//
+	// Inner sub-selects pick:
+	//   - the shortest CLAUDE.md path per repo as the canonical root
+	//     (subdirectory CLAUDE.md files are usually scoped notes,
+	//     not the project summary). LENGTH() ordering is cheap and
+	//     deterministic.
+	//   - MAX(commit_date) per repo for the last-commit signal.
 	q := `
+		WITH base AS (
+			SELECT
+				CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
+				MAX(sm.cwd) AS path,
+				COUNT(DISTINCT sm.session_id) AS sessions,
+				MAX(ss.last_msg) AS last_activity
+			FROM session_meta sm
+			JOIN session_summary ss ON ss.session_id = sm.session_id
+			` + where + `
+			GROUP BY display_repo
+			HAVING display_repo != ''
+		)
 		SELECT
-			CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
-			MAX(sm.cwd) AS path,
-			COUNT(DISTINCT sm.session_id) AS sessions,
-			MAX(ss.last_msg) AS last_activity
-		FROM session_meta sm
-		JOIN session_summary ss ON ss.session_id = sm.session_id
-		` + where + `
-		GROUP BY display_repo
-		HAVING display_repo != ''
-		ORDER BY last_activity DESC
+			base.display_repo,
+			base.path,
+			base.sessions,
+			base.last_activity,
+			(
+				SELECT cc.content
+				FROM claude_configs cc
+				WHERE cc.repo = base.display_repo
+				ORDER BY LENGTH(cc.file_path) ASC
+				LIMIT 1
+			) AS claude_md_content,
+			(
+				SELECT MAX(gc.commit_date)
+				FROM git_commits gc
+				WHERE gc.repo = base.display_repo
+			) AS last_commit
+		FROM base
+		ORDER BY base.last_activity DESC
 	`
 
 	rows, err := s.db.Query(q, args...)
@@ -4200,12 +4241,53 @@ func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
 	var results []RepoInfo
 	for rows.Next() {
 		var r RepoInfo
-		if err := rows.Scan(&r.Repo, &r.Path, &r.Sessions, &r.LastActivity); err != nil {
+		var claudeMD, lastCommit sql.NullString
+		if err := rows.Scan(&r.Repo, &r.Path, &r.Sessions, &r.LastActivity,
+			&claudeMD, &lastCommit); err != nil {
 			continue
+		}
+		if claudeMD.Valid {
+			r.Summary = extractClaudeMDSummary(claudeMD.String)
+		}
+		if lastCommit.Valid {
+			r.LastCommit = lastCommit.String
+			if len(r.LastCommit) > 19 {
+				r.LastCommit = r.LastCommit[:19]
+			}
 		}
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// extractClaudeMDSummary pulls a one-line summary out of CLAUDE.md
+// content: skip leading blank lines and top-level headings, take the
+// first non-blank line of body prose, then the first sentence of that
+// line. Capped at 120 chars so the at-a-glance view stays scannable.
+//
+// This is best-effort prose extraction, not Markdown parsing — bullet
+// lists and code fences are rare as the FIRST body content of a
+// CLAUDE.md, and falling through to "use the first non-empty line"
+// gives a useful answer even on edge cases.
+func extractClaudeMDSummary(content string) string {
+	const maxLen = 120
+	for line := range strings.Lines(content) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// First sentence: split on ". " (period + space) which
+		// catches normal English; fall through to the whole line if
+		// no sentence boundary is found.
+		if idx := strings.Index(line, ". "); idx > 0 && idx < maxLen {
+			line = line[:idx+1]
+		}
+		if len(line) > maxLen {
+			line = line[:maxLen-1] + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 // RecentActivity returns per-repo summaries of session activity within the
