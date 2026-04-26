@@ -1169,6 +1169,58 @@ targets:
       Forms a sister capability to 🎯T40 (mnemo_repos enrichment) — both extend mnemo's surface to absorb responsibilities currently scattered across other tools or unfilled.
     origin: discovered while exploring whether Claude sessions can message each other's agents — user proposed mnemo as the host since jevons is too heavyweight
     discovered: 2026-04-26
+  T43:
+    name: mnemo_usage groups results by session and by 5-hour rate-limit block
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_usage accepts group_by="session" and returns one row per Claude Code session ID with the same token/cost/message columns as the day/model/repo views
+    - mnemo_usage accepts group_by="block" and returns one row per Anthropic 5-hour billing block (boundaries aligned to UTC and matching what /cost and ccusage report)
+    - Both groupings respect the existing model and repo filters
+    - Documented in mnemo's MCP tool descriptions
+    context: Today mnemo_usage groups by day, model, or repo. Two missing dimensions limit it as a real-time signal source for downstream tooling (e.g. a claudia lifecycle broker that wants to throttle when a billing block is nearly exhausted, or attribute cost to a specific session for preemption decisions). The underlying per-message rows already carry session_id and a timestamp, so this is a query-shape extension, not a data-model change. Forked from a claudia broker design discussion 2026-04-26 — see also the sub-day time-window target.
+    tags:
+    - cost
+    - mcp
+    - usage
+    origin: forked-from claudia broker design discussion 2026-04-26
+    discovered: 2026-04-26
+  T44:
+    name: mnemo_usage accepts sub-day time windows for real-time consumers
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_usage accepts since=<RFC3339 timestamp> and until=<RFC3339 timestamp> as an alternative to days
+    - When since/until are supplied, the response covers exactly that window with the requested grouping and is freshness-bounded by the indexer lag (which the response surfaces as a field)
+    - A consumer polling once per minute over a 1-minute window returns within 250ms on a warm index
+    - days, since/until, and group_by interact correctly (since/until override days when both supplied)
+    context: A claudia lifecycle broker (or any real-time spend dashboard) needs minute-grained spend data, not "last N days". The current days parameter floors to whole days from now, so it can't answer "how much have we spent in the last 60 seconds?". Adding since/until plus a freshness field keeps the API simple while unblocking realtime use. Forked from a claudia broker design discussion 2026-04-26.
+    tags:
+    - cost
+    - mcp
+    - usage
+    - realtime
+    origin: forked-from claudia broker design discussion 2026-04-26
+    discovered: 2026-04-26
+  T45:
+    name: mnemo cost estimates are reconciled against Anthropic's Cost Admin API
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A background loop polls the Anthropic /v1/organizations/cost_report endpoint at most once per minute (the documented sustained polling rate) and stores the authoritative per-day USD cost
+    - mnemo_usage prefers the reconciled Anthropic figure over its locally-computed estimate when available, and surfaces a source field ("reconciled" | "estimated" | "mixed") on each row
+    - 'Reconciliation degrades gracefully when no admin key is configured: rows continue to report estimated costs with source="estimated" and a one-time warning is logged'
+    - 'Configuration: ANTHROPIC_ADMIN_API_KEY env var (or equivalent config field), absent by default'
+    context: mnemo currently computes cost_usd from a hardcoded price table per model family (Sonnet fallback for unknowns). That's fine today but drifts as Anthropic changes pricing or adds tiers, and it doesn't see workbench/non-Claude-Code usage that hits the same account. Anthropic exposes /v1/organizations/cost_report (USD, daily, ~5min freshness) which is ground truth for the whole org. Reconciling against it makes mnemo's cost view authoritative without losing the offline fallback. Forked from a claudia broker design discussion 2026-04-26 — the broker wants to trust mnemo as its real-time spend source rather than building its own reconciler.
+    tags:
+    - cost
+    - anthropic-api
+    - usage
+    origin: forked-from claudia broker design discussion 2026-04-26
+    discovered: 2026-04-26
   T5:
     name: Self-improving tool discovery
     status: achieved
