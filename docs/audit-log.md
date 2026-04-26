@@ -392,3 +392,33 @@ maintenance activities. Append-only — newest entries at the bottom.
   can't deliver real-time wakeup), 🎯T43 raised (review-worker
   scale hardening for when multi-user / cold-start cost matters).
   Homebrew formula updated.
+
+## 2026-04-26 — /release v0.32.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.32.0. Two-commit reliability/test
+  release. **MCP keepalive fix** (#64): the local streamable-HTTP
+  MCP server (`:19419`) and the federated mTLS endpoint (`:19420`)
+  now pass `server.WithHeartbeatInterval(30*time.Second)` to
+  `mark3labs/mcp-go`'s `NewStreamableHTTPServer`, sending a `ping`
+  JSON-RPC frame on each session's GET (SSE) stream every 30s.
+  Resolves the user-visible `MCP error -32000: Connection closed`
+  that surfaced on the first tool call after ~3 minutes of session
+  idle (OS / NAT / proxy collapsed the underlying TCP because no
+  app-layer keepalive was active). Diagnosed from a real claudia-
+  repo Claude Code session that disconnected at 11:14:35Z; mnemo's
+  log over the same window showed no panic, no restart, just the
+  default `mcp-go` library option `WithHeartbeatInterval` not set.
+  **mnemo_rework_history test coverage** + STABILITY.md catalogue
+  entry — the tool itself shipped in v0.31.0 (commit `09a3149`)
+  but was missed by that release's catalogue update; tests landed
+  alongside the docs update in commit `20203fd`. Targets
+  housekeeping: forks raised in adjacent repos (sawmill 🎯T28,
+  spyder 🎯T40, mcpbridge 🎯T6) for the same `mcp-go`
+  heartbeat-default footgun in their own streamable-HTTP servers,
+  plus a defensive client-side ping design for mcpbridge to
+  protect non-owned upstreams. Global directive amendment:
+  removed the "target-only edits stop at the push" rule from
+  `~/.claude/CLAUDE.md` and `~/.claude/skills/push/SKILL.md` —
+  causing more friction than visibility benefit for solo repos.
+  Homebrew formula updated.

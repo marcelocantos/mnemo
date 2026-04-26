@@ -9,7 +9,23 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.31.0.
+Snapshot as of v0.32.0.
+
+**v0.32.0 note**: Two-commit reliability/test release. **MCP keepalive**
+(`49e015f`): the local streamable-HTTP server (`:19419`) and the
+federated mTLS endpoint (`:19420`) now pass
+`server.WithHeartbeatInterval(30*time.Second)` to `mark3labs/mcp-go`'s
+`NewStreamableHTTPServer`. Sends a `ping` JSON-RPC frame on each
+session's GET (SSE) stream every 30s so OS / NAT / proxy idle timeouts
+don't collapse the underlying TCP — fixes the user-visible
+`MCP error -32000: Connection closed` that surfaced on the first tool
+call after ~3 minutes of idle. No public-surface change; pure
+reliability fix. **`mnemo_rework_history` test coverage** (`20203fd`):
+the tool itself shipped in v0.31.0 (commit `09a3149`, missed by that
+release's STABILITY.md update) and is now fully exercised by tests
+plus documented in this catalogue (see `### MCP tools` below).
+**Stability**: heartbeat interval is internal; no behavioural promise
+on its exact cadence.
 
 **v0.31.0 note**: Two-target follow-up to v0.30.0. **`mnemo_repos`
 gains four new per-repo fields** (🎯T40): `Summary` (first
@@ -707,6 +723,23 @@ hits. Replaces Python-loop-over-JSONL workarounds for
 debugging session chaining and tracing tool_use_id retries.
 **Stability**: Needs review — output is structured JSON; shape may
 add e.g. confidence ranking before 1.0.
+
+#### `mnemo_rework_history`
+
+**Added in v0.31.0** (commit `09a3149`; catalogue entry retroactively
+added in v0.32.0). Returns prior rework attempts for a bullseye
+target, ordered most-recent first. Each result is one compaction span
+in which the target appeared as actively worked on (in
+`targets_active` or `targets_progressed`); fields are session ID,
+timestamp, repo, the per-target progress note (if the compactor
+recorded one), the prose summary of the span, and any open threads
+left unresolved. Designed to feed `bullseye_rework`'s `mnemo_history`
+parameter so the rework agent sees what was tried before. Parameters:
+`target_id` (required, exact match against `targets_active` /
+`targets_progressed` keys, e.g. "T1.5"), `repo` (optional path
+fragment filter), `limit` (default 20). **Stability**: Needs review —
+the per-span fields are likely stable, but the ordering / dedup story
+across overlapping spans may evolve before 1.0.
 
 ### Store / Backend interface methods
 
