@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -69,6 +70,7 @@ func Start(
 	httpHandler := mcpserver.NewStreamableHTTPServer(mcp,
 		mcpserver.WithStateful(true),
 		mcpserver.WithHTTPContextFunc(tools.UsernameContextFunc),
+		mcpserver.WithHeartbeatInterval(30*time.Second),
 	)
 
 	httpSrv := &http.Server{
