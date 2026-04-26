@@ -579,6 +579,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	httpSrv := server.NewStreamableHTTPServer(mcpSrv,
 		server.WithStateful(true),
 		server.WithHTTPContextFunc(tools.UsernameContextFunc),
+		// Keep the GET (SSE) stream warm so NAT / OS keepalive doesn't
+		// collapse it during idle stretches. Without this, an idle
+		// Claude Code session sees "MCP error -32000: Connection closed"
+		// on the first tool call after a few minutes of silence.
+		server.WithHeartbeatInterval(30*time.Second),
 	)
 
 	slog.Info("mnemo serve starting", "version", version, "addr", addr)
