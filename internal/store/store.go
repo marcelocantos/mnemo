@@ -2838,9 +2838,9 @@ type ReworkAttempt struct {
 	GeneratedAt string `json:"generated_at"`
 	Repo        string `json:"repo,omitempty"`
 	// Progress is the targets_progressed note for this target, if present.
-	Progress    string `json:"progress,omitempty"`
+	Progress string `json:"progress,omitempty"`
 	// Summary is the compaction's prose abstract.
-	Summary     string `json:"summary,omitempty"`
+	Summary string `json:"summary,omitempty"`
 	// OpenThreads lists unresolved items recorded in the span.
 	OpenThreads []string `json:"open_threads,omitempty"`
 }
