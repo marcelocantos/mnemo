@@ -1109,7 +1109,7 @@ targets:
     achieved: 2026-04-26
   T41:
     name: A repo's CLAUDE.md summary stays current — there is a defined pattern for periodically reviewing the first-paragraph summaries that mnemo_repos surfaces, so they don't silently drift away from what the project actually is
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1140,6 +1140,33 @@ targets:
     - claude-md
     - ops
     origin: user 2026-04-26 — "we need a pattern to periodically review these summaries and keep them up to date"
+    discovered: 2026-04-26
+    achieved: 2026-04-26
+  T42:
+    name: mnemo provides a cross-session message bus for Claude Code agents
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo exposes mnemo_message_post(topic, body, reply_to?) — posts a message to a topic
+    - mnemo exposes mnemo_message_recv(topic, since?, mark_read?) — pulls messages from a topic, optionally marking read
+    - mnemo exposes mnemo_message_list(topic?, unread_only?, limit) — browses without consuming
+    - mnemo exposes mnemo_topic_list() — discovery of active topics
+    - Topics support both freeform names ('deploy-watch') and session-derived addresses (e.g. 'session:repo=mnemo', 'session:latest@~/work/ytt') so callers don't need to track UUIDs
+    - Schema lives in its own messages table, not commingled with transcripts/docs/commits
+    - Documentation includes the three usage patterns (polite poll, UserPromptSubmit hook, /loop watcher) with at least one worked example of the hook pattern
+    - Two separate Claude Code sessions can demonstrably round-trip a message via the bus
+    context: |-
+      Claude Code has no native primitive for one running session to message another. SendMessage is intra-session only (sibling subagents). RemoteTrigger spawns a fresh remote session with a preconfigured prompt — fire-and-forget, not addressed at a specific running instance. The user wants a lightweight, MCP-resident bus that works with stock Claude Code.
+
+      mnemo is the natural host: already an MCP server everyone has registered, already has SQLite and a file-watcher, and already knows the session inventory — which means messages can be addressed to logical destinations like 'the session most recently active in ~/work/foo' instead of UUIDs the user has to track.
+
+      The cost is conceptual: mnemo turns from pure observer/indexer into something with a write side. Mitigate by keeping the schema partitioned (messages table separate from transcripts/docs/commits) and tool naming distinct (mnemo_message_*).
+
+      Polling reality: Claude has no event loop, so a session can't be interrupted mid-turn. Three usage patterns enabled by a pull-based bus: explicit polite poll, UserPromptSubmit hook that calls mnemo_message_recv and prepends new messages to the user's prompt (the slick pattern — sessions feel each other naturally), and /loop watchers that poll each tick.
+
+      Forms a sister capability to 🎯T40 (mnemo_repos enrichment) — both extend mnemo's surface to absorb responsibilities currently scattered across other tools or unfilled.
+    origin: discovered while exploring whether Claude sessions can message each other's agents — user proposed mnemo as the host since jevons is too heavyweight
     discovered: 2026-04-26
   T5:
     name: Self-improving tool discovery

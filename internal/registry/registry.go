@@ -23,8 +23,30 @@ import (
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
 )
+
+// llmAdapter bridges compact.LLMCaller to reviewer.LLMCaller. The
+// two interfaces have the same shape; the type alias would create
+// an import cycle since reviewer can't import compact.
+type llmAdapter struct {
+	c *compact.ClaudiaCaller
+}
+
+func (a llmAdapter) Call(ctx context.Context, sys, user string) (reviewer.LLMResult, error) {
+	res, err := a.c.Call(ctx, sys, user)
+	if err != nil {
+		return reviewer.LLMResult{}, err
+	}
+	return reviewer.LLMResult{
+		Text:         res.Text,
+		Model:        res.Model,
+		PromptTokens: res.PromptTokens,
+		OutputTokens: res.OutputTokens,
+		CostUSD:      res.CostUSD,
+	}, nil
+}
 
 // Registry holds per-user Store instances plus their background
 // workers. Stores are created lazily on first access via ForUser —
@@ -174,6 +196,17 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{}, r.mnemoRepoDir)
 		logger.Info("compact: watcher starting")
 		watcher.Run(r.baseCtx)
+	}()
+
+	// CLAUDE.md summary review worker (🎯T41). Same claudia.Task
+	// path as the compactor but a different cadence and trigger
+	// (cheap-signal entry-count gate, see store.ShouldReview).
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		caller := compact.NewClaudiaCaller(r.mnemoRepoDir, r.compactorModel)
+		rev := reviewer.New(e.store, llmAdapter{caller})
+		reviewer.Run(r.baseCtx, rev)
 	}()
 
 	// CI polling.

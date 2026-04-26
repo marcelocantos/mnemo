@@ -180,6 +180,13 @@ type RepoInfo struct {
 	// LastActivity (UTC, second-precision). Empty when git history
 	// hasn't been indexed for this repo.
 	LastCommit string `json:"last_commit,omitempty"`
+	// SummaryVerdict is the latest LLM-review verdict for this
+	// repo's CLAUDE.md summary (🎯T41). One of "current", "stale",
+	// "rewritten", or empty when no review has run. Populated by
+	// the reviewer worker when its cheap-signal trigger fires.
+	SummaryVerdict string `json:"summary_verdict,omitempty"`
+	// SummaryReviewedAt is the timestamp of SummaryVerdict.
+	SummaryReviewedAt string `json:"summary_reviewed_at,omitempty"`
 }
 
 // RecentActivityInfo summarises recent session activity for a single repo.
@@ -387,7 +394,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 22
+const schemaVersion = 23
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -667,6 +674,34 @@ func New(dbPath, projectDir string) (*Store, error) {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		CREATE TABLE IF NOT EXISTS claude_md_reviews (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			reviewed_at TEXT NOT NULL,
+			-- commit_id: repo's git HEAD at review time. Stored for
+			-- forensic correlation; NOT consumed by the staleness
+			-- trigger logic (entry-count-since-review is the cheap
+			-- signal). 🎯T41.
+			commit_id TEXT NOT NULL DEFAULT '',
+			-- summary: the CLAUDE.md first-paragraph as it stood at
+			-- review time (the thing the LLM was asked to assess).
+			summary TEXT NOT NULL,
+			-- verdict: LLM's assessment. One of: "current",
+			-- "stale", "rewritten" (where "rewritten" means the
+			-- LLM proposed a CLAUDE.md rewrite, not just a summary
+			-- update).
+			verdict TEXT NOT NULL,
+			-- proposed_summary: LLM's replacement summary text when
+			-- verdict in (stale, rewritten). NULL otherwise.
+			proposed_summary TEXT,
+			-- proposed_claude_md: LLM's CLAUDE.md rewrite when
+			-- verdict = rewritten. NULL otherwise. Surfaced for
+			-- human review; never auto-applied.
+			proposed_claude_md TEXT,
+			UNIQUE(repo, reviewed_at)
+		);
+		CREATE INDEX IF NOT EXISTS idx_claude_md_reviews_repo
+			ON claude_md_reviews(repo, reviewed_at DESC);
 		CREATE TABLE IF NOT EXISTS git_commits (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo TEXT NOT NULL,
@@ -4256,6 +4291,22 @@ func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
 			}
 		}
 		results = append(results, r)
+	}
+
+	// Decorate with the latest CLAUDE.md review verdict (🎯T41).
+	// Done in a second pass so the SQL above stays simple — the
+	// number of repos is small (tens, not millions) and each
+	// LatestReview is a single indexed lookup. Failures here are
+	// non-fatal: a repo without a review just gets empty fields.
+	for i := range results {
+		s.rwmu.RUnlock()
+		rev, err := s.LatestReview(results[i].Repo)
+		s.rwmu.RLock()
+		if err != nil || rev == nil {
+			continue
+		}
+		results[i].SummaryVerdict = rev.Verdict
+		results[i].SummaryReviewedAt = rev.ReviewedAt
 	}
 	return results, nil
 }
