@@ -9,7 +9,36 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.32.0.
+Snapshot as of v0.33.0.
+
+**v0.33.0 note**: Cost-tracking trio (🎯T43 🎯T44 🎯T45) plus
+Homebrew formula runtime deps (🎯T47). `mnemo_usage` gains
+`group_by="session"` (per-Claude-Code-session aggregation) and
+`group_by="block"` (Anthropic's 5-hour billing windows aligned to
+UTC hour boundaries — same algorithm ccusage uses); accepts
+`since` / `until` RFC3339 params for sub-day windows that override
+`days`; surfaces a top-level `freshness` field (timestamp of the
+most-recently-ingested assistant message) so polling consumers can
+bound staleness. Each row gains a `source` field
+(`"estimated"` / `"reconciled"` / `"mixed"`) reporting whether the
+cost figure is mnemo's local price-table estimate or reconciled
+against Anthropic's authoritative `/v1/organizations/cost_report`
+admin endpoint. Reconciliation is a background loop (poll-once-per-
+minute when `ANTHROPIC_ADMIN_API_KEY` is set; logs a single warning
+and stays dormant when absent). Schema bumps **22 → 24**: PR #68
+adds `reconciled_costs (date PK, cost_usd, fetched_at)`. T47:
+formula now declares `depends_on "gh"`, `"uv"`, `"tesseract"`,
+`"poppler"`, `"mupdf"` and the launchd service block sets a PATH
+that covers `/opt/homebrew/{bin,sbin}` and the user's
+`.cargo`/`.local`/`.py`/`go`/`.claude/local` bins, so brew-services
+no longer hands the daemon a spartan PATH. Phantom `"serve"` arg
+dropped from the launchd `run` line as a side-effect (also
+satisfies 🎯T39). `diagnose.go`'s daemon-PATH-vs-process-PATH
+delta detection removed (the bug it caught no longer occurs).
+**Stability**: `since`/`until`/`freshness`/`source` are first-cut
+under "Needs review" pending broader real-time-consumer feedback
+(🎯T46 verify); `group_by` block/session boundaries follow ccusage
+and are intended to remain stable.
 
 **v0.32.0 note**: Two-commit reliability/test release. **MCP keepalive**
 (`49e015f`): the local streamable-HTTP server (`:19419`) and the
@@ -316,13 +345,29 @@ review — first release, output format and filters may evolve.
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `days` | number | no | Recency window in days (default 30) | Stable |
+| `days` | number | no | Recency window in days (default 30); ignored when `since`/`until` is supplied | Stable |
+| `since` | string | no | RFC3339 lower bound; overrides `days` when set | Needs review |
+| `until` | string | no | RFC3339 upper bound; overrides `days` when set | Needs review |
 | `repo` | string | no | Repo filter (name or path fragment) | Stable |
 | `model` | string | no | Model prefix filter (e.g. "claude-opus-4") | Needs review |
-| `group_by` | string | no | Group by: day (default), model, repo | Needs review |
+| `group_by` | string | no | Group by: `day` (default), `model`, `repo`, `session`, `block` | Needs review |
 
 **Added in v0.11.0.** Returns aggregated token usage with cost estimates.
-**Stability**: Needs review — cost model and grouping options may evolve.
+Each row carries a `source` field (`"estimated"` / `"reconciled"` /
+`"mixed"`) reporting how `cost_usd` was computed; `"reconciled"` and
+`"mixed"` rows are present only when `ANTHROPIC_ADMIN_API_KEY` is
+configured and the background reconciler has populated
+`reconciled_costs`. The response includes a top-level `freshness`
+field carrying the timestamp of the most-recently-ingested assistant
+message — consumers polling sub-day windows can use it to bound
+staleness. **v0.33.0 (🎯T43/T44/T45)**: added `since`/`until` for
+sub-day windows; added `group_by="session"` (per-Claude-Code-session
+aggregation) and `group_by="block"` (Anthropic 5-hour billing
+windows aligned to UTC hour boundaries — same algorithm ccusage
+uses); added the `source` and `freshness` fields. **Stability**:
+Needs review — first cut at the real-time-consumer surface
+(🎯T46 verify pending); `group_by` block/session boundaries are
+intended to remain stable.
 
 #### mnemo_skills
 
@@ -831,6 +876,7 @@ dependency and cache TTL are implementation details and may change.
 | `image_ocr` | image_id (PK FK), text, backend (`apple_vision`\|`tesseract`), confidence, error, created_at | Fluid |
 | `image_ocr_fts` | FTS5 on text | Fluid |
 | `image_embeddings` | image_id (PK FK), model, dim, vector (float32 BLOB), error, created_at | Fluid |
+| `reconciled_costs` | date (PK), cost_usd, fetched_at — authoritative per-day USD from Anthropic Cost Admin API; populated only when `ANTHROPIC_ADMIN_API_KEY` is set (🎯T45, v0.33.0) | Needs review |
 
 **Notes**: v0.9.0 added the `entries` table which stores every JSONL line
 as JSONB with 15 virtual columns for high-query fields. All entry types
