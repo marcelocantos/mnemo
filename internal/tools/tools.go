@@ -213,11 +213,17 @@ When name is omitted, returns a list of all memories for the project with their 
 		mcp.NewTool("mnemo_usage",
 			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
 
-Returns per-period breakdown and totals. Cost estimates use published Anthropic pricing (Opus, Sonnet, Haiku families). Unknown models use Sonnet pricing as fallback.`),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
+Returns per-period breakdown and totals. Cost estimates use published Anthropic pricing (Opus, Sonnet, Haiku families). Unknown models use Sonnet pricing as fallback.
+
+Each row includes a "source" field: "estimated" (computed from token counts), "reconciled" (authoritative cost from Anthropic Admin API), or "mixed" (aggregation spans both). Reconciliation requires ANTHROPIC_ADMIN_API_KEY env var; absent by default (all rows report "estimated").
+
+A top-level "freshness" field reports the RFC3339 timestamp of the most recently ingested assistant message, bounding indexer lag for real-time consumers.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30). Ignored when since/until are supplied.")),
+			mcp.WithString("since", mcp.Description("RFC3339 timestamp lower bound (inclusive). Overrides days when set.")),
+			mcp.WithString("until", mcp.Description("RFC3339 timestamp upper bound (inclusive). Defaults to now when only since is set.")),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
-			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", or "repo"`)),
+			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", "repo", "session" (one row per Claude Code session ID), or "block" (one row per 5-hour Anthropic billing block, boundaries aligned to UTC and matching what /cost and ccusage report).`)),
 		),
 		mcp.NewTool("mnemo_skills",
 			mcp.WithDescription(`Search across Claude Code skill files (~/.claude/skills/). Skills define reusable workflows — release processes, audit procedures, documentation generation, etc. Use this to discover relevant skills or understand what workflows are available.`),
@@ -983,15 +989,17 @@ func (h *callHandler) configs(args map[string]any) (string, bool, error) {
 }
 
 func (h *callHandler) usage(args map[string]any) (string, bool, error) {
-	days := 30
+	p := store.UsageParams{}
 	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
+		p.Days = int(d)
 	}
-	repoFilter, _ := args["repo"].(string)
-	model, _ := args["model"].(string)
-	groupBy, _ := args["group_by"].(string)
+	p.Since, _ = args["since"].(string)
+	p.Until, _ = args["until"].(string)
+	p.RepoFilter, _ = args["repo"].(string)
+	p.Model, _ = args["model"].(string)
+	p.GroupBy, _ = args["group_by"].(string)
 
-	result, err := h.mem.Usage(days, repoFilter, model, groupBy)
+	result, err := h.mem.Usage(p)
 	if err != nil {
 		return fmt.Sprintf("usage query failed: %v", err), true, nil
 	}

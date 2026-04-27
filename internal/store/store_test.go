@@ -6,6 +6,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2000,7 +2001,7 @@ func TestUsageHourlyRate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := s.Usage(30, "", "", "day")
+	result, err := s.Usage(UsageParams{Days: 30, GroupBy: "day"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2143,4 +2144,380 @@ func TestIngestIdempotent(t *testing.T) {
 	if messagesAfterSecond != messagesAfterFirst {
 		t.Errorf("messages duplicated: first=%d second=%d", messagesAfterFirst, messagesAfterSecond)
 	}
+}
+
+// TestUsageGroupBySession verifies 🎯T43: group_by="session" returns one row
+// per Claude Code session ID.
+func TestUsageGroupBySession(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Two sessions with different models and token counts.
+	writeJSONL(t, projectDir, "proj", "sess-A", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 500, 50),
+		assistantWithUsage("2026-04-09T10:01:00Z", "claude-sonnet-4-5", 2000, 200, 800, 100),
+	})
+	writeJSONL(t, projectDir, "proj", "sess-B", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-10T08:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-10T08:00:05Z", "claude-opus-4-5", 5000, 500, 2000, 200),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.Usage(UsageParams{Days: 30, GroupBy: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected 2 session rows, got %d", len(result.Rows))
+	}
+
+	// Verify each row has a SessionID and non-zero tokens.
+	for i, r := range result.Rows {
+		if r.SessionID == "" {
+			t.Errorf("row %d: empty session_id", i)
+		}
+		if r.Messages == 0 {
+			t.Errorf("row %d: zero messages", i)
+		}
+		if r.InputTokens == 0 {
+			t.Errorf("row %d: zero input_tokens", i)
+		}
+		if r.Source == "" {
+			t.Errorf("row %d: empty source", i)
+		}
+	}
+
+	// Total should match sum across all sessions.
+	if result.Total.Messages != 3 {
+		t.Errorf("expected 3 total messages, got %d", result.Total.Messages)
+	}
+}
+
+// TestUsageGroupByBlock verifies 🎯T43: group_by="block" groups messages into
+// 5-hour billing blocks with the ccusage-compatible boundary algorithm.
+func TestUsageGroupByBlock(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Messages that fall into two distinct 5-hour blocks:
+	// Block 1: 10:00 → start at 10:00 UTC, messages at 10:00, 11:00, 14:00 (all within 5h)
+	// Block 2: 16:00 → start at 16:00 UTC (15:01 is >5h from 10:00)
+	writeJSONL(t, projectDir, "proj", "sess-blocks", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 0, 0),
+		assistantWithUsage("2026-04-09T11:00:00Z", "claude-sonnet-4-5", 2000, 200, 0, 0),
+		assistantWithUsage("2026-04-09T14:30:00Z", "claude-sonnet-4-5", 500, 50, 0, 0),
+		// This message is >5h from the block start (10:00 + 5h = 15:00); starts a new block.
+		assistantWithUsage("2026-04-09T16:00:00Z", "claude-sonnet-4-5", 3000, 300, 0, 0),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.Usage(UsageParams{Days: 30, GroupBy: "block"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected 2 billing blocks, got %d: %+v", len(result.Rows), result.Rows)
+	}
+
+	// Blocks are returned newest-first.
+	block1 := result.Rows[0] // newer block (16:00)
+	block2 := result.Rows[1] // older block (10:00)
+
+	if block1.Messages != 1 {
+		t.Errorf("block1 expected 1 message, got %d", block1.Messages)
+	}
+	if block2.Messages != 3 {
+		t.Errorf("block2 expected 3 messages, got %d", block2.Messages)
+	}
+
+	// Period should be "start/end" RFC3339 range.
+	if !strings.Contains(block1.Period, "/") {
+		t.Errorf("block period should be start/end range, got %q", block1.Period)
+	}
+	if block1.Source != "estimated" {
+		t.Errorf("expected source=estimated, got %q", block1.Source)
+	}
+
+	// Total messages should equal all 4 assistant messages.
+	if result.Total.Messages != 4 {
+		t.Errorf("expected 4 total messages, got %d", result.Total.Messages)
+	}
+}
+
+// TestUsageSinceUntil verifies 🎯T44: since/until params create a sub-day window.
+func TestUsageSinceUntil(t *testing.T) {
+	projectDir := t.TempDir()
+
+	writeJSONL(t, projectDir, "proj", "sess-window", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 0, 0),
+		// Outside the window we'll query:
+		assistantWithUsage("2026-04-09T12:00:00Z", "claude-sonnet-4-5", 9999, 9999, 0, 0),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query only the first hour.
+	result, err := s.Usage(UsageParams{
+		Since:   "2026-04-09T10:00:00Z",
+		Until:   "2026-04-09T11:00:00Z",
+		GroupBy: "day",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Days != 0 {
+		t.Errorf("expected days=0 when since/until supplied, got %d", result.Days)
+	}
+	if result.Since == "" {
+		t.Error("expected Since to be populated")
+	}
+	if result.Total.Messages != 1 {
+		t.Errorf("expected 1 message in window, got %d", result.Total.Messages)
+	}
+	if result.Total.InputTokens != 1000 {
+		t.Errorf("expected 1000 input tokens, got %d", result.Total.InputTokens)
+	}
+	// Freshness should be set.
+	if result.Freshness == "" {
+		t.Error("expected Freshness to be populated")
+	}
+}
+
+// TestUsageSinceUntilOverridesDays verifies that since/until take precedence over days.
+func TestUsageSinceUntilOverridesDays(t *testing.T) {
+	projectDir := t.TempDir()
+
+	writeJSONL(t, projectDir, "proj", "sess-override", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 500, 50, 0, 0),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// days=0 but since/until set — should use since/until window.
+	result, err := s.Usage(UsageParams{
+		Days:    0,
+		Since:   "2026-04-09T10:00:00Z",
+		Until:   "2026-04-09T11:00:00Z",
+		GroupBy: "day",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Days != 0 {
+		t.Errorf("expected days=0 in result, got %d", result.Days)
+	}
+	if result.Total.Messages != 1 {
+		t.Errorf("expected 1 message, got %d", result.Total.Messages)
+	}
+}
+
+// TestUsageReconciledCosts verifies 🎯T45: UpsertReconciledCost stores
+// authoritative costs and Usage surfaces them with source="reconciled".
+func TestUsageReconciledCosts(t *testing.T) {
+	projectDir := t.TempDir()
+
+	writeJSONL(t, projectDir, "proj", "sess-reconc", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 0, 0),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without reconciliation, source should be "estimated".
+	result, err := s.Usage(UsageParams{Days: 30, GroupBy: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) == 0 {
+		t.Fatal("expected at least one row")
+	}
+	if result.Rows[0].Source != "estimated" {
+		t.Errorf("expected source=estimated before reconciliation, got %q", result.Rows[0].Source)
+	}
+
+	// Insert a reconciled cost for that date.
+	if err := s.UpsertReconciledCost("2026-04-09", 99.99); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now source should be "reconciled" and cost should match the upserted value.
+	result2, err := s.Usage(UsageParams{Days: 30, GroupBy: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Rows) == 0 {
+		t.Fatal("expected at least one row after reconciliation")
+	}
+	row := result2.Rows[0]
+	if row.Source != "reconciled" {
+		t.Errorf("expected source=reconciled after upsert, got %q", row.Source)
+	}
+	if row.CostUSD != 99.99 {
+		t.Errorf("expected CostUSD=99.99, got %f", row.CostUSD)
+	}
+}
+
+// TestUsageReconciledMixedSource verifies that "mixed" source is reported when
+// a date range spans both reconciled and estimated rows.
+func TestUsageReconciledMixedSource(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Two days of activity.
+	writeJSONL(t, projectDir, "proj", "sess-mixed", []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-08T09:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage("2026-04-08T09:00:05Z", "claude-sonnet-4-5", 100, 10, 0, 0),
+		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 200, 20, 0, 0),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reconcile only Apr 9, leave Apr 8 as estimated.
+	if err := s.UpsertReconciledCost("2026-04-09", 50.0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query with group_by=day — should see two rows with different sources.
+	result, err := s.Usage(UsageParams{Days: 30, GroupBy: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sourceMap := map[string]string{}
+	for _, r := range result.Rows {
+		sourceMap[r.Period] = r.Source
+	}
+	if sourceMap["2026-04-09"] != "reconciled" {
+		t.Errorf("2026-04-09: expected reconciled, got %q", sourceMap["2026-04-09"])
+	}
+	if sourceMap["2026-04-08"] != "estimated" {
+		t.Errorf("2026-04-08: expected estimated, got %q", sourceMap["2026-04-08"])
+	}
+	// Total should be "mixed" since it spans both types.
+	if result.Total.Source != "mixed" {
+		t.Errorf("total expected mixed, got %q", result.Total.Source)
+	}
+}
+
+// BenchmarkUsageSinceUntilMinuteWindow benchmarks 🎯T44's acceptance criterion:
+// a 1-minute window query should complete within 250ms on a warm index.
+// Run with: go test -tags sqlite_fts5 -bench BenchmarkUsageSinceUntilMinuteWindow ./internal/store/
+func BenchmarkUsageSinceUntilMinuteWindow(b *testing.B) {
+	projectDir := b.TempDir()
+
+	// Seed with 1000 messages spread over several days.
+	entries := []map[string]any{
+		{
+			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+	}
+	for i := 0; i < 1000; i++ {
+		// Spread across 10 hours, some within the query window.
+		h := i / 100
+		m := i % 60
+		ts := fmt.Sprintf("2026-04-09T%02d:%02d:00Z", 8+h, m)
+		entries = append(entries, assistantWithUsage(ts, "claude-sonnet-4-5", 1000, 100, 500, 50))
+	}
+	writeBenchJSONL(b, projectDir, "proj", "sess-bench", entries)
+
+	dbPath := filepath.Join(b.TempDir(), "bench.db")
+	s, err := New(dbPath, projectDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { s.Close() })
+
+	if err := s.IngestAll(); err != nil {
+		b.Fatal(err)
+	}
+
+	// Warm index: run once before timing.
+	since := "2026-04-09T10:00:00Z"
+	until := "2026-04-09T10:01:00Z"
+	if _, err := s.Usage(UsageParams{Since: since, Until: until, GroupBy: "day"}); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := s.Usage(UsageParams{Since: since, Until: until, GroupBy: "day"}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// writeBenchJSONL is a benchmark-compatible version of writeJSONL (which only accepts *testing.T).
+func writeBenchJSONL(b *testing.B, dir, project, sessionID string, entries []map[string]any) string {
+	b.Helper()
+	projDir := filepath.Join(dir, project)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		b.Fatal(err)
+	}
+	path := filepath.Join(projDir, sessionID+".jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
+			b.Fatal(err)
+		}
+	}
+	return path
 }

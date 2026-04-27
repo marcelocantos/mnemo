@@ -16,7 +16,8 @@ type Backend interface {
 	ResolveNonce(nonce string) (string, error)
 	RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error)
 	Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error)
-	Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error)
+	Usage(p UsageParams) (*UsageResult, error)
+	UpsertReconciledCost(date string, costUSD float64) error
 	SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error)
 	GetMemory(project, name string) (*MemoryInfo, error)
 	SearchSkills(query string, limit int) ([]SkillInfo, error)

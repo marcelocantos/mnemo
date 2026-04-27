@@ -226,6 +226,14 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			}
 		}
 	}()
+
+	// Anthropic Admin API cost reconciler (🎯T45).
+	// StartReconciler is a no-op when ANTHROPIC_ADMIN_API_KEY is absent.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		e.store.StartReconciler(r.baseCtx)
+	}()
 }
 
 // Close cancels every worker context and closes every Store. Safe to

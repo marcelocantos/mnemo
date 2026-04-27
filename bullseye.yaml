@@ -1221,6 +1221,34 @@ targets:
     - usage
     origin: forked-from claudia broker design discussion 2026-04-26
     discovered: 2026-04-26
+  T46:
+    name: mnemo_usage delivers a real-time, reconciled spend signal usable by an external broker
+    kind: verify
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A live invocation of mnemo_usage with group_by="block" and a sub-day since/until window returns the current 5-hour Anthropic billing block's spend within 250ms on a warm index, including a freshness field.
+    - A live invocation with group_by="session" and a sub-day window returns per-session spend for the same window, with the same token/cost columns as the day/model/repo views.
+    - When ANTHROPIC_ADMIN_API_KEY is configured, at least one row in the response carries source="reconciled" (or source="mixed") and the per-day USD figure matches the Anthropic Cost Admin API to within rounding for a completed day.
+    - When the admin key is absent, the same call still returns sensible numbers with source="estimated" and a one-time warning has been logged — the demonstration covers both modes.
+    - Demonstration captured (transcript or screenshot) showing all four behaviours above in a single session, suitable for handing to a downstream consumer (e.g. a claudia broker) as proof of fitness.
+    context: 'Created 2026-04-27 to give the cost-tracking trio a reachable checkpoint. Without this verify target, T43/T44/T45 are tunnels — each lands a query-shape extension with no end-to-end demonstration that the trio actually composes into the real-time, reconciled spend signal that motivated them (claudia broker design discussion 2026-04-26). This target is the showcase: exercise all three together against a live mnemo, against the live Anthropic Cost Admin API, and confirm the shape is usable.'
+    depends_on:
+    - T43
+    - T44
+    - T45
+    verifies:
+    - T43
+    - T44
+    - T45
+    tags:
+    - cost
+    - usage
+    - checkpoint
+    - showcase
+    origin: forked from /cv unblock — T43/T44/T45 had no checkpoint reachable
+    discovered: 2026-04-27
   T5:
     name: Self-improving tool discovery
     status: achieved
