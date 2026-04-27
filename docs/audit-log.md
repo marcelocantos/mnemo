@@ -422,3 +422,39 @@ maintenance activities. Append-only — newest entries at the bottom.
   `~/.claude/CLAUDE.md` and `~/.claude/skills/push/SKILL.md` —
   causing more friction than visibility benefit for solo repos.
   Homebrew formula updated.
+
+## 2026-04-27 — /release v0.33.0
+
+- **Commit**: `pending`
+- **Outcome**: Released v0.33.0. **Cost-tracking trio** (#68 —
+  🎯T43/T44/T45): `mnemo_usage` becomes a real-time, reconciled
+  spend signal. New `group_by="session"` aggregates per Claude
+  Code session ID; `group_by="block"` aggregates per Anthropic
+  5-hour billing window (UTC-hour-aligned, ccusage algorithm).
+  `since`/`until` RFC3339 params override `days` for sub-day
+  windows; response carries a top-level `freshness` field so
+  polling consumers can bound staleness (~0.13ms for a 1-min
+  window on a warm index, well under the 250ms acceptance bar).
+  Background reconciler polls Anthropic
+  `/v1/organizations/cost_report` once per minute when
+  `ANTHROPIC_ADMIN_API_KEY` is set; populates new
+  `reconciled_costs` table; per-row `source` field reports
+  `"estimated"`/`"reconciled"`/`"mixed"`. Schema bump 22 → 24
+  (additive). Forked from a claudia broker design discussion
+  2026-04-26. Surfaced (and worked around) one pre-existing
+  latent issue: single-connection pool would have deadlocked a
+  naive two-query Usage() against the GitHub backfill goroutine
+  — reconciled costs are LEFT-JOINed into the main query
+  instead. **Homebrew runtime deps** (#69 — 🎯T47): formula
+  declares `depends_on` for `gh`, `uv`, `tesseract`, `poppler`,
+  `mupdf`; launchd service block sets a PATH covering
+  `/opt/homebrew/{bin,sbin}` and the user's `.cargo`/`.local`/
+  `.py`/`go`/`.claude/local` bins, so brew-services no longer
+  hands the daemon a spartan PATH. Phantom `"serve"` arg
+  dropped from the launchd `run` line as a side-effect (also
+  satisfies 🎯T39). `diagnose.go`'s daemon-PATH-vs-process-PATH
+  delta detection removed (the bug it caught no longer occurs);
+  external-tools check is now a single-PATH probe. Verify
+  checkpoint 🎯T46 raised to gate the trio's end-to-end
+  demonstration; live demo against a real admin key still
+  pending. Homebrew formula updated.
