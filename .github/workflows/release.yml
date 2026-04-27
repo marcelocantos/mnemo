@@ -231,11 +231,17 @@ jobs:
           skip_checksum: true
           update_readme_table: true
           formula_includes: |
+            depends_on "gh"
+            depends_on "uv"
+            depends_on "tesseract"
+            depends_on "poppler"
+            depends_on "mupdf"
+
             service do
-              run [opt_bin/"mnemo", "serve"]
+              run [opt_bin/"mnemo"]
               keep_alive true
               log_path var/"log/mnemo.log"
               error_log_path var/"log/mnemo.log"
               working_dir HOMEBREW_PREFIX
-              environment_variables PATH: "#{HOMEBREW_PREFIX}/bin:#{ENV["HOME"]}/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin"
+              environment_variables PATH: "#{HOMEBREW_PREFIX}/bin:#{HOMEBREW_PREFIX}/sbin:#{ENV["HOME"]}/.cargo/bin:#{ENV["HOME"]}/.local/bin:#{ENV["HOME"]}/.py/bin:#{ENV["HOME"]}/go/bin:#{ENV["HOME"]}/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin"
             end

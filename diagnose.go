@@ -99,24 +99,10 @@ func cmdDiagnose(args []string) {
 		runtime.GOOS, runtime.GOARCH, time.Now().Format(time.RFC3339))
 	fmt.Println(strings.Repeat("=", 60))
 
-	// The daemon-process check captures the daemon's inherited PATH;
-	// the external-tools check then verifies each required tool is
-	// reachable from BOTH this process's PATH and the daemon's. This
-	// is the most common silent-failure mode: brew-services launchd
-	// hands the daemon a spartan PATH that excludes /opt/homebrew/bin,
-	// so `gh` / `claude` / `uv` etc. are invisible to the daemon even
-	// though the user can run them fine from a shell.
-	var daemonPATH string
 	checks := []func() checkResult{
-		func() checkResult {
-			r := checkDaemon(*addr)
-			if path := readDaemonPATH(*addr); path != "" {
-				daemonPATH = path
-			}
-			return r
-		},
+		func() checkResult { return checkDaemon(*addr) },
 		func() checkResult { return checkEndpoint(*addr) },
-		func() checkResult { return checkExternalTools(daemonPATH) },
+		checkExternalTools,
 		checkFilesystem,
 		checkDatabase,
 		checkIndexFreshness,
@@ -323,19 +309,11 @@ var externalTools = []toolSpec{
 	{"brew", false, []string{"--version"}, "auto-start fallback in stdio-migration won't fire"},
 }
 
-func checkExternalTools(daemonPATH string) checkResult {
+func checkExternalTools() checkResult {
 	r := checkResult{title: "External tools"}
-	if daemonPATH != "" {
-		r.add("[D] = visible to the running daemon, [d] = visible to this command only")
-	}
 	for _, t := range externalTools {
-		myPath, _ := exec.LookPath(t.name)
-		var daemonReach string
-		if daemonPATH != "" {
-			daemonReach = lookupOnPath(t.name, daemonPATH)
-		}
-		switch {
-		case myPath == "" && daemonReach == "":
+		path, _ := exec.LookPath(t.name)
+		if path == "" {
 			tag := "MISSING"
 			if !t.required {
 				tag = "missing"
@@ -346,56 +324,12 @@ func checkExternalTools(daemonPATH string) checkResult {
 			} else if r.status == statusOK {
 				r.status = statusWarn
 			}
-		case daemonPATH != "" && daemonReach == "" && myPath != "":
-			// Tool is on the user's PATH but NOT on the daemon's.
-			// This is the silent-failure mode worth flagging loudly.
-			r.add(fmt.Sprintf("%-10s [d only] %s — daemon CANNOT see it (%s)",
-				t.name, myPath, t.consequence))
-			if r.status == statusOK {
-				r.status = statusWarn
-			}
-		default:
-			path := daemonReach
-			tag := "[D]"
-			if path == "" {
-				path = myPath
-				tag = "[d]"
-			}
-			ver := toolVersion(path, t.versionArgs)
-			r.add(fmt.Sprintf("%-10s %s %s (%s)", t.name, tag, path, ver))
+			continue
 		}
+		ver := toolVersion(path, t.versionArgs)
+		r.add(fmt.Sprintf("%-10s %s (%s)", t.name, path, ver))
 	}
 	return r
-}
-
-// readDaemonPATH returns the running daemon's PATH (or empty if it
-// cannot be determined). Wraps the same primitives as checkDaemon
-// but without producing a checkResult.
-func readDaemonPATH(addr string) string {
-	pid := findListenerPID(addr)
-	if pid == 0 {
-		return ""
-	}
-	return readProcessEnv(pid, "PATH")
-}
-
-// lookupOnPath resolves an executable name against an explicit PATH
-// string, ignoring the process's own environment. Returns empty if
-// not found. Honours platform-specific extensions on Windows.
-func lookupOnPath(name, path string) string {
-	exts := []string{""}
-	if runtime.GOOS == "windows" {
-		exts = []string{".exe", ".cmd", ".bat", ""}
-	}
-	for _, dir := range splitPath(path) {
-		for _, ext := range exts {
-			candidate := filepath.Join(dir, name+ext)
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				return candidate
-			}
-		}
-	}
-	return ""
 }
 
 func toolVersion(path string, args []string) string {
