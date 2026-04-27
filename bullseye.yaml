@@ -742,9 +742,11 @@ targets:
     achieved: 2026-04-15
   T26:
     name: Adopt sqlpipe.Database as mnemo's SQLite layer
-    status: identified
+    status: set_aside
     value: 13.0
     cost: 8.0
+    showcase: true
+    set_aside_reason: Parked 2026-04-30. Blocked on sqlpipe 🎯T13 — the sqlpipe Go wrapper does not yet expose FTS5, sqlift Go bindings, or automatic sqldeep transpilation (verified empirically by the T26 surveyor on 2026-04-29). Mnemo cannot adopt sqlpipe.Database as the SQLite layer until T13 lands. The scope is also large (148 Exec/Query/QueryRow callsites, 180 Scan sites) and not mechanically migratable — sqlpipe returns iter.Seq[*Row] with positional accessors, so each callsite needs review. Resume when sqlpipe T13 ships and the Go wrapper exposes the three required capabilities. Re-frontier this target at that point; the v0.18.0/v0.19.0 schema-window argument from the original framing remains valid but is not load-bearing on the parked decision.
     acceptance:
     - mnemo's Store replaces the database/sql + mattn/go-sqlite3 layer with sqlpipe.Database as the primary DB handle. Calls like s.db.Exec, s.db.Query, and s.db.QueryRow become their sqlpipe.Database equivalents; s.rwmu serialisation is reviewed against sqlpipe's concurrency model.
     - 'Schema migration via sqlift is live: a single authoritative schema.sql file is the source of truth. At Store.New, sqlpipe.Database''s built-in sqlift diffs the current DB against schema.sql and applies the delta. The wipe-on-schemaVersion-mismatch branch is deleted.'
@@ -756,20 +758,19 @@ targets:
     context: |-
       Reframed 2026-04-16. Originally scoped as "use sqlift to stop wiping the DB", with sqlpipe called out as an optional superset. User direction: the sqlpipe adoption needs to happen regardless — schema migration, sqldeep everywhere, and replication primitives are all foundation work that benefits mnemo independent of any one feature. Treat the DB-layer switch as the primary work item and the three capabilities as inherent, not optional.
 
-      **What sqlpipe.Database brings:**
+      **Cross-repo prerequisite (added 2026-04-29):** This target is gated on **sqlpipe 🎯T13** ("sqlpipe Go wrapper exposes FTS5, sqlift Go bindings, and automatic sqldeep transpilation"). The T26 surveyor agent verified empirically that the sqlpipe Go wrapper today is missing all three capabilities mnemo needs — FTS5 is not enabled in cgo flags, sqlift bindings are not exposed in Go (only C++), and sqldeep transpilation is absent from Database.Exec/Query/Rows. Mnemo cannot proceed with T26 until sqlpipe T13 lands. Cross-repo link tracked in context only — bullseye does not model inter-repo deps natively.
+
+      **What sqlpipe.Database brings (once T13 lands):**
 
       - **sqlift** — declarative schema migration via structural diffing. Schema lives in a single SQL file; sqlift computes and applies deltas at startup. Destructive-operation guard prevents accidental data loss. Replaces the wipe-and-rebuild machinery that would otherwise destroy ephemeral data (daemon_connections, connection_sessions, session_chains, compactions) on every schema bump.
       - **sqldeep** — JSON5-like SQL transpilation. Currently mnemo uses sqldeep selectively in mnemo_query; under sqlpipe every query transpiles by default. The JSON object construction syntax becomes available anywhere.
       - **Replication primitives** (Master/Replica/Peer/Relay) — bidirectional, transport-agnostic. Load-bearing for 🎯T15 federation if/when that lands; zero cost to have them sitting dormant until then.
 
-      **Scope: the DB layer rewrite is the expensive part.** mnemo has ~7000 lines of Go with hundreds of `s.db.Exec` / `s.db.Query` / `s.db.QueryRow` sites, plus the `s.rwmu` read-write lock coordinating them. Each site becomes a sqlpipe.Database equivalent. Tests that seed DB state using `sql.DB` need rewriting to use `sqlpipe.Database`. The CGo build flags for FTS5 likely change since sqlpipe vendors its own SQLite.
+      **Scope: the DB layer rewrite is the expensive part.** mnemo has ~7000 lines of Go with hundreds of `s.db.Exec` / `s.db.Query` / `s.db.QueryRow` sites, plus the `s.rwmu` read-write lock coordinating them. The T26 survey counted 148 Exec/Query/QueryRow callsites and 180 *sql.Rows.Scan sites; sqlpipe returns iter.Seq[*Row] with positional accessors, so a 1:1 mechanical migration is not possible. Each callsite needs review against sqlpipe's iterator + concurrency model.
 
-      **Sequencing:** land this before the next schema bump. v0.18.0 introduced the ephemeral tables; v0.19.0 has no committed schema changes yet, so the window to switch is now before any data is captured that would need migration. Practically: T26 and 🎯T22 (Windows) are independent; T26 and 🎯T15 (federation) are coupled (federation will use sqlpipe's replication).
+      **Sequencing:** sqlpipe T13 first → mnemo T26 second. v0.18.0 introduced ephemeral tables; v0.19.0 has no committed schema changes yet, so the window to switch is now before any data is captured that would need migration. Practically: T26 and 🎯T22 (Windows) are independent; T26 and 🎯T15 (federation) are coupled (federation will use sqlpipe's replication).
 
-      Discovered 2026-04-16 during /release v0.18.0 smoke testing.</context>
-      <parameter name="origin">v0.18.0 release exposed the wipe-and-rebuild hazard with ephemeral data</parameter>
-      <parameter name="tags">["db-layer", "sqlpipe", "sqlift", "sqldeep", "durability", "foundation"]</parameter>
-      </invoke>
+      Discovered 2026-04-16 during /release v0.18.0 smoke testing. Cross-repo dependency on sqlpipe T13 surfaced 2026-04-29 during T26 survey by automated agent.
     origin: manual
     discovered: 2026-04-16
   T27:
@@ -943,9 +944,11 @@ targets:
     achieved: 2026-04-21
   T33:
     name: Windows installer is code-signed so non-technical users do not see a SmartScreen warning on first run
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    showcase: true
+    set_aside_reason: 'Parked 2026-04-30. Blocked on user procurement of an EV code-signing certificate (~$300/yr, issued to a verifiable legal entity). Until the cert and its private key are available as GitHub Actions secrets, the agent cannot integrate signtool.exe into release.yml or verify the SmartScreen-free first-run experience on a fresh Windows install. Workflow integration and acceptance-criterion #2 (signtool calls in release.yml) are mechanical work the agent can do in a single sitting once the cert exists; criterion #3 (UAC prompt with publisher name, no SmartScreen warning) requires a real Windows machine for verification. Resume when the user procures the cert and stores it in repo secrets. Mnemo continues to ship an unsigned installer in the meantime; this is a UX-polish target, not a security regression.'
     acceptance:
     - EV code signing certificate acquired and stored as GitHub Actions secrets.
     - release.yml runs signtool.exe against mnemo.exe and the setup.exe before upload.
@@ -1051,9 +1054,11 @@ targets:
     achieved: 2026-04-26
   T39:
     name: The Homebrew formula's launchd service block invokes mnemo with arguments that match an actual subcommand or flag, not a phantom "serve" positional that only works because main.go silently ignores it
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    showcase: true
+    demonstration: Verified the deployed Homebrew formula at marcelocantos/homebrew-tap (Formula/mnemo.rb at v0.33.0) has `run [opt_bin/"mnemo"]` with no phantom "serve" arg. The fix landed via `formula_includes:` in .github/workflows/release.yml (commit 41630d2, the 🎯T47 PR), so it survives homebrew-releaser regeneration. main.go documents the bare invocation as the serve mode in both the package doc (line 10) and the inline switch comment in main() (lines 70–73), satisfying the third acceptance criterion. `brew services start mnemo` runs the daemon today via this formula.
     acceptance:
     - The mnemo Homebrew formula's `service do` block has `run [opt_bin/"mnemo"]` (no `"serve"` arg) OR mnemo gains a real `serve` subcommand that aliases the bare-invocation default behaviour and is documented in main.go's package comment / CLI help.
     - The fix lands via `formula_includes` in `.github/workflows/release.yml` (so it survives homebrew-releaser regenerating the formula), not as a manual edit to the tap repo.
@@ -1079,6 +1084,7 @@ targets:
     - ops
     origin: forked-from 🎯T37 during /release v0.30.0 install verification
     discovered: 2026-04-26
+    achieved: 2026-04-30
   T4:
     name: Individual session transcript access
     status: achieved
@@ -1227,9 +1233,10 @@ targets:
   T46:
     name: mnemo_usage delivers a real-time, reconciled spend signal usable by an external broker
     kind: verify
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    set_aside_reason: 'Parked 2026-04-28. Verification blocked on ANTHROPIC_ADMIN_API_KEY not being configured anywhere reachable (not set in launchctl user-domain env; brew plist''s EnvironmentVariables block would replace inherited env regardless). Three acceptance criteria are demonstrable today (#2 session sub-day ✅ live, #4 estimated mode + one-time warning ✅ captured in daemon log 2026-04-28T22:05:24, #1 block freshness ✅ once PR #72 merges and brew installs), but #3 reconciled-mode-matches-Admin-API requires the key. Implementation is complete (estimated-only path works in production today); the gap is verification + production delivery of the reconciled half. Resume when key wiring is decided — options on the table: (1) manual plist edit, (2) formula_includes in release.yml, (3) macOS Keychain lookup at daemon startup. Option 3 is the durable one and could land as a forked sub-target. PR #72 (block freshness) stands alone and merges independently.'
     acceptance:
     - A live invocation of mnemo_usage with group_by="block" and a sub-day since/until window returns the current 5-hour Anthropic billing block's spend within 250ms on a warm index, including a freshness field.
     - A live invocation with group_by="session" and a sub-day window returns per-session spend for the same window, with the same token/cost columns as the day/model/repo views.
@@ -1254,7 +1261,7 @@ targets:
     discovered: 2026-04-27
   T47:
     name: Homebrew formula declares runtime tool deps and sets service-block PATH so the launchd-spawned mnemo daemon resolves all external tools without manual setup
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1313,6 +1320,24 @@ targets:
       If a shared PATH constant is later defined in the tap (other formulas like sawmill and vellum will need the same string), refactor to reference it. Don't block on that — duplicate the literal string for now if convenient.
     origin: forked-from spyder PATH-bug investigation in ~/think on 2026-04-27
     discovered: 2026-04-27
+    achieved: 2026-04-27
+  T48:
+    name: Docs ingest walks the entire repo recursively, picking up every .md/.txt/.pdf outside junk dirs and .gitignore
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - A repo's docs ingest discovers .md/.txt/.pdf files at any depth (e.g., README.md at root, internal/foo/NOTES.md, cmd/bar/baz.txt) — not just under a fixed set of named subdirs and a root whitelist
+    - Files matched by .gitignore are skipped, and the existing junk-dir skip list (node_modules, .git, build/, dist/, etc. from T21) is respected
+    - T21's md/pdf dedup, incremental re-index, and watcher behaviour continue to hold across the wider walk — no duplicates, no full re-scans on every tick
+    - internal/store/docs.go no longer hard-codes the 'docs/, design/, notes/, papers/ + root whitelist' split; the recursion entry point is the repo root with the same gitignore + junk-dir filter applied uniformly
+    context: Today (v0.33.0, internal/store/docs.go) the docs walker treats the repo root as a whitelist (only specific top-level files are picked up) and recurses only into a fixed set of named subdirs (docs/, design/, notes/, papers/). That misses real documentation living elsewhere — module-local READMEs, design notes next to the code they describe, ad-hoc .txt/.pdf assets in cmd/ or internal/. Widening to a full recursive walk (with the same .gitignore + junk-dir skip filter T21 already established) makes mnemo_docs reflect what's actually in the repo, and removes the maintenance burden of curating the subdir whitelist as projects grow.
+    tags:
+    - ingest
+    - docs
+    origin: forked-from T21 (md/pdf docs ingest); user-raised 2026-05-06
+    discovered: 2026-05-06
   T5:
     name: Self-improving tool discovery
     status: achieved
