@@ -425,7 +425,7 @@ maintenance activities. Append-only — newest entries at the bottom.
 
 ## 2026-04-27 — /release v0.33.0
 
-- **Commit**: `pending`
+- **Commit**: `b0ce289`
 - **Outcome**: Released v0.33.0. **Cost-tracking trio** (#68 —
   🎯T43/T44/T45): `mnemo_usage` becomes a real-time, reconciled
   spend signal. New `group_by="session"` aggregates per Claude
