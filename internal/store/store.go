@@ -251,17 +251,22 @@ type StatsResult struct {
 	Streams       []BackfillStatus `json:"streams,omitempty"`
 }
 
-// UsageRow holds aggregated token usage for a single group (date, model, repo).
+// UsageRow holds aggregated token usage for a single group (date, model, repo, session, or block).
 type UsageRow struct {
 	Period              string  `json:"period"`
 	Model               string  `json:"model,omitempty"`
 	Repo                string  `json:"repo,omitempty"`
+	SessionID           string  `json:"session_id,omitempty"`
 	InputTokens         int64   `json:"input_tokens"`
 	OutputTokens        int64   `json:"output_tokens"`
 	CacheReadTokens     int64   `json:"cache_read_tokens"`
 	CacheCreationTokens int64   `json:"cache_creation_tokens"`
 	Messages            int     `json:"messages"`
 	CostUSD             float64 `json:"cost_usd"`
+	// Source indicates how cost was determined: "estimated" (from token
+	// counts), "reconciled" (from Anthropic Admin API), or "mixed" (both
+	// within this aggregation window).
+	Source string `json:"source"`
 }
 
 // HourlyRate shows token and cost velocity over the queried period.
@@ -329,10 +334,26 @@ type QueryTemplate struct {
 
 // UsageResult holds aggregated token usage with totals.
 type UsageResult struct {
-	Days       int         `json:"days"`
+	Days       int         `json:"days,omitempty"`
+	Since      string      `json:"since,omitempty"`
+	Until      string      `json:"until,omitempty"`
 	Rows       []UsageRow  `json:"rows"`
 	Total      UsageRow    `json:"total"`
 	HourlyRate *HourlyRate `json:"hourly_rate,omitempty"`
+	// Freshness is the timestamp of the most-recently ingested assistant
+	// message (in RFC3339). Consumers polling for near-realtime data can
+	// use this to bound indexer lag.
+	Freshness string `json:"freshness,omitempty"`
+}
+
+// UsageParams gathers all filter and grouping parameters for Usage queries.
+type UsageParams struct {
+	Days       int    // Recency window in days (default 30). Ignored when Since/Until are set.
+	Since      string // RFC3339 lower bound (inclusive). Overrides Days when set.
+	Until      string // RFC3339 upper bound (inclusive). Defaults to now when only Since is set.
+	RepoFilter string
+	Model      string
+	GroupBy    string // "day" | "model" | "repo" | "session" | "block"
 }
 
 // modelCosts maps model slug prefixes to per-token costs in USD.
@@ -394,7 +415,7 @@ func relaxQuery(q string) string {
 
 // schemaVersion is incremented whenever the database schema changes.
 // On mismatch the database file is deleted and rebuilt from transcripts.
-const schemaVersion = 23
+const schemaVersion = 24
 
 func openDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -807,6 +828,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 			doc_status TEXT NOT NULL DEFAULT '',
 			doc_target TEXT NOT NULL DEFAULT '',
 			doc_source TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE IF NOT EXISTS reconciled_costs (
+			date TEXT NOT NULL PRIMARY KEY, -- UTC calendar date (YYYY-MM-DD)
+			cost_usd REAL NOT NULL,          -- authoritative cost from Anthropic Admin API
+			fetched_at TEXT NOT NULL         -- when this row was retrieved
 		);
 	`)
 	if err != nil {
@@ -4406,16 +4432,53 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 }
 
 // Usage returns aggregated token usage statistics from the entries table.
-// groupBy can be "day" (default), "model", or "repo".
-func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult, error) {
+// Use UsageParams to specify the window, filters, and grouping.
+//
+// groupBy supports: "day" (default), "model", "repo", "session", "block".
+//
+// The 5-hour billing block algorithm (group_by="block") mirrors ccusage:
+//   - Sort assistant messages by timestamp.
+//   - Floor the first message's timestamp to the UTC hour → block start.
+//   - Messages within 5 hours of the block start fall in the same block.
+//   - When the gap from the previous message exceeds 5 hours, or the total
+//     span from the block start exceeds 5 hours, close the current block and
+//     open a new one (floored to the UTC hour of the new message).
+//
+// This produces billing-aligned blocks matching what /cost and ccusage report.
+func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
-	if days <= 0 {
-		days = 30
-	}
+	groupBy := p.GroupBy
 	if groupBy == "" {
 		groupBy = "day"
+	}
+
+	// Resolve time window.
+	var sinceExpr, untilExpr string
+	result := &UsageResult{}
+	if p.Since != "" || p.Until != "" {
+		// Explicit since/until window overrides days.
+		if p.Since != "" {
+			sinceExpr = p.Since
+			result.Since = p.Since
+		} else {
+			sinceExpr = "1970-01-01T00:00:00Z"
+		}
+		if p.Until != "" {
+			untilExpr = p.Until
+			result.Until = p.Until
+		} else {
+			untilExpr = time.Now().UTC().Format(time.RFC3339)
+		}
+	} else {
+		days := p.Days
+		if days <= 0 {
+			days = 30
+		}
+		result.Days = days
+		sinceExpr = time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339)
+		untilExpr = time.Now().UTC().Format(time.RFC3339)
 	}
 
 	// Build GROUP BY expression.
@@ -4427,6 +4490,13 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 	case "repo":
 		groupExpr = "CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END"
 		periodExpr = groupExpr
+	case "session":
+		groupExpr = "e.session_id"
+		periodExpr = "e.session_id"
+	case "block":
+		// Block grouping is done in Go after fetching per-message rows.
+		groupExpr = "" // handled below
+		periodExpr = ""
 	default: // "day"
 		groupExpr = "date(e.timestamp)"
 		periodExpr = "date(e.timestamp)"
@@ -4434,28 +4504,49 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 
 	where := []string{
 		"e.type = 'assistant'",
-		"e.timestamp >= datetime('now', ?)",
+		"e.timestamp >= ?",
+		"e.timestamp <= ?",
 	}
-	args := []any{fmt.Sprintf("-%d days", days)}
+	args := []any{sinceExpr, untilExpr}
 
-	if repoFilter != "" {
+	if p.RepoFilter != "" {
 		where = append(where, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
-		pattern := "%" + repoFilter + "%"
+		pattern := "%" + p.RepoFilter + "%"
 		args = append(args, pattern, pattern)
 	}
-	if model != "" {
+	if p.Model != "" {
 		where = append(where, "e.model LIKE ?")
-		args = append(args, model+"%")
+		args = append(args, p.Model+"%")
 	}
 
-	needJoin := repoFilter != "" || groupBy == "repo"
+	needJoin := p.RepoFilter != "" || groupBy == "repo"
 	joinClause := ""
 	if needJoin {
 		joinClause = "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
 	}
 
+	// For block grouping, fetch per-message rows and group in Go.
+	if groupBy == "block" {
+		return s.usageByBlock(result, where, args, joinClause, p.RepoFilter, p.Model)
+	}
+
 	// Always group by model too, so cost estimation is accurate.
 	// Re-aggregate in Go when the requested groupBy isn't "model".
+	//
+	// For "day" grouping, LEFT JOIN reconciled_costs so we can surface
+	// authoritative Anthropic Admin API costs alongside estimated costs
+	// in a single round-trip (avoids a second concurrent DB connection
+	// under the single-connection pool constraint).
+	//
+	// MAX(e.timestamp) is included to derive the freshness field without
+	// a second query.
+	reconcJoin := ""
+	reconcCostCol := "NULL"
+	if groupBy == "day" {
+		reconcJoin = "LEFT JOIN reconciled_costs rc ON rc.date = date(e.timestamp)"
+		reconcCostCol = "MIN(rc.cost_usd)" // MIN collapses the per-model GROUP
+	}
+
 	q := fmt.Sprintf(`
 		SELECT
 			%s AS period,
@@ -4464,42 +4555,77 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 			COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
 			COALESCE(SUM(e.cache_read_tokens), 0) AS cache_read_tokens,
 			COALESCE(SUM(e.cache_creation_tokens), 0) AS cache_creation_tokens,
-			COUNT(*) AS messages
+			COUNT(*) AS messages,
+			%s AS reconciled_cost_usd,
+			MAX(e.timestamp) AS max_ts
 		FROM entries e
+		%s
 		%s
 		WHERE %s
 		GROUP BY %s, e.model
 		ORDER BY period DESC
-	`, periodExpr, joinClause, strings.Join(where, " AND "), groupExpr)
+	`, periodExpr, reconcCostCol, joinClause, reconcJoin, strings.Join(where, " AND "), groupExpr)
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	// Accumulate per-(period, model) rows, computing accurate costs.
+	// NOTE: rows.Close() is called explicitly after the loop so the DB
+	// connection is released before the activeHours follow-on query.
+	// With db.SetMaxOpenConns(1), holding rows open while issuing a
+	// second Query() blocks indefinitely.
 	merged := map[string]*UsageRow{} // period → aggregated row
 	var order []string
 
-	result := &UsageResult{Days: days}
+	// Track per-period estimated/reconciled cost presence for "mixed" detection.
+	// mergedEstimated[period] = true if any row in that period used estimated cost.
+	// mergedReconciled[period] = true if any row used reconciled cost.
+	mergedEstimated := map[string]bool{}
+	mergedReconciled := map[string]bool{}
+
+	totalEstimated := false
+	totalReconciled := false
+
+	var maxTS string // track overall freshness
 	for rows.Next() {
 		var period, rowModel string
 		var input, output, cacheRead, cacheCreate int64
 		var msgs int
+		var reconciledCost sql.NullFloat64
+		var rowMaxTS string
 		if err := rows.Scan(&period, &rowModel, &input, &output,
-			&cacheRead, &cacheCreate, &msgs); err != nil {
+			&cacheRead, &cacheCreate, &msgs, &reconciledCost, &rowMaxTS); err != nil {
 			continue
 		}
-		cost := estimateCost(rowModel, input, output, cacheRead, cacheCreate)
+		if rowMaxTS > maxTS {
+			maxTS = rowMaxTS
+		}
+		estimatedCost := estimateCost(rowModel, input, output, cacheRead, cacheCreate)
+
+		// Use the reconciled cost (from Anthropic Admin API) when available;
+		// fall back to the locally-computed estimate otherwise.
+		var rowCost float64
+		rowReconciled := false
+		if reconciledCost.Valid {
+			rowCost = reconciledCost.Float64
+			rowReconciled = true
+		} else {
+			rowCost = estimatedCost
+		}
 
 		if groupBy == "model" {
 			// Each model is its own row — no merging needed.
+			src := "estimated"
+			if rowReconciled {
+				src = "reconciled"
+			}
 			result.Rows = append(result.Rows, UsageRow{
 				Period: period, Model: period,
 				InputTokens: input, OutputTokens: output,
 				CacheReadTokens: cacheRead, CacheCreationTokens: cacheCreate,
-				Messages: msgs, CostUSD: cost,
+				Messages: msgs, CostUSD: rowCost, Source: src,
 			})
 		} else {
 			r, ok := merged[period]
@@ -4507,6 +4633,9 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 				r = &UsageRow{Period: period}
 				if groupBy == "repo" {
 					r.Repo = period
+				}
+				if groupBy == "session" {
+					r.SessionID = period
 				}
 				merged[period] = r
 				order = append(order, period)
@@ -4516,7 +4645,24 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 			r.CacheReadTokens += cacheRead
 			r.CacheCreationTokens += cacheCreate
 			r.Messages += msgs
-			r.CostUSD += cost
+			if rowReconciled {
+				// For day grouping, the reconciled cost covers all models in
+				// that day; only add it once (first model hit sets the cost,
+				// subsequent models in same day add 0 to avoid double-counting).
+				if !mergedReconciled[period] {
+					r.CostUSD += rowCost
+					mergedReconciled[period] = true
+				}
+			} else {
+				r.CostUSD += rowCost
+				mergedEstimated[period] = true
+			}
+		}
+
+		if rowReconciled {
+			totalReconciled = true
+		} else {
+			totalEstimated = true
 		}
 
 		result.Total.InputTokens += input
@@ -4524,29 +4670,213 @@ func (s *Store) Usage(days int, repoFilter, model, groupBy string) (*UsageResult
 		result.Total.CacheReadTokens += cacheRead
 		result.Total.CacheCreationTokens += cacheCreate
 		result.Total.Messages += msgs
-		result.Total.CostUSD += cost
+		result.Total.CostUSD += rowCost
 	}
+
+	// Release the DB connection before issuing any follow-on queries.
+	rows.Close()
 
 	if groupBy != "model" {
 		for _, k := range order {
-			result.Rows = append(result.Rows, *merged[k])
+			r := merged[k]
+			// Set source per-row.
+			if mergedReconciled[k] && mergedEstimated[k] {
+				r.Source = "mixed"
+			} else if mergedReconciled[k] {
+				r.Source = "reconciled"
+			} else {
+				r.Source = "estimated"
+			}
+			result.Rows = append(result.Rows, *r)
 		}
 	}
 	result.Total.Period = "total"
+	if totalReconciled && totalEstimated {
+		result.Total.Source = "mixed"
+	} else if totalReconciled {
+		result.Total.Source = "reconciled"
+	} else {
+		result.Total.Source = "estimated"
+	}
+
+	// Freshness: timestamp of most-recently ingested assistant message,
+	// collected from MAX(e.timestamp) during the main iteration.
+	if maxTS != "" {
+		result.Freshness = maxTS
+	}
 
 	// Compute hourly rate from the actual time span of assistant messages.
-	activeHours, err := s.activeHours(days, repoFilter, model)
-	if err == nil && activeHours > 0 {
+	var activeHoursErr error
+	var activeHoursVal float64
+	if result.Days > 0 {
+		activeHoursVal, activeHoursErr = s.activeHours(result.Days, p.RepoFilter, p.Model)
+	} else {
+		activeHoursVal, activeHoursErr = s.activeHoursRange(sinceExpr, untilExpr, p.RepoFilter, p.Model)
+	}
+	if activeHoursErr == nil && activeHoursVal > 0 {
 		result.HourlyRate = &HourlyRate{
-			ActiveHours:     activeHours,
-			InputPerHour:    float64(result.Total.InputTokens) / activeHours,
-			OutputPerHour:   float64(result.Total.OutputTokens) / activeHours,
-			CostPerHour:     result.Total.CostUSD / activeHours,
-			MessagesPerHour: float64(result.Total.Messages) / activeHours,
+			ActiveHours:     activeHoursVal,
+			InputPerHour:    float64(result.Total.InputTokens) / activeHoursVal,
+			OutputPerHour:   float64(result.Total.OutputTokens) / activeHoursVal,
+			CostPerHour:     result.Total.CostUSD / activeHoursVal,
+			MessagesPerHour: float64(result.Total.Messages) / activeHoursVal,
 		}
 	}
 
 	return result, nil
+}
+
+// usageByBlock groups assistant messages into 5-hour billing blocks.
+// The block boundary algorithm mirrors ccusage/_session-blocks.ts:
+//   - Floor the first message timestamp to the UTC hour → blockStart.
+//   - Messages whose timestamp is within 5 hours of blockStart, AND whose
+//     gap from the previous message is ≤ 5 hours, belong to the same block.
+//   - Otherwise, close the block and open a new one.
+func (s *Store) usageByBlock(
+	result *UsageResult,
+	where []string, args []any,
+	joinClause, repoFilter, model string,
+) (*UsageResult, error) {
+	// Fetch per-message rows ordered by timestamp.
+	q := fmt.Sprintf(`
+		SELECT
+			e.timestamp,
+			COALESCE(e.model, '') AS model,
+			COALESCE(e.input_tokens, 0) AS input_tokens,
+			COALESCE(e.output_tokens, 0) AS output_tokens,
+			COALESCE(e.cache_read_tokens, 0) AS cache_read_tokens,
+			COALESCE(e.cache_creation_tokens, 0) AS cache_creation_tokens
+		FROM entries e
+		%s
+		WHERE %s
+		ORDER BY e.timestamp ASC
+	`, joinClause, strings.Join(where, " AND "))
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type msgRow struct {
+		ts          time.Time
+		model       string
+		input       int64
+		output      int64
+		cacheRead   int64
+		cacheCreate int64
+	}
+
+	var msgs []msgRow
+	for rows.Next() {
+		var tsStr, mdl string
+		var inp, out, cr, cc int64
+		if err := rows.Scan(&tsStr, &mdl, &inp, &out, &cr, &cc); err != nil {
+			continue
+		}
+		ts, err := parseTimestamp(tsStr)
+		if err != nil {
+			continue
+		}
+		msgs = append(msgs, msgRow{ts, mdl, inp, out, cr, cc})
+	}
+
+	const blockDur = 5 * time.Hour
+
+	type blockState struct {
+		start       time.Time
+		lastMsg     time.Time
+		cost        float64
+		input       int64
+		output      int64
+		cacheRead   int64
+		cacheCreate int64
+		messages    int
+	}
+
+	var blocks []blockState
+	var cur *blockState
+
+	for _, m := range msgs {
+		cost := estimateCost(m.model, m.input, m.output, m.cacheRead, m.cacheCreate)
+
+		if cur == nil {
+			// Floor to UTC hour.
+			start := m.ts.UTC().Truncate(time.Hour)
+			cur = &blockState{start: start, lastMsg: m.ts}
+		} else {
+			sinceStart := m.ts.Sub(cur.start)
+			sinceLastMsg := m.ts.Sub(cur.lastMsg)
+			if sinceStart > blockDur || sinceLastMsg > blockDur {
+				// Close current block, start new one.
+				blocks = append(blocks, *cur)
+				start := m.ts.UTC().Truncate(time.Hour)
+				cur = &blockState{start: start, lastMsg: m.ts}
+			} else {
+				cur.lastMsg = m.ts
+			}
+		}
+		cur.cost += cost
+		cur.input += m.input
+		cur.output += m.output
+		cur.cacheRead += m.cacheRead
+		cur.cacheCreate += m.cacheCreate
+		cur.messages++
+		result.Total.InputTokens += m.input
+		result.Total.OutputTokens += m.output
+		result.Total.CacheReadTokens += m.cacheRead
+		result.Total.CacheCreationTokens += m.cacheCreate
+		result.Total.Messages++
+		result.Total.CostUSD += cost
+	}
+	if cur != nil {
+		blocks = append(blocks, *cur)
+	}
+
+	// Emit rows newest-first.
+	for i := len(blocks) - 1; i >= 0; i-- {
+		b := blocks[i]
+		endTime := b.start.Add(blockDur)
+		period := fmt.Sprintf("%s/%s", b.start.UTC().Format(time.RFC3339), endTime.UTC().Format(time.RFC3339))
+		result.Rows = append(result.Rows, UsageRow{
+			Period:              period,
+			InputTokens:         b.input,
+			OutputTokens:        b.output,
+			CacheReadTokens:     b.cacheRead,
+			CacheCreationTokens: b.cacheCreate,
+			Messages:            b.messages,
+			CostUSD:             b.cost,
+			Source:              "estimated",
+		})
+	}
+	result.Total.Period = "total"
+	result.Total.Source = "estimated"
+
+	return result, nil
+}
+
+// parseTimestamp parses a SQLite timestamp string in RFC3339 or datetime format.
+func parseTimestamp(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("unparseable timestamp: %s", s)
+}
+
+// UpsertReconciledCost stores or updates an authoritative cost figure from the
+// Anthropic Admin API for a given UTC calendar date.
+func (s *Store) UpsertReconciledCost(date string, costUSD float64) error {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	_, err := s.db.Exec(`
+		INSERT INTO reconciled_costs(date, cost_usd, fetched_at)
+		VALUES (?, ?, datetime('now'))
+		ON CONFLICT(date) DO UPDATE SET cost_usd=excluded.cost_usd, fetched_at=excluded.fetched_at
+	`, date, costUSD)
+	return err
 }
 
 // activeHours estimates the number of active hours of assistant usage within
@@ -4620,6 +4950,76 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 	hours := totalActive.Hours()
 	// If there's data but all within a single message per session, return a
 	// minimum of the number of distinct sessions × 1 minute as a floor.
+	if hours == 0 {
+		return 0, nil
+	}
+	return hours, nil
+}
+
+// activeHoursRange is like activeHours but uses explicit since/until bounds.
+func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float64, error) {
+	where := []string{
+		"e.type = 'assistant'",
+		"e.timestamp >= ?",
+		"e.timestamp <= ?",
+	}
+	args := []any{since, until}
+
+	needJoin := repoFilter != ""
+	if repoFilter != "" {
+		where = append(where, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+	if model != "" {
+		where = append(where, "e.model LIKE ?")
+		args = append(args, model+"%")
+	}
+
+	joinClause := ""
+	if needJoin {
+		joinClause = "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
+	}
+
+	q := fmt.Sprintf(`
+		SELECT e.session_id, e.timestamp
+		FROM entries e
+		%s
+		WHERE %s
+		ORDER BY e.session_id, e.timestamp
+	`, joinClause, strings.Join(where, " AND "))
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	const idleThreshold = 30 * time.Minute
+	var totalActive time.Duration
+	var prevSession string
+	var prevTime time.Time
+
+	for rows.Next() {
+		var sessionID, ts string
+		if err := rows.Scan(&sessionID, &ts); err != nil {
+			continue
+		}
+		t, err := parseTimestamp(ts)
+		if err != nil {
+			continue
+		}
+		if sessionID == prevSession && !prevTime.IsZero() {
+			gap := t.Sub(prevTime)
+			if gap > 0 && gap <= idleThreshold {
+				totalActive += gap
+			}
+		}
+		prevSession = sessionID
+		prevTime = t
+	}
+
+	hours := totalActive.Hours()
 	if hours == 0 {
 		return 0, nil
 	}
