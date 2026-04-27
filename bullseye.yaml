@@ -1171,7 +1171,7 @@ targets:
     discovered: 2026-04-26
   T43:
     name: mnemo_usage groups results by session and by 5-hour rate-limit block
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1186,9 +1186,10 @@ targets:
     - usage
     origin: forked-from claudia broker design discussion 2026-04-26
     discovered: 2026-04-26
+    achieved: 2026-04-27
   T44:
     name: mnemo_usage accepts sub-day time windows for real-time consumers
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1204,9 +1205,10 @@ targets:
     - realtime
     origin: forked-from claudia broker design discussion 2026-04-26
     discovered: 2026-04-26
+    achieved: 2026-04-27
   T45:
     name: mnemo cost estimates are reconciled against Anthropic's Cost Admin API
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1221,6 +1223,7 @@ targets:
     - usage
     origin: forked-from claudia broker design discussion 2026-04-26
     discovered: 2026-04-26
+    achieved: 2026-04-27
   T46:
     name: mnemo_usage delivers a real-time, reconciled spend signal usable by an external broker
     kind: verify
@@ -1248,6 +1251,67 @@ targets:
     - checkpoint
     - showcase
     origin: forked from /cv unblock — T43/T44/T45 had no checkpoint reachable
+    discovered: 2026-04-27
+  T47:
+    name: Homebrew formula declares runtime tool deps and sets service-block PATH so the launchd-spawned mnemo daemon resolves all external tools without manual setup
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Formula's `service do` block sets `environment_variables PATH:` to `"/opt/homebrew/bin:/opt/homebrew/sbin:#{Dir.home}/.cargo/bin:#{Dir.home}/.local/bin:#{Dir.home}/.py/bin:#{Dir.home}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin"`
+    - 'Formula declares `depends_on` for every brew-installable runtime tool: `gh`, `uv`, `tesseract`, `poppler` (provides `pdftotext`), `mupdf` (provides `mutool`)'
+    - '`internal/store/diagnose.go:106` self-diagnosis code for spartan launchd PATH is removed (the bug it detected no longer occurs)'
+    - '`brew services restart mnemo` followed by an image-OCR ingest, an image-embedding run, a docs ingest of a PDF, and a `gh`-using operation all succeed with no manual `launchctl setenv` or PATH workaround'
+    context: |-
+      Background: launchd-spawned MCP daemons (started via `brew services`) inherit a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`). Any external tool the daemon shells out to that lives in `/opt/homebrew/bin`, `~/.cargo/bin`, `~/.local/bin`, `~/.py/bin`, or `~/go/bin` fails to resolve at runtime. Spyder hit this first (with pmd3) and is already fixed via a different mechanism (bundled binary). The cross-repo fix design decision was made in ~/think on 2026-04-27.
+
+      Design decision — fix at the Homebrew formula's `service` block, NOT:
+      - in code (mcpbridge / per-server PATH augmentation): would need touching N codebases, doesn't help non-Go servers, buries the fix far from where the daemon's environment is configured.
+      - via global `launchctl setenv PATH`: pollutes the user-domain environment for every GUI app.
+      - via wrapper script in `~/.claude.json`: Claude Code isn't actually spawning the daemon — `brew services` is.
+
+      Reasons the formula's `service` block is correct:
+      - Per-daemon scope, no collateral on other apps.
+      - `brew services` regenerates the launchd plist from the formula on every install/upgrade/restart, so the fix survives upgrades automatically.
+      - No code change in any server.
+      - The formula already encodes how the daemon runs; environment is part of that.
+      - `depends_on` makes `brew install mnemo` self-sufficient — no buried README install steps.
+
+      Audit findings for mnemo (from ~/think investigation 2026-04-27):
+      - `internal/store/store.go:3227,3248,3291,6708,6746,6801,6856` — calls `gh` (in /opt/homebrew/bin)
+      - `internal/store/image_embeddings.go:28,106` — calls `uv` (in /opt/homebrew/bin)
+      - `internal/store/image_ocr.go:28,62` — calls `tesseract` (homebrew)
+      - `internal/store/image_describer.go:88,130,246` — calls `claude` (npm-installed, NOT in Homebrew; leave as PATH expectation, the service-block PATH covers ~/.local/bin and similar)
+      - `internal/store/docs.go:90,113,116` — calls `pdftotext` (poppler), `mutool` (mupdf)
+      - `main.go:271-272` — calls `brew` (homebrew itself)
+      - `internal/store/store.go:6996,7015` — calls `git` (in /usr/bin, fine, no action)
+      - `internal/store/diagnose.go:106` — has a comment explicitly noting the brew-services spartan-PATH problem and a runtime self-diagnostic. This whole code path becomes dead once the formula fix lands and should be removed.
+
+      Tools available in Homebrew (verified 2026-04-27): `gh`, `uv`, `tesseract`, `poppler`, `mupdf`. All belong in `depends_on`.
+
+      Tools NOT in Homebrew, kept as service-block-PATH expectations: `claude` (npm global, lives wherever npm puts it; ~/.local/bin or /opt/homebrew/bin depending on install method).
+
+      Formula shape (template):
+      ```ruby
+      depends_on "gh"
+      depends_on "uv"
+      depends_on "tesseract"
+      depends_on "poppler"
+      depends_on "mupdf"
+
+      service do
+        run [opt_bin/"mnemo"]
+        environment_variables PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:#{Dir.home}/.cargo/bin:#{Dir.home}/.local/bin:#{Dir.home}/.py/bin:#{Dir.home}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        keep_alive true
+        log_path var/"log/mnemo.log"
+        error_log_path var/"log/mnemo.log"
+      end
+      ```
+
+      Note: `Dir.home` expands at install time on Marcelo's machine (single-user personal tap context — fine; launchd plists don't expand `$HOME` at runtime).
+
+      If a shared PATH constant is later defined in the tap (other formulas like sawmill and vellum will need the same string), refactor to reference it. Don't block on that — duplicate the literal string for now if convenient.
+    origin: forked-from spyder PATH-bug investigation in ~/think on 2026-04-27
     discovered: 2026-04-27
   T5:
     name: Self-improving tool discovery
