@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -2263,6 +2264,19 @@ func TestUsageGroupByBlock(t *testing.T) {
 	// Total messages should equal all 4 assistant messages.
 	if result.Total.Messages != 4 {
 		t.Errorf("expected 4 total messages, got %d", result.Total.Messages)
+	}
+
+	// Freshness must reflect the most-recent assistant timestamp so real-time
+	// consumers (e.g. the claudia broker) can bound indexer lag.
+	if result.Freshness == "" {
+		t.Errorf("expected non-empty freshness for block grouping")
+	} else {
+		ts, err := time.Parse(time.RFC3339Nano, result.Freshness)
+		if err != nil {
+			t.Errorf("freshness not RFC3339Nano: %q (%v)", result.Freshness, err)
+		} else if want := time.Date(2026, 4, 9, 16, 0, 0, 0, time.UTC); !ts.Equal(want) {
+			t.Errorf("freshness = %s, want %s", ts.Format(time.RFC3339), want.Format(time.RFC3339))
+		}
 	}
 }
 
