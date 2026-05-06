@@ -40,15 +40,6 @@ type DocInfo struct {
 	DocSource   string `json:"doc_source,omitempty"`
 }
 
-// docDirs are the directories (relative to repo root) searched for documentation.
-var docDirs = []string{
-	".",
-	"docs",
-	"design",
-	"notes",
-	"papers",
-}
-
 // docExcludeDirs are directory names to skip entirely during the doc walk.
 var docExcludeDirs = map[string]bool{
 	".git":         true,
@@ -66,19 +57,6 @@ var docExcludeDirs = map[string]bool{
 	".cache":       true,
 	"coverage":     true,
 	"tmp":          true,
-}
-
-// docRootOnlyGlobs are filename patterns that are only scanned at the repo root
-// (not recursively in docDirs subdirectories). For "." we take only well-known names.
-var docRootFiles = map[string]bool{
-	"README.md":       true,
-	"CHANGELOG.md":    true,
-	"CHANGES.md":      true,
-	"CONTRIBUTING.md": true,
-	"STABILITY.md":    true,
-	"NOTES.md":        true,
-	"README.txt":      true,
-	"CHANGELOG.txt":   true,
 }
 
 // pdfExtractOnce guards the one-time tool detection for PDF extraction.
@@ -222,15 +200,18 @@ func (s *Store) IngestDocs() error {
 	return nil
 }
 
-// ingestDocsForRepoLocked indexes doc files for a single repo.
+// ingestDocsForRepoLocked indexes doc files for a single repo. Walks the
+// entire repo tree from repoRoot, picking up every .md/.txt/.pdf file
+// outside the junk-dir skip list and .gitignore matches. The same filter
+// applies uniformly at every depth, including the repo root itself.
 // Returns (indexed, skipped_unchanged, on_disk).
 func (s *Store) ingestDocsForRepoLocked(repoRoot, repo string) (indexed, skipped, onDisk int) {
 	gitignorePatterns := parseGitignorePatterns(filepath.Join(repoRoot, ".gitignore"))
 	seen := map[string]bool{} // avoid double-indexing a path
 
 	// collectDir gathers doc candidates from one directory (non-recursive),
-	// deduplicates by stem, and ingests each winner.
-	collectDir := func(dirPath string, rootOnly bool) {
+	// deduplicates by stem within that directory, and ingests each winner.
+	collectDir := func(dirPath string) {
 		entries, err := os.ReadDir(dirPath)
 		if err != nil {
 			return
@@ -243,10 +224,6 @@ func (s *Store) ingestDocsForRepoLocked(repoRoot, repo string) (indexed, skipped
 			name := e.Name()
 			ext := strings.ToLower(filepath.Ext(name))
 			if ext != ".md" && ext != ".txt" && ext != ".pdf" {
-				continue
-			}
-			// Repo-root level: only well-known filenames.
-			if rootOnly && !docRootFiles[name] {
 				continue
 			}
 			fp := filepath.Join(dirPath, name)
@@ -270,39 +247,23 @@ func (s *Store) ingestDocsForRepoLocked(repoRoot, repo string) (indexed, skipped
 		}
 	}
 
-	for _, subDir := range docDirs {
-		dirPath := filepath.Join(repoRoot, subDir)
-		fi, err := os.Stat(dirPath)
-		if err != nil || !fi.IsDir() {
-			continue
-		}
-
-		rootOnly := subDir == "."
-		if rootOnly {
-			// Repo root: only the directory itself, no recursion.
-			collectDir(dirPath, true)
-			continue
-		}
-
-		// Named subDir: walk recursively, skipping excluded/gitignored dirs.
-		_ = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			if path != dirPath {
-				name := d.Name()
-				relFromRepo, _ := filepath.Rel(repoRoot, path)
-				if docExcludeDirs[name] || matchesGitignore(gitignorePatterns, name, relFromRepo) {
-					return filepath.SkipDir
-				}
-			}
-			collectDir(path, false)
+	_ = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return nil
-		})
-	}
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path != repoRoot {
+			name := d.Name()
+			relFromRepo, _ := filepath.Rel(repoRoot, path)
+			if docExcludeDirs[name] || matchesGitignore(gitignorePatterns, name, relFromRepo) {
+				return filepath.SkipDir
+			}
+		}
+		collectDir(path)
+		return nil
+	})
 	return
 }
 

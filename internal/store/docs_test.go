@@ -233,10 +233,10 @@ func TestDocIngestIncremental(t *testing.T) {
 	}
 }
 
-// TestDocIngestRootReadme verifies that well-known root-level files
-// (README.md, CHANGELOG.md) are indexed, but random root-level .md files
-// are not.
-func TestDocIngestRootReadme(t *testing.T) {
+// TestDocIngestRoot verifies that every .md/.txt/.pdf at the repo root is
+// indexed — there is no whitelist of well-known filenames; the recursive
+// walk treats the root like any other directory.
+func TestDocIngestRoot(t *testing.T) {
 	projectDir := t.TempDir()
 	repoRoot := filepath.Join(t.TempDir(), "org", "repo")
 	s := newTestStore(t, projectDir)
@@ -244,8 +244,8 @@ func TestDocIngestRootReadme(t *testing.T) {
 
 	writeDoc(t, filepath.Join(repoRoot, "README.md"), "# My Repo\n\nThis is the readme.\n")
 	writeDoc(t, filepath.Join(repoRoot, "CHANGELOG.md"), "# Changelog\n\n## v0.1.0\nInitial release.\n")
-	// A random file at repo root should NOT be indexed.
-	writeDoc(t, filepath.Join(repoRoot, "random.md"), "# Random\n\nShouldNotAppear.\n")
+	// Arbitrary root-level files are also indexed under T48.
+	writeDoc(t, filepath.Join(repoRoot, "AdHoc.md"), "# Ad Hoc\n\nIndexedUnderT48.\n")
 
 	if err := s.IngestDocs(); err != nil {
 		t.Fatal(err)
@@ -255,15 +255,101 @@ func TestDocIngestRootReadme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 root docs (README+CHANGELOG), got %d: %v", len(rows), rows)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 root docs, got %d: %v", len(rows), rows)
 	}
+	wantBases := map[string]bool{"README.md": true, "CHANGELOG.md": true, "AdHoc.md": true}
 	for _, r := range rows {
 		fp, _ := r["file_path"].(string)
-		base := filepath.Base(fp)
-		if base != "README.md" && base != "CHANGELOG.md" {
+		if !wantBases[filepath.Base(fp)] {
 			t.Errorf("unexpected file indexed: %q", fp)
 		}
+	}
+}
+
+// TestDocIngestArbitraryDepth verifies that .md/.txt/.pdf files anywhere in
+// the tree (e.g., module-local READMEs, notes next to code) are picked up,
+// not just files under a fixed set of named subdirectories.
+func TestDocIngestArbitraryDepth(t *testing.T) {
+	projectDir := t.TempDir()
+	repoRoot := filepath.Join(t.TempDir(), "org", "repo")
+	s := newTestStore(t, projectDir)
+	setupDocRepo(t, s, repoRoot)
+
+	writeDoc(t, filepath.Join(repoRoot, "internal", "foo", "NOTES.md"),
+		"# Foo Notes\n\nModule-local design notes.\n")
+	writeDoc(t, filepath.Join(repoRoot, "cmd", "bar", "baz.txt"),
+		"Plain text asset under cmd/.\n")
+	writeDoc(t, filepath.Join(repoRoot, "pkg", "deep", "nested", "subdir", "DESIGN.md"),
+		"# Deep Design\n\nDeeply nested design doc.\n")
+
+	if err := s.IngestDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.Query("SELECT file_path FROM docs ORDER BY file_path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 docs from arbitrary depths, got %d: %v", len(rows), rows)
+	}
+}
+
+// TestDocIngestRootJunkDir verifies that the junk-dir skip list applies at
+// every depth, including directly under the repo root (e.g., a top-level
+// node_modules/).
+func TestDocIngestRootJunkDir(t *testing.T) {
+	projectDir := t.TempDir()
+	repoRoot := filepath.Join(t.TempDir(), "org", "repo")
+	s := newTestStore(t, projectDir)
+	setupDocRepo(t, s, repoRoot)
+
+	writeDoc(t, filepath.Join(repoRoot, "README.md"), "# Real\n\nIndexed.\n")
+	writeDoc(t, filepath.Join(repoRoot, "node_modules", "pkg", "README.md"),
+		"# Junk\n\nShouldNotAppear.\n")
+	writeDoc(t, filepath.Join(repoRoot, "vendor", "lib", "DOC.md"),
+		"# Vendored\n\nShouldNotAppear.\n")
+
+	if err := s.IngestDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, _ := rows[0]["cnt"].(int64); cnt != 1 {
+		t.Fatalf("expected 1 doc (root junk dirs excluded), got %v", rows[0]["cnt"])
+	}
+}
+
+// TestDocIngestRootGitignore verifies that .gitignore patterns apply to
+// directories directly under the repo root.
+func TestDocIngestRootGitignore(t *testing.T) {
+	projectDir := t.TempDir()
+	repoRoot := filepath.Join(t.TempDir(), "org", "repo")
+	s := newTestStore(t, projectDir)
+	setupDocRepo(t, s, repoRoot)
+
+	if err := os.WriteFile(filepath.Join(repoRoot, ".gitignore"), []byte("scratch/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeDoc(t, filepath.Join(repoRoot, "README.md"), "# Real\n\nIndexed.\n")
+	writeDoc(t, filepath.Join(repoRoot, "scratch", "draft.md"),
+		"# Draft\n\nShouldNotAppear.\n")
+
+	if err := s.IngestDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, _ := rows[0]["cnt"].(int64); cnt != 1 {
+		t.Fatalf("expected 1 doc (root gitignore'd dir excluded), got %v", rows[0]["cnt"])
 	}
 }
 
