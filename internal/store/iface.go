@@ -11,6 +11,7 @@ type Backend interface {
 	ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]SessionInfo, error)
 	ReadSession(sessionID string, role string, offset int, limit int) ([]SessionMessage, error)
 	Query(query string) ([]map[string]any, error)
+	QueryArgs(query string, args ...any) ([]map[string]any, error)
 	Stats() (*StatsResult, error)
 	ListRepos(filter string) ([]RepoInfo, error)
 	ResolveNonce(nonce string) (string, error)

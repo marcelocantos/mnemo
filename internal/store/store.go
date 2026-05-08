@@ -5877,6 +5877,48 @@ func (s *Store) Query(query string) ([]map[string]any, error) {
 	return results, nil
 }
 
+// QueryArgs executes a parameterised SELECT/WITH query with bound args,
+// preventing SQL injection when values come from external sources.
+// Only SELECT and WITH queries are permitted (same as Query).
+func (s *Store) QueryArgs(query string, args ...any) ([]map[string]any, error) {
+	q := strings.TrimSpace(query)
+	upper := strings.ToUpper(q)
+	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
+		return nil, fmt.Errorf("only SELECT and WITH queries are allowed")
+	}
+
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, _ := rows.Columns()
+	var results []map[string]any
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			continue
+		}
+		row := make(map[string]any, len(cols))
+		for i, col := range cols {
+			row[col] = vals[i]
+		}
+		results = append(results, row)
+		if len(results) >= 100 {
+			break
+		}
+	}
+	return results, nil
+}
+
 func backfillSessionMeta(db *sql.DB, projectDir string) {
 	// Quick check: any sessions missing metadata?
 	var missing int
