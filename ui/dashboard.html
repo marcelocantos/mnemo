@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mnemo</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --bg2: #1a1d27;
+    --bg3: #21263a;
+    --border: #2a2f45;
+    --text: #c9d1e0;
+    --text-dim: #6b7894;
+    --text-bright: #e8eaf6;
+    --accent: #4f8ef7;
+    --accent2: #3dd68c;
+    --accent3: #f7874f;
+    --accent4: #c97cf7;
+    --red: #f75f5f;
+    --card-radius: 8px;
+    --gap: 12px;
+  }
+  [data-theme="light"] {
+    --bg: #f0f2f8;
+    --bg2: #ffffff;
+    --bg3: #e8eaf0;
+    --border: #d0d4e0;
+    --text: #333a50;
+    --text-dim: #7a829a;
+    --text-bright: #1a2030;
+    --accent: #2563eb;
+    --accent2: #16a34a;
+    --accent3: #ea580c;
+    --accent4: #9333ea;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; min-height: 100vh; }
+
+  /* TOP BAR */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: var(--bg2); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .topbar-logo { display: flex; align-items: center; gap: 8px; color: var(--accent); font-size: 16px; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); flex-shrink: 0; }
+  .status-dot.stale { background: var(--red); }
+  .updated-label { color: var(--text-dim); }
+  select, button {
+    background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 8px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 11px;
+  }
+  select:hover, button:hover { border-color: var(--accent); }
+  button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #themeBtn { display: flex; align-items: center; justify-content: center; padding: 4px 7px; }
+  #themeBtn svg { width: 14px; height: 14px; stroke: var(--text); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #themeBtn:hover svg { stroke: var(--accent); }
+
+  /* MAIN GRID */
+  .main { padding: var(--gap); display: flex; flex-direction: column; gap: var(--gap); }
+  .row { display: grid; gap: var(--gap); }
+  .row-top { grid-template-columns: repeat(4, 1fr); }
+  .row-bottom { grid-template-columns: repeat(4, 1fr); }
+  .row-context { grid-template-columns: 1fr; }
+  .row-convos  { grid-template-columns: 1fr 320px; }
+
+  /* CARD */
+  .card {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: var(--card-radius);
+    padding: 14px; display: flex; flex-direction: column; gap: 10px; overflow: hidden;
+  }
+  .card-title {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    color: var(--text-dim); text-transform: uppercase;
+  }
+
+  /* STAT TRIPLE */
+  .stat-triple { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat-box {
+    background: var(--bg3); border-radius: 6px; padding: 10px 8px; text-align: center;
+  }
+  .stat-box .num { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .stat-box .lbl { font-size: 9px; color: var(--text-dim); margin-top: 2px; letter-spacing: 0.06em; text-transform: uppercase; }
+
+  /* TYPE BREAKDOWN */
+  .type-list { display: flex; flex-direction: column; gap: 2px; }
+  .type-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--border); }
+  .type-row:last-child { border-bottom: none; }
+  .type-name { color: var(--text-dim); }
+  .type-val { color: var(--accent); }
+  .section-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.07em; margin-top: 6px; }
+
+  /* HOURLY RATE */
+  .rate-triple { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .rate-box { background: var(--bg3); border-radius: 6px; padding: 10px 8px; text-align: center; }
+  .rate-box .num { font-size: 20px; font-weight: 700; color: var(--accent2); }
+  .rate-box .lbl { font-size: 9px; color: var(--text-dim); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .rate-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .rate-row:last-child { border-bottom: none; }
+  .rate-label { color: var(--text-dim); }
+  .rate-value { color: var(--text-bright); font-weight: 600; }
+  .rate-value.cost { color: var(--accent2); }
+
+  /* SUBAGENT */
+  .sub-triple { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .sub-box { background: var(--bg3); border-radius: 6px; padding: 10px 8px; text-align: center; }
+  .sub-box .num { font-size: 22px; font-weight: 700; color: var(--text-bright); }
+  .sub-box .lbl { font-size: 9px; color: var(--text-dim); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .session-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; }
+  .session-item {
+    display: grid; grid-template-columns: auto 1fr auto;
+    gap: 8px; align-items: start; padding: 6px 8px;
+    background: var(--bg3); border-radius: 6px; border-left: 3px solid var(--accent);
+  }
+  .session-id { color: var(--accent); font-size: 10px; font-weight: 600; white-space: nowrap; }
+  .session-topic { color: var(--text); font-size: 11px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .session-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  .session-type-badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: var(--bg); color: var(--text-dim); white-space: nowrap; }
+  .session-age { font-size: 9px; color: var(--text-dim); white-space: nowrap; }
+  .session-msgs { font-size: 9px; color: var(--text-dim); white-space: nowrap; }
+
+  /* HORIZONTAL BAR CHART */
+  .bar-chart { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row { display: grid; grid-template-columns: 100px 1fr 60px; gap: 6px; align-items: center; }
+  .bar-label { color: var(--text-dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { background: var(--bg3); border-radius: 3px; height: 14px; position: relative; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+  .bar-fill.blue { background: var(--accent); }
+  .bar-fill.green { background: var(--accent2); }
+  .bar-fill.orange { background: var(--accent3); }
+  .bar-fill.purple { background: var(--accent4); }
+  .bar-value { color: var(--text-bright); font-size: 10px; text-align: right; white-space: nowrap; }
+
+  /* VERTICAL BAR CHART (daily cost) */
+  .vchart { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .vchart-bars { display: flex; align-items: flex-end; gap: 4px; flex: 1; min-height: 80px; }
+  .vchart-bar-wrap { display: flex; flex-direction: column; align-items: center; flex: 1; gap: 2px; }
+  .vchart-bar { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; transition: height 0.4s ease; position: relative; }
+  .vchart-bar:hover .vchart-tooltip { display: block; }
+  .vchart-tooltip { display: none; position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 10px; white-space: nowrap; z-index: 10; pointer-events: none; }
+  .vchart-label { font-size: 9px; color: var(--text-dim); white-space: nowrap; }
+  .vchart-cost-label { font-size: 9px; color: var(--text); text-align: center; }
+
+  /* RECENT ACTIVITY */
+  .activity-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; }
+  .activity-item { background: var(--bg3); border-radius: 6px; padding: 8px 10px; }
+  .activity-repo { color: var(--accent); font-size: 11px; font-weight: 600; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-stats { display: flex; gap: 12px; margin-bottom: 4px; }
+  .activity-stat { display: flex; flex-direction: column; }
+  .activity-stat .num { font-size: 16px; font-weight: 700; color: var(--text-bright); }
+  .activity-stat .lbl { font-size: 9px; color: var(--text-dim); text-transform: uppercase; }
+  .activity-types { display: flex; gap: 4px; flex-wrap: wrap; }
+  .work-badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: var(--bg); color: var(--text-dim); }
+  .activity-topic { font-size: 10px; color: var(--text-dim); margin-top: 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+  /* CONTEXT PRESSURE */
+  .ctx-list { display: flex; flex-direction: column; gap: 6px; }
+  .ctx-row { display: grid; grid-template-columns: 160px 1fr 80px 70px; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .ctx-row:last-child { border-bottom: none; }
+  .ctx-session { display: flex; flex-direction: column; gap: 2px; }
+  .ctx-id { color: var(--accent); font-size: 10px; font-weight: 600; }
+  .ctx-meta { color: var(--text-dim); font-size: 9px; }
+  .ctx-track { background: var(--bg3); border-radius: 3px; height: 16px; position: relative; overflow: hidden; }
+  .ctx-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+  .ctx-fill.low    { background: var(--accent2); }
+  .ctx-fill.medium { background: var(--accent3); }
+  .ctx-fill.high   { background: var(--red); }
+  .ctx-pct { text-align: right; font-weight: 600; font-size: 11px; }
+  .ctx-pct.low    { color: var(--accent2); }
+  .ctx-pct.medium { color: var(--accent3); }
+  .ctx-pct.high   { color: var(--red); }
+  .ctx-tokens { color: var(--text-dim); font-size: 10px; text-align: right; }
+
+  /* CONVERSATIONS */
+  .convo-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .filter-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--text-dim); padding: 3px 10px; border-radius: 12px; cursor: pointer; font-family: inherit; font-size: 10px; }
+  .filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .convo-list { display: flex; flex-direction: column; gap: 6px; }
+  .convo-item { background: var(--bg3); border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  .convo-header { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 10px 12px; cursor: pointer; }
+  .convo-header:hover { background: var(--bg); }
+  .convo-left { display: flex; flex-direction: column; gap: 3px; }
+  .convo-id { font-size: 10px; color: var(--accent); font-weight: 600; }
+  .convo-topic { font-size: 11px; color: var(--text-bright); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 600px; }
+  .convo-badges { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .badge { font-size: 9px; padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+  .badge-type { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+  .badge-work { background: var(--bg); color: var(--accent4); border: 1px solid var(--accent4); }
+  .badge-branch { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border); }
+  .convo-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .convo-msgs { font-size: 10px; color: var(--text-dim); }
+  .convo-age  { font-size: 10px; color: var(--text-dim); }
+  .convo-chevron { font-size: 12px; color: var(--text-dim); transition: transform 0.2s; }
+  .convo-item.open .convo-chevron { transform: rotate(90deg); }
+  .convo-messages { display: none; border-top: 1px solid var(--border); padding: 10px 12px; max-height: 400px; overflow-y: auto; }
+  .convo-item.open .convo-messages { display: block; }
+  .msg-row { display: grid; grid-template-columns: 70px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .msg-row:last-child { border-bottom: none; }
+  .msg-role { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding-top: 2px; }
+  .msg-role.user      { color: var(--accent2); }
+  .msg-role.assistant { color: var(--accent); }
+  .msg-role.tool      { color: var(--text-dim); }
+  .msg-text { font-size: 11px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+  .msg-load-more { text-align: center; padding: 8px; color: var(--accent); cursor: pointer; font-size: 11px; }
+  .msg-load-more:hover { text-decoration: underline; }
+
+  /* LIVE SESSIONS */
+  .live-none { color: var(--text-dim); font-style: italic; text-align: center; padding: 20px 0; font-size: 11px; }
+  .live-session { background: var(--bg3); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; border-left: 3px solid var(--accent2); }
+  .live-session.idle { border-left-color: var(--text-dim); }
+  .live-header { display: flex; justify-content: space-between; align-items: center; }
+  .live-pid { font-size: 9px; color: var(--text-dim); }
+  .live-repo { font-size: 11px; color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .live-topic { font-size: 10px; color: var(--text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .live-metrics { display: flex; gap: 10px; align-items: center; }
+  .live-metric { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .live-metric .val { font-size: 12px; font-weight: 700; color: var(--text-bright); }
+  .live-metric .lbl { font-size: 9px; color: var(--text-dim); text-transform: uppercase; }
+  .cpu-bar-wrap { flex: 1; }
+  .cpu-bar-track { background: var(--bg); border-radius: 3px; height: 8px; overflow: hidden; }
+  .cpu-bar-fill { height: 100%; border-radius: 3px; background: var(--accent2); transition: width 0.6s ease; }
+  .cpu-bar-fill.hot { background: var(--accent3); }
+  .cpu-bar-fill.burning { background: var(--red); }
+  .mem-bar-track { background: var(--bg); border-radius: 3px; height: 6px; overflow: hidden; margin-top: 4px; }
+  .mem-bar-fill { height: 100%; border-radius: 3px; background: var(--accent4); transition: width 0.6s ease; }
+  .sys-pressure { margin-bottom: 6px; }
+  .sys-label { display: flex; justify-content: space-between; font-size: 9px; color: var(--text-dim); margin-bottom: 3px; }
+  .postmortem-item { font-size: 10px; color: var(--text-dim); padding: 3px 0; border-bottom: 1px solid var(--border); }
+  .postmortem-item:last-child { border-bottom: none; }
+
+  #ctxContent { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  #ctxContent::-webkit-scrollbar { width: 4px; }
+  #ctxContent::-webkit-scrollbar-track { background: transparent; }
+  #ctxContent::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* LOADING/ERROR */
+  .loading { color: var(--text-dim); font-style: italic; padding: 10px 0; text-align: center; }
+  .error { color: var(--red); font-size: 11px; padding: 4px 0; }
+
+  /* RESPONSIVE */
+  @media (max-width: 1200px) {
+    .row-top { grid-template-columns: 1fr 1fr; }
+    .row-bottom { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 700px) {
+    .row-top, .row-bottom { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-logo">
+    <span class="dot"></span>
+    mnemo
+  </div>
+  <div class="topbar-right">
+    <span class="status-dot" id="statusDot"></span>
+    <span class="updated-label">updated <span id="updatedAt">—</span></span>
+    <select id="daysSelect" onchange="onDaysChange()">
+      <option value="1">1d</option>
+      <option value="7">7d</option>
+      <option value="30">30d</option>
+    </select>
+    <button id="refreshBtn" onclick="refreshAll()" title="Refresh now">↻</button>
+    <select id="intervalSelect" onchange="onIntervalChange()">
+      <option value="0">off</option>
+      <option value="10" selected>10s</option>
+      <option value="30">30s</option>
+      <option value="60">1m</option>
+    </select>
+    <button id="themeBtn" onclick="toggleTheme()" title="Toggle theme"></button>
+  </div>
+</div>
+
+<div class="main">
+
+  <div class="row row-top">
+    <!-- INDEX OVERVIEW -->
+    <div class="card" id="cardStats">
+      <div class="card-title">Index Overview</div>
+      <div id="statsContent"><div class="loading">loading…</div></div>
+    </div>
+
+    <!-- HOURLY RATE -->
+    <div class="card" id="cardRate">
+      <div class="card-title" id="rateTitle">Hourly Rate (1d)</div>
+      <div id="rateContent"><div class="loading">loading…</div></div>
+    </div>
+
+    <!-- SUBAGENT SESSIONS -->
+    <div class="card" id="cardSubagent">
+      <div class="card-title">Subagent Sessions</div>
+      <div id="subagentContent"><div class="loading">loading…</div></div>
+    </div>
+
+    <!-- INDEX HEALTH -->
+    <div class="card" id="cardDBStats">
+      <div class="card-title">DB Health</div>
+      <div id="dbStatsContent"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ROW 2: COST BY MODEL | COST BY REPO | DAILY COST | RECENT ACTIVITY -->
+  <div class="row row-bottom">
+    <div class="card" id="cardModel">
+      <div class="card-title" id="modelTitle">Cost by Model (1d)</div>
+      <div id="modelContent"><div class="loading">loading…</div></div>
+    </div>
+    <div class="card" id="cardRepo">
+      <div class="card-title" id="repoTitle">Cost by Repo (1d)</div>
+      <div id="repoContent"><div class="loading">loading…</div></div>
+    </div>
+    <div class="card" id="cardDaily">
+      <div class="card-title" id="dailyTitle">Daily Cost (1d)</div>
+      <div id="dailyContent" style="display:flex;flex-direction:column;flex:1;"><div class="loading">loading…</div></div>
+    </div>
+    <div class="card" id="cardActivity">
+      <div class="card-title" id="activityTitle">Recent Activity (1d)</div>
+      <div id="activityContent"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+
+  <!-- CONVERSATIONS + LIVE SESSIONS -->
+  <div class="row row-convos">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-title">Conversations</div>
+        <div class="convo-filters" id="convoFilters">
+          <button class="filter-btn active" onclick="setConvoFilter('')">all</button>
+          <button class="filter-btn" onclick="setConvoFilter('interactive')">interactive</button>
+          <button class="filter-btn" onclick="setConvoFilter('subagent')">subagent</button>
+          <button class="filter-btn" onclick="setConvoFilter('worktree')">worktree</button>
+          <button class="filter-btn" onclick="setConvoFilter('ephemeral')">ephemeral</button>
+        </div>
+      </div>
+      <div id="convoContent"><div class="loading">loading…</div></div>
+    </div>
+
+    <!-- LIVE SESSION MONITOR -->
+    <div class="card" id="cardLive">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-title">Live Sessions</div>
+        <div id="liveRefreshDot" style="width:7px;height:7px;border-radius:50%;background:var(--accent2);"></div>
+      </div>
+      <div id="liveContent"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+
+  <!-- CONTEXT PRESSURE -->
+  <div class="row row-context">
+    <div class="card">
+      <div class="card-title" id="ctxTitle">Context Pressure (1d)</div>
+      <div id="ctxContent" style="max-height:calc(4 * 52px);overflow-y:auto;"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────
+let days = 1;
+let refreshTimer = null;
+let theme = localStorage.getItem('mnemo-theme') || 'dark';
+
+// ── Theme ─────────────────────────────────────────────────────────────
+const SVG_SUN  = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
+const SVG_MOON = `<svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
+
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', theme === 'dark' ? '' : 'light');
+  const btn = document.getElementById('themeBtn');
+  // show opposite mode icon (what you'll switch TO)
+  if (btn) btn.innerHTML = theme === 'dark' ? SVG_SUN : SVG_MOON;
+}
+function toggleTheme() {
+  theme = theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('mnemo-theme', theme);
+  applyTheme();
+}
+
+// ── Fetch helpers ─────────────────────────────────────────────────────
+async function apiFetch(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+function fmtCost(usd) {
+  if (usd >= 1000) return '$' + (usd / 1000).toFixed(1) + 'K';
+  if (usd >= 1) return '$' + usd.toFixed(2);
+  return '$' + usd.toFixed(4);
+}
+function fmtTokens(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K';
+  return String(n);
+}
+function fmtNum(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K';
+  return String(n);
+}
+function ago(isoStr) {
+  if (!isoStr) return '';
+  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  if (diff < 60) return Math.round(diff) + 's ago';
+  if (diff < 3600) return Math.round(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.round(diff / 3600) + 'h ago';
+  return Math.round(diff / 86400) + 'd ago';
+}
+function shortID(id) {
+  // Extract meaningful prefix (after last - if it looks like a session ID)
+  const parts = id.split('-');
+  if (parts.length >= 2) return parts.slice(0, 2).join('-').substring(0, 12);
+  return id.substring(0, 12);
+}
+
+// ── Stats (Index Overview) ─────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const data = await apiFetch('/api/stats');
+    const el = document.getElementById('statsContent');
+
+    // Type breakdown
+    const typeOrder = ['interactive','worktree','subagent','ephemeral'];
+    const typeMap = {};
+    (data.by_type || []).forEach(t => typeMap[t.session_type] = t);
+
+    // All unique types in data
+    const allTypes = [...new Set([
+      ...typeOrder,
+      ...(data.by_type || []).map(t => t.session_type)
+    ])].filter(t => typeMap[t]);
+
+    const streamRows = (data.streams || []).map(s => `
+      <div class="type-row">
+        <span class="type-name">${esc(s.stream)}</span>
+        <span class="type-val">${s.files_indexed} / ${s.files_on_disk}</span>
+      </div>`).join('');
+
+    const typeRows = allTypes.map(t => {
+      const ts = typeMap[t];
+      return `<div class="type-row">
+        <span class="type-name">${esc(t)}</span>
+        <span class="type-val">${ts.sessions} sess · ${fmtNum(ts.total_msgs)} msgs</span>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="stat-triple">
+        <div class="stat-box"><div class="num">${fmtNum(data.total_sessions)}</div><div class="lbl">Sessions</div></div>
+        <div class="stat-box"><div class="num">${fmtNum(data.total_messages)}</div><div class="lbl">Messages</div></div>
+        <div class="stat-box"><div class="num">${(data.by_type||[]).length}</div><div class="lbl">Types</div></div>
+      </div>
+      <div class="type-list">${typeRows}</div>
+      ${streamRows ? `<div class="section-label">Streams</div><div class="type-list">${streamRows}</div>` : ''}
+    `;
+  } catch(e) {
+    document.getElementById('statsContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Usage: Hourly Rate ─────────────────────────────────────────────────
+async function loadRate() {
+  try {
+    const data = await apiFetch(`/api/usage?days=${days}&group_by=day`);
+    const hr = data.hourly_rate;
+    document.getElementById('rateTitle').textContent = `Hourly Rate (${days}d)`;
+    const el = document.getElementById('rateContent');
+
+    const totalCost = data.total ? data.total.cost_usd : 0;
+
+    if (!hr) {
+      el.innerHTML = '<div class="loading">no data</div>';
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="rate-triple">
+        <div class="rate-box">
+          <div class="num">${fmtCost(hr.cost_per_hour)}</div>
+          <div class="lbl">$/hr</div>
+        </div>
+        <div class="rate-box">
+          <div class="num">${Math.round(hr.messages_per_hour)}</div>
+          <div class="lbl">msgs/hr</div>
+        </div>
+        <div class="rate-box">
+          <div class="num">${hr.active_hours.toFixed(1)}</div>
+          <div class="lbl">active hrs</div>
+        </div>
+      </div>
+      <div class="type-list">
+        <div class="rate-row">
+          <span class="rate-label">Input / hr</span>
+          <span class="rate-value">${fmtTokens(hr.input_per_hour)}</span>
+        </div>
+        <div class="rate-row">
+          <span class="rate-label">Output / hr</span>
+          <span class="rate-value">${fmtTokens(hr.output_per_hour)}</span>
+        </div>
+        <div class="rate-row">
+          <span class="rate-label">Total cost (${days}d)</span>
+          <span class="rate-value cost">${fmtCost(totalCost)}</span>
+        </div>
+      </div>
+    `;
+  } catch(e) {
+    document.getElementById('rateContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Subagent Sessions ─────────────────────────────────────────────────
+async function loadSubagent() {
+  try {
+    const [sessions, whatsup] = await Promise.all([
+      apiFetch('/api/sessions?type=subagent&limit=20'),
+      apiFetch('/api/whatsup'),
+    ]);
+
+    const el = document.getElementById('subagentContent');
+    // whatsup.sessions is an array
+    const liveSessions = whatsup.sessions || [];
+    const activeNow = liveSessions.length;
+    const totalMsgs = sessions.reduce((s, x) => s + (x.total_msgs || 0), 0);
+
+    const sessionHTML = sessions.slice(0, 8).map(s => `
+      <div class="session-item">
+        <div class="session-id">${esc(shortID(s.session_id))}</div>
+        <div class="session-topic">${esc(s.topic || s.repo || '—')}</div>
+        <div class="session-meta">
+          ${s.work_type ? `<span class="session-type-badge">${esc(s.work_type)}</span>` : ''}
+          <span class="session-msgs">${s.total_msgs} msgs</span>
+          <span class="session-age">${ago(s.last_msg)}</span>
+        </div>
+      </div>
+    `).join('');
+
+    el.innerHTML = `
+      <div class="sub-triple">
+        <div class="sub-box"><div class="num">${activeNow}</div><div class="lbl">Active Now</div></div>
+        <div class="sub-box"><div class="num">${sessions.length}</div><div class="lbl">Recent</div></div>
+        <div class="sub-box"><div class="num">${fmtNum(totalMsgs)}</div><div class="lbl">Messages</div></div>
+      </div>
+      <div class="section-label">Recent Sessions</div>
+      <div class="session-list">${sessionHTML || '<div class="loading">no subagent sessions</div>'}</div>
+    `;
+  } catch(e) {
+    document.getElementById('subagentContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Cost by Model ─────────────────────────────────────────────────────
+async function loadModelCost() {
+  try {
+    const data = await apiFetch(`/api/usage?days=${days}&group_by=model`);
+    document.getElementById('modelTitle').textContent = `Cost by Model (${days}d)`;
+    const el = document.getElementById('modelContent');
+
+    const rows = (data.rows || []).sort((a, b) => b.cost_usd - a.cost_usd);
+    if (!rows.length) { el.innerHTML = '<div class="loading">no data</div>'; return; }
+
+    const max = rows[0].cost_usd;
+    const colors = ['blue', 'green', 'orange', 'purple'];
+    const html = rows.map((r, i) => `
+      <div class="bar-row">
+        <span class="bar-label" title="${esc(r.model || '?')}">${esc(shortModel(r.model))}</span>
+        <div class="bar-track">
+          <div class="bar-fill ${colors[i % colors.length]}" style="width:${max > 0 ? (r.cost_usd / max * 100).toFixed(1) : 0}%"></div>
+        </div>
+        <span class="bar-value">${fmtCost(r.cost_usd)}</span>
+      </div>
+    `).join('');
+
+    el.innerHTML = `<div class="bar-chart">${html}</div>`;
+  } catch(e) {
+    document.getElementById('modelContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function shortModel(m) {
+  if (!m) return '?';
+  // "us.anthropic.claude-opus-4-..." → "claude-opus-4"
+  const match = m.match(/claude-[\w.-]+/);
+  if (match) return match[0].replace(/-\d{8}$/, '').substring(0, 18);
+  return m.substring(0, 18);
+}
+
+// ── Cost by Repo ─────────────────────────────────────────────────────
+async function loadRepoCost() {
+  try {
+    const data = await apiFetch(`/api/usage?days=${days}&group_by=repo`);
+    document.getElementById('repoTitle').textContent = `Cost by Repo (${days}d)`;
+    const el = document.getElementById('repoContent');
+
+    const rows = (data.rows || []).filter(r => r.repo).sort((a, b) => b.cost_usd - a.cost_usd);
+    if (!rows.length) { el.innerHTML = '<div class="loading">no data</div>'; return; }
+
+    const max = rows[0].cost_usd;
+    const html = rows.slice(0, 10).map((r, i) => `
+      <div class="bar-row">
+        <span class="bar-label" title="${esc(r.repo)}">${esc(shortRepo(r.repo))}</span>
+        <div class="bar-track">
+          <div class="bar-fill blue" style="width:${max > 0 ? (r.cost_usd / max * 100).toFixed(1) : 0}%"></div>
+        </div>
+        <span class="bar-value">${fmtCost(r.cost_usd)}</span>
+      </div>
+    `).join('');
+
+    el.innerHTML = `<div class="bar-chart">${html}</div>`;
+  } catch(e) {
+    document.getElementById('repoContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function shortRepo(r) {
+  if (!r) return '?';
+  const parts = r.split('/');
+  return parts[parts.length - 1].substring(0, 16);
+}
+
+// ── Daily Cost ─────────────────────────────────────────────────────────
+async function loadDailyCost() {
+  try {
+    const data = await apiFetch(`/api/usage?days=2&group_by=day`);
+    document.getElementById('dailyTitle').textContent = `Daily Cost (today & yday)`;
+    const el = document.getElementById('dailyContent');
+
+    const rows = (data.rows || []).sort((a, b) => a.period.localeCompare(b.period));
+    if (!rows.length) { el.innerHTML = '<div class="loading">no data</div>'; return; }
+
+    const max = Math.max(...rows.map(r => r.cost_usd), 0.001);
+
+    const bars = rows.map(r => {
+      const pct = Math.max((r.cost_usd / max * 100), 2).toFixed(1);
+      const label = r.period.substring(5); // MM-DD
+      return `
+        <div class="vchart-bar-wrap">
+          <div class="vchart-cost-label" style="font-size:9px;color:var(--text-dim)">${fmtCost(r.cost_usd)}</div>
+          <div class="vchart-bar" style="height:${pct}%;background:var(--accent)">
+            <div class="vchart-tooltip">${esc(r.period)}: ${fmtCost(r.cost_usd)}</div>
+          </div>
+          <div class="vchart-label">${esc(label)}</div>
+        </div>
+      `;
+    }).join('');
+
+    el.innerHTML = `<div class="vchart"><div class="vchart-bars">${bars}</div></div>`;
+  } catch(e) {
+    document.getElementById('dailyContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Recent Activity ─────────────────────────────────────────────────────
+async function loadActivity() {
+  try {
+    const data = await apiFetch(`/api/activity?days=${days}`);
+    document.getElementById('activityTitle').textContent = `Recent Activity (${days}d)`;
+    const el = document.getElementById('activityContent');
+
+    const items = (data || []).sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
+    if (!items.length) { el.innerHTML = '<div class="loading">no activity</div>'; return; }
+
+    const html = items.slice(0, 8).map(r => {
+      const types = (r.work_types || []).map(t => `<span class="work-badge">${esc(t)}</span>`).join('');
+      const topic = (r.topics || [])[0] || '';
+      return `
+        <div class="activity-item">
+          <div class="activity-repo" title="${esc(r.repo)}">${esc(shortRepo(r.repo))}</div>
+          <div class="activity-stats">
+            <div class="activity-stat"><div class="num">${r.sessions}</div><div class="lbl">sess</div></div>
+            <div class="activity-stat"><div class="num">${fmtNum(r.messages)}</div><div class="lbl">msgs</div></div>
+            <div class="activity-stat"><div class="num">${ago(r.last_activity)}</div><div class="lbl">last</div></div>
+          </div>
+          ${types ? `<div class="activity-types">${types}</div>` : ''}
+          ${topic ? `<div class="activity-topic">${esc(topic)}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    el.innerHTML = `<div class="activity-list">${html}</div>`;
+  } catch(e) {
+    document.getElementById('activityContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── XSS-safe escape ───────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Live Sessions ─────────────────────────────────────────────────────
+let liveTimer = null;
+
+async function loadLive() {
+  try {
+    const sessions = await apiFetch('/api/active');
+    const el = document.getElementById('liveContent');
+
+    const fmtRSS = b => {
+      if (!b) return '0';
+      if (b >= 1e9) return (b/1e9).toFixed(1)+'G';
+      if (b >= 1e6) return (b/1e6).toFixed(0)+'M';
+      return (b/1e3).toFixed(0)+'K';
+    };
+
+    if (!sessions || !sessions.length) {
+      el.innerHTML = '<div class="live-none">No active claude processes</div>';
+      return;
+    }
+
+    const html = sessions.map(s => {
+      const cpu = Math.min(s.cpu_pct || 0, 100);
+      const cpuClass = cpu > 80 ? 'burning' : cpu > 40 ? 'hot' : '';
+      const repo = s.repo ? shortRepo(s.repo) : s.cwd ? s.cwd.split('/').pop() : 'claude';
+      const topic = (s.topic || '').replace(/\n/g,' ').trim();
+      return `
+        <div class="live-session">
+          <div class="live-header">
+            <span class="live-repo">${esc(repo)}</span>
+            <span class="live-pid">PID ${s.pid}</span>
+          </div>
+          ${topic ? `<div class="live-topic">${esc(topic.substring(0, 100))}</div>` : ''}
+          <div class="live-metrics">
+            <div class="live-metric"><div class="val">${cpu.toFixed(0)}%</div><div class="lbl">CPU</div></div>
+            <div class="live-metric"><div class="val">${fmtRSS(s.rss_bytes)}</div><div class="lbl">RSS</div></div>
+            ${s.total_msgs ? `<div class="live-metric"><div class="val">${s.total_msgs}</div><div class="lbl">msgs</div></div>` : ''}
+            <div class="cpu-bar-wrap">
+              <div class="cpu-bar-track"><div class="cpu-bar-fill ${cpuClass}" style="width:${Math.max(cpu,2).toFixed(1)}%"></div></div>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px;">${html}</div>`;
+  } catch(e) {
+    document.getElementById('liveContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function startLiveMonitor() {
+  loadLive();
+  clearInterval(liveTimer);
+  liveTimer = setInterval(loadLive, 5000);
+}
+
+// ── Index Health ──────────────────────────────────────────────────────
+async function loadDBStats() {
+  try {
+    const d = await apiFetch('/api/dbstats');
+    const el = document.getElementById('dbStatsContent');
+
+    const fmtBytes = b => {
+      if (b >= 1e9) return (b/1e9).toFixed(1) + ' GB';
+      if (b >= 1e6) return (b/1e6).toFixed(1) + ' MB';
+      if (b >= 1e3) return (b/1e3).toFixed(0) + ' KB';
+      return b + ' B';
+    };
+
+    const driftColor = d.ingest_drift > 0 ? 'var(--accent3)' : 'var(--accent2)';
+    const driftLabel = d.ingest_drift > 0 ? `⚠ ${d.ingest_drift} unindexed` : '✓ fully indexed';
+
+    el.innerHTML = `
+      <div class="type-list">
+        <div class="type-row">
+          <span class="type-name">DB size</span>
+          <span class="type-val">${fmtBytes(d.file_size_bytes)}</span>
+        </div>
+        <div class="type-row">
+          <span class="type-name">All-time cost</span>
+          <span class="type-val" style="color:var(--accent2)">${fmtCost(d.all_time_cost_usd)}</span>
+        </div>
+        <div class="type-row">
+          <span class="type-name">Decisions</span>
+          <span class="type-val">${d.decisions}</span>
+        </div>
+        <div class="type-row">
+          <span class="type-name">Git commits</span>
+          <span class="type-val">${d.git_commits}</span>
+        </div>
+        <div class="type-row">
+          <span class="type-name">Images</span>
+          <span class="type-val">${d.images} <span style="color:var(--text-dim);font-size:9px">(${d.images_described} described)</span></span>
+        </div>
+        <div class="type-row">
+          <span class="type-name">Compactions</span>
+          <span class="type-val">${d.compactions}</span>
+        </div>
+        <div class="type-row">
+          <span class="type-name">Ingest</span>
+          <span class="type-val" style="color:${driftColor}">${driftLabel}</span>
+        </div>
+      </div>
+    `;
+  } catch(e) {
+    document.getElementById('dbStatsContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Conversations ────────────────────────────────────────────────────
+let convoFilter = '';
+let convoMessageOffsets = {}; // sessionID → next offset to load
+
+function setConvoFilter(type) {
+  convoFilter = type;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent === (type || 'all'));
+  });
+  loadConversations();
+}
+
+async function loadConversations() {
+  try {
+    const typeParam = convoFilter ? `&type=${convoFilter}` : '';
+    const data = await apiFetch(`/api/sessions?limit=30${typeParam}`);
+    const el = document.getElementById('convoContent');
+    if (!data || !data.length) { el.innerHTML = '<div class="loading">no sessions</div>'; return; }
+
+    convoMessageOffsets = {};
+
+    const items = data.map(s => {
+      const topic = (s.topic || '').replace(/\n/g, ' ').trim();
+      const displayTopic = topic.length > 120 ? topic.substring(0, 120) + '…' : (topic || '(no topic)');
+      const repo = s.repo ? shortRepo(s.repo) : '';
+      return `
+        <div class="convo-item" id="ci-${esc(s.session_id)}" data-session-id="${esc(s.session_id)}">
+          <div class="convo-header">
+            <div class="convo-left">
+              <div class="convo-badges">
+                <span class="badge badge-type">${esc(s.session_type)}</span>
+                ${s.work_type ? `<span class="badge badge-work">${esc(s.work_type)}</span>` : ''}
+                ${repo ? `<span class="badge badge-branch">${esc(repo)}</span>` : ''}
+                ${s.git_branch && s.git_branch !== 'HEAD' ? `<span class="badge badge-branch">${esc(s.git_branch)}</span>` : ''}
+              </div>
+              <div class="convo-topic">${esc(displayTopic)}</div>
+              <div class="convo-id">${esc(s.session_id.substring(0, 24))}</div>
+            </div>
+            <div></div>
+            <div class="convo-right">
+              <span class="convo-msgs">${s.total_msgs} msgs</span>
+              <span class="convo-age">${ago(s.last_msg)}</span>
+              <span class="convo-chevron">▶</span>
+            </div>
+          </div>
+          <div class="convo-messages" id="cm-${esc(s.session_id)}">
+            <div class="loading">loading messages…</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    el.innerHTML = `<div class="convo-list" id="convoList">${items}</div>`;
+    document.getElementById('convoList').addEventListener('click', e => {
+      const header = e.target.closest('.convo-header');
+      if (!header) return;
+      const item = header.closest('.convo-item');
+      if (item && item.dataset.sessionId) toggleConvo(item.dataset.sessionId);
+    });
+  } catch(e) {
+    document.getElementById('convoContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function toggleConvo(sessionID) {
+  const item = document.getElementById('ci-' + sessionID);
+  const msgEl = document.getElementById('cm-' + sessionID);
+  const isOpen = item.classList.contains('open');
+
+  if (isOpen) {
+    item.classList.remove('open');
+    return;
+  }
+
+  item.classList.add('open');
+  if (convoMessageOffsets[sessionID] !== undefined) return; // already loaded
+
+  convoMessageOffsets[sessionID] = 0;
+  await loadMoreMessages(sessionID, true);
+}
+
+async function loadMoreMessages(sessionID, replace) {
+  const msgEl = document.getElementById('cm-' + sessionID);
+  const offset = convoMessageOffsets[sessionID] || 0;
+  const limit = 20;
+
+  try {
+    const msgs = await apiFetch(`/api/messages?id=${encodeURIComponent(sessionID)}&offset=${offset}&limit=${limit}`);
+    const substantive = (msgs || []).filter(m => !m.is_noise);
+    convoMessageOffsets[sessionID] = offset + msgs.length;
+
+    const rows = substantive.map(m => {
+      const text = (m.text || '').trim();
+      const truncated = text.length > 800 ? text.substring(0, 800) + '\n…' : text;
+      return `
+        <div class="msg-row">
+          <div class="msg-role ${esc(m.role)}">${esc(m.role)}</div>
+          <div class="msg-text">${esc(truncated)}</div>
+        </div>
+      `;
+    }).join('');
+
+    const hasMore = msgs.length === limit;
+    const loadMoreHTML = hasMore ? `<div class="msg-load-more">load more…</div>` : '';
+
+    if (replace) {
+      msgEl.innerHTML = (rows + loadMoreHTML) || '<div class="loading">no messages</div>';
+    } else {
+      // Remove old "load more" button and append
+      const existing = msgEl.querySelector('.msg-load-more');
+      if (existing) existing.remove();
+      msgEl.insertAdjacentHTML('beforeend', rows + loadMoreHTML);
+    }
+
+    // Attach load-more click via delegation on the container (avoids inline JS-escape risk).
+    const loadMoreBtn = msgEl.querySelector('.msg-load-more');
+    if (loadMoreBtn) {
+      loadMoreBtn.addEventListener('click', () => loadMoreMessages(sessionID, false));
+    }
+  } catch(e) {
+    msgEl.innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Context Pressure ──────────────────────────────────────────────────
+async function loadContext() {
+  try {
+    const data = await apiFetch(`/api/context?days=${days}&limit=20`);
+    document.getElementById('ctxTitle').textContent = `Context Pressure (${days}d)`;
+    const el = document.getElementById('ctxContent');
+
+    if (!data || !data.length) { el.innerHTML = '<div class="loading">no data</div>'; return; }
+
+    const rows = data.map(r => {
+      const pct = Math.min(r.pressure_pct, 100);
+      const level = pct >= 80 ? 'high' : pct >= 50 ? 'medium' : 'low';
+      const label = r.topic || r.repo || r.session_id.substring(0, 12);
+      const meta = [r.session_type, r.work_type, shortModel(r.model)].filter(Boolean).join(' · ');
+      return `
+        <div class="ctx-row">
+          <div class="ctx-session">
+            <div class="ctx-id">${esc(shortID(r.session_id))}</div>
+            <div class="ctx-meta" title="${esc(label)}">${esc(label.substring(0, 30))}${label.length > 30 ? '…' : ''}</div>
+            <div class="ctx-meta">${esc(meta)}</div>
+          </div>
+          <div class="ctx-track">
+            <div class="ctx-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
+          </div>
+          <div class="ctx-pct ${level}">${pct.toFixed(1)}%</div>
+          <div class="ctx-tokens">${fmtTokens(r.peak_input_tokens)} / ${fmtTokens(r.context_window_size)}</div>
+        </div>
+      `;
+    }).join('');
+
+    el.innerHTML = `<div class="ctx-list">${rows}</div>`;
+  } catch(e) {
+    document.getElementById('ctxContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Orchestration ─────────────────────────────────────────────────────
+async function refreshAll() {
+  const dot = document.getElementById('statusDot');
+  dot.classList.remove('stale');
+  try {
+    await Promise.all([
+      loadStats(),
+      loadRate(),
+      loadSubagent(),
+      loadDBStats(),
+      loadConversations(),
+      loadContext(),
+      loadModelCost(),
+      loadRepoCost(),
+      loadDailyCost(),
+      loadActivity(),
+    ]);
+    const now = new Date();
+    document.getElementById('updatedAt').textContent =
+      now.toTimeString().slice(0,8);
+  } catch(e) {
+    dot.classList.add('stale');
+  }
+}
+
+function onDaysChange() {
+  days = parseInt(document.getElementById('daysSelect').value, 10);
+  refreshAll();
+}
+
+function onIntervalChange() {
+  clearInterval(refreshTimer);
+  const secs = parseInt(document.getElementById('intervalSelect').value, 10);
+  if (secs > 0) refreshTimer = setInterval(refreshAll, secs * 1000);
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────
+applyTheme();
+refreshAll();
+onIntervalChange();
+startLiveMonitor();
+</script>
+</body>
+</html>
