@@ -5,7 +5,9 @@ a persistent MCP server — available in every Claude Code session.
 
 mnemo indexes JSONL transcript files from `~/.claude/projects/`,
 maintains a realtime SQLite FTS5 index, and exposes 30+ tools via MCP.
-New transcripts are picked up automatically via filesystem watching.
+New transcripts are picked up automatically via filesystem watching. A
+browser dashboard is served on the same port at `http://localhost:19419`
+— no separate process or build step required.
 
 **What it indexes:**
 
@@ -49,6 +51,31 @@ New transcripts are picked up automatically via filesystem watching.
   tool usage patterns
 - **Raw SQL access** — read-only queries against the full database,
   including sqldeep nested syntax for hierarchical JSON output
+
+## Dashboard
+
+Open `http://localhost:19419` in a browser after starting mnemo. The
+dashboard is embedded in the binary — no separate install needed.
+
+**Row 1 — Index overview**
+Session and message counts, hourly token rate, subagent session count,
+and DB health (file size, all-time cost, images, decisions, git commits).
+
+**Row 2 — Cost and activity**
+Cost by model, cost by repo, daily cost (today and yesterday), and
+recent activity by repo.
+
+**Row 3 — Sessions**
+Scrollable conversation list (filterable by session type) alongside a
+live session monitor that polls running `claude` processes every 5s and
+correlates them with session metadata.
+
+**Row 4 — Context pressure**
+Per-session peak context window usage, colour-coded green / orange / red,
+scrollable when more than four rows are present.
+
+Dark/light theme is toggled via the button in the top-right corner and
+persisted in `localStorage`.
 
 ## Quick start
 
