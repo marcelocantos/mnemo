@@ -543,6 +543,17 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	)
 	handler := tools.NewHandler(resolve)
 
+	// Wire the per-user vault syncer resolver so mnemo_vault_sync and
+	// mnemo_vault_status work. Returns nil when vault is not configured
+	// for the requested user; the tool handlers gracefully report this.
+	handler.SetVaultResolver(func(username string) tools.VaultSyncer {
+		v := reg.VaultFor(username)
+		if v == nil {
+			return nil // avoid (*vault.Exporter)(nil) wrapped in interface
+		}
+		return v
+	})
+
 	// Build a federation client if linked_instances are configured —
 	// this owns one persistent http.Client per peer and is shared
 	// across every fan-out tool registration. Failure to construct

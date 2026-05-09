@@ -5,8 +5,10 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,6 +21,14 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
+// VaultSyncer is satisfied by *vault.Exporter when vault is configured.
+// Defined here as an interface so the tools package does not import the
+// vault package directly, keeping the dependency graph clean.
+type VaultSyncer interface {
+	Sync(ctx context.Context) error
+	Path() string
+}
+
 // Handler handles tool calls, dispatching each incoming call to the
 // per-user Store resolved from the call's Username. The resolver is
 // injected so the tools package does not need to import the
@@ -26,8 +36,9 @@ import (
 // hierarchy in tests and future refactors). seen deduplicates the
 // first-call RecordConnectionOpen per (username, MCP session) pair.
 type Handler struct {
-	resolve func(username string) (store.Backend, error)
-	seen    sync.Map
+	resolve      func(username string) (store.Backend, error)
+	resolveVault func(username string) VaultSyncer // nil when vault disabled
+	seen         sync.Map
 }
 
 // NewHandler creates a tool handler that resolves each call's
@@ -37,6 +48,13 @@ func NewHandler(resolve func(string) (store.Backend, error)) *Handler {
 	return &Handler{resolve: resolve}
 }
 
+// SetVaultResolver configures a per-user vault syncer resolver. Calling
+// this is optional; when not called (or when the resolver returns nil)
+// the vault tools report "vault not configured".
+func (h *Handler) SetVaultResolver(fn func(string) VaultSyncer) {
+	h.resolveVault = fn
+}
+
 // callHandler is the per-call delegate that owns the user-resolved
 // Store for the lifetime of one tool invocation. Every per-tool
 // method is defined on *callHandler so the method bodies read
@@ -44,8 +62,9 @@ func NewHandler(resolve func(string) (store.Backend, error)) *Handler {
 // through every signature. Call() builds the callHandler once and
 // dispatches into the switch.
 type callHandler struct {
-	mem store.Backend
-	cc  CallContext
+	mem   store.Backend
+	cc    CallContext
+	vault VaultSyncer // nil when vault is not configured for this user
 }
 
 // Definitions returns the MCP tool definitions.
@@ -476,6 +495,18 @@ Use this to build a rework diagnosis context: the bullseye_rework tool accepts t
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment (optional).")),
 			mcp.WithNumber("limit", mcp.Description("Max attempts to return (default 20).")),
 		),
+		mcp.NewTool("mnemo_vault_sync",
+			mcp.WithDescription(`Synchronise the vault: write or update Markdown notes for every session, decision, memory, plan, target, CI run, and PR in the knowledge graph, then re-ingest the vault directory so human-added notes and edits are searchable.
+
+Notes whose vault file is already up to date (file mtime > entity timestamp) are skipped, making repeated syncs fast.
+
+Human content added below the <!-- mnemo:generated --> fence in any vault note is preserved across re-syncs and is indexed by mnemo's FTS5 search, feeding back into mnemo's associations.
+
+Vault must be configured via vault_path in ~/.mnemo/config.json.`),
+		),
+		mcp.NewTool("mnemo_vault_status",
+			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, and a count of notes on disk by section."),
+		),
 	}
 }
 
@@ -498,7 +529,12 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 			mem.RecordConnectionOpen(cc.MCPSessionID, 0, time.Now())
 		}
 	}
-	ch := &callHandler{mem: mem, cc: cc}
+	// Resolve vault syncer for this user (nil when vault not configured).
+	var vs VaultSyncer
+	if h.resolveVault != nil {
+		vs = h.resolveVault(cc.Username)
+	}
+	ch := &callHandler{mem: mem, cc: cc, vault: vs}
 	switch name {
 	case "mnemo_search":
 		return ch.search(args)
@@ -574,6 +610,10 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 		return ch.toolResult(args)
 	case "mnemo_rework_history":
 		return ch.reworkHistory(args)
+	case "mnemo_vault_sync":
+		return ch.vaultSync()
+	case "mnemo_vault_status":
+		return ch.vaultStatus()
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -2015,4 +2055,53 @@ func (h *callHandler) reworkHistory(args map[string]any) (string, bool, error) {
 		b.WriteByte('\n')
 	}
 	return b.String(), false, nil
+}
+
+// vaultNotConfigured is the standard response when vault_path is absent.
+const vaultNotConfigured = "vault not configured. Set vault_path in ~/.mnemo/config.json to enable.\n\nExample:\n  {\"vault_path\": \"~/.mnemo/vault\"}"
+
+func (h *callHandler) vaultSync() (string, bool, error) {
+	if h.vault == nil {
+		return vaultNotConfigured, false, nil
+	}
+	start := time.Now()
+	if err := h.vault.Sync(context.Background()); err != nil {
+		return fmt.Sprintf("vault sync failed: %v", err), true, nil
+	}
+	return fmt.Sprintf("vault sync complete in %s.\nVault path: %s",
+		time.Since(start).Round(time.Millisecond), h.vault.Path()), false, nil
+}
+
+func (h *callHandler) vaultStatus() (string, bool, error) {
+	if h.vault == nil {
+		return vaultNotConfigured, false, nil
+	}
+	vaultPath := h.vault.Path()
+	sections := []string{"sessions", "decisions", "memories", "skills", "configs", "plans", "targets", "ci", "prs", "repos"}
+	var b strings.Builder
+	fmt.Fprintf(&b, "vault path: %s\n\n", vaultPath)
+	b.WriteString("Notes on disk:\n")
+	total := 0
+	for _, sec := range sections {
+		count := countMDFiles(filepath.Join(vaultPath, sec))
+		total += count
+		fmt.Fprintf(&b, "  %-12s %d\n", sec, count)
+	}
+	fmt.Fprintf(&b, "  %-12s %d\n", "total", total)
+	return b.String(), false, nil
+}
+
+// countMDFiles counts *.md files recursively under dir.
+func countMDFiles(dir string) int {
+	count := 0
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
+			count++
+		}
+		return nil
+	})
+	return count
 }

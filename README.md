@@ -171,6 +171,22 @@ claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 Restart your agent session after registration — tools registered
 mid-session are not picked up.
 
+## Vault export (optional)
+
+Export your knowledge graph as Markdown notes compatible with Obsidian
+and Logseq. Human annotations sync back into mnemo's FTS5 search within
+~2 seconds. Zero overhead when disabled.
+
+Add to `~/.mnemo/config.json` and restart the daemon:
+
+```json
+{
+  "vault_path": "~/Documents/mnemo-vault"
+}
+```
+
+Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
+
 ## MCP Tools
 
 ### Transcript search and browsing
@@ -236,6 +252,13 @@ mid-session are not picked up.
 | Tool | Description |
 |---|---|
 | `mnemo_restore` | Retrieve compacted context from prior `/clear` boundaries |
+
+### Vault
+
+| Tool | Description |
+|---|---|
+| `mnemo_vault_sync` | Trigger an immediate vault sync (writes all changed notes to `vault_path`) |
+| `mnemo_vault_status` | Show vault path and current Markdown file count |
 
 For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
 or run `mnemo --help-agent`.

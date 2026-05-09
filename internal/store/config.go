@@ -44,6 +44,15 @@ type Config struct {
 	// still indexed via WorkspaceRoots + IngestDocs).
 	SynthesisRoots []string `json:"synthesis_roots,omitempty"`
 
+	// VaultPath is the directory where mnemo writes its Markdown knowledge
+	// graph. When set, mnemo continuously exports sessions, decisions,
+	// memories, skills, configs, plans, targets, CI runs, and PRs as
+	// Markdown files compatible with Obsidian and Logseq. Human edits
+	// below the <!-- mnemo:generated --> fence are preserved on re-sync.
+	// Supports ~ for the user's home directory.
+	// When absent or empty, vault export is completely disabled.
+	VaultPath string `json:"vault_path,omitempty"`
+
 	// LinkedInstances declares peer mnemo endpoints to federate with
 	// (🎯T15). Each peer is identified by a https URL and a trusted
 	// peer certificate (either a name resolved under ~/.mnemo/peers/
@@ -208,6 +217,28 @@ func (c Config) ResolvedWorkspaceRoots() []string {
 		return DefaultWorkspaceRoots()
 	}
 	return c.WorkspaceRoots
+}
+
+// ResolvedVaultPath returns VaultPath with ~ expanded using userHome.
+// Returns "" when VaultPath is not set (vault export disabled).
+// userHome is passed in rather than looked up here so ForUser can
+// expand ~ relative to the target user's home directory, not the
+// daemon's own home (relevant on Windows where LocalSystem runs the
+// daemon but a named user's vault path is configured).
+func (c Config) ResolvedVaultPath(userHome string) string {
+	p := c.VaultPath
+	if p == "" {
+		return ""
+	}
+	if userHome != "" {
+		switch {
+		case p == "~":
+			return userHome
+		case strings.HasPrefix(p, "~/"):
+			return filepath.Join(userHome, p[2:])
+		}
+	}
+	return p
 }
 
 // ResolvedSynthesisRoots returns SynthesisRoots with ~ expanded to the
