@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -354,6 +355,123 @@ func TestModelContextWindow(t *testing.T) {
 		if got := modelContextWindow(c.model); got != c.want {
 			t.Errorf("modelContextWindow(%q) = %d, want %d", c.model, got, c.want)
 		}
+	}
+}
+
+func TestGetOnlyRejectsPost(t *testing.T) {
+	fb := &fakeBackend{statsResult: &store.StatsResult{}}
+	_, mux := newTestHandler(fb)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("POST", "/api/stats", nil))
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("want 405, got %d", rr.Code)
+	}
+	if allow := rr.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("want Allow: GET, got %q", allow)
+	}
+}
+
+func TestResolveError(t *testing.T) {
+	h := New(func(string) (store.Backend, error) {
+		return nil, fmt.Errorf("no backend")
+	})
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/stats", nil))
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", rr.Code)
+	}
+}
+
+func TestEstimateCost(t *testing.T) {
+	cases := []struct {
+		name                                     string
+		model                                    string
+		input, output, cacheRead, cacheWrite float64
+		wantMin, wantMax                         float64
+	}{
+		{
+			name:  "opus",
+			model: "claude-opus-4-5",
+			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
+			wantMin: 20.0, wantMax: 30.0, // ~$15 input + $7.5 output + $0.75 cache_read + $0.9375 cache_write
+		},
+		{
+			name:  "sonnet",
+			model: "claude-sonnet-4-6",
+			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
+			wantMin: 4.0, wantMax: 5.0, // ~$3 input + $1.5 output + $0.15 cache_read + $0.1875 cache_write
+		},
+		{
+			name:  "haiku",
+			model: "claude-haiku-4-5",
+			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
+			wantMin: 1.0, wantMax: 2.0, // ~$0.80 input + $0.40 output + $0.04 cache_read + $0.05 cache_write
+		},
+		{
+			name:  "unknown defaults to sonnet",
+			model: "unknown-model",
+			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
+			wantMin: 4.0, wantMax: 5.0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := estimateCost(c.model, c.input, c.output, c.cacheRead, c.cacheWrite)
+			if got < c.wantMin || got > c.wantMax {
+				t.Errorf("estimateCost(%q) = %.4f, want [%.1f, %.1f]", c.model, got, c.wantMin, c.wantMax)
+			}
+		})
+	}
+}
+
+func TestDBStatsHandler(t *testing.T) {
+	fb := &fakeBackend{
+		queryResult: []map[string]any{
+			{
+				"images":      float64(10),
+				"described":   float64(5),
+				"decisions":   float64(20),
+				"git_commits": float64(100),
+				"compactions": float64(3),
+			},
+		},
+		statsResult: &store.StatsResult{},
+	}
+	_, mux := newTestHandler(fb)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/dbstats", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var result DBStats
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Images != 10 {
+		t.Errorf("want Images=10, got %d", result.Images)
+	}
+	if result.Decisions != 20 {
+		t.Errorf("want Decisions=20, got %d", result.Decisions)
+	}
+}
+
+func TestClampBounds(t *testing.T) {
+	if got := clamp(0, 1, 365); got != 1 {
+		t.Errorf("clamp(0,1,365) = %d, want 1", got)
+	}
+	if got := clamp(500, 1, 365); got != 365 {
+		t.Errorf("clamp(500,1,365) = %d, want 365", got)
+	}
+	if got := clamp(30, 1, 365); got != 30 {
+		t.Errorf("clamp(30,1,365) = %d, want 30", got)
 	}
 }
 

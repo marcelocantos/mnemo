@@ -43,15 +43,27 @@ func (h *Handler) backend() (store.Backend, error) {
 // same mux, so cross-origin access is not needed and would expose
 // sensitive transcript data to any page the user visits.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/stats", h.stats)
-	mux.HandleFunc("/api/usage", h.usage)
-	mux.HandleFunc("/api/sessions", h.sessions)
-	mux.HandleFunc("/api/activity", h.activity)
-	mux.HandleFunc("/api/whatsup", h.whatsup)
-	mux.HandleFunc("/api/context", h.context)
-	mux.HandleFunc("/api/messages", h.messages)
-	mux.HandleFunc("/api/dbstats", h.dbstats)
-	mux.HandleFunc("/api/active", h.active)
+	mux.HandleFunc("/api/stats", getOnly(h.stats))
+	mux.HandleFunc("/api/usage", getOnly(h.usage))
+	mux.HandleFunc("/api/sessions", getOnly(h.sessions))
+	mux.HandleFunc("/api/activity", getOnly(h.activity))
+	mux.HandleFunc("/api/whatsup", getOnly(h.whatsup))
+	mux.HandleFunc("/api/context", getOnly(h.context))
+	mux.HandleFunc("/api/messages", getOnly(h.messages))
+	mux.HandleFunc("/api/dbstats", getOnly(h.dbstats))
+	mux.HandleFunc("/api/active", getOnly(h.active))
+}
+
+// getOnly rejects non-GET requests with 405 Method Not Allowed.
+func getOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -84,7 +96,7 @@ func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	days := queryInt(q.Get("days"), 1)
+	days := clamp(queryInt(q.Get("days"), 1), 1, 365)
 	groupBy := q.Get("group_by")
 	if groupBy == "" {
 		groupBy = "day"
@@ -114,7 +126,7 @@ func (h *Handler) sessions(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	sessionType := q.Get("type")
-	limit := queryInt(q.Get("limit"), 20)
+	limit := clamp(queryInt(q.Get("limit"), 20), 1, 100)
 	repo := q.Get("repo")
 
 	result, err := mem.ListSessions(sessionType, 0, limit, "", repo, "")
@@ -133,7 +145,7 @@ func (h *Handler) activity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	days := queryInt(q.Get("days"), 1)
+	days := clamp(queryInt(q.Get("days"), 1), 1, 365)
 	repo := q.Get("repo")
 
 	result, err := mem.RecentActivity(days, repo)
@@ -176,6 +188,30 @@ func modelContextWindow(model string) int64 {
 	return 200_000
 }
 
+// modelCostRates maps model slug prefixes to per-token costs in USD,
+// mirroring the rates in store.go's modelCosts table.
+var modelCostRates = []struct {
+	prefix                                   string
+	input, output, cacheRead, cacheWrite float64
+}{
+	{"claude-opus-4", 15.0 / 1e6, 75.0 / 1e6, 1.5 / 1e6, 18.75 / 1e6},
+	{"claude-sonnet-4", 3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
+	{"claude-haiku-4", 0.80 / 1e6, 4.0 / 1e6, 0.08 / 1e6, 1.0 / 1e6},
+}
+
+// estimateCost returns the estimated USD cost for a set of token counts
+// at the given model's rates. Falls back to Sonnet pricing for unknown models.
+func estimateCost(model string, input, output, cacheRead, cacheWrite float64) float64 {
+	for _, m := range modelCostRates {
+		if strings.HasPrefix(model, m.prefix) {
+			return input*m.input + output*m.output + cacheRead*m.cacheRead + cacheWrite*m.cacheWrite
+		}
+	}
+	// Default to Sonnet pricing.
+	m := modelCostRates[1]
+	return input*m.input + output*m.output + cacheRead*m.cacheRead + cacheWrite*m.cacheWrite
+}
+
 // ContextRow is one session's peak context usage.
 type ContextRow struct {
 	SessionID         string  `json:"session_id"`
@@ -199,8 +235,8 @@ func (h *Handler) context(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	days := queryInt(q.Get("days"), 1)
-	limit := queryInt(q.Get("limit"), 20)
+	days := clamp(queryInt(q.Get("days"), 1), 1, 365)
+	limit := clamp(queryInt(q.Get("limit"), 20), 1, 100)
 
 	rows, err := mem.QueryArgs(`
 		SELECT
@@ -448,33 +484,55 @@ func (h *Handler) dbstats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// File size
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		slog.Warn("api/dbstats: cannot determine home directory", "err", err)
+	}
 	dbPath := filepath.Join(homeDir, ".mnemo", "mnemo.db")
 	var fileSize int64
 	if fi, err := os.Stat(dbPath); err == nil {
 		fileSize = fi.Size()
 	}
 
-	// Table counts + all-time cost via Query
-	rows, err := mem.Query(`
+	// Table counts
+	countRows, err := mem.Query(`
 		SELECT
 			(SELECT COUNT(*) FROM images)             AS images,
 			(SELECT COUNT(*) FROM image_descriptions) AS described,
 			(SELECT COUNT(*) FROM decisions)          AS decisions,
 			(SELECT COUNT(*) FROM git_commits)        AS git_commits,
-			(SELECT COUNT(*) FROM compactions)        AS compactions,
-			COALESCE((
-				SELECT SUM(
-					COALESCE(input_tokens,0)          * 3.0  / 1e6 +
-					COALESCE(output_tokens,0)         * 15.0 / 1e6 +
-					COALESCE(cache_read_tokens,0)     * 0.3  / 1e6 +
-					COALESCE(cache_creation_tokens,0) * 3.75 / 1e6
-				) FROM entries WHERE input_tokens IS NOT NULL
-			), 0) AS all_time_cost
+			(SELECT COUNT(*) FROM compactions)        AS compactions
 	`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Per-model token totals for accurate cost estimation.
+	costRows, err := mem.Query(`
+		SELECT
+			COALESCE(model, '') AS model,
+			COALESCE(SUM(input_tokens), 0)          AS input_tokens,
+			COALESCE(SUM(output_tokens), 0)         AS output_tokens,
+			COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
+			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
+		FROM entries
+		WHERE input_tokens IS NOT NULL
+		GROUP BY model
+	`)
+	if err != nil {
+		slog.Warn("api/dbstats: cost query failed", "err", err)
+	}
+
+	var allTimeCost float64
+	for _, row := range costRows {
+		allTimeCost += estimateCost(
+			str(row["model"]),
+			num(row["input_tokens"]),
+			num(row["output_tokens"]),
+			num(row["cache_read_tokens"]),
+			num(row["cache_creation_tokens"]),
+		)
 	}
 
 	// Ingest drift from stats
@@ -491,14 +549,13 @@ func (h *Handler) dbstats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	out := DBStats{FileSizeBytes: fileSize, IngestDrift: drift}
-	if len(rows) == 1 {
-		out.Images = int64(num(rows[0]["images"]))
-		out.ImagesDescribed = int64(num(rows[0]["described"]))
-		out.Decisions = int64(num(rows[0]["decisions"]))
-		out.GitCommits = int64(num(rows[0]["git_commits"]))
-		out.Compactions = int64(num(rows[0]["compactions"]))
-		out.AllTimeCostUSD = num(rows[0]["all_time_cost"])
+	out := DBStats{FileSizeBytes: fileSize, IngestDrift: drift, AllTimeCostUSD: allTimeCost}
+	if len(countRows) == 1 {
+		out.Images = int64(num(countRows[0]["images"]))
+		out.ImagesDescribed = int64(num(countRows[0]["described"]))
+		out.Decisions = int64(num(countRows[0]["decisions"]))
+		out.GitCommits = int64(num(countRows[0]["git_commits"]))
+		out.Compactions = int64(num(countRows[0]["compactions"]))
 	}
 
 	writeJSON(w, out)
@@ -517,7 +574,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id required", http.StatusBadRequest)
 		return
 	}
-	limit := queryInt(q.Get("limit"), 20)
+	limit := clamp(queryInt(q.Get("limit"), 20), 1, 100)
 	offset := queryInt(q.Get("offset"), 0)
 
 	msgs, err := mem.ReadSession(id, "", offset, limit)
@@ -558,6 +615,16 @@ func queryInt(s string, def int) int {
 	v, err := strconv.Atoi(s)
 	if err != nil {
 		return def
+	}
+	return v
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
 	}
 	return v
 }
