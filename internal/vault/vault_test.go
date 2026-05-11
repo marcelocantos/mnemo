@@ -613,6 +613,57 @@ func TestRenderSessionAliases(t *testing.T) {
 	}
 }
 
+// TestRenderSessionAliasesNewlineEscaping verifies that topics containing
+// newlines/tabs/quotes do not break the YAML aliases array. Topics are
+// extracted from conversation text and may contain any character.
+func TestRenderSessionAliasesNewlineEscaping(t *testing.T) {
+	info := store.SessionInfo{
+		SessionID: "abc123def456",
+		Topic:     "first line\nsecond line\twith\ttabs and \"quotes\"",
+		FirstMsg:  "2026-05-10T10:00:00Z",
+	}
+	note := renderSession(info, nil)
+
+	// Extract aliases block (between "aliases:\n" and the next key/end of frontmatter).
+	aliasIdx := strings.Index(note, "aliases:\n")
+	if aliasIdx < 0 {
+		t.Fatal("session note missing aliases frontmatter")
+	}
+	rest := note[aliasIdx+len("aliases:\n"):]
+	tagsIdx := strings.Index(rest, "tags:")
+	if tagsIdx < 0 {
+		t.Fatal("session note missing tags frontmatter")
+	}
+	aliasBlock := rest[:tagsIdx]
+
+	// Every line in the alias block must be a list item ("  - \"...\"").
+	// A raw newline in the topic would split the alias across multiple lines,
+	// producing a malformed entry like `  - "first line` followed by a bare
+	// `second line"` line.
+	for _, line := range strings.Split(strings.TrimRight(aliasBlock, "\n"), "\n") {
+		if !strings.HasPrefix(line, "  - \"") || !strings.HasSuffix(line, "\"") {
+			t.Errorf("alias line not properly quoted: %q", line)
+		}
+	}
+
+	// Escape sequences must be present (not literal control chars).
+	if strings.Contains(aliasBlock, "\n  - \"second") {
+		t.Error("topic newline not escaped — alias array is malformed")
+	}
+	if strings.ContainsRune(aliasBlock, '\t') {
+		t.Error("topic tab not escaped — alias array contains literal tab")
+	}
+	if !strings.Contains(aliasBlock, `\n`) {
+		t.Errorf("expected \\n escape in alias, got: %q", aliasBlock)
+	}
+	if !strings.Contains(aliasBlock, `\t`) {
+		t.Errorf("expected \\t escape in alias, got: %q", aliasBlock)
+	}
+	if !strings.Contains(aliasBlock, `\"quotes\"`) {
+		t.Errorf("expected \\\" escape for embedded quotes, got: %q", aliasBlock)
+	}
+}
+
 // ---- Exporter.Sync integration ----------------------------------------------
 
 // TestExporterSyncCreatesFiles verifies that Sync writes the expected vault

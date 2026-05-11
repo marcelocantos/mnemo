@@ -36,11 +36,14 @@ func renderSession(info store.SessionInfo, msgs []store.SessionMessage) string {
 	}
 	// Obsidian aliases: lets users find the session by topic without
 	// knowing the session ID; the short ID is always included as fallback.
+	// Topics are extracted from conversation text and may contain newlines
+	// or other YAML-breaking characters, so route through yamlEscapeQuoted
+	// (same escape pass as writeYAML).
 	b.WriteString("aliases:\n")
 	if info.Topic != "" {
-		fmt.Fprintf(&b, "  - \"%s\"\n", strings.ReplaceAll(info.Topic, `"`, `\"`))
+		fmt.Fprintf(&b, "  - \"%s\"\n", yamlEscapeQuoted(info.Topic))
 	}
-	fmt.Fprintf(&b, "  - \"%s\"\n", shortID(info.SessionID))
+	fmt.Fprintf(&b, "  - \"%s\"\n", yamlEscapeQuoted(shortID(info.SessionID)))
 	b.WriteString("tags:\n")
 	b.WriteString("  - session\n")
 	if r := shortProjectName(info.Repo); r != "" && r != "untitled" && r != "unknown" {
@@ -530,15 +533,22 @@ func writeYAML(b *strings.Builder, key, value string) {
 	needsQuote := strings.ContainsAny(value, ":{}[]|>&*!,'\"#%@`\n\t\r") ||
 		value != strings.TrimSpace(value)
 	if needsQuote {
-		escaped := strings.ReplaceAll(value, `\`, `\\`)
-		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-		escaped = strings.ReplaceAll(escaped, "\n", `\n`)
-		escaped = strings.ReplaceAll(escaped, "\r", `\r`)
-		escaped = strings.ReplaceAll(escaped, "\t", `\t`)
-		fmt.Fprintf(b, "%s: \"%s\"\n", key, escaped)
+		fmt.Fprintf(b, "%s: \"%s\"\n", key, yamlEscapeQuoted(value))
 	} else {
 		fmt.Fprintf(b, "%s: %s\n", key, value)
 	}
+}
+
+// yamlEscapeQuoted returns s escaped for use inside a YAML double-quoted
+// scalar. Escapes backslash, double-quote, and the control characters
+// \n/\r/\t that would otherwise break the scalar across lines.
+func yamlEscapeQuoted(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
 }
 
 // summarize truncates s to at most maxLen printable characters, breaking
