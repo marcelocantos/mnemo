@@ -52,6 +52,34 @@ import (
 // above this marker while leaving everything below untouched.
 const generatedFence = "<!-- mnemo:generated -->"
 
+// fenceLineIndex returns the byte offset of the line break ending the LAST
+// line that exactly equals the generated fence (modulo trailing whitespace),
+// or -1 when no such line exists.
+//
+// Line-anchored matching avoids a subtle data-loss bug: a plain LastIndex
+// of the fence string would also match if the user pasted the literal fence
+// into their annotations (e.g. quoting mnemo's docs). Detecting the fence
+// only on its own line keeps user-typed instances of the string safely
+// inside human content.
+func fenceLineIndex(raw string) int {
+	end := len(raw)
+	// Walk backwards line by line.
+	for end > 0 {
+		start := strings.LastIndexByte(raw[:end], '\n') + 1 // 0 if no earlier newline
+		line := raw[start:end]
+		// Strip a trailing CR + spaces/tabs (but not the leading content).
+		trimmed := strings.TrimRight(line, " \t\r")
+		if trimmed == generatedFence {
+			return end // offset of (or just past) the line's terminating newline
+		}
+		if start == 0 {
+			break
+		}
+		end = start - 1 // step over the '\n'
+	}
+	return -1
+}
+
 // Exporter writes mnemo's knowledge graph as Markdown vault notes.
 //
 // Sync calls are serialised via syncMu: if a Sync is already running when
@@ -518,8 +546,8 @@ func writeNote(absPath, generated, entityTS string) error {
 	human := ""
 	if existing, err := os.ReadFile(absPath); err == nil {
 		raw := string(existing)
-		if idx := strings.LastIndex(raw, generatedFence); idx >= 0 {
-			after := strings.TrimLeft(raw[idx+len(generatedFence):], "\n")
+		if idx := fenceLineIndex(raw); idx >= 0 {
+			after := strings.TrimLeft(raw[idx:], "\n")
 			if after != "" {
 				human = after
 			}

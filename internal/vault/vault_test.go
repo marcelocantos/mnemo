@@ -844,6 +844,55 @@ func TestUserCreatedFileIsIndexed(t *testing.T) {
 	}
 }
 
+// TestFenceLineIndexLineAnchored verifies that a literal occurrence of
+// the fence string inside the user's annotation (e.g. when documenting
+// mnemo) is NOT treated as a fence — only an exact line match counts.
+// Without line anchoring, vault.writeNote would silently drop any content
+// between the real fence and the user-typed literal on next sync.
+func TestFenceLineIndexLineAnchored(t *testing.T) {
+	raw := "above\n" +
+		"<!-- mnemo:generated -->\n" +
+		"real human content\n" +
+		"And here's how the fence looks inline: `<!-- mnemo:generated -->`\n" +
+		"more human content\n"
+	idx := fenceLineIndex(raw)
+	if idx < 0 {
+		t.Fatal("expected to find the real fence line")
+	}
+	below := strings.TrimLeft(raw[idx:], "\n")
+	if !strings.Contains(below, "real human content") {
+		t.Errorf("missing 'real human content' below fence; got: %q", below)
+	}
+	if !strings.Contains(below, "more human content") {
+		t.Errorf("missing 'more human content' — inline literal incorrectly treated as fence; got: %q", below)
+	}
+}
+
+func TestWriteNotePreservesContentWithInlineFenceLiteral(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.md")
+	if err := writeNote(path, "# Generated v1", ""); err != nil {
+		t.Fatalf("initial write: %v", err)
+	}
+	// Human appends content that includes the fence string inline.
+	raw, _ := os.ReadFile(path)
+	annotated := string(raw) + "\nMy notes:\n\n- the fence is `<!-- mnemo:generated -->`\n- and this line must survive\n"
+	if err := os.WriteFile(path, []byte(annotated), 0o644); err != nil {
+		t.Fatalf("annotate: %v", err)
+	}
+	// Re-sync.
+	if err := writeNote(path, "# Generated v2", ""); err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+	final, _ := os.ReadFile(path)
+	if !strings.Contains(string(final), "this line must survive") {
+		t.Errorf("content after inline fence literal was dropped: %s", final)
+	}
+	if !strings.Contains(string(final), "Generated v2") {
+		t.Error("re-sync didn't update generated content")
+	}
+}
+
 // TestVaultDeletionPrunesRow verifies that deleting a vault .md file
 // removes its row from the docs table on the next ingest pass — without
 // this, search would return content from files the user has removed.

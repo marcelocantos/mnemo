@@ -74,18 +74,16 @@ takes under 10 seconds; 5,000 sessions under 2 minutes. Subsequent
 daemon restarts are near-instant because mnemo embeds the entity
 timestamp in each note and skips files that are already up to date.
 
-mnemo_search results tagged `[vault]` are human annotations — content
-below the `<!-- mnemo:generated -->` fence that was indexed after your
-last save.
-
 Then open the directory in Obsidian (`Open folder as vault`) or Logseq
 (`Add a local graph`). No plugins required — the vault uses only core
 features: YAML frontmatter, `[[wikilinks]]`, and standard Markdown.
 Subsequent syncs run every 5 minutes in the background.
 
-## Human edits
+## Adding human knowledge
 
-Edit any note freely below the `<!-- mnemo:generated -->` fence:
+Two ways to flow content into mnemo's index:
+
+**Annotate generated notes** — edit below the fence:
 
 ```markdown
 # My session
@@ -99,8 +97,15 @@ Edit any note freely below the `<!-- mnemo:generated -->` fence:
 Worth revisiting — approach has known edge cases with concurrent writes.
 ```
 
-mnemo picks up your additions within ~2 seconds (OS-native file
-watcher) and they become searchable via `mnemo_search`.
+**Drop standalone `.md` files anywhere in the vault** — files without
+a `<!-- mnemo:generated -->` fence (your own Obsidian/Logseq notes,
+reading lists, design sketches, …) are indexed in full. mnemo never
+overwrites them; only the directories it creates carry generated content.
+
+Either way, mnemo picks up changes within ~2 seconds (OS-native file
+watcher) and the new content becomes searchable via `mnemo_search`
+results tagged `[vault]`. Deleting a file (or moving it out of the
+vault) removes its index entry on the next sync.
 
 ## Manual sync
 
@@ -117,8 +122,9 @@ goroutines, no file I/O, zero overhead.
 
 When enabled, the cost is:
 
-- **Initial sync**: scans all indexed entities on startup; mtime-based
-  skipping makes restarts near-instant
+- **Initial sync**: scans all indexed entities on startup; an entity
+  timestamp embedded in each note (just above the fence) makes
+  restarts near-instant by skipping unchanged files
 - **Periodic sync**: one `Sync()` call every 5 minutes, writing only
   changed files
 - **File watcher**: OS-native kqueue/inotify — CPU overhead is ~zero

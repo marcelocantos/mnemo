@@ -29,10 +29,25 @@ const vaultGeneratedFence = "<!-- mnemo:generated -->"
 //     Obsidian/Logseq note dropped into the vault): the whole file is human
 //     content and gets indexed in full.
 //
+// Fence detection is line-anchored: the fence must be a whole line by
+// itself (modulo trailing whitespace). This avoids treating a user-pasted
+// literal of the fence string (e.g. when quoting mnemo's own docs) as a
+// real fence, which would otherwise hide everything above the pasted copy
+// from indexing.
+//
 // Returns "" when the file is empty or only contains generated content.
 func humanContentOf(raw string) string {
-	if idx := strings.LastIndex(raw, vaultGeneratedFence); idx >= 0 {
-		return strings.TrimSpace(raw[idx+len(vaultGeneratedFence):])
+	end := len(raw)
+	for end > 0 {
+		start := strings.LastIndexByte(raw[:end], '\n') + 1
+		line := strings.TrimRight(raw[start:end], " \t\r")
+		if line == vaultGeneratedFence {
+			return strings.TrimSpace(raw[end:])
+		}
+		if start == 0 {
+			break
+		}
+		end = start - 1
 	}
 	return strings.TrimSpace(raw)
 }
