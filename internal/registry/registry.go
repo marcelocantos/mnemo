@@ -271,10 +271,16 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			// fsnotify v1.9 does not expose a public WithRecursive option
 			// on all platforms, so we walk and add manually, then
 			// re-add any newly created subdirectory on CREATE events.
+			// Hidden dirs (.obsidian/, .git/, .trash/) are skipped to
+			// avoid wasting inotify slots on Linux and to skip Obsidian
+			// internal-state churn that has no signal for mnemo.
 			addVaultDirs := func(root string) {
 				_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 					if err != nil || !d.IsDir() {
 						return nil
+					}
+					if p != root && strings.HasPrefix(d.Name(), ".") {
+						return filepath.SkipDir
 					}
 					_ = fw.Add(p)
 					return nil
@@ -296,10 +302,11 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 					if !ok {
 						return
 					}
-					// Watch newly created subdirectories so notes
+					// Watch newly created non-hidden subdirectories so notes
 					// written into new sections are also picked up.
 					if ev.Has(fsnotify.Create) {
-						if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
+						if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() &&
+							!strings.HasPrefix(filepath.Base(ev.Name), ".") {
 							_ = fw.Add(ev.Name)
 						}
 					}

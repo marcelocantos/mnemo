@@ -66,8 +66,37 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 	vaultRepo := filepath.Base(vaultPath)
 	indexed, skipped, removed := 0, 0, 0
 
+	// Snapshot existing vault rows so we can prune any whose source file
+	// has been deleted, moved, or now lives outside this vault root (e.g.
+	// after vault_path is reconfigured). Without this, deleting a note
+	// would leave a stale row visible in search.
+	stale := map[string]bool{}
+	if rows, err := s.db.Query(
+		"SELECT file_path FROM docs WHERE kind = 'vault'",
+	); err == nil {
+		for rows.Next() {
+			var p string
+			if rows.Scan(&p) == nil {
+				stale[p] = true
+			}
+		}
+		rows.Close()
+	}
+
 	walkErr := filepath.WalkDir(vaultPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+		if err != nil {
+			return nil
+		}
+		// Skip hidden dirs (.obsidian/, .git/, .trash/, …) entirely — they
+		// hold tool config and aren't human knowledge. Saves IO + watcher
+		// slots on Linux inotify.
+		if d.IsDir() {
+			if path != vaultPath && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".md") {
 			return nil
 		}
 
@@ -77,6 +106,9 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 		}
 
 		human := humanContentOf(string(data))
+
+		// This file still exists under the current vault root — don't prune it.
+		delete(stale, path)
 
 		if human == "" {
 			// No human content: remove any previously indexed row.
@@ -142,6 +174,15 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 		indexed++
 		return nil
 	})
+
+	// Prune rows whose source file no longer exists under this vault root.
+	for p := range stale {
+		if _, err := s.db.Exec(
+			"DELETE FROM docs WHERE file_path = ? AND kind = 'vault'", p,
+		); err == nil {
+			removed++
+		}
+	}
 
 	slog.Info("vault: annotations ingested",
 		"path", vaultPath,

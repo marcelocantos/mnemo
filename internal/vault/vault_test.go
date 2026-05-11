@@ -844,6 +844,80 @@ func TestUserCreatedFileIsIndexed(t *testing.T) {
 	}
 }
 
+// TestVaultDeletionPrunesRow verifies that deleting a vault .md file
+// removes its row from the docs table on the next ingest pass — without
+// this, search would return content from files the user has removed.
+func TestVaultDeletionPrunesRow(t *testing.T) {
+	projDir := t.TempDir()
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+
+	notePath := filepath.Join(vaultDir, "ephemeral.md")
+	body := "# Ephemeral\n\nThis content references the rare term flibbertigibbet.\n"
+	if err := os.WriteFile(notePath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write note: %v", err)
+	}
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+
+	// Sanity: searchable before deletion.
+	results, _ := s.Search("flibbertigibbet", 10, "all", "", 0, 0, false)
+	if len(results) == 0 {
+		t.Fatal("expected search to find note before deletion")
+	}
+
+	// Delete the file and re-ingest.
+	if err := os.Remove(notePath); err != nil {
+		t.Fatalf("remove note: %v", err)
+	}
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("post-deletion ingest: %v", err)
+	}
+
+	results, _ = s.Search("flibbertigibbet", 10, "all", "", 0, 0, false)
+	for _, r := range results {
+		if r.Role == "vault" {
+			t.Errorf("deleted file still surfaces in search: %q", r.Text)
+		}
+	}
+}
+
+// TestVaultSkipsHiddenDirs verifies that .obsidian/, .git/ etc. are not
+// scanned (avoids inotify exhaustion on Linux + skips tool config churn).
+func TestVaultSkipsHiddenDirs(t *testing.T) {
+	projDir := t.TempDir()
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+
+	// Plant a .md file inside an Obsidian config dir — must NOT be indexed.
+	hidden := filepath.Join(vaultDir, ".obsidian")
+	if err := os.MkdirAll(hidden, 0o755); err != nil {
+		t.Fatalf("mkdir hidden: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "plugin-config.md"),
+		[]byte("zibblefrotz-config-internal\n"), 0o644); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	results, _ := s.Search("zibblefrotz config internal", 10, "all", "", 0, 0, false)
+	for _, r := range results {
+		if r.Role == "vault" {
+			t.Errorf("hidden dir content leaked into search: %q", r.Text)
+		}
+	}
+}
+
 // TestVaultSyncCoalescesConcurrentCalls verifies that two concurrent
 // Sync() calls don't both run a full pass — the second returns
 // immediately while the first completes. This protects writeNote's
