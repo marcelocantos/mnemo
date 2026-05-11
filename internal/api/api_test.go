@@ -25,7 +25,6 @@ type fakeBackend struct {
 	activity      []store.RecentActivityInfo
 	whatsupResult *store.WhatsupResult
 	queryResult   []map[string]any
-	queryArgsResult []map[string]any
 	messages      []store.SessionMessage
 }
 
@@ -42,9 +41,8 @@ func (f *fakeBackend) RecentActivity(days int, repoFilter string) ([]store.Recen
 func (f *fakeBackend) Whatsup(postmortem bool) (*store.WhatsupResult, error) {
 	return f.whatsupResult, nil
 }
-func (f *fakeBackend) Query(query string) ([]map[string]any, error) { return f.queryResult, nil }
-func (f *fakeBackend) QueryArgs(query string, args ...any) ([]map[string]any, error) {
-	return f.queryArgsResult, nil
+func (f *fakeBackend) Query(query string, args ...any) ([]map[string]any, error) {
+	return f.queryResult, nil
 }
 func (f *fakeBackend) ReadSession(sessionID string, role string, offset int, limit int) ([]store.SessionMessage, error) {
 	return f.messages, nil
@@ -300,7 +298,7 @@ func TestMessagesHandler(t *testing.T) {
 
 func TestContextHandler(t *testing.T) {
 	fb := &fakeBackend{
-		queryArgsResult: []map[string]any{
+		queryResult: []map[string]any{
 			{
 				"session_id":        "sess-1",
 				"session_type":      "interactive",
@@ -343,8 +341,10 @@ func TestModelContextWindow(t *testing.T) {
 		model string
 		want  int64
 	}{
-		{"claude-opus-4-5", 1_000_000},
-		{"claude-opus-4", 1_000_000},
+		{"claude-opus-4-5[1m]", 1_000_000},
+		{"claude-sonnet-4-6[1m]", 1_000_000},
+		{"claude-opus-4-5", 200_000},
+		{"claude-opus-4", 200_000},
 		{"claude-sonnet-4-6", 200_000},
 		{"claude-haiku-4-5", 200_000},
 		{"claude-3-5-sonnet", 200_000},

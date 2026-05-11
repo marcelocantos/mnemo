@@ -172,18 +172,10 @@ func (h *Handler) whatsup(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelContextWindow returns the context window token limit for a model slug.
-// Prefixes are matched longest-first so more-specific entries win.
+// Only the [1m]-suffixed variant has a 1M window; all others are 200K.
 func modelContextWindow(model string) int64 {
-	// Models with non-default (>200K) windows.
-	for _, entry := range []struct {
-		prefix string
-		tokens int64
-	}{
-		{"claude-opus-4", 1_000_000},
-	} {
-		if strings.HasPrefix(model, entry.prefix) {
-			return entry.tokens
-		}
+	if strings.HasSuffix(model, "[1m]") {
+		return 1_000_000
 	}
 	return 200_000
 }
@@ -238,7 +230,7 @@ func (h *Handler) context(w http.ResponseWriter, r *http.Request) {
 	days := clamp(queryInt(q.Get("days"), 1), 1, 365)
 	limit := clamp(queryInt(q.Get("limit"), 20), 1, 100)
 
-	rows, err := mem.QueryArgs(`
+	rows, err := mem.Query(`
 		SELECT
 			s.session_id,
 			s.session_type,
@@ -341,7 +333,7 @@ func (h *Handler) active(w http.ResponseWriter, r *http.Request) {
 		for i, id := range sessionIDs {
 			args[i] = id
 		}
-		rows, err := mem.QueryArgs(`
+		rows, err := mem.Query(`
 			SELECT
 				s.session_id,
 				COALESCE(m.repo, '')      AS repo,
