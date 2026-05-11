@@ -24,8 +24,10 @@ import (
 )
 
 // VaultSyncer is satisfied by *vault.Exporter when vault is configured.
-// Defined here as an interface so the tools package does not import the
-// vault package directly, keeping the dependency graph clean.
+// Defined as an interface so test code can substitute a fake. The tools
+// package does import the vault package solely for vault.ErrSyncInFlight
+// — a one-symbol sentinel needed to distinguish coalesced calls from
+// real errors in the MCP response.
 type VaultSyncer interface {
 	Sync(ctx context.Context) error
 	Path() string

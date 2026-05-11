@@ -652,11 +652,19 @@ func repackagePreexistingContent(content string) string {
 // Returns (body, rest, true) when s begins with "---\n<body>\n---\n" (the
 // closing fence on its own line, trailing whitespace tolerated). Returns
 // ("", s, false) when no leading frontmatter is present.
+//
+// Tolerates CRLF line endings on the opening "---" line for consistency
+// with fenceLineIndex, which already strips trailing \r before comparing.
 func extractLeadingFrontmatter(s string) (body, rest string, ok bool) {
-	if !strings.HasPrefix(s, "---\n") {
+	var after string
+	switch {
+	case strings.HasPrefix(s, "---\n"):
+		after = s[len("---\n"):]
+	case strings.HasPrefix(s, "---\r\n"):
+		after = s[len("---\r\n"):]
+	default:
 		return "", s, false
 	}
-	after := s[len("---\n"):]
 	i := 0
 	for i < len(after) {
 		nl := strings.IndexByte(after[i:], '\n')

@@ -571,6 +571,10 @@ func TestExtractLeadingFrontmatter(t *testing.T) {
 		{"empty", "", "", "", false},
 		{"only-opening", "---\nkey: value\n", "", "---\nkey: value\n", false},
 		{"empty-body", "---\n---\nbody\n", "", "body\n", true},
+		// CRLF on opening fence is tolerated for consistency with
+		// fenceLineIndex. Inner lines are LF-terminated (the trailing \r
+		// would be stripped by TrimRight on the closing-fence line check).
+		{"crlf-opening", "---\r\nkey: value\n---\nbody\n", "key: value\n", "body\n", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1173,10 +1177,15 @@ func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// Run two Syncs concurrently. One must complete cleanly; the other
-	// must return ErrSyncInFlight (coalesced — see bug D fix). Surfacing
-	// the skip honestly is the whole point: a silent nil would mislead
-	// MCP callers into thinking their sync request ran.
+	// Run two Syncs concurrently. Each must return either nil (ran
+	// cleanly) or ErrSyncInFlight (coalesced — bug D fix). At least one
+	// nil must be observed (the work actually happened) and at most one
+	// nil is possible because the second call is gated on syncing. The
+	// exact (1 nil, 1 inFlight) split is timing-dependent — on a very
+	// fast empty store the two goroutines can run sequentially without
+	// overlap, producing two nils. That's still correct behaviour, just
+	// not exercising the coalescing path; TestSyncReturnsErrSyncInFlight-
+	// WhenBusy below covers the sentinel deterministically.
 	errs := make(chan error, 2)
 	for range 2 {
 		go func() {
@@ -1194,8 +1203,8 @@ func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
 			t.Errorf("concurrent Sync failed: %v", err)
 		}
 	}
-	if nilCount != 1 || inFlightCount != 1 {
-		t.Errorf("expected exactly one nil and one ErrSyncInFlight, got nil=%d inFlight=%d",
+	if nilCount < 1 || nilCount+inFlightCount != 2 {
+		t.Errorf("expected at least one nil and total of 2 results, got nil=%d inFlight=%d",
 			nilCount, inFlightCount)
 	}
 
@@ -1207,6 +1216,27 @@ func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
 	raw, _ := os.ReadFile(sessionFiles[0])
 	if c := strings.Count(string(raw), generatedFence); c != 1 {
 		t.Errorf("expected 1 fence after concurrent Sync, got %d", c)
+	}
+}
+
+// TestSyncReturnsErrSyncInFlightWhenBusy deterministically verifies the
+// coalescing sentinel: when syncing is already true (simulating an
+// in-flight Sync on another goroutine), a fresh Sync call must return
+// ErrSyncInFlight without doing any work. The concurrent test above is
+// timing-dependent; this one is not.
+func TestSyncReturnsErrSyncInFlightWhenBusy(t *testing.T) {
+	exp, err := New(nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	exp.syncMu.Lock()
+	exp.syncing = true
+	exp.syncMu.Unlock()
+	// nil backend would panic if Sync proceeded into work — its return of
+	// ErrSyncInFlight before touching the backend is what we're asserting.
+	got := exp.Sync(context.Background())
+	if !errors.Is(got, ErrSyncInFlight) {
+		t.Fatalf("Sync = %v, want ErrSyncInFlight", got)
 	}
 }
 
