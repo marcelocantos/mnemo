@@ -62,7 +62,14 @@ func (a llmAdapter) Call(ctx context.Context, sys, user string) (reviewer.LLMRes
 // Store instance. Registry.Close waits for every user's workers to
 // drain and closes every Store.
 type Registry struct {
-	mu             sync.Mutex
+	mu sync.Mutex
+	// reloadMu serializes Reload calls. Holding it across the entire
+	// Reload flow (snapshot → adopt → swap) prevents two concurrent
+	// reloads from racing through swapVault and orphaning workers /
+	// leaving the registry with two live exporters per user. mu is
+	// still acquired in fine-grained sections inside Reload; reloadMu
+	// is the coarse-grained guard.
+	reloadMu       sync.Mutex
 	baseCtx        context.Context
 	cancel         context.CancelFunc
 	stores         map[string]*userEntry
@@ -225,13 +232,21 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		// immediately and live JSONL ingestion is not delayed. The SQLite
 		// index is fully populated at this point (all Ingest* calls above
 		// have completed), so the sync goroutine reads a consistent snapshot.
+		//
+		// Tracked under vaultWorkers (not workers) so a concurrent
+		// mnemo_config vault_path swap waits for it to drain before
+		// starting the new exporter, guaranteeing the old exporter
+		// finishes writing to the old path before workers spin up
+		// against the new one.
 		r.mu.Lock()
 		vp := e.vault
+		if vp != nil {
+			e.vaultWorkers.Add(1)
+		}
 		r.mu.Unlock()
 		if vp != nil {
-			e.workers.Add(1)
 			go func() {
-				defer e.workers.Done()
+				defer e.vaultWorkers.Done()
 				logger.Info("vault: initial sync starting")
 				if err := vp.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
 					logger.Warn("vault: initial sync failed", "err", err)
@@ -299,19 +314,21 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 // mnemo_config tool can stop just those goroutines when vault_path
 // changes without disturbing transcript ingest or the compactor.
 //
+// PRECONDITION: caller MUST hold r.mu. ForUser owns it via its defer
+// for the entire Store-construction path; swapVault re-acquires it
+// after building the new exporter. Re-acquiring inside this function
+// would self-deadlock the ForUser path.
+//
 // No-op when e.vault is nil. The vault pointer is captured locally so a
 // concurrent hot-swap that replaces e.vault does not race with the
 // goroutines already running against the previous exporter.
 func (r *Registry) startVaultWorkers(username string, e *userEntry) {
-	r.mu.Lock()
 	vp := e.vault
 	if vp == nil {
-		r.mu.Unlock()
 		return
 	}
 	vctx, vcancel := context.WithCancel(r.baseCtx)
 	e.vaultCancel = vcancel
-	r.mu.Unlock()
 
 	logger := slog.Default().With("user", username)
 
@@ -458,6 +475,15 @@ type ReloadReport struct {
 //     mid-run swap would need to tear down and rebuild every fan-out
 //     handler, which is out of scope for this tool.
 func (r *Registry) Reload(newCfg store.Config) ReloadReport {
+	// Serialize reloads end-to-end. Two concurrent Reload calls would
+	// otherwise both pass through the swapVault stages, with one
+	// racing the other's vaultCancel/vault assignment under r.mu and
+	// the result depending on goroutine interleavings. The MCP entry
+	// point is the only caller in practice (single agent), but
+	// nothing in the type signature enforces that, so guard it here.
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+
 	r.mu.Lock()
 	old := r.cfg
 	r.cfg = newCfg
@@ -510,6 +536,11 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 // will simply build one and start workers. Logs warnings rather than
 // returning errors — partial success (e.g. the exporter built but a
 // later sync failed) should not roll back the on-disk config.
+//
+// Reload serializes calls to swapVault via reloadMu; without that, two
+// concurrent reloads could clear each other's vaultCancel funcs and
+// leave the entry with stale workers running against an abandoned
+// exporter.
 func (r *Registry) swapVault(username string, e *userEntry, newPath string) {
 	logger := slog.Default().With("user", username)
 
@@ -538,15 +569,18 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) {
 	}
 	r.mu.Lock()
 	e.vault = exp
+	r.startVaultWorkers(username, e)
+	// Track the post-reload initial sync under vaultWorkers so a
+	// subsequent swap waits for it (no two syncs against the same
+	// exporter racing through writeNote) and Close blocks on its
+	// completion before closing the Store.
+	e.vaultWorkers.Add(1)
 	r.mu.Unlock()
 
-	r.startVaultWorkers(username, e)
 	logger.Info("vault: workers restarted with new path", "path", newPath)
 
-	// Kick off an initial sync against the new path so notes appear
-	// without waiting for the 5-minute ticker. Detached from the
-	// caller's request context so the MCP call returns promptly.
 	go func() {
+		defer e.vaultWorkers.Done()
 		if err := exp.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
 			logger.Warn("vault: post-reload sync failed", "err", err)
 		}

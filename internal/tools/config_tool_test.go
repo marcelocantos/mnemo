@@ -62,6 +62,20 @@ func TestMergeConfigPatchClearWithEmptyString(t *testing.T) {
 	}
 }
 
+func TestMergeConfigPatchRejectsUnknownKeys(t *testing.T) {
+	_, err := mergeConfigPatch(store.Config{}, map[string]any{
+		"vaultpath":         "/x", // missing underscore
+		"random_other_key":  "y",
+		"workspace_roots":   []any{"/a"}, // valid; should still error overall
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown keys")
+	}
+	if !strings.Contains(err.Error(), "vaultpath") || !strings.Contains(err.Error(), "random_other_key") {
+		t.Errorf("error should mention both typos, got: %v", err)
+	}
+}
+
 func TestConfigToolReadReturnsJSON(t *testing.T) {
 	ctl := &fakeCtl{cur: store.Config{VaultPath: "/v"}}
 	ch := &callHandler{}

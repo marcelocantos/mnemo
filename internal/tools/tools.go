@@ -2194,7 +2194,7 @@ func (h *callHandler) config(args map[string]any, ctl ConfigController) (string,
 	}
 	switch op {
 	case "read":
-		return renderConfigRead(ctl.Get()), false, nil
+		return renderConfigRead(ctl.Get(), h.callerHome()), false, nil
 	case "write":
 		patch, _ := args["patch"].(map[string]any)
 		if len(patch) == 0 {
@@ -2215,13 +2215,56 @@ func (h *callHandler) config(args map[string]any, ctl ConfigController) (string,
 	}
 }
 
+// callerHome resolves the home directory for the request's
+// Username, falling back to the daemon's own home if the user is
+// unset or unresolvable. The read path uses this only for ~
+// expansion in the displayed "Resolved paths" block; on Windows
+// Service deployments the daemon runs as LocalSystem, and a per-
+// user mnemo_config call should see vault_path resolved against the
+// caller's home, not the service account's.
+func (h *callHandler) callerHome() string {
+	if h.cc.Username != "" {
+		if home, err := store.ResolveHomeFor(h.cc.Username); err == nil {
+			return home
+		}
+	}
+	home, _ := osUserHome()
+	return home
+}
+
+// knownConfigKeys is the closed set of JSON keys mnemo_config accepts
+// in a patch. Anything else is rejected up-front so a typo like
+// "vaultpath" produces an error rather than being silently dropped by
+// json.Unmarshal's unknown-field handling.
+var knownConfigKeys = map[string]struct{}{
+	"workspace_roots":    {},
+	"extra_project_dirs": {},
+	"synthesis_roots":    {},
+	"vault_path":         {},
+	"linked_instances":   {},
+}
+
 // mergeConfigPatch round-trips current through JSON so the patch's
 // keys overlay only the fields the user actually specified. This is
 // simpler and safer than reflective field-by-field merging: any new
 // Config field added later participates automatically as long as it
 // has a json tag, and the resulting Config goes through json.Unmarshal
 // which catches obvious type mismatches early.
+//
+// Patch keys are validated against knownConfigKeys before merging so
+// typos surface as tool errors instead of silent no-ops. Add a new
+// entry to knownConfigKeys when adding a Config field.
 func mergeConfigPatch(current store.Config, patch map[string]any) (store.Config, error) {
+	var unknown []string
+	for k := range patch {
+		if _, ok := knownConfigKeys[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return store.Config{}, fmt.Errorf("unknown config keys: %s", strings.Join(unknown, ", "))
+	}
 	curJSON, err := json.Marshal(current)
 	if err != nil {
 		return store.Config{}, fmt.Errorf("marshal current: %w", err)
@@ -2247,7 +2290,7 @@ func mergeConfigPatch(current store.Config, patch map[string]any) (store.Config,
 	return merged, nil
 }
 
-func renderConfigRead(cfg store.Config) string {
+func renderConfigRead(cfg store.Config, home string) string {
 	var b strings.Builder
 	b.WriteString("Current mnemo config (~/.mnemo/config.json):\n\n")
 	data, _ := json.MarshalIndent(cfg, "", "  ")
@@ -2256,7 +2299,6 @@ func renderConfigRead(cfg store.Config) string {
 	b.WriteString("Resolved paths:\n")
 	fmt.Fprintf(&b, "  workspace_roots:    %v\n", cfg.ResolvedWorkspaceRoots())
 	fmt.Fprintf(&b, "  synthesis_roots:    %v\n", cfg.ResolvedSynthesisRoots())
-	home, _ := osUserHome()
 	vp := cfg.ResolvedVaultPath(home)
 	if vp == "" {
 		b.WriteString("  vault_path:         (vault disabled)\n")

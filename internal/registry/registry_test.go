@@ -5,11 +5,15 @@ package registry
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/storetest"
+	"github.com/marcelocantos/mnemo/internal/vault"
 )
 
 // TestReloadReportClassifiesFields validates the diff logic without
@@ -81,5 +85,120 @@ func TestReloadNoOpWhenConfigUnchanged(t *testing.T) {
 	report := r.Reload(cfg)
 	if len(report.Changed) != 0 {
 		t.Errorf("Changed should be empty, got %v", report.Changed)
+	}
+}
+
+// TestSwapVaultEndToEnd builds a Registry around a real Store +
+// Exporter, runs swapVault, and asserts the new exporter is wired and
+// the old workers are gone. Regression for the prior deadlock in
+// startVaultWorkers re-acquiring r.mu while ForUser still owned it,
+// and for the concurrent-swap race that left orphaned workers.
+func TestSwapVaultEndToEnd(t *testing.T) {
+	projectDir := t.TempDir()
+	s := storetest.NewStore(t, projectDir)
+
+	oldDir := filepath.Join(t.TempDir(), "old-vault")
+	newDir := filepath.Join(t.TempDir(), "new-vault")
+	oldExp, err := vault.New(s, oldDir)
+	if err != nil {
+		t.Fatalf("vault.New old: %v", err)
+	}
+
+	r := NewRegistry(context.Background(), store.Config{VaultPath: oldDir}, "")
+	defer r.Close()
+
+	e := &userEntry{store: s, vault: oldExp, homeDir: t.TempDir()}
+
+	// Simulate the ForUser path: caller acquires r.mu, calls
+	// startVaultWorkers under the lock, releases. Pre-fix this
+	// deadlocked because startVaultWorkers re-acquired r.mu.
+	r.mu.Lock()
+	r.startVaultWorkers("u", e)
+	r.mu.Unlock()
+	if e.vaultCancel == nil {
+		t.Fatal("vaultCancel not set after startVaultWorkers")
+	}
+
+	// Swap to the new path. swapVault should: stop old workers,
+	// build a new exporter at newDir, and start fresh workers.
+	r.swapVault("u", e, newDir)
+	r.mu.Lock()
+	gotPath := ""
+	if e.vault != nil {
+		gotPath = e.vault.Path()
+	}
+	hasCancel := e.vaultCancel != nil
+	r.mu.Unlock()
+
+	if gotPath != newDir {
+		t.Errorf("vault path after swap: got %q want %q", gotPath, newDir)
+	}
+	if !hasCancel {
+		t.Errorf("vaultCancel should be set after swap to non-empty path")
+	}
+
+	// Swap to disabled (empty path). Workers should drain and exporter
+	// clear.
+	r.swapVault("u", e, "")
+	r.mu.Lock()
+	if e.vault != nil {
+		t.Errorf("vault should be nil after swap to empty path, got %v", e.vault)
+	}
+	if e.vaultCancel != nil {
+		t.Errorf("vaultCancel should be nil after disable")
+	}
+	r.mu.Unlock()
+}
+
+// TestReloadSerialisesConcurrentSwaps fires multiple Reload calls in
+// parallel and asserts the final state matches the last write under
+// reloadMu. Without reloadMu serialisation, two concurrent swapVault
+// flows could leave the registry with orphaned cancel funcs or
+// duplicate worker sets per user.
+func TestReloadSerialisesConcurrentSwaps(t *testing.T) {
+	projectDir := t.TempDir()
+	s := storetest.NewStore(t, projectDir)
+
+	r := NewRegistry(context.Background(), store.Config{}, "")
+	defer r.Close()
+
+	r.mu.Lock()
+	r.stores["u"] = &userEntry{store: s, homeDir: t.TempDir()}
+	r.mu.Unlock()
+
+	dirs := []string{
+		filepath.Join(t.TempDir(), "a"),
+		filepath.Join(t.TempDir(), "b"),
+		filepath.Join(t.TempDir(), "c"),
+	}
+
+	var wg sync.WaitGroup
+	for _, d := range dirs {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			r.Reload(store.Config{VaultPath: path})
+		}(d)
+	}
+	wg.Wait()
+
+	r.mu.Lock()
+	finalPath := ""
+	if r.stores["u"].vault != nil {
+		finalPath = r.stores["u"].vault.Path()
+	}
+	r.mu.Unlock()
+
+	// Final path must be one of the dirs (whichever Reload won the
+	// reloadMu race last), not a partial/empty state.
+	matched := false
+	for _, d := range dirs {
+		if finalPath == d {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Errorf("final vault path %q must be one of the concurrent reload inputs %v", finalPath, dirs)
 	}
 }
