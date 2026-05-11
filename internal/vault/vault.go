@@ -492,13 +492,21 @@ const entityTSCommentSuffix = " -->"
 // their annotations (e.g. quoting mnemo's docs). Restricting to whole
 // lines keeps user-typed instances of the string safely inside human
 // content.
+//
+// The length guard is required because entityTSComment ends with a space
+// and entityTSCommentSuffix starts with one — for the degenerate input
+// "<!-- mnemo:entity_ts -->" the prefix and suffix share that space, so
+// HasPrefix+HasSuffix both pass but the substring between them is
+// negative-length. Without the guard, slicing would panic.
 func parseEntityTS(raw string) (string, bool) {
 	end := len(raw)
 	for end > 0 {
 		start := strings.LastIndexByte(raw[:end], '\n') + 1
 		line := raw[start:end]
 		trimmed := strings.TrimRight(line, " \t\r")
-		if strings.HasPrefix(trimmed, entityTSComment) && strings.HasSuffix(trimmed, entityTSCommentSuffix) {
+		if strings.HasPrefix(trimmed, entityTSComment) &&
+			strings.HasSuffix(trimmed, entityTSCommentSuffix) &&
+			len(trimmed) >= len(entityTSComment)+len(entityTSCommentSuffix) {
 			ts := trimmed[len(entityTSComment) : len(trimmed)-len(entityTSCommentSuffix)]
 			return ts, true
 		}

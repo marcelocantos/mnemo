@@ -628,6 +628,28 @@ func TestParseEntityTSLineAnchored(t *testing.T) {
 			raw:    "no marker at all\n",
 			wantOK: false,
 		},
+		{
+			// Degenerate input: prefix ends with a space, suffix starts
+			// with a space; on the literal "<!-- mnemo:entity_ts -->" line
+			// they share that space. HasPrefix+HasSuffix both pass, but
+			// the substring between them is negative-length. Without the
+			// length guard, slicing would panic — a user pasting this
+			// literal into their annotations would crash the next sync.
+			name:   "prefix-suffix-overlap-no-timestamp",
+			raw:    "<!-- mnemo:entity_ts -->\n",
+			wantOK: false,
+		},
+		{
+			// Adjacent prefix+suffix with zero-width timestamp slot
+			// ("<!-- mnemo:entity_ts  -->" — two spaces). Both fences
+			// match; the slot between them is empty but well-formed.
+			// Treat as a valid match with an empty timestamp; needsUpdate
+			// will fail to parse it and fall through to "regenerate".
+			name:   "prefix-suffix-empty-timestamp",
+			raw:    "<!-- mnemo:entity_ts  -->\n",
+			wantTS: "",
+			wantOK: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
