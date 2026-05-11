@@ -4870,6 +4870,7 @@ func (s *Store) usageByBlock(
 	}
 
 	var msgs []msgRow
+	var maxTS time.Time
 	for rows.Next() {
 		var tsStr, mdl string
 		var inp, out, cr, cc int64
@@ -4879,6 +4880,9 @@ func (s *Store) usageByBlock(
 		ts, err := parseTimestamp(tsStr)
 		if err != nil {
 			continue
+		}
+		if ts.After(maxTS) {
+			maxTS = ts
 		}
 		msgs = append(msgs, msgRow{ts, mdl, inp, out, cr, cc})
 	}
@@ -4953,6 +4957,9 @@ func (s *Store) usageByBlock(
 	}
 	result.Total.Period = "total"
 	result.Total.Source = "estimated"
+	if !maxTS.IsZero() {
+		result.Freshness = maxTS.UTC().Format(time.RFC3339Nano)
+	}
 
 	return result, nil
 }
