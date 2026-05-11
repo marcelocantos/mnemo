@@ -1577,7 +1577,7 @@ targets:
     discovered: 2026-05-11
   T57:
     name: internal/store TestUsage* tests pass on master
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1586,6 +1586,7 @@ targets:
     context: 'Five TestUsage* tests in internal/store fail on plain master (last green commit: c2c6901). TestUsageHourlyRate, TestUsageGroupBySession, TestUsageGroupByBlock, TestUsageReconciledCosts, TestUsageReconciledMixedSource. Reproduces locally and on both CI platforms. Likely introduced between c2c6901 and b342e68 (the docs-ingest refactor and bullseye.yaml chores in between). Blocking work: cannot add required_status_checks to the branch ruleset until these are green, which means CI regressions continue to slip through silently. PR #73 (web dashboard) merged with the same failures showing on its CI run — confirmed by reviewer to be unrelated, but the situation should not persist.'
     origin: manual
     discovered: 2026-05-11
+    achieved: 2026-05-12
   T58:
     name: CI is enforced as a required status check on master
     status: identified
