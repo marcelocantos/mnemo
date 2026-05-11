@@ -558,6 +558,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		return v
 	})
 
+	// Wire the mnemo_config tool to the live Registry. Get returns a
+	// snapshot of the current Config; Put persists the new config to
+	// disk via store.WriteConfig (which re-runs the same validation as
+	// LoadConfig) and asks the Registry to adopt it across every
+	// already-initialised per-user Store.
+	handler.SetConfigController(configController{reg: reg})
+
 	// Build a federation client if linked_instances are configured —
 	// this owns one persistent http.Client per peer and is shared
 	// across every fan-out tool registration. Failure to construct
@@ -670,4 +677,28 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		}
 		return nil
 	}
+}
+
+// configController adapts a *registry.Registry to tools.ConfigController.
+// Defined in main rather than in registry to keep registry from
+// importing the tools package (a cycle we already avoid for
+// dependency hygiene).
+type configController struct {
+	reg *registry.Registry
+}
+
+func (c configController) Get() store.Config {
+	return c.reg.CurrentConfig()
+}
+
+func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
+	if err := store.WriteConfig(newCfg); err != nil {
+		return tools.ConfigReport{}, err
+	}
+	rep := c.reg.Reload(newCfg)
+	return tools.ConfigReport{
+		Changed:         rep.Changed,
+		Adopted:         rep.Adopted,
+		RequiresRestart: rep.RequiresRestart,
+	}, nil
 }

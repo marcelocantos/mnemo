@@ -113,6 +113,77 @@ func loadConfigFrom(path string) (Config, error) {
 	return cfg, nil
 }
 
+// ConfigPath returns the absolute path to ~/.mnemo/config.json for the
+// current process user. Returns an error only when the home directory
+// cannot be resolved.
+func ConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".mnemo", "config.json"), nil
+}
+
+// WriteConfig persists cfg to ~/.mnemo/config.json atomically and after
+// passing the same federation-peer validation that LoadConfig applies on
+// startup. The write is atomic in the rename-into-place sense: a tmp
+// file is written next to the target and renamed once fsync'd, so a
+// crashed writer cannot leave a half-formed config visible to a
+// subsequent LoadConfig call.
+//
+// Used by the mnemo_config MCP tool to apply runtime configuration
+// changes (chiefly vault_path) without requiring a daemon restart.
+func WriteConfig(cfg Config) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if err := cfg.validateLinkedInstances(filepath.Join(home, ".mnemo", "peers")); err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".mnemo", "config.json")
+	return writeConfigTo(path, cfg)
+}
+
+// writeConfigTo is the testable core of WriteConfig: it writes cfg to
+// path using a sibling tmp file + rename so concurrent readers always
+// observe either the previous or the new file, never a partial write.
+// The parent directory is created if missing (mode 0o755).
+func writeConfigTo(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.json.*")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
 // validateLinkedInstances enforces the rules documented on
 // LinkedInstance: unique names, https-only URLs, and resolvable
 // peer certificates (either as a name under peersDir or as inline

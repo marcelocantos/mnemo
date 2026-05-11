@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -33,6 +34,27 @@ type VaultSyncer interface {
 	Path() string
 }
 
+// ConfigReport mirrors registry.ReloadReport without importing the
+// registry package. The mnemo_config write handler returns these three
+// slices verbatim so the caller can see which fields were applied live
+// vs deferred to restart.
+type ConfigReport struct {
+	Changed         []string
+	Adopted         []string
+	RequiresRestart []string
+}
+
+// ConfigController is the dependency the mnemo_config tool uses to read
+// and atomically apply config changes. Injected from main so the tools
+// package stays free of any direct dependency on the registry or
+// filesystem layout. Get returns a snapshot of the live Config. Put
+// validates+persists newCfg to disk and applies in-process adoption
+// across every per-user Store.
+type ConfigController interface {
+	Get() store.Config
+	Put(newCfg store.Config) (ConfigReport, error)
+}
+
 // Handler handles tool calls, dispatching each incoming call to the
 // per-user Store resolved from the call's Username. The resolver is
 // injected so the tools package does not need to import the
@@ -42,6 +64,7 @@ type VaultSyncer interface {
 type Handler struct {
 	resolve      func(username string) (store.Backend, error)
 	resolveVault func(username string) VaultSyncer // nil when vault disabled
+	cfgCtl       ConfigController                  // nil when mnemo_config disabled
 	seen         sync.Map
 }
 
@@ -57,6 +80,13 @@ func NewHandler(resolve func(string) (store.Backend, error)) *Handler {
 // the vault tools report "vault not configured".
 func (h *Handler) SetVaultResolver(fn func(string) VaultSyncer) {
 	h.resolveVault = fn
+}
+
+// SetConfigController wires the mnemo_config tool to a live config
+// source. Calling this is optional; when not called, mnemo_config
+// reports that runtime reconfiguration is not available.
+func (h *Handler) SetConfigController(c ConfigController) {
+	h.cfgCtl = c
 }
 
 // callHandler is the per-call delegate that owns the user-resolved
@@ -512,6 +542,24 @@ Vault must be configured via vault_path in ~/.mnemo/config.json.`),
 		mcp.NewTool("mnemo_vault_status",
 			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, and a count of notes on disk by section."),
 		),
+		mcp.NewTool("mnemo_config",
+			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
+
+Modes:
+  - op=read (default): return the current effective config as JSON, plus a list of resolved-paths (workspace_roots, vault_path, synthesis_roots) with ~ expanded.
+  - op=write: merge "patch" into the current config, validate, persist to disk, and adopt the change in the running daemon.
+
+Patch semantics: patch is a JSON object with the same shape as ~/.mnemo/config.json. Only keys present in the patch are changed; unset keys are left untouched. To clear a field, set it to its zero value (empty string for vault_path, empty array for the slices).
+
+Hot-reload coverage:
+  - vault_path: applied live. The existing vault workers stop, a fresh exporter is built at the new path, and an initial sync starts in the background. Set vault_path to "" to disable vault export entirely.
+  - workspace_roots, extra_project_dirs, synthesis_roots: applied live; subsequent ingest passes pick up the new roots.
+  - linked_instances: persisted to disk but requires a daemon restart to take effect (the federation client is built once at startup).
+
+Response includes which fields changed, which were adopted live, and which require a restart.`),
+			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),
+			mcp.WithObject("patch", mcp.Description("For op=write: object with the keys to update. Same shape as ~/.mnemo/config.json. Omitted keys are left unchanged.")),
+		),
 	}
 }
 
@@ -619,6 +667,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultSync()
 	case "mnemo_vault_status":
 		return ch.vaultStatus()
+	case "mnemo_config":
+		return ch.config(args, h.cfgCtl)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -2124,4 +2174,122 @@ func countMDFiles(dir string) int {
 		return nil
 	})
 	return count
+}
+
+// config implements the mnemo_config tool. ctl is nil when main did not
+// wire up the controller; in that case both modes report unavailability
+// rather than crashing.
+//
+// The write path merges patch onto a fresh snapshot of the live config.
+// Only keys present in the patch JSON are applied — unspecified keys
+// preserve their current value. This makes "configure vault_path"
+// safe to call without re-stating workspace_roots/etc.
+func (h *callHandler) config(args map[string]any, ctl ConfigController) (string, bool, error) {
+	if ctl == nil {
+		return "mnemo_config not available (server started without config controller)", true, nil
+	}
+	op, _ := args["op"].(string)
+	if op == "" {
+		op = "read"
+	}
+	switch op {
+	case "read":
+		return renderConfigRead(ctl.Get()), false, nil
+	case "write":
+		patch, _ := args["patch"].(map[string]any)
+		if len(patch) == 0 {
+			return "op=write requires a non-empty \"patch\" object", true, nil
+		}
+		current := ctl.Get()
+		merged, err := mergeConfigPatch(current, patch)
+		if err != nil {
+			return fmt.Sprintf("patch invalid: %v", err), true, nil
+		}
+		report, err := ctl.Put(merged)
+		if err != nil {
+			return fmt.Sprintf("write failed: %v", err), true, nil
+		}
+		return renderConfigWrite(merged, report), false, nil
+	default:
+		return fmt.Sprintf("unknown op %q: expected \"read\" or \"write\"", op), true, nil
+	}
+}
+
+// mergeConfigPatch round-trips current through JSON so the patch's
+// keys overlay only the fields the user actually specified. This is
+// simpler and safer than reflective field-by-field merging: any new
+// Config field added later participates automatically as long as it
+// has a json tag, and the resulting Config goes through json.Unmarshal
+// which catches obvious type mismatches early.
+func mergeConfigPatch(current store.Config, patch map[string]any) (store.Config, error) {
+	curJSON, err := json.Marshal(current)
+	if err != nil {
+		return store.Config{}, fmt.Errorf("marshal current: %w", err)
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(curJSON, &asMap); err != nil {
+		return store.Config{}, fmt.Errorf("unmarshal current: %w", err)
+	}
+	if asMap == nil {
+		asMap = map[string]any{}
+	}
+	for k, v := range patch {
+		asMap[k] = v
+	}
+	mergedJSON, err := json.Marshal(asMap)
+	if err != nil {
+		return store.Config{}, fmt.Errorf("marshal merged: %w", err)
+	}
+	var merged store.Config
+	if err := json.Unmarshal(mergedJSON, &merged); err != nil {
+		return store.Config{}, fmt.Errorf("decode merged: %w", err)
+	}
+	return merged, nil
+}
+
+func renderConfigRead(cfg store.Config) string {
+	var b strings.Builder
+	b.WriteString("Current mnemo config (~/.mnemo/config.json):\n\n")
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	b.Write(data)
+	b.WriteString("\n\n")
+	b.WriteString("Resolved paths:\n")
+	fmt.Fprintf(&b, "  workspace_roots:    %v\n", cfg.ResolvedWorkspaceRoots())
+	fmt.Fprintf(&b, "  synthesis_roots:    %v\n", cfg.ResolvedSynthesisRoots())
+	home, _ := osUserHome()
+	vp := cfg.ResolvedVaultPath(home)
+	if vp == "" {
+		b.WriteString("  vault_path:         (vault disabled)\n")
+	} else {
+		fmt.Fprintf(&b, "  vault_path:         %s\n", vp)
+	}
+	return b.String()
+}
+
+func renderConfigWrite(merged store.Config, report ConfigReport) string {
+	var b strings.Builder
+	b.WriteString("mnemo config updated and persisted to ~/.mnemo/config.json.\n\n")
+	if len(report.Changed) == 0 {
+		b.WriteString("No field values changed (patch matched the existing config).\n")
+	} else {
+		fmt.Fprintf(&b, "Changed fields:        %s\n", strings.Join(report.Changed, ", "))
+		if len(report.Adopted) > 0 {
+			fmt.Fprintf(&b, "Adopted live:          %s\n", strings.Join(report.Adopted, ", "))
+		}
+		if len(report.RequiresRestart) > 0 {
+			fmt.Fprintf(&b, "Requires daemon restart: %s\n", strings.Join(report.RequiresRestart, ", "))
+		}
+	}
+	b.WriteString("\nNew config:\n")
+	data, _ := json.MarshalIndent(merged, "", "  ")
+	b.Write(data)
+	b.WriteString("\n")
+	return b.String()
+}
+
+// osUserHome is split into a tiny helper so tests can stub home
+// resolution if needed; the current callers only need a best-effort
+// path for read-side rendering.
+func osUserHome() (string, error) {
+	return os.UserHomeDir()
 }

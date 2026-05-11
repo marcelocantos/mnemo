@@ -25,6 +25,57 @@ func TestValidateLinkedInstancesEmpty(t *testing.T) {
 	}
 }
 
+func TestWriteConfigToRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := Config{
+		WorkspaceRoots:   []string{"/tmp/a", "/tmp/b"},
+		ExtraProjectDirs: []string{"/mnt/c"},
+		VaultPath:        "~/Documents/v",
+	}
+	if err := writeConfigTo(path, cfg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := loadConfigFrom(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.VaultPath != cfg.VaultPath {
+		t.Errorf("vault_path: got %q want %q", got.VaultPath, cfg.VaultPath)
+	}
+	if len(got.WorkspaceRoots) != 2 || got.WorkspaceRoots[0] != "/tmp/a" {
+		t.Errorf("workspace_roots: %v", got.WorkspaceRoots)
+	}
+	if len(got.ExtraProjectDirs) != 1 || got.ExtraProjectDirs[0] != "/mnt/c" {
+		t.Errorf("extra_project_dirs: %v", got.ExtraProjectDirs)
+	}
+}
+
+func TestWriteConfigToAtomicReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"vault_path":"/old"}`), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := writeConfigTo(path, Config{VaultPath: "/new"}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(data), `"vault_path": "/new"`) {
+		t.Errorf("expected /new in file, got: %s", data)
+	}
+	// Tmp file must not be left behind.
+	entries, _ := os.ReadDir(dir)
+	for _, ent := range entries {
+		if strings.HasPrefix(ent.Name(), ".config.json.") {
+			t.Errorf("tmp file left behind: %s", ent.Name())
+		}
+	}
+}
+
 func TestValidateLinkedInstancesValidPeerByName(t *testing.T) {
 	peersDir := t.TempDir()
 	writePeerCert(t, filepath.Join(peersDir, "alice.pem"))

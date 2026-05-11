@@ -466,6 +466,33 @@ Parameters:
 - `context_before` — context messages before the match (default 3)
 - `context_after` — context messages after the match (default 3)
 
+### mnemo_config
+
+Read or update mnemo's runtime configuration (`~/.mnemo/config.json`)
+without restarting the daemon. Use this to flip `vault_path` on or off,
+add a new workspace root, or rotate `synthesis_roots` from the same
+agent that just told you what to change.
+
+Parameters:
+- `op` — `"read"` (default) or `"write"`
+- `patch` — for `op=write`, a JSON object with the keys to update.
+  Same shape as `~/.mnemo/config.json`. Only keys present in the patch
+  are modified; unspecified keys retain their current value. Set a
+  field to its zero value (empty string for `vault_path`, empty array
+  for the slices) to clear it.
+
+Hot-reload coverage:
+- `vault_path` — applied live. Old vault workers stop, a fresh
+  exporter is built at the new path, and an initial sync starts in the
+  background. Set to `""` to disable vault export entirely.
+- `workspace_roots`, `extra_project_dirs`, `synthesis_roots` — applied
+  live; subsequent ingest passes pick up the new roots.
+- `linked_instances` — persisted but requires a daemon restart (the
+  federation client is wired once at startup).
+
+The write response lists which fields changed, which were adopted live,
+and which require a restart.
+
 ## Federation across linked instances
 
 If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
