@@ -4,6 +4,7 @@
 package store
 
 import (
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -12,25 +13,21 @@ import (
 	"time"
 )
 
-// vaultGeneratedFencePrefix is the HTML comment prefix that vault.writeNote
-// writes to separate generated content (above) from human annotations (below).
-// Defined here so the store package does not import the vault package.
-const vaultGeneratedFencePrefix = "<!-- mnemo:generated"
+// vaultGeneratedFence is the HTML comment line that vault.writeNote writes
+// to separate generated content (above) from human annotations (below).
+// Duplicated here so the store package does not import the vault package;
+// must be kept in sync with vault.generatedFence.
+const vaultGeneratedFence = "<!-- mnemo:generated -->"
 
 // belowVaultFence extracts the content below the generated fence in a vault
 // note, trimming leading/trailing whitespace. Returns "" when the file has no
 // fence or no content below it.
 func belowVaultFence(raw string) string {
-	idx := strings.LastIndex(raw, vaultGeneratedFencePrefix)
+	idx := strings.LastIndex(raw, vaultGeneratedFence)
 	if idx < 0 {
 		return ""
 	}
-	// Skip to the end of the fence line.
-	lineEnd := strings.IndexByte(raw[idx:], '\n')
-	if lineEnd < 0 {
-		return ""
-	}
-	below := strings.TrimSpace(raw[idx+lineEnd:])
+	below := strings.TrimSpace(raw[idx+len(vaultGeneratedFence):])
 	return below
 }
 
@@ -46,13 +43,19 @@ func belowVaultFence(raw string) string {
 // SearchDocs(kind="vault") and in the main Search results alongside transcript
 // messages.
 func (s *Store) IngestVaultAnnotations(vaultPath string) error {
+	if fi, err := os.Stat(vaultPath); err != nil {
+		return fmt.Errorf("vault: stat %s: %w", vaultPath, err)
+	} else if !fi.IsDir() {
+		return fmt.Errorf("vault: %s is not a directory", vaultPath)
+	}
+
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
 	vaultRepo := filepath.Base(vaultPath)
 	indexed, skipped, removed := 0, 0, 0
 
-	_ = filepath.WalkDir(vaultPath, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(vaultPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
 			return nil
 		}
@@ -76,12 +79,19 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 			return nil
 		}
 
-		hash := contentHash([]byte(human))
-
-		var existingHash string
+		// If an existing row at this file_path is NOT a vault annotation
+		// (e.g. a synthesis doc indexed via IngestDocs), leave it alone —
+		// vault must never clobber a more authoritative doc kind.
+		var existingKind, existingHash string
 		_ = s.db.QueryRow(
-			"SELECT content_hash FROM docs WHERE file_path = ?", path,
-		).Scan(&existingHash)
+			"SELECT kind, content_hash FROM docs WHERE file_path = ?", path,
+		).Scan(&existingKind, &existingHash)
+		if existingKind != "" && existingKind != "vault" {
+			skipped++
+			return nil
+		}
+
+		hash := contentHash([]byte(human))
 		if existingHash == hash {
 			skipped++
 			return nil
@@ -112,6 +122,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 				doc_status   = '',
 				doc_target   = '',
 				doc_source   = ''
+			WHERE docs.kind = 'vault'
 		`, vaultRepo, path, title, human, hash, int64(len(human)), now, now)
 		if err != nil {
 			slog.Error("vault: ingest annotation failed", "file", path, "err", err)
@@ -124,5 +135,5 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 	slog.Info("vault: annotations ingested",
 		"path", vaultPath,
 		"indexed", indexed, "skipped", skipped, "removed", removed)
-	return nil
+	return walkErr
 }

@@ -654,6 +654,13 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 
 	var b strings.Builder
 	for _, r := range results {
+		// Vault annotation hits use SessionID to carry the file path; render
+		// them as a single "[vault] <path>" header rather than the message
+		// format with empty Project/Timestamp/sessionID fields.
+		if r.Role == "vault" {
+			fmt.Fprintf(&b, ">> [vault] %s\n>> %s\n\n", r.SessionID, r.Text)
+			continue
+		}
 		sid := r.SessionID
 		if len(sid) > 8 {
 			sid = sid[:8]

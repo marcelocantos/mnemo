@@ -725,10 +725,10 @@ func TestBidirectionalSync(t *testing.T) {
 		summary := fmt.Sprintf("%d results:", len(results))
 		for _, r := range results {
 			n := len(r.Text)
-		if n > 50 {
-			n = 50
-		}
-		summary += fmt.Sprintf(" [%s]%q", r.Role, r.Text[:n])
+			if n > 50 {
+				n = 50
+			}
+			summary += fmt.Sprintf(" [%s]%q", r.Role, r.Text[:n])
 		}
 		t.Errorf("vault annotation not found in search results; %s", summary)
 	}
@@ -739,6 +739,113 @@ func TestBidirectionalSync(t *testing.T) {
 		if r.Role == "vault" && strings.Contains(r.Text, "session_id:") {
 			t.Error("generated frontmatter re-indexed as vault annotation — feedback loop!")
 		}
+	}
+
+	// Removing the annotation and re-ingesting should drop the row.
+	if err := os.WriteFile(noteFile, raw, 0o644); err != nil {
+		t.Fatalf("rewrite without annotation: %v", err)
+	}
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("IngestVaultAnnotations after removal: %v", err)
+	}
+	results, err = s.Search("unique annotation bidir feature", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatalf("Search after removal: %v", err)
+	}
+	for _, r := range results {
+		if r.Role == "vault" && strings.Contains(r.Text, "unique annotation") {
+			t.Error("annotation row should be removed after content deletion")
+		}
+	}
+}
+
+// TestVaultOnlySearch verifies Phase 3 vault hits surface even when the
+// transcript FTS produces zero hits — regression test for the early-return
+// that previously short-circuited before Phase 3 ran.
+func TestVaultOnlySearch(t *testing.T) {
+	projDir := t.TempDir()
+	storetest.WriteJSONL(t, projDir, "-Users-alice-dev-myapp", "sess-vo-01", []map[string]any{
+		storetest.MetaMsg("user", "completely different transcript content",
+			"2026-05-10T10:00:00Z", "/Users/alice/dev/myapp", "main"),
+	})
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+	exp, err := New(s, vaultDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := exp.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	sessionFiles, _ := filepath.Glob(filepath.Join(vaultDir, "sessions", "*", "*.md"))
+	if len(sessionFiles) == 0 {
+		t.Fatal("no session files")
+	}
+	raw, _ := os.ReadFile(sessionFiles[0])
+	annotated := string(raw) + "\nzymurgist-quibble-paradigm\n"
+	os.WriteFile(sessionFiles[0], []byte(annotated), 0o644)
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	// Search for a term that only appears in the annotation, not in any message.
+	results, err := s.Search("zymurgist quibble paradigm", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("vault-only search returned zero results; Phase 3 must run when Phase 2 is empty")
+	}
+	if results[0].Role != "vault" {
+		t.Errorf("expected first result Role=vault, got %q", results[0].Role)
+	}
+}
+
+// TestVaultSyncCoalescesConcurrentCalls verifies that two concurrent
+// Sync() calls don't both run a full pass — the second returns
+// immediately while the first completes. This protects writeNote's
+// read-modify-write of fenced files from interleaved racing writes.
+func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
+	projDir := t.TempDir()
+	storetest.WriteJSONL(t, projDir, "-Users-alice-dev-myapp", "sess-coal-01", []map[string]any{
+		storetest.MetaMsg("user", "hi", "2026-05-10T10:00:00Z",
+			"/Users/alice/dev/myapp", "main"),
+	})
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+	exp, err := New(s, vaultDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Run two Syncs concurrently. Both must complete without error and
+	// without corrupting the vault state.
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errs <- exp.Sync(context.Background())
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Sync failed: %v", err)
+		}
+	}
+
+	// Vault state must be consistent (fence present, file readable).
+	sessionFiles, _ := filepath.Glob(filepath.Join(vaultDir, "sessions", "*", "*.md"))
+	if len(sessionFiles) == 0 {
+		t.Fatal("no session files after concurrent Sync")
+	}
+	raw, _ := os.ReadFile(sessionFiles[0])
+	if c := strings.Count(string(raw), generatedFence); c != 1 {
+		t.Errorf("expected 1 fence after concurrent Sync, got %d", c)
 	}
 }
 

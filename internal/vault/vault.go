@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -52,9 +53,16 @@ import (
 const generatedFence = "<!-- mnemo:generated -->"
 
 // Exporter writes mnemo's knowledge graph as Markdown vault notes.
+//
+// Sync calls are serialised via syncMu: if a Sync is already running when
+// another is invoked, the second returns immediately without rerunning.
+// This prevents the periodic Sync ticker from racing the initial Sync on
+// large vaults and protects writeNote's read-modify-write of fenced files.
 type Exporter struct {
 	backend store.Backend
 	path    string
+	syncMu  sync.Mutex
+	syncing bool
 }
 
 // New creates a new Exporter rooted at path. The directory is created if
@@ -73,10 +81,28 @@ func (e *Exporter) Path() string { return e.path }
 // Sync performs a full vault synchronisation: sessions, decisions, memories,
 // plans, targets, CI runs, PRs, per-repo indices, and the root index.
 //
-// Session notes whose vault file mtime is newer than the session's last
+// Concurrent calls are coalesced: if a Sync is already in flight, the second
+// call returns nil immediately. The work-in-flight goroutine completes the
+// pass for both callers.
+//
+// Session notes whose recorded entity timestamp matches the session's last
 // message timestamp are skipped so that repeated syncs are fast after the
 // initial run.
 func (e *Exporter) Sync(ctx context.Context) error {
+	e.syncMu.Lock()
+	if e.syncing {
+		e.syncMu.Unlock()
+		slog.Info("vault: sync already in flight; skipping")
+		return nil
+	}
+	e.syncing = true
+	e.syncMu.Unlock()
+	defer func() {
+		e.syncMu.Lock()
+		e.syncing = false
+		e.syncMu.Unlock()
+	}()
+
 	slog.Info("vault: sync starting", "path", e.path)
 	start := time.Now()
 

@@ -4060,7 +4060,9 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		ORDER BY rank
 		LIMIT ?
 	`, ftsQuery, limit)
-	if vaultErr == nil {
+	if vaultErr != nil {
+		slog.Warn("vault FTS query failed", "err", vaultErr)
+	} else {
 		for vaultRows.Next() {
 			var docID int64
 			var filePath, content string
