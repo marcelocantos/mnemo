@@ -294,9 +294,9 @@ func TestRenderSessionFrontmatter(t *testing.T) {
 		{"- session\n", "session tag"},
 		{"- feature\n", "feature tag"},
 		{"# test session\n", "title heading"},
-		{"[[repos/mnemo]]", "repo wikilink"},
-		{"**Human**", "Human role marker"},
-		{"**Claude**", "Claude role marker"},
+		{"[[repos/mnemo", "repo wikilink"},
+		{"### Human", "Human role marker"},
+		{"### Claude", "Claude role marker"},
 		{"Hello", "user message text"},
 		{"Hi there", "assistant message text"},
 	}
@@ -364,10 +364,10 @@ func TestRenderRootIndex(t *testing.T) {
 	}
 	note := renderRootIndex(repos, nil)
 
-	if !strings.Contains(note, "[[repos/mnemo]]") {
+	if !strings.Contains(note, "[[repos/mnemo") {
 		t.Error("missing mnemo repo wikilink")
 	}
-	if !strings.Contains(note, "[[repos/other-repo]]") {
+	if !strings.Contains(note, "[[repos/other-repo") {
 		t.Error("missing other-repo wikilink")
 	}
 	if !strings.Contains(note, "42 sessions") {
@@ -801,6 +801,46 @@ func TestVaultOnlySearch(t *testing.T) {
 	}
 	if results[0].Role != "vault" {
 		t.Errorf("expected first result Role=vault, got %q", results[0].Role)
+	}
+}
+
+// TestUserCreatedFileIsIndexed verifies that a standalone .md file dropped
+// into the vault by a user (no <!-- mnemo:generated --> fence) is indexed
+// in full — this is the "humans can add new files to enhance mnemo's
+// knowledge" half of bidirectional sync.
+func TestUserCreatedFileIsIndexed(t *testing.T) {
+	projDir := t.TempDir()
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+
+	// User drops their own note into the vault (no fence — entirely human content).
+	userFile := filepath.Join(vaultDir, "my-thoughts.md")
+	body := "# Brainstorm\n\nIdeas about distributed consensus protocols and Byzantine generals.\n"
+	if err := os.WriteFile(userFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write user file: %v", err)
+	}
+
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	// User's note must be findable via mnemo_search.
+	results, err := s.Search("Byzantine generals consensus", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Role == "vault" && strings.Contains(r.Text, "Byzantine") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("user-created standalone file not found in search; %d results", len(results))
 	}
 }
 

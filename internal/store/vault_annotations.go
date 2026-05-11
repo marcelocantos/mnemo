@@ -19,25 +19,36 @@ import (
 // must be kept in sync with vault.generatedFence.
 const vaultGeneratedFence = "<!-- mnemo:generated -->"
 
-// belowVaultFence extracts the content below the generated fence in a vault
-// note, trimming leading/trailing whitespace. Returns "" when the file has no
-// fence or no content below it.
-func belowVaultFence(raw string) string {
-	idx := strings.LastIndex(raw, vaultGeneratedFence)
-	if idx < 0 {
-		return ""
+// humanContentOf returns the human-authored portion of a vault Markdown file.
+//
+// Two cases:
+//   - File contains a generated fence (a mnemo-written note): only the content
+//     below the fence is human. Generated blocks above the fence are skipped
+//     to avoid re-ingesting machine output.
+//   - File contains no fence (a user-created standalone .md, e.g. their own
+//     Obsidian/Logseq note dropped into the vault): the whole file is human
+//     content and gets indexed in full.
+//
+// Returns "" when the file is empty or only contains generated content.
+func humanContentOf(raw string) string {
+	if idx := strings.LastIndex(raw, vaultGeneratedFence); idx >= 0 {
+		return strings.TrimSpace(raw[idx+len(vaultGeneratedFence):])
 	}
-	below := strings.TrimSpace(raw[idx+len(vaultGeneratedFence):])
-	return below
+	return strings.TrimSpace(raw)
 }
 
-// IngestVaultAnnotations walks vaultPath and indexes the human-authored
-// content below the <!-- mnemo:generated --> fence in each .md file. Only
-// below-fence content is indexed, so generated blocks (sessions, decisions,
-// plans, …) are never re-ingested — there is no feedback loop.
+// IngestVaultAnnotations walks vaultPath and indexes human-authored content
+// from every .md file:
 //
-// Files with no fence or no human content below the fence are removed from
-// the docs table (kind='vault') so stale rows don't accumulate.
+//   - mnemo-generated notes (with a <!-- mnemo:generated --> fence): only
+//     content BELOW the fence is indexed, so generated blocks (sessions,
+//     decisions, plans, …) are never re-ingested. No feedback loop.
+//   - User-created standalone files (no fence): the whole file is indexed
+//     as human knowledge. This lets users drop their own .md files into the
+//     vault and have them flow into mnemo_search alongside transcripts.
+//
+// Files with no human content are removed from the docs table (kind='vault')
+// so stale rows don't accumulate.
 //
 // Indexed rows use kind='vault' and repo=basename(vaultPath). They appear in
 // SearchDocs(kind="vault") and in the main Search results alongside transcript
@@ -65,7 +76,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 			return nil
 		}
 
-		human := belowVaultFence(string(data))
+		human := humanContentOf(string(data))
 
 		if human == "" {
 			// No human content: remove any previously indexed row.

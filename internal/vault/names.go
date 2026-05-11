@@ -81,6 +81,26 @@ func dateOf(ts string) string {
 	return time.Now().UTC().Format("2006-01-02")
 }
 
+// timeOfDay extracts HH:MM:SS from an RFC3339 timestamp like
+// "2026-05-10T14:23:45Z" → "14:23:45". The session date is shown once in
+// the note header so per-message timestamps only need the time component.
+// Falls back to the full input when the format doesn't match.
+func timeOfDay(ts string) string {
+	if len(ts) >= 19 && ts[10] == 'T' {
+		return ts[11:19]
+	}
+	return ts
+}
+
+// pluralize formats "<n> <noun>" with a trailing s when n != 1. Keeps
+// human-facing counts grammatically correct in repo/index metadata lines.
+func pluralize(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 // shortID returns the first min(8, len(id)) characters of id.
 func shortID(id string) string {
 	if len(id) > 8 {

@@ -58,10 +58,10 @@ func renderSession(info store.SessionInfo, msgs []store.SessionMessage) string {
 	}
 	fmt.Fprintf(&b, "# %s\n\n", title)
 
-	// --- Metadata line ---
-	meta := fmt.Sprintf("*`%s` · %s", shortID(info.SessionID), dateOf(info.FirstMsg))
+	// --- Metadata line (human-friendly: date, repo, work type) ---
+	meta := "*" + dateOf(info.FirstMsg)
 	if info.Repo != "" {
-		meta += fmt.Sprintf(" · [[repos/%s]]", shortProjectName(info.Repo))
+		meta += fmt.Sprintf(" · [[repos/%s|%s]]", shortProjectName(info.Repo), shortProjectName(info.Repo))
 	}
 	if info.WorkType != "" {
 		meta += fmt.Sprintf(" · %s", info.WorkType)
@@ -86,7 +86,13 @@ func renderSession(info store.SessionInfo, msgs []store.SessionMessage) string {
 			if msg.Role == "assistant" {
 				role = "Claude"
 			}
-			fmt.Fprintf(&b, "---\n\n**%s** · *%s*\n\n%s\n\n", role, msg.Timestamp, msg.Text)
+			// Use time-of-day only (the session date is already in the
+			// metadata header). Drop the inter-message `---` rule because
+			// the role heading already separates turns visually and `---`
+			// inside Markdown is parsed as a horizontal rule by Obsidian
+			// AND as a YAML frontmatter delimiter when it appears at the
+			// top of a block — confusing readers and tools.
+			fmt.Fprintf(&b, "### %s · %s\n\n%s\n\n", role, timeOfDay(msg.Timestamp), msg.Text)
 		}
 	}
 
@@ -415,10 +421,16 @@ func renderRepoIndex(repo store.RepoInfo, sessions []store.SessionInfo, decision
 	}
 	b.WriteString("---\n\n")
 
-	fmt.Fprintf(&b, "# %s\n\n", repo.Repo)
+	// Title uses the friendly short name; the full path lives in the
+	// metadata line below for traceability.
+	title := shortProjectName(repo.Repo)
+	if title == "" || title == "untitled" {
+		title = repo.Repo
+	}
+	fmt.Fprintf(&b, "# %s\n\n", title)
 
-	meta := fmt.Sprintf("*Path: `%s` · %d sessions · last active %s*",
-		repo.Path, repo.Sessions, repo.LastActivity)
+	meta := fmt.Sprintf("*Path: `%s` · %s · last active %s*",
+		repo.Path, pluralize(repo.Sessions, "session"), dateOf(repo.LastActivity))
 	fmt.Fprintf(&b, "%s\n\n", meta)
 
 	if repo.Summary != "" {
@@ -436,9 +448,9 @@ func renderRepoIndex(repo store.RepoInfo, sessions []store.SessionInfo, decision
 			link := strings.TrimSuffix(filepath.ToSlash(p), ".md")
 			topic := s.Topic
 			if topic == "" {
-				topic = shortID(s.SessionID)
+				topic = "session " + shortID(s.SessionID)
 			}
-			fmt.Fprintf(&b, "- [[%s]] — %s\n", link, topic)
+			fmt.Fprintf(&b, "- %s · [[%s|%s]]\n", dateOf(s.FirstMsg), link, topic)
 		}
 		b.WriteString("\n")
 	}
@@ -448,7 +460,7 @@ func renderRepoIndex(repo store.RepoInfo, sessions []store.SessionInfo, decision
 		for _, d := range decisions {
 			p := strings.TrimSuffix(filepath.ToSlash(decisionPath(d)), ".md")
 			summary := summarize(d.ProposalText, 80)
-			fmt.Fprintf(&b, "- [[%s]] — %s\n", p, summary)
+			fmt.Fprintf(&b, "- %s · [[%s|%s]]\n", dateOf(d.Timestamp), p, summary)
 		}
 		b.WriteString("\n")
 	}
@@ -469,20 +481,25 @@ func renderRootIndex(repos []store.RepoInfo, stats *store.StatsResult) string {
 
 	b.WriteString("# mnemo knowledge vault\n\n")
 	b.WriteString("*Maintained by [mnemo](https://github.com/marcelocantos/mnemo). ")
-	b.WriteString("Add your own notes below the `<!-- mnemo:generated -->` fence — ")
-	b.WriteString("they survive re-syncs and are indexed by mnemo's FTS5 search.*\n\n")
+	b.WriteString("Drop your own `.md` files anywhere here, or annotate below ")
+	b.WriteString("the `<!-- mnemo:generated -->` fence — both flow into ")
+	b.WriteString("`mnemo_search` alongside transcripts.*\n\n")
 
 	if stats != nil {
-		fmt.Fprintf(&b, "*%d sessions · %d messages indexed*\n\n",
-			stats.TotalSessions, stats.TotalMessages)
+		fmt.Fprintf(&b, "*%s · %d messages indexed*\n\n",
+			pluralize(stats.TotalSessions, "session"), stats.TotalMessages)
 	}
 
 	if len(repos) > 0 {
 		b.WriteString("## Repositories\n\n")
 		for _, r := range repos {
 			link := strings.TrimSuffix(filepath.ToSlash(repoIndexPath(r.Repo)), ".md")
-			fmt.Fprintf(&b, "- [[%s]] — %d sessions, last active %s\n",
-				link, r.Sessions, r.LastActivity)
+			name := shortProjectName(r.Repo)
+			if name == "" || name == "untitled" {
+				name = r.Repo
+			}
+			fmt.Fprintf(&b, "- [[%s|%s]] — %s · last active %s\n",
+				link, name, pluralize(r.Sessions, "session"), dateOf(r.LastActivity))
 		}
 		b.WriteString("\n")
 	}
