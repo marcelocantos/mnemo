@@ -700,5 +700,6 @@ func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
 		Changed:         rep.Changed,
 		Adopted:         rep.Adopted,
 		RequiresRestart: rep.RequiresRestart,
+		Warnings:        rep.Warnings,
 	}, nil
 }

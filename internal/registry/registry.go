@@ -454,6 +454,14 @@ type ReloadReport struct {
 	// applied in-process (currently: "linked_instances"). These will
 	// take effect only after the daemon is restarted.
 	RequiresRestart []string
+	// Warnings lists per-user adoption failures that happened despite
+	// the config write itself succeeding. The classic case: vault.New
+	// fails because the new vault_path points at a regular file (not
+	// a directory). The config-on-disk is the new value, the old
+	// vault workers are torn down, but the new exporter never came
+	// up. Surfacing this here lets the MCP caller see the divergence
+	// instead of believing the field was cleanly adopted.
+	Warnings []string
 }
 
 // Reload swaps the Registry's active config for newCfg and adopts the
@@ -518,10 +526,20 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 	}
 	if old.VaultPath != newCfg.VaultPath {
 		report.Changed = append(report.Changed, "vault_path")
+		anyFailure := false
 		for username, e := range entries {
-			r.swapVault(username, e, newCfg.ResolvedVaultPath(e.homeDir))
+			if err := r.swapVault(username, e, newCfg.ResolvedVaultPath(e.homeDir)); err != nil {
+				report.Warnings = append(report.Warnings,
+					fmt.Sprintf("vault_path: user %q: %v", username, err))
+				anyFailure = true
+			}
 		}
-		report.Adopted = append(report.Adopted, "vault_path")
+		// Even one failure means at least one Store does not have
+		// the new vault active; refrain from claiming live adoption
+		// in that case. The warning carries the detail.
+		if !anyFailure {
+			report.Adopted = append(report.Adopted, "vault_path")
+		}
 	}
 	if !linkedInstancesEqual(old.LinkedInstances, newCfg.LinkedInstances) {
 		report.Changed = append(report.Changed, "linked_instances")
@@ -541,7 +559,7 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 // concurrent reloads could clear each other's vaultCancel funcs and
 // leave the entry with stale workers running against an abandoned
 // exporter.
-func (r *Registry) swapVault(username string, e *userEntry, newPath string) {
+func (r *Registry) swapVault(username string, e *userEntry, newPath string) error {
 	logger := slog.Default().With("user", username)
 
 	r.mu.Lock()
@@ -559,13 +577,13 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) {
 
 	if newPath == "" {
 		logger.Info("vault: disabled by reload (vault_path cleared)")
-		return
+		return nil
 	}
 
 	exp, err := vault.New(e.store, newPath)
 	if err != nil {
 		logger.Warn("vault: exporter creation failed on reload", "path", newPath, "err", err)
-		return
+		return fmt.Errorf("vault.New(%q): %w", newPath, err)
 	}
 	r.mu.Lock()
 	e.vault = exp
@@ -585,6 +603,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) {
 			logger.Warn("vault: post-reload sync failed", "err", err)
 		}
 	}()
+	return nil
 }
 
 func safePath(v *vault.Exporter) string {

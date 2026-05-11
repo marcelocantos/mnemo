@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -85,6 +86,45 @@ func TestReloadNoOpWhenConfigUnchanged(t *testing.T) {
 	report := r.Reload(cfg)
 	if len(report.Changed) != 0 {
 		t.Errorf("Changed should be empty, got %v", report.Changed)
+	}
+}
+
+// TestReloadVaultFailureReportedAsWarning runs Reload with a
+// vault_path that points at a regular file. vault.New's MkdirAll
+// fails, and Reload must NOT classify vault_path as Adopted — instead
+// the failure surfaces in Warnings so the MCP caller sees that
+// although the on-disk config now reflects the new value, no vault is
+// actually active.
+func TestReloadVaultFailureReportedAsWarning(t *testing.T) {
+	projectDir := t.TempDir()
+	s := storetest.NewStore(t, projectDir)
+
+	// Create a regular file at the target path. MkdirAll on an
+	// existing regular-file path fails with ENOTDIR on Unix /
+	// equivalent on Windows.
+	badPath := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badPath, []byte("blocking"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	r := NewRegistry(context.Background(), store.Config{}, "")
+	defer r.Close()
+	r.mu.Lock()
+	r.stores["u"] = &userEntry{store: s, homeDir: t.TempDir()}
+	r.mu.Unlock()
+
+	report := r.Reload(store.Config{VaultPath: badPath})
+
+	if len(report.Warnings) == 0 {
+		t.Fatalf("expected a warning for failed vault.New, got none. report=%+v", report)
+	}
+	for _, a := range report.Adopted {
+		if a == "vault_path" {
+			t.Errorf("vault_path should NOT be Adopted when swap failed; report=%+v", report)
+		}
+	}
+	if len(report.Changed) == 0 || report.Changed[0] != "vault_path" {
+		t.Errorf("vault_path should still be Changed even on adoption failure; report=%+v", report)
 	}
 }
 

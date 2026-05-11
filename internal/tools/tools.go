@@ -35,13 +35,15 @@ type VaultSyncer interface {
 }
 
 // ConfigReport mirrors registry.ReloadReport without importing the
-// registry package. The mnemo_config write handler returns these three
-// slices verbatim so the caller can see which fields were applied live
-// vs deferred to restart.
+// registry package. The mnemo_config write handler returns these four
+// slices verbatim so the caller can see which fields were applied live,
+// which require a restart, and which adoption attempts failed despite
+// the config write itself succeeding.
 type ConfigReport struct {
 	Changed         []string
 	Adopted         []string
 	RequiresRestart []string
+	Warnings        []string
 }
 
 // ConfigController is the dependency the mnemo_config tool uses to read
@@ -2120,7 +2122,12 @@ func (h *callHandler) reworkHistory(args map[string]any) (string, bool, error) {
 }
 
 // vaultNotConfigured is the standard response when vault_path is absent.
-const vaultNotConfigured = "vault not configured. Set vault_path in ~/.mnemo/config.json to enable.\n\nExample:\n  {\"vault_path\": \"~/.mnemo/vault\"}"
+const vaultNotConfigured = `Vault export is not configured. Mnemo runs fine without it — vault export is an optional Obsidian/Logseq integration that materialises sessions, decisions, memories, plans, and targets as Markdown notes in a directory you choose, and re-ingests human annotations you add below the <!-- mnemo:generated --> fence so they become searchable across all your transcripts.
+
+To enable now without restarting the daemon:
+  mnemo_config(op="write", patch={"vault_path": "~/Documents/mnemo-vault"})
+
+Or edit ~/.mnemo/config.json and restart the daemon.`
 
 func (h *callHandler) vaultSync() (string, bool, error) {
 	if h.vault == nil {
@@ -2314,12 +2321,18 @@ func renderConfigWrite(merged store.Config, report ConfigReport) string {
 	if len(report.Changed) == 0 {
 		b.WriteString("No field values changed (patch matched the existing config).\n")
 	} else {
-		fmt.Fprintf(&b, "Changed fields:        %s\n", strings.Join(report.Changed, ", "))
+		fmt.Fprintf(&b, "Changed fields:          %s\n", strings.Join(report.Changed, ", "))
 		if len(report.Adopted) > 0 {
-			fmt.Fprintf(&b, "Adopted live:          %s\n", strings.Join(report.Adopted, ", "))
+			fmt.Fprintf(&b, "Adopted live:            %s\n", strings.Join(report.Adopted, ", "))
 		}
 		if len(report.RequiresRestart) > 0 {
 			fmt.Fprintf(&b, "Requires daemon restart: %s\n", strings.Join(report.RequiresRestart, ", "))
+		}
+		if len(report.Warnings) > 0 {
+			b.WriteString("\nAdoption warnings (config persisted but live adoption failed):\n")
+			for _, w := range report.Warnings {
+				fmt.Fprintf(&b, "  - %s\n", w)
+			}
 		}
 	}
 	b.WriteString("\nNew config:\n")
