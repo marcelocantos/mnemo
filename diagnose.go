@@ -607,8 +607,26 @@ func checkConfiguration() checkResult {
 			r.add(pathStatus(p))
 		}
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if vp := cfg.ResolvedVaultPath(home); vp != "" {
+			count := countMDFilesLocal(vp)
+			r.add(fmt.Sprintf("vault_path: %s (%d .md files)", vp, count))
+		}
+	}
 	r.status = statusOK
 	return r
+}
+
+// countMDFilesLocal counts .md files under root using filepath.WalkDir.
+func countMDFilesLocal(root string) int {
+	count := 0
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Ext(p) == ".md" {
+			count++
+		}
+		return nil
+	})
+	return count
 }
 
 func pathStatus(p string) string {

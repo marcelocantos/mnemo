@@ -62,7 +62,7 @@ func (h *Handler) RegisterFederatedTools(s *mcpserver.MCPServer) {
 				MCPSessionID: req.Header.Get(sessionIDHeader),
 				Username:     UsernameFromContext(ctx),
 			}
-			text, isError, err := h.Call(cc, name, req.GetArguments())
+			text, isError, err := h.Call(ctx, cc, name, req.GetArguments())
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
 			}

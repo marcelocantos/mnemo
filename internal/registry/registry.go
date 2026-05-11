@@ -15,16 +15,20 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/vault"
 )
 
 // llmAdapter bridges compact.LLMCaller to reviewer.LLMCaller. The
@@ -67,11 +71,12 @@ type Registry struct {
 	compactorModel string
 }
 
-// userEntry tracks one user's Store plus its background goroutines.
-// workers lets Close wait for them to drain before the Store is
-// actually closed.
+// userEntry tracks one user's Store, optional vault Exporter, and
+// background goroutines. workers lets Close wait for them to drain
+// before the Store is closed.
 type userEntry struct {
 	store   *store.Store
+	vault   *vault.Exporter // nil when vault_path is not configured
 	workers sync.WaitGroup
 }
 
@@ -128,12 +133,35 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	}
 	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
 	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
-	s.SetSynthesisRoots(r.cfg.ResolvedSynthesisRoots())
 
-	e := &userEntry{store: s}
+	synthRoots := r.cfg.ResolvedSynthesisRoots()
+	var vaultExp *vault.Exporter
+	if vaultPath := r.cfg.ResolvedVaultPath(home); vaultPath != "" {
+		exp, err := vault.New(s, vaultPath)
+		if err != nil {
+			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
+		} else {
+			vaultExp = exp
+		}
+	}
+	s.SetSynthesisRoots(synthRoots)
+
+	e := &userEntry{store: s, vault: vaultExp}
 	r.stores[username] = e
 	r.startWorkers(username, projectDir, e)
 	return s, nil
+}
+
+// VaultFor returns the vault Exporter for username, or nil when vault is
+// not configured or the user has not yet been initialised. Safe to call
+// concurrently.
+func (r *Registry) VaultFor(username string) *vault.Exporter {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.stores[username]; ok {
+		return e.vault
+	}
+	return nil
 }
 
 // startWorkers kicks off the per-user ingest / watcher / compactor /
@@ -182,10 +210,124 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		if err := e.store.IngestSynthesis(); err != nil {
 			logger.Error("synthesis ingest failed", "err", err)
 		}
+		// Initial vault sync: materialise all knowledge-graph entities as
+		// Markdown notes. Spawned in its own goroutine so Watch() starts
+		// immediately and live JSONL ingestion is not delayed. The SQLite
+		// index is fully populated at this point (all Ingest* calls above
+		// have completed), so the sync goroutine reads a consistent snapshot.
+		if e.vault != nil {
+			e.workers.Add(1)
+			go func() {
+				defer e.workers.Done()
+				logger.Info("vault: initial sync starting")
+				if err := e.vault.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
+					logger.Warn("vault: initial sync failed", "err", err)
+				}
+			}()
+		}
 		if err := e.store.Watch(); err != nil {
 			logger.Error("watcher failed", "err", err)
 		}
 	}()
+
+	if e.vault != nil {
+		// Vault periodic sync: materialise new transcript entities as
+		// Markdown every 5 minutes. Does NOT call IngestSynthesis here —
+		// the file watcher below picks up those writes within ~2 seconds.
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-r.baseCtx.Done():
+					return
+				case <-ticker.C:
+					if err := e.vault.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
+						logger.Warn("vault: periodic sync failed", "err", err)
+					}
+				}
+			}
+		}()
+
+		// Vault file watcher: re-indexes human annotations (content below the
+		// <!-- mnemo:generated --> fence) within ~2 seconds of any .md save.
+		// IngestVaultAnnotations extracts only below-fence content, so
+		// generated blocks are never re-ingested and there is no feedback loop.
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			vaultPath := e.vault.Path()
+			// vault.New already called os.MkdirAll; the directory exists.
+
+			fw, err := fsnotify.NewWatcher()
+			if err != nil {
+				logger.Warn("vault: file watcher init failed", "err", err)
+				return
+			}
+			defer fw.Close()
+
+			// Add vault root and all existing subdirectories.
+			// fsnotify v1.9 does not expose a public WithRecursive option
+			// on all platforms, so we walk and add manually, then
+			// re-add any newly created subdirectory on CREATE events.
+			// Hidden dirs (.obsidian/, .git/, .trash/) are skipped to
+			// avoid wasting inotify slots on Linux and to skip Obsidian
+			// internal-state churn that has no signal for mnemo.
+			addVaultDirs := func(root string) {
+				_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+					if err != nil || !d.IsDir() {
+						return nil
+					}
+					if p != root && strings.HasPrefix(d.Name(), ".") {
+						return filepath.SkipDir
+					}
+					_ = fw.Add(p)
+					return nil
+				})
+			}
+			addVaultDirs(vaultPath)
+			logger.Info("vault: file watcher started", "path", vaultPath)
+
+			const quietPeriod = 2 * time.Second
+			debounce := time.NewTimer(quietPeriod)
+			debounce.Stop()
+			defer debounce.Stop()
+
+			for {
+				select {
+				case <-r.baseCtx.Done():
+					return
+				case ev, ok := <-fw.Events:
+					if !ok {
+						return
+					}
+					// Watch newly created non-hidden subdirectories so notes
+					// written into new sections are also picked up.
+					if ev.Has(fsnotify.Create) {
+						if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() &&
+							!strings.HasPrefix(filepath.Base(ev.Name), ".") {
+							_ = fw.Add(ev.Name)
+						}
+					}
+					if strings.HasSuffix(ev.Name, ".md") {
+						debounce.Reset(quietPeriod)
+					}
+				case err, ok := <-fw.Errors:
+					if !ok {
+						return
+					}
+					logger.Warn("vault: watcher error", "err", err)
+				case <-debounce.C:
+					if err := e.store.IngestVaultAnnotations(vaultPath); err != nil {
+						logger.Warn("vault: annotation ingest failed", "err", err)
+					}
+					logger.Info("vault: annotations indexed from file change")
+				}
+			}
+		}()
+	}
 
 	// Compaction watcher.
 	e.workers.Add(1)
