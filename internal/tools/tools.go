@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/vault"
 )
 
 // VaultSyncer is satisfied by *vault.Exporter when vault is configured.
@@ -2074,6 +2076,14 @@ func (h *callHandler) vaultSync() (string, bool, error) {
 	}
 	start := time.Now()
 	if err := h.vault.Sync(h.ctx); err != nil {
+		if errors.Is(err, vault.ErrSyncInFlight) {
+			// Another sync (periodic ticker or initial pass) is already
+			// running. Reporting this honestly is important: a falsely
+			// successful 0s response would mislead callers into thinking
+			// their sync request ran.
+			return fmt.Sprintf("vault sync skipped: another sync is already in flight; this call did not run.\nVault path: %s",
+				h.vault.Path()), false, nil
+		}
 		return fmt.Sprintf("vault sync failed: %v", err), true, nil
 	}
 	return fmt.Sprintf("vault sync complete in %s.\nVault path: %s",

@@ -5,6 +5,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -500,6 +501,140 @@ func TestWriteNotePreservesPreExistingContent(t *testing.T) {
 	userIdx := strings.Index(s, "My Notes")
 	if userIdx < fenceIdx {
 		t.Error("pre-existing content must appear after fence")
+	}
+}
+
+// TestWriteNoteRepackagesPreExistingFrontmatter verifies bug B fix:
+// a pre-existing user file whose content begins with its own YAML
+// frontmatter block must NOT produce a double --- fence below mnemo's
+// generated frontmatter. Obsidian only treats the first --- pair as
+// frontmatter and renders the second as literal text, which is ugly.
+// The user's frontmatter is preserved as a yaml code block under a
+// "Preserved frontmatter" heading.
+func TestWriteNoteRepackagesPreExistingFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.md")
+	preExisting := "---\ntitle: User's note\ntags: [todo]\n---\n\n# My Notes\n\nBody.\n"
+	if err := os.WriteFile(path, []byte(preExisting), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	generated := "---\nrepo: mnemo\n---\n\n# Generated\n"
+	if err := writeNote(path, generated, ""); err != nil {
+		t.Fatalf("writeNote: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	s := string(raw)
+
+	// Exactly one frontmatter fence pair: mnemo's. The user's --- pair
+	// must have been repackaged.
+	if got := strings.Count(s, "\n---\n"); got > 1 {
+		// One leading "---\n" + one closing "\n---\n" expected from
+		// mnemo's frontmatter only.
+		t.Errorf("expected single frontmatter block, got %d \"---\" lines in:\n%s", got, s)
+	}
+
+	// User's body must be preserved.
+	if !strings.Contains(s, "# My Notes") || !strings.Contains(s, "Body.") {
+		t.Error("user body must survive repackaging")
+	}
+
+	// User's frontmatter must appear in a yaml code block.
+	if !strings.Contains(s, "## Preserved frontmatter") {
+		t.Error("missing 'Preserved frontmatter' section heading")
+	}
+	if !strings.Contains(s, "```yaml\ntitle: User's note") {
+		t.Errorf("user frontmatter must be in a yaml code block, got:\n%s", s)
+	}
+
+	// All of it must appear AFTER the generated fence.
+	fenceIdx := strings.Index(s, generatedFence)
+	preservedIdx := strings.Index(s, "## Preserved frontmatter")
+	if preservedIdx < fenceIdx {
+		t.Error("preserved frontmatter must appear after the fence")
+	}
+}
+
+// TestExtractLeadingFrontmatter covers the helper directly: present,
+// absent, and malformed (no closing ---) frontmatter cases.
+func TestExtractLeadingFrontmatter(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantBody string
+		wantRest string
+		wantOK   bool
+	}{
+		{"present", "---\nkey: value\n---\nbody\n", "key: value\n", "body\n", true},
+		{"present-no-trailing-newline", "---\nkey: value\n---", "key: value\n", "", true},
+		{"absent", "no frontmatter here\n", "", "no frontmatter here\n", false},
+		{"empty", "", "", "", false},
+		{"only-opening", "---\nkey: value\n", "", "---\nkey: value\n", false},
+		{"empty-body", "---\n---\nbody\n", "", "body\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body, rest, ok := extractLeadingFrontmatter(c.in)
+			if ok != c.wantOK {
+				t.Errorf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if body != c.wantBody {
+				t.Errorf("body = %q, want %q", body, c.wantBody)
+			}
+			if rest != c.wantRest {
+				t.Errorf("rest = %q, want %q", rest, c.wantRest)
+			}
+		})
+	}
+}
+
+// TestParseEntityTSLineAnchored verifies bug C fix: the entity timestamp
+// must be located via a per-line scan rather than plain LastIndex, so a
+// user pasting the literal entityTSComment string into their annotations
+// doesn't poison the parse. Mirrors the line-anchored fence detection
+// added in the fifth-pass commit.
+func TestParseEntityTSLineAnchored(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		wantTS string
+		wantOK bool
+	}{
+		{
+			name:   "valid-line-anchored",
+			raw:    "preamble\n<!-- mnemo:entity_ts 2026-05-10T10:00:00Z -->\n" + generatedFence + "\n",
+			wantTS: "2026-05-10T10:00:00Z",
+			wantOK: true,
+		},
+		{
+			name: "inline-string-in-prose-not-matched",
+			// User wrote a paragraph that includes the literal comment prefix
+			// inline (no newline before it). The whole-line check must skip it.
+			raw:    "see how the marker `<!-- mnemo:entity_ts FAKE -->` is parsed\nbody only, no real marker\n",
+			wantOK: false,
+		},
+		{
+			name:   "last-line-anchored-wins-over-earlier-inline",
+			raw:    "quoted `<!-- mnemo:entity_ts INLINE -->` here\n<!-- mnemo:entity_ts 2026-05-11T00:00:00Z -->\n" + generatedFence + "\n",
+			wantTS: "2026-05-11T00:00:00Z",
+			wantOK: true,
+		},
+		{
+			name:   "missing",
+			raw:    "no marker at all\n",
+			wantOK: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ts, ok := parseEntityTS(c.raw)
+			if ok != c.wantOK {
+				t.Errorf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if ts != c.wantTS {
+				t.Errorf("ts = %q, want %q", ts, c.wantTS)
+			}
+		})
 	}
 }
 
@@ -1038,18 +1173,30 @@ func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// Run two Syncs concurrently. Both must complete without error and
-	// without corrupting the vault state.
+	// Run two Syncs concurrently. One must complete cleanly; the other
+	// must return ErrSyncInFlight (coalesced — see bug D fix). Surfacing
+	// the skip honestly is the whole point: a silent nil would mislead
+	// MCP callers into thinking their sync request ran.
 	errs := make(chan error, 2)
 	for range 2 {
 		go func() {
 			errs <- exp.Sync(context.Background())
 		}()
 	}
+	var nilCount, inFlightCount int
 	for range 2 {
-		if err := <-errs; err != nil {
+		switch err := <-errs; {
+		case err == nil:
+			nilCount++
+		case errors.Is(err, ErrSyncInFlight):
+			inFlightCount++
+		default:
 			t.Errorf("concurrent Sync failed: %v", err)
 		}
+	}
+	if nilCount != 1 || inFlightCount != 1 {
+		t.Errorf("expected exactly one nil and one ErrSyncInFlight, got nil=%d inFlight=%d",
+			nilCount, inFlightCount)
 	}
 
 	// Vault state must be consistent (fence present, file readable).

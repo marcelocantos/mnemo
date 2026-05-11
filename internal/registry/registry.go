@@ -15,6 +15,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -219,7 +220,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			go func() {
 				defer e.workers.Done()
 				logger.Info("vault: initial sync starting")
-				if err := e.vault.Sync(r.baseCtx); err != nil {
+				if err := e.vault.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
 					logger.Warn("vault: initial sync failed", "err", err)
 				}
 			}()
@@ -243,7 +244,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				case <-r.baseCtx.Done():
 					return
 				case <-ticker.C:
-					if err := e.vault.Sync(r.baseCtx); err != nil {
+					if err := e.vault.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
 						logger.Warn("vault: periodic sync failed", "err", err)
 					}
 				}

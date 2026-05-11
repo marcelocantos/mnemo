@@ -36,6 +36,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -46,6 +47,12 @@ import (
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
+
+// ErrSyncInFlight is returned by Sync when another Sync is already running.
+// Periodic and initial-sync callers can ignore this; the human-triggered MCP
+// path checks for it to report honestly that the call did nothing rather
+// than falsely claiming a successful 0s sync.
+var ErrSyncInFlight = errors.New("vault: sync already in flight")
 
 // generatedFence separates mnemo-generated content (above the line) from
 // human-added content (below the line). Re-syncing rewrites everything
@@ -110,8 +117,9 @@ func (e *Exporter) Path() string { return e.path }
 // plans, targets, CI runs, PRs, per-repo indices, and the root index.
 //
 // Concurrent calls are coalesced: if a Sync is already in flight, the second
-// call returns nil immediately. The work-in-flight goroutine completes the
-// pass for both callers.
+// call returns ErrSyncInFlight immediately. The other in-flight goroutine's
+// completion is unrelated to the caller's request, so we surface the skip
+// rather than falsely report success.
 //
 // Session notes whose recorded entity timestamp matches the session's last
 // message timestamp are skipped so that repeated syncs are fast after the
@@ -121,7 +129,7 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	if e.syncing {
 		e.syncMu.Unlock()
 		slog.Info("vault: sync already in flight; skipping")
-		return nil
+		return ErrSyncInFlight
 	}
 	e.syncing = true
 	e.syncMu.Unlock()
@@ -472,6 +480,36 @@ func (e *Exporter) syncRootIndex(repos []store.RepoInfo) error {
 // mtime (which human editors bump on every save).
 const entityTSComment = "<!-- mnemo:entity_ts "
 
+// entityTSCommentSuffix closes the entity-timestamp HTML comment.
+const entityTSCommentSuffix = " -->"
+
+// parseEntityTS returns the recorded entity timestamp from raw, scanning
+// from the end for a line that exactly matches the entity-timestamp comment
+// pattern. Returns ("", false) when no such line exists.
+//
+// Line-anchored matching mirrors fenceLineIndex: a plain LastIndex would
+// also match if the user pasted the literal entityTSComment prefix into
+// their annotations (e.g. quoting mnemo's docs). Restricting to whole
+// lines keeps user-typed instances of the string safely inside human
+// content.
+func parseEntityTS(raw string) (string, bool) {
+	end := len(raw)
+	for end > 0 {
+		start := strings.LastIndexByte(raw[:end], '\n') + 1
+		line := raw[start:end]
+		trimmed := strings.TrimRight(line, " \t\r")
+		if strings.HasPrefix(trimmed, entityTSComment) && strings.HasSuffix(trimmed, entityTSCommentSuffix) {
+			ts := trimmed[len(entityTSComment) : len(trimmed)-len(entityTSCommentSuffix)]
+			return ts, true
+		}
+		if start == 0 {
+			break
+		}
+		end = start - 1
+	}
+	return "", false
+}
+
 // needsUpdate returns true when the vault file at absPath does not exist or
 // the entity timestamp recorded in its fence comment is older than ts.
 // An empty ts always returns true (no reliable timestamp → always regenerate).
@@ -501,8 +539,8 @@ func needsUpdate(absPath, ts string) bool {
 	}
 
 	raw := string(data)
-	idx := strings.LastIndex(raw, entityTSComment)
-	if idx < 0 {
+	tsStr, ok := parseEntityTS(raw)
+	if !ok {
 		// No entity timestamp recorded — fall back to mtime so existing
 		// vault files are regenerated once and then carry the new marker.
 		info, err := os.Stat(absPath)
@@ -511,14 +549,9 @@ func needsUpdate(absPath, ts string) bool {
 		}
 		return info.ModTime().Before(entityTime)
 	}
-	rest := raw[idx+len(entityTSComment):]
-	end := strings.Index(rest, " -->")
-	if end < 0 {
-		return true
-	}
 	var fileTime time.Time
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
-		if parsed, err := time.Parse(layout, rest[:end]); err == nil {
+		if parsed, err := time.Parse(layout, tsStr); err == nil {
 			fileTime = parsed
 			break
 		}
@@ -540,7 +573,12 @@ func needsUpdate(absPath, ts string) bool {
 //
 // If the existing file is non-empty but contains no fence (e.g. a
 // pre-existing user file at a colliding path), its entire content is
-// treated as human content and preserved below the fence.
+// treated as human content and preserved below the fence. If that
+// preserved content begins with its own YAML frontmatter block
+// (---\n…\n---\n), the block is repackaged as a fenced yaml code block
+// under a "Preserved frontmatter" heading: Obsidian otherwise renders
+// the second --- pair as literal text in the body. The original keys
+// remain visible and copy-pasteable.
 func writeNote(absPath, generated, entityTS string) error {
 	// Harvest human content from the existing file, if any.
 	human := ""
@@ -554,7 +592,7 @@ func writeNote(absPath, generated, entityTS string) error {
 		} else if trimmed := strings.TrimSpace(raw); trimmed != "" {
 			// Pre-existing file with no fence: treat entire content as
 			// human content so we don't silently overwrite user files.
-			human = trimmed + "\n"
+			human = repackagePreexistingContent(trimmed + "\n")
 		}
 	}
 
@@ -577,6 +615,67 @@ func writeNote(absPath, generated, entityTS string) error {
 		return fmt.Errorf("vault: mkdir %s: %w", filepath.Dir(absPath), err)
 	}
 	return os.WriteFile(absPath, []byte(out.String()), 0o644)
+}
+
+// repackagePreexistingContent prepares a pre-existing user file's content
+// for placement below mnemo's generated fence. If the content begins with
+// its own YAML frontmatter (---\n…\n---\n), the block is extracted and
+// rewritten as a fenced yaml code block under a heading so that Obsidian
+// (which only recognises frontmatter at the very top of a file) does not
+// render the stray --- pair as literal text in the body.
+//
+// Content with no leading frontmatter is returned unchanged.
+func repackagePreexistingContent(content string) string {
+	body, rest, ok := extractLeadingFrontmatter(content)
+	if !ok {
+		return content
+	}
+	var b strings.Builder
+	b.WriteString("## Preserved frontmatter\n\n")
+	b.WriteString("*This file existed before mnemo took over the path; its original ")
+	b.WriteString("YAML frontmatter is preserved below. Copy any keys you want into ")
+	b.WriteString("mnemo's frontmatter above the fence, or delete this block.*\n\n")
+	b.WriteString("```yaml\n")
+	b.WriteString(strings.TrimRight(body, "\n"))
+	b.WriteString("\n```\n\n")
+	rest = strings.TrimLeft(rest, "\n")
+	if rest != "" {
+		b.WriteString(rest)
+		if !strings.HasSuffix(rest, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// extractLeadingFrontmatter peels a leading YAML frontmatter block from s.
+// Returns (body, rest, true) when s begins with "---\n<body>\n---\n" (the
+// closing fence on its own line, trailing whitespace tolerated). Returns
+// ("", s, false) when no leading frontmatter is present.
+func extractLeadingFrontmatter(s string) (body, rest string, ok bool) {
+	if !strings.HasPrefix(s, "---\n") {
+		return "", s, false
+	}
+	after := s[len("---\n"):]
+	i := 0
+	for i < len(after) {
+		nl := strings.IndexByte(after[i:], '\n')
+		if nl < 0 {
+			// Tolerate a closing "---" with no trailing newline at EOF.
+			trimmed := strings.TrimRight(after[i:], " \t\r")
+			if trimmed == "---" {
+				return after[:i], "", true
+			}
+			return "", s, false
+		}
+		line := after[i : i+nl]
+		trimmed := strings.TrimRight(line, " \t\r")
+		if trimmed == "---" {
+			return after[:i], after[i+nl+1:], true
+		}
+		i += nl + 1
+	}
+	return "", s, false
 }
 
 // readAllMessages fetches all messages for a session, paginating until

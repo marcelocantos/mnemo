@@ -4084,13 +4084,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		vaultRows.Close()
 	}
 
-	// Sort merged results by BM25 rank (ascending; SQLite FTS5 returns
-	// negative values so lower = better match).
-	if len(results) > 1 {
-		sort.Slice(results, func(i, j int) bool {
-			return results[i].Rank < results[j].Rank
-		})
-	}
+	results = mergeBySourcePercentile(results)
 	if len(results) > limit {
 		results = results[:limit]
 	}
@@ -4115,6 +4109,65 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	}
 
 	return results, nil
+}
+
+// mergeBySourcePercentile re-orders a mixed slice of transcript and vault
+// search hits so that BM25 ranks are compared on a source-relative scale
+// rather than as raw scores.
+//
+// SQLite FTS5 BM25 scores from messages_fts and docs_fts are NOT directly
+// comparable: BM25 calibrates against the corpus (doc-length distribution
+// and IDF), so a rank of -3.5 from one corpus and -3.5 from the other were
+// computed against different denominators. Sorting by raw rank tends to
+// clump one source above the other regardless of true relevance.
+//
+// Fix: rank each hit by its position within its own source (best=0.0,
+// worst=1.0) and sort the merged slice by that percentile. Raw rank is
+// the tiebreaker so within-source order is preserved. The "vault" role
+// distinguishes vault hits; everything else is treated as a transcript
+// hit.
+func mergeBySourcePercentile(results []SearchResult) []SearchResult {
+	if len(results) <= 1 {
+		return results
+	}
+	percentile := make([]float64, len(results))
+	assignPercentiles := func(matches func(SearchResult) bool) {
+		idxs := make([]int, 0, len(results))
+		for i, r := range results {
+			if matches(r) {
+				idxs = append(idxs, i)
+			}
+		}
+		sort.SliceStable(idxs, func(a, b int) bool {
+			return results[idxs[a]].Rank < results[idxs[b]].Rank
+		})
+		n := len(idxs)
+		for pos, i := range idxs {
+			if n <= 1 {
+				percentile[i] = 0
+				continue
+			}
+			percentile[i] = float64(pos) / float64(n-1)
+		}
+	}
+	assignPercentiles(func(r SearchResult) bool { return r.Role == "vault" })
+	assignPercentiles(func(r SearchResult) bool { return r.Role != "vault" })
+
+	order := make([]int, len(results))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		if percentile[order[a]] != percentile[order[b]] {
+			return percentile[order[a]] < percentile[order[b]]
+		}
+		return results[order[a]].Rank < results[order[b]].Rank
+	})
+	sorted := make([]SearchResult, len(results))
+	for i, idx := range order {
+		sorted[i] = results[idx]
+	}
+	return sorted
 }
 
 // fetchContext retrieves messages before or after a given message ID within the same session.
