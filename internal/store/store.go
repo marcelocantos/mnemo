@@ -5830,7 +5830,7 @@ func isSqldeep(upper string) bool {
 // Accepts both plain SQL (SELECT/WITH) and sqldeep nested syntax
 // (FROM ... SELECT { ... }). sqldeep queries are transparently
 // transpiled to SQL before execution.
-func (s *Store) Query(query string) ([]map[string]any, error) {
+func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 	q := strings.TrimSpace(query)
 	upper := strings.ToUpper(q)
 
@@ -5848,7 +5848,7 @@ func (s *Store) Query(query string) ([]map[string]any, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query(execSQL)
+	rows, err := s.db.Query(execSQL, args...)
 	if err != nil {
 		return nil, err
 	}

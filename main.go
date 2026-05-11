@@ -37,6 +37,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/marcelocantos/mnemo/internal/api"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
@@ -59,6 +60,9 @@ Then restart this Claude Code session.`
 
 //go:embed agents-guide.md
 var agentsGuide string
+
+//go:embed ui/dashboard.html
+var dashboardHTML []byte
 
 const (
 	version              = "0.33.0"
@@ -576,6 +580,8 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		handler.RegisterTools(mcpSrv)
 	}
 
+	// httpSrv implements http.Handler so we can mount it inside our
+	// own mux alongside the dashboard and REST API routes.
 	httpSrv := server.NewStreamableHTTPServer(mcpSrv,
 		server.WithStateful(true),
 		server.WithHTTPContextFunc(tools.UsernameContextFunc),
@@ -586,13 +592,32 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		server.WithHeartbeatInterval(30*time.Second),
 	)
 
+	// Wire up a single mux that serves:
+	//   /mcp          → MCP streamable-HTTP endpoint (for Claude Code)
+	//   /api/*        → JSON REST API (for the dashboard)
+	//   /             → Web dashboard UI
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", httpSrv)
+	mux.Handle("/mcp/", httpSrv) // catch sub-paths used by the MCP transport
+	api.New(resolve).RegisterRoutes(mux)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(dashboardHTML)
+	})
+
+	httpServer := &http.Server{Addr: addr, Handler: mux}
+
 	slog.Info("mnemo serve starting", "version", version, "addr", addr)
 
 	// Run the local HTTP server in a goroutine so we can react to ctx
 	// cancellation (triggered by the Windows Service handler on SCM
 	// Stop, or never triggered in the foreground case).
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.Start(addr) }()
+	go func() { errCh <- httpServer.ListenAndServe() }()
 
 	// Optionally start the federated mTLS server in parallel
 	// (🎯T15.3). A startup failure here is non-fatal — we log and
@@ -620,8 +645,12 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		slog.Info("mnemo serve shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// Drain MCP sessions first, then close the TCP listener.
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			slog.Warn("HTTP shutdown error", "err", err)
+		}
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("HTTP server shutdown error", "err", err)
 		}
 		if fedSrv != nil {
 			if err := fedSrv.Shutdown(shutdownCtx); err != nil {
