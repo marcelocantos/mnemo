@@ -2055,21 +2055,39 @@ func assistantWithUsage(ts string, model string, input, output, cacheRead, cache
 	}
 }
 
-// now returns the current time formatted for JSONL timestamps.
+// testAnchor is the per-process reference midnight (UTC) for date-bound
+// test fixtures. Anchored 3 days before "today" so all fixtures land
+// comfortably inside the 30-day recency window queried by Usage tests.
+// Stable within a single test run; advances day-by-day across runs so
+// the fixtures never rot out of the window.
+var testAnchor = time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -3)
+
+// now returns testAnchor at 10:00:00 UTC formatted for JSONL timestamps.
 func now() string {
-	return "2026-04-09T10:00:00Z"
+	return nowAt(0, 10, 0, 0)
 }
 
-// nowPlus returns a timestamp offset by the given minutes.
+// nowPlus returns testAnchor at 10:00:00 + minutes UTC.
 func nowPlus(minutes int) string {
-	return "2026-04-09T10:" + padMinutes(minutes) + ":00Z"
+	return nowAt(0, 10, minutes, 0)
 }
 
-func padMinutes(m int) string {
-	if m < 10 {
-		return "0" + string(rune('0'+m))
-	}
-	return string(rune('0'+m/10)) + string(rune('0'+m%10))
+// nowAt returns testAnchor + dayOffset days, at h:m:s UTC, as RFC3339.
+// dayOffset and any of h/m/s may overflow (e.g. m=60) and time.Time
+// normalises them.
+func nowAt(dayOffset, h, m, s int) string {
+	return testAnchor.
+		AddDate(0, 0, dayOffset).
+		Add(time.Duration(h)*time.Hour +
+			time.Duration(m)*time.Minute +
+			time.Duration(s)*time.Second).
+		Format(time.RFC3339)
+}
+
+// nowDate returns testAnchor + dayOffset days as YYYY-MM-DD (for
+// UpsertReconciledCost date keys and source-map lookups).
+func nowDate(dayOffset int) string {
+	return testAnchor.AddDate(0, 0, dayOffset).Format("2006-01-02")
 }
 
 // msgWithUUID creates a user/assistant message entry with a uuid field.
@@ -2155,20 +2173,20 @@ func TestUsageGroupBySession(t *testing.T) {
 	// Two sessions with different models and token counts.
 	writeJSONL(t, projectDir, "proj", "sess-A", []map[string]any{
 		{
-			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"type": "system", "timestamp": nowAt(0, 10, 0, 0),
 			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
 			"message": map[string]any{"content": "init"},
 		},
-		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 500, 50),
-		assistantWithUsage("2026-04-09T10:01:00Z", "claude-sonnet-4-5", 2000, 200, 800, 100),
+		assistantWithUsage(nowAt(0, 10, 0, 5), "claude-sonnet-4-5", 1000, 100, 500, 50),
+		assistantWithUsage(nowAt(0, 10, 1, 0), "claude-sonnet-4-5", 2000, 200, 800, 100),
 	})
 	writeJSONL(t, projectDir, "proj", "sess-B", []map[string]any{
 		{
-			"type": "system", "timestamp": "2026-04-10T08:00:00Z",
+			"type": "system", "timestamp": nowAt(1, 8, 0, 0),
 			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
 			"message": map[string]any{"content": "init"},
 		},
-		assistantWithUsage("2026-04-10T08:00:05Z", "claude-opus-4-5", 5000, 500, 2000, 200),
+		assistantWithUsage(nowAt(1, 8, 0, 5), "claude-opus-4-5", 5000, 500, 2000, 200),
 	})
 
 	s := newTestStore(t, projectDir)
@@ -2217,15 +2235,15 @@ func TestUsageGroupByBlock(t *testing.T) {
 	// Block 2: 16:00 → start at 16:00 UTC (15:01 is >5h from 10:00)
 	writeJSONL(t, projectDir, "proj", "sess-blocks", []map[string]any{
 		{
-			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"type": "system", "timestamp": nowAt(0, 10, 0, 0),
 			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
 			"message": map[string]any{"content": "init"},
 		},
-		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 0, 0),
-		assistantWithUsage("2026-04-09T11:00:00Z", "claude-sonnet-4-5", 2000, 200, 0, 0),
-		assistantWithUsage("2026-04-09T14:30:00Z", "claude-sonnet-4-5", 500, 50, 0, 0),
+		assistantWithUsage(nowAt(0, 10, 0, 5), "claude-sonnet-4-5", 1000, 100, 0, 0),
+		assistantWithUsage(nowAt(0, 11, 0, 0), "claude-sonnet-4-5", 2000, 200, 0, 0),
+		assistantWithUsage(nowAt(0, 14, 30, 0), "claude-sonnet-4-5", 500, 50, 0, 0),
 		// This message is >5h from the block start (10:00 + 5h = 15:00); starts a new block.
-		assistantWithUsage("2026-04-09T16:00:00Z", "claude-sonnet-4-5", 3000, 300, 0, 0),
+		assistantWithUsage(nowAt(0, 16, 0, 0), "claude-sonnet-4-5", 3000, 300, 0, 0),
 	})
 
 	s := newTestStore(t, projectDir)
@@ -2274,8 +2292,11 @@ func TestUsageGroupByBlock(t *testing.T) {
 		ts, err := time.Parse(time.RFC3339Nano, result.Freshness)
 		if err != nil {
 			t.Errorf("freshness not RFC3339Nano: %q (%v)", result.Freshness, err)
-		} else if want := time.Date(2026, 4, 9, 16, 0, 0, 0, time.UTC); !ts.Equal(want) {
-			t.Errorf("freshness = %s, want %s", ts.Format(time.RFC3339), want.Format(time.RFC3339))
+		} else {
+			want, _ := time.Parse(time.RFC3339, nowAt(0, 16, 0, 0))
+			if !ts.Equal(want) {
+				t.Errorf("freshness = %s, want %s", ts.Format(time.RFC3339), want.Format(time.RFC3339))
+			}
 		}
 	}
 }
@@ -2371,11 +2392,11 @@ func TestUsageReconciledCosts(t *testing.T) {
 
 	writeJSONL(t, projectDir, "proj", "sess-reconc", []map[string]any{
 		{
-			"type": "system", "timestamp": "2026-04-09T10:00:00Z",
+			"type": "system", "timestamp": nowAt(0, 10, 0, 0),
 			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
 			"message": map[string]any{"content": "init"},
 		},
-		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 1000, 100, 0, 0),
+		assistantWithUsage(nowAt(0, 10, 0, 5), "claude-sonnet-4-5", 1000, 100, 0, 0),
 	})
 
 	s := newTestStore(t, projectDir)
@@ -2396,7 +2417,7 @@ func TestUsageReconciledCosts(t *testing.T) {
 	}
 
 	// Insert a reconciled cost for that date.
-	if err := s.UpsertReconciledCost("2026-04-09", 99.99); err != nil {
+	if err := s.UpsertReconciledCost(nowDate(0), 99.99); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2422,15 +2443,15 @@ func TestUsageReconciledCosts(t *testing.T) {
 func TestUsageReconciledMixedSource(t *testing.T) {
 	projectDir := t.TempDir()
 
-	// Two days of activity.
+	// Two days of activity (day -1 = "yesterday relative to fixtures", day 0 = "today").
 	writeJSONL(t, projectDir, "proj", "sess-mixed", []map[string]any{
 		{
-			"type": "system", "timestamp": "2026-04-08T09:00:00Z",
+			"type": "system", "timestamp": nowAt(-1, 9, 0, 0),
 			"cwd": "/Users/dev/work/github.com/acme/app", "version": "2.1.81",
 			"message": map[string]any{"content": "init"},
 		},
-		assistantWithUsage("2026-04-08T09:00:05Z", "claude-sonnet-4-5", 100, 10, 0, 0),
-		assistantWithUsage("2026-04-09T10:00:05Z", "claude-sonnet-4-5", 200, 20, 0, 0),
+		assistantWithUsage(nowAt(-1, 9, 0, 5), "claude-sonnet-4-5", 100, 10, 0, 0),
+		assistantWithUsage(nowAt(0, 10, 0, 5), "claude-sonnet-4-5", 200, 20, 0, 0),
 	})
 
 	s := newTestStore(t, projectDir)
@@ -2438,8 +2459,8 @@ func TestUsageReconciledMixedSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Reconcile only Apr 9, leave Apr 8 as estimated.
-	if err := s.UpsertReconciledCost("2026-04-09", 50.0); err != nil {
+	// Reconcile only the "today" fixture day; leave the previous day as estimated.
+	if err := s.UpsertReconciledCost(nowDate(0), 50.0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2453,11 +2474,12 @@ func TestUsageReconciledMixedSource(t *testing.T) {
 	for _, r := range result.Rows {
 		sourceMap[r.Period] = r.Source
 	}
-	if sourceMap["2026-04-09"] != "reconciled" {
-		t.Errorf("2026-04-09: expected reconciled, got %q", sourceMap["2026-04-09"])
+	reconciledDay, estimatedDay := nowDate(0), nowDate(-1)
+	if sourceMap[reconciledDay] != "reconciled" {
+		t.Errorf("%s: expected reconciled, got %q", reconciledDay, sourceMap[reconciledDay])
 	}
-	if sourceMap["2026-04-08"] != "estimated" {
-		t.Errorf("2026-04-08: expected estimated, got %q", sourceMap["2026-04-08"])
+	if sourceMap[estimatedDay] != "estimated" {
+		t.Errorf("%s: expected estimated, got %q", estimatedDay, sourceMap[estimatedDay])
 	}
 	// Total should be "mixed" since it spans both types.
 	if result.Total.Source != "mixed" {
