@@ -102,7 +102,7 @@ func TestSessionPath(t *testing.T) {
 		Topic:     "vault feature",
 		FirstMsg:  "2026-05-10T14:23:45Z",
 	}
-	got := sessionPath(info)
+	got := filepath.ToSlash(sessionPath(info))
 	if !strings.HasPrefix(got, "sessions/mnemo/") {
 		t.Errorf("expected sessions/mnemo/ prefix, got %q", got)
 	}
@@ -126,7 +126,7 @@ func TestSessionPathNoRepo(t *testing.T) {
 		Project:   "-Users-alice-dev-myapp",
 		FirstMsg:  "2026-05-10T14:23:45Z",
 	}
-	got := sessionPath(info)
+	got := filepath.ToSlash(sessionPath(info))
 	if !strings.HasPrefix(got, "sessions/") {
 		t.Errorf("expected sessions/ prefix, got %q", got)
 	}
@@ -138,7 +138,7 @@ func TestDecisionPath(t *testing.T) {
 		Repo:      "my-repo",
 		Timestamp: "2026-05-10T10:00:00Z",
 	}
-	got := decisionPath(d)
+	got := filepath.ToSlash(decisionPath(d))
 	if !strings.HasPrefix(got, "decisions/my-repo/") {
 		t.Errorf("expected decisions/my-repo/ prefix, got %q", got)
 	}
@@ -155,7 +155,7 @@ func TestMemoryPath(t *testing.T) {
 		Project: "-Users-alice-dev-myapp",
 		Name:    "My Memory",
 	}
-	got := memoryPath(m)
+	got := filepath.ToSlash(memoryPath(m))
 	if !strings.HasPrefix(got, "memories/") {
 		t.Errorf("expected memories/ prefix, got %q", got)
 	}
