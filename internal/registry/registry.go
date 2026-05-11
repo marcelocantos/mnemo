@@ -133,8 +133,6 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
 	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
 
-	// Build synthesis roots: configured roots plus the vault dir (if
-	// vault is enabled) so human-added vault notes are FTS5-indexed.
 	synthRoots := r.cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
 	if vaultPath := r.cfg.ResolvedVaultPath(home); vaultPath != "" {
@@ -143,7 +141,6 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
 		} else {
 			vaultExp = exp
-			synthRoots = append(synthRoots, vaultPath)
 		}
 	}
 	s.SetSynthesisRoots(synthRoots)
@@ -213,16 +210,19 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			logger.Error("synthesis ingest failed", "err", err)
 		}
 		// Initial vault sync: materialise all knowledge-graph entities as
-		// Markdown notes. Runs in this goroutine (after ingest, before
-		// Watch) so the SQLite index is fully populated. mtime-based
-		// skip makes subsequent daemon restarts fast. Watch() starts
-		// after sync completes; the typical sync for a fresh vault is
-		// O(seconds), not O(minutes), so Watch delay is acceptable.
+		// Markdown notes. Spawned in its own goroutine so Watch() starts
+		// immediately and live JSONL ingestion is not delayed. The SQLite
+		// index is fully populated at this point (all Ingest* calls above
+		// have completed), so the sync goroutine reads a consistent snapshot.
 		if e.vault != nil {
-			logger.Info("vault: initial sync starting")
-			if err := e.vault.Sync(r.baseCtx); err != nil {
-				logger.Warn("vault: initial sync failed", "err", err)
-			}
+			e.workers.Add(1)
+			go func() {
+				defer e.workers.Done()
+				logger.Info("vault: initial sync starting")
+				if err := e.vault.Sync(r.baseCtx); err != nil {
+					logger.Warn("vault: initial sync failed", "err", err)
+				}
+			}()
 		}
 		if err := e.store.Watch(); err != nil {
 			logger.Error("watcher failed", "err", err)
@@ -250,37 +250,15 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			}
 		}()
 
-		// Vault file watcher: re-indexes synthesis docs near-instantly
-		// when any .md file in the vault dir is created or modified —
-		// whether by vault.Sync() or by a human editor.
-		//
-		// Uses OS-native events (kqueue/inotify/ReadDirectoryChangesW)
-		// so CPU overhead is ~zero when the vault is idle. Changes are
-		// debounced with a 2-second quiet window to batch bursts from
-		// vault.Sync() writing many files into a single IngestSynthesis.
-		//
-		// Falls back gracefully: if fsnotify init fails the goroutine
-		// logs a warning and exits; IngestSynthesis still runs at the
-		// next daemon restart via the initial ingest goroutine.
+		// Vault file watcher: re-indexes human annotations (content below the
+		// <!-- mnemo:generated --> fence) within ~2 seconds of any .md save.
+		// IngestVaultAnnotations extracts only below-fence content, so
+		// generated blocks are never re-ingested and there is no feedback loop.
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
 			vaultPath := e.vault.Path()
-
-			// Wait for the vault directory to be created by the initial
-			// Sync() which runs in the ingest goroutine concurrently.
-			waitTick := time.NewTicker(500 * time.Millisecond)
-			defer waitTick.Stop()
-			for {
-				if _, err := os.Stat(vaultPath); err == nil {
-					break
-				}
-				select {
-				case <-r.baseCtx.Done():
-					return
-				case <-waitTick.C:
-				}
-			}
+			// vault.New already called os.MkdirAll; the directory exists.
 
 			fw, err := fsnotify.NewWatcher()
 			if err != nil {
@@ -334,10 +312,10 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 					}
 					logger.Warn("vault: watcher error", "err", err)
 				case <-debounce.C:
-					if err := e.store.IngestSynthesis(); err != nil {
-						logger.Warn("vault: synthesis re-ingest failed", "err", err)
+					if err := e.store.IngestVaultAnnotations(vaultPath); err != nil {
+						logger.Warn("vault: annotation ingest failed", "err", err)
 					}
-					logger.Info("vault: synthesis re-ingested from file change")
+					logger.Info("vault: annotations indexed from file change")
 				}
 			}
 		}()

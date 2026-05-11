@@ -456,7 +456,7 @@ func renderRepoIndex(repo store.RepoInfo, sessions []store.SessionInfo, decision
 	return b.String()
 }
 
-// renderRootIndex produces the vault root _index.md.
+// renderRootIndex produces the vault root index.md.
 func renderRootIndex(repos []store.RepoInfo, stats *store.StatsResult) string {
 	var b strings.Builder
 
@@ -508,13 +508,16 @@ func writeYAML(b *strings.Builder, key, value string) {
 	if value == "" {
 		return
 	}
-	// Quote if the value contains YAML-special characters or leading/trailing
-	// whitespace that would be lost without quoting.
-	needsQuote := strings.ContainsAny(value, ":{}[]|>&*!,'\"#%@`") ||
+	// Quote if value contains YAML-special characters, control chars, or
+	// leading/trailing whitespace that would be lost without quoting.
+	needsQuote := strings.ContainsAny(value, ":{}[]|>&*!,'\"#%@`\n\t\r") ||
 		value != strings.TrimSpace(value)
 	if needsQuote {
 		escaped := strings.ReplaceAll(value, `\`, `\\`)
 		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		escaped = strings.ReplaceAll(escaped, "\n", `\n`)
+		escaped = strings.ReplaceAll(escaped, "\r", `\r`)
+		escaped = strings.ReplaceAll(escaped, "\t", `\t`)
 		fmt.Fprintf(b, "%s: \"%s\"\n", key, escaped)
 	} else {
 		fmt.Fprintf(b, "%s: %s\n", key, value)

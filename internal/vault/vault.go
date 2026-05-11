@@ -11,14 +11,12 @@
 // and Logseq.
 //
 // The vault is bidirectional: mnemo writes notes on every ingest cycle
-// and adds the vault directory as a SynthesisRoot so that human-added
-// content (new files, annotations below the fence marker) is picked up
-// by the FTS5 index and flows back into mnemo_search and all other
-// query tools.
+// and a dedicated IngestVaultAnnotations pass re-indexes the content
+// below the <!-- mnemo:generated --> fence so human-added annotations
+// appear in mnemo_search results alongside transcript messages.
 //
-// Human edits are preserved across re-syncs via a <!-- mnemo:generated -->
-// fence: generated content lives above the fence, human notes live below
-// and are never overwritten.
+// Human edits are preserved across re-syncs: generated content lives
+// above the fence, human notes live below and are never overwritten.
 //
 // Vault structure:
 //
@@ -145,7 +143,7 @@ func (e *Exporter) syncSessions(ctx context.Context) (map[string]string, error) 
 			continue
 		}
 
-		if err := writeNote(absPath, renderSession(s, msgs)); err != nil {
+		if err := writeNote(absPath, renderSession(s, msgs), s.LastMsg); err != nil {
 			slog.Warn("vault: write session note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -174,7 +172,7 @@ func (e *Exporter) syncDecisions(ctx context.Context, sessionPaths map[string]st
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderDecision(d, sessionPaths[d.SessionID])); err != nil {
+		if err := writeNote(absPath, renderDecision(d, sessionPaths[d.SessionID]), d.Timestamp); err != nil {
 			slog.Warn("vault: write decision note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -202,7 +200,7 @@ func (e *Exporter) syncMemories(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderMemory(m)); err != nil {
+		if err := writeNote(absPath, renderMemory(m), m.UpdatedAt); err != nil {
 			slog.Warn("vault: write memory note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -230,7 +228,7 @@ func (e *Exporter) syncPlans(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderPlan(p)); err != nil {
+		if err := writeNote(absPath, renderPlan(p), p.UpdatedAt); err != nil {
 			slog.Warn("vault: write plan note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -262,7 +260,7 @@ func (e *Exporter) syncTargets(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderTarget(t)); err != nil {
+		if err := writeNote(absPath, renderTarget(t), ""); err != nil {
 			slog.Warn("vault: write target note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -290,7 +288,7 @@ func (e *Exporter) syncCI(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderCIRun(r)); err != nil {
+		if err := writeNote(absPath, renderCIRun(r), r.CompletedAt); err != nil {
 			slog.Warn("vault: write CI run note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -318,7 +316,7 @@ func (e *Exporter) syncPRs(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderPR(r)); err != nil {
+		if err := writeNote(absPath, renderPR(r), r.UpdatedAt); err != nil {
 			slog.Warn("vault: write PR note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -345,7 +343,7 @@ func (e *Exporter) syncRepoIndices(ctx context.Context, repos []store.RepoInfo, 
 		}
 		content := renderRepoIndex(repo, sessions, decisions, sessionPaths)
 		absPath := filepath.Join(e.path, repoIndexPath(repo.Repo))
-		if err := writeNote(absPath, content); err != nil {
+		if err := writeNote(absPath, content, ""); err != nil {
 			slog.Warn("vault: write repo index failed", "repo", repo.Repo, "err", err)
 		}
 	}
@@ -369,7 +367,7 @@ func (e *Exporter) syncSkills(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderSkill(s)); err != nil {
+		if err := writeNote(absPath, renderSkill(s), s.UpdatedAt); err != nil {
 			slog.Warn("vault: write skill note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -397,7 +395,7 @@ func (e *Exporter) syncConfigs(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderConfig(c)); err != nil {
+		if err := writeNote(absPath, renderConfig(c), c.UpdatedAt); err != nil {
 			slog.Warn("vault: write config note failed", "path", absPath, "err", err)
 			continue
 		}
@@ -411,39 +409,85 @@ func (e *Exporter) syncConfigs(ctx context.Context) error {
 // syncRootIndex writes the vault root index.md.
 func (e *Exporter) syncRootIndex(repos []store.RepoInfo) error {
 	stats, _ := e.backend.Stats()
-	return writeNote(filepath.Join(e.path, "index.md"), renderRootIndex(repos, stats))
+	return writeNote(filepath.Join(e.path, "index.md"), renderRootIndex(repos, stats), "")
 }
 
+// entityTSComment is the HTML comment prefix written just before the
+// generatedFence to record the entity timestamp used during the last write.
+// needsUpdate reads this back to detect staleness without relying on file
+// mtime (which human editors bump on every save).
+const entityTSComment = "<!-- mnemo:entity_ts "
+
 // needsUpdate returns true when the vault file at absPath does not exist or
-// its modification time is before ts (RFC3339). An empty ts always returns
-// true so that callers that have no reliable timestamp force a write.
+// the entity timestamp recorded in its fence comment is older than ts.
+// An empty ts always returns true (no reliable timestamp → always regenerate).
+//
+// The entity timestamp is embedded as an HTML comment just before the
+// generatedFence marker on every writeNote call. For files that pre-date
+// this mechanism (no comment present) needsUpdate falls back to mtime
+// comparison so they are regenerated once and then carry the new marker.
 func needsUpdate(absPath, ts string) bool {
 	if ts == "" {
 		return true
 	}
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return true // file absent or unreadable
-	}
-	// Parse ts: try nanosecond, then second precision, then date-only.
-	var t time.Time
+	var entityTime time.Time
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
 		if parsed, err := time.Parse(layout, ts); err == nil {
-			t = parsed
+			entityTime = parsed
 			break
 		}
 	}
-	if t.IsZero() {
+	if entityTime.IsZero() {
 		return true // unparseable timestamp → always regenerate
 	}
-	return info.ModTime().Before(t)
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return true // file absent or unreadable
+	}
+
+	raw := string(data)
+	idx := strings.LastIndex(raw, entityTSComment)
+	if idx < 0 {
+		// No entity timestamp recorded — fall back to mtime so existing
+		// vault files are regenerated once and then carry the new marker.
+		info, err := os.Stat(absPath)
+		if err != nil {
+			return true
+		}
+		return info.ModTime().Before(entityTime)
+	}
+	rest := raw[idx+len(entityTSComment):]
+	end := strings.Index(rest, " -->")
+	if end < 0 {
+		return true
+	}
+	var fileTime time.Time
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, rest[:end]); err == nil {
+			fileTime = parsed
+			break
+		}
+	}
+	if fileTime.IsZero() {
+		return true
+	}
+	return fileTime.Before(entityTime)
 }
 
 // writeNote writes generated content to absPath, preserving any
 // human-added content that follows the generatedFence marker in an
 // existing file. The fence is always written; human content (if any)
 // is appended after it.
-func writeNote(absPath, generated string) error {
+//
+// entityTS, when non-empty, is written as an HTML comment just before
+// the fence so needsUpdate can detect staleness without relying on
+// file mtime (which human editors bump on every save).
+//
+// If the existing file is non-empty but contains no fence (e.g. a
+// pre-existing user file at a colliding path), its entire content is
+// treated as human content and preserved below the fence.
+func writeNote(absPath, generated, entityTS string) error {
 	// Harvest human content from the existing file, if any.
 	human := ""
 	if existing, err := os.ReadFile(absPath); err == nil {
@@ -453,12 +497,19 @@ func writeNote(absPath, generated string) error {
 			if after != "" {
 				human = after
 			}
+		} else if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			// Pre-existing file with no fence: treat entire content as
+			// human content so we don't silently overwrite user files.
+			human = trimmed + "\n"
 		}
 	}
 
 	var out strings.Builder
 	out.WriteString(strings.TrimRight(generated, "\n"))
 	out.WriteString("\n\n")
+	if entityTS != "" {
+		fmt.Fprintf(&out, "%s%s -->\n", entityTSComment, entityTS)
+	}
 	out.WriteString(generatedFence)
 	if human != "" {
 		out.WriteString("\n")

@@ -64,7 +64,8 @@ func (h *Handler) SetVaultResolver(fn func(string) VaultSyncer) {
 type callHandler struct {
 	mem   store.Backend
 	cc    CallContext
-	vault VaultSyncer // nil when vault is not configured for this user
+	vault VaultSyncer     // nil when vault is not configured for this user
+	ctx   context.Context // request context; honours MCP-caller cancellation
 }
 
 // Definitions returns the MCP tool definitions.
@@ -518,7 +519,7 @@ Vault must be configured via vault_path in ~/.mnemo/config.json.`),
 // header). Most tools ignore it; mnemo_self uses it to bind a Claude
 // Code session to its owning MCP session, which the compactor and
 // mnemo_restore rely on for /clear-boundary context preservation.
-func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string, bool, error) {
+func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args map[string]any) (string, bool, error) {
 	mem, err := h.resolve(cc.Username)
 	if err != nil {
 		return fmt.Sprintf("resolve user %q: %v", cc.Username, err), true, nil
@@ -534,7 +535,7 @@ func (h *Handler) Call(cc CallContext, name string, args map[string]any) (string
 	if h.resolveVault != nil {
 		vs = h.resolveVault(cc.Username)
 	}
-	ch := &callHandler{mem: mem, cc: cc, vault: vs}
+	ch := &callHandler{mem: mem, cc: cc, vault: vs, ctx: ctx}
 	switch name {
 	case "mnemo_search":
 		return ch.search(args)
@@ -2065,7 +2066,7 @@ func (h *callHandler) vaultSync() (string, bool, error) {
 		return vaultNotConfigured, false, nil
 	}
 	start := time.Now()
-	if err := h.vault.Sync(context.Background()); err != nil {
+	if err := h.vault.Sync(h.ctx); err != nil {
 		return fmt.Sprintf("vault sync failed: %v", err), true, nil
 	}
 	return fmt.Sprintf("vault sync complete in %s.\nVault path: %s",

@@ -4004,10 +4004,6 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	}
 	ftsRows.Close()
 
-	if len(hits) == 0 {
-		return nil, nil
-	}
-
 	// Phase 2: enrich hits with message data and apply filters.
 	var results []SearchResult
 	for _, h := range hits {
@@ -4052,10 +4048,61 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		results = append(results, r)
 	}
 
-	// Fetch context messages for each hit.
-	if (contextBefore > 0 || contextAfter > 0) && len(results) > 0 {
+	// Phase 3: vault annotation hits (human content below the generated fence).
+	// Vault annotations live in the docs table (kind='vault') and are indexed
+	// alongside transcript messages so search surfaces both at once.
+	// repoFilter and sessionType are not applied — annotations are cross-repo.
+	vaultRows, vaultErr := s.db.Query(`
+		SELECT d.id, d.file_path, d.content, f.rank
+		FROM docs d
+		JOIN docs_fts f ON f.rowid = d.id
+		WHERE docs_fts MATCH ? AND d.kind = 'vault'
+		ORDER BY rank
+		LIMIT ?
+	`, ftsQuery, limit)
+	if vaultErr == nil {
+		for vaultRows.Next() {
+			var docID int64
+			var filePath, content string
+			var rank float64
+			if err := vaultRows.Scan(&docID, &filePath, &content, &rank); err != nil {
+				continue
+			}
+			if len(content) > 500 {
+				content = content[:497] + "..."
+			}
+			results = append(results, SearchResult{
+				MessageID: int(-docID), // negative distinguishes from message row IDs
+				SessionID: filePath,
+				Role:      "vault",
+				Text:      content,
+				Rank:      rank,
+			})
+		}
+		vaultRows.Close()
+	}
+
+	// Sort merged results by BM25 rank (ascending; SQLite FTS5 returns
+	// negative values so lower = better match).
+	if len(results) > 1 {
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Rank < results[j].Rank
+		})
+	}
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	// Fetch context messages for each transcript hit (skip vault entries).
+	if contextBefore > 0 || contextAfter > 0 {
 		for i := range results {
 			r := &results[i]
+			if r.Role == "vault" {
+				continue
+			}
 			if contextBefore > 0 {
 				r.Before = s.fetchContext(r.SessionID, r.MessageID, contextBefore, true, substantiveOnly)
 			}

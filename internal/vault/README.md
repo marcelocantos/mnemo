@@ -71,8 +71,12 @@ brew services restart mnemo
 call `mnemo_vault_status`. It will report the vault path and the number
 of Markdown files written. A freshly populated vault of 200 sessions
 takes under 10 seconds; 5,000 sessions under 2 minutes. Subsequent
-daemon restarts are near-instant because mnemo skips files whose mtime
-is newer than the last message timestamp.
+daemon restarts are near-instant because mnemo embeds the entity
+timestamp in each note and skips files that are already up to date.
+
+mnemo_search results tagged `[vault]` are human annotations — content
+below the `<!-- mnemo:generated -->` fence that was indexed after your
+last save.
 
 Then open the directory in Obsidian (`Open folder as vault`) or Logseq
 (`Add a local graph`). No plugins required — the vault uses only core

@@ -101,7 +101,7 @@ func (h *Handler) LocalHandler(name string) func(ctx context.Context, req mcp.Ca
 			MCPSessionID: req.Header.Get(sessionIDHeader),
 			Username:     UsernameFromContext(ctx),
 		}
-		text, isError, err := h.Call(cc, name, req.GetArguments())
+		text, isError, err := h.Call(ctx, cc, name, req.GetArguments())
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
 		}

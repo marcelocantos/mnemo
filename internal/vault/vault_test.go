@@ -5,6 +5,7 @@ package vault
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,7 +177,7 @@ func TestWriteNoteFencePreservesHumanContent(t *testing.T) {
 	path := filepath.Join(dir, "test.md")
 
 	// Initial write.
-	if err := writeNote(path, "# Generated\n\nGenerated v1."); err != nil {
+	if err := writeNote(path, "# Generated\n\nGenerated v1.", ""); err != nil {
 		t.Fatalf("initial writeNote: %v", err)
 	}
 
@@ -186,7 +187,7 @@ func TestWriteNoteFencePreservesHumanContent(t *testing.T) {
 	os.WriteFile(path, []byte(withHuman), 0o644)
 
 	// Re-sync with updated generated content.
-	if err := writeNote(path, "# Generated\n\nGenerated v2."); err != nil {
+	if err := writeNote(path, "# Generated\n\nGenerated v2.", ""); err != nil {
 		t.Fatalf("re-sync writeNote: %v", err)
 	}
 
@@ -221,7 +222,7 @@ func TestWriteNoteFenceNoCascade(t *testing.T) {
 	path := filepath.Join(dir, "test.md")
 
 	for i := 0; i < 3; i++ {
-		if err := writeNote(path, "# Generated"); err != nil {
+		if err := writeNote(path, "# Generated", ""); err != nil {
 			t.Fatalf("writeNote run %d: %v", i, err)
 		}
 	}
@@ -238,7 +239,7 @@ func TestWriteNoteNoFenceNoHuman(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "note.md")
 
-	if err := writeNote(path, "# Title\n\nContent."); err != nil {
+	if err := writeNote(path, "# Title\n\nContent.", ""); err != nil {
 		t.Fatalf("writeNote: %v", err)
 	}
 
@@ -258,7 +259,7 @@ func TestWriteNoteNoFenceNoHuman(t *testing.T) {
 func TestWriteNoteCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a", "b", "c", "note.md")
-	if err := writeNote(path, "hello"); err != nil {
+	if err := writeNote(path, "hello", ""); err != nil {
 		t.Fatalf("writeNote with deep path: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -429,10 +430,100 @@ func TestNeedsUpdateEmptyTS(t *testing.T) {
 func TestNeedsUpdateFreshFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.md")
-	os.WriteFile(path, []byte("x"), 0o644)
-	// File was just created; any past timestamp should not need update.
-	if needsUpdate(path, "2020-01-01T00:00:00Z") {
-		t.Error("fresh file with old timestamp should not need update")
+	const ts = "2020-01-01T00:00:00Z"
+	// Write via writeNote so the entity_ts comment is embedded.
+	if err := writeNote(path, "content", ts); err != nil {
+		t.Fatalf("writeNote: %v", err)
+	}
+	// Same timestamp → no update needed.
+	if needsUpdate(path, ts) {
+		t.Error("file with same entity timestamp should not need update")
+	}
+	// Older entity timestamp → no update needed.
+	if needsUpdate(path, "2019-01-01T00:00:00Z") {
+		t.Error("file with newer recorded timestamp should not need update")
+	}
+	// Newer entity timestamp → update needed.
+	if !needsUpdate(path, "2026-01-01T00:00:00Z") {
+		t.Error("file with older recorded timestamp should need update")
+	}
+}
+
+func TestNeedsUpdateHumanEditDoesNotSuppressRegeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.md")
+	const entityTS = "2020-01-01T00:00:00Z"
+	if err := writeNote(path, "generated", entityTS); err != nil {
+		t.Fatalf("writeNote: %v", err)
+	}
+	// Simulate human touching the file — bump mtime to now.
+	raw, _ := os.ReadFile(path)
+	os.WriteFile(path, raw, 0o644)
+
+	// Entity timestamp recorded in file is still 2020; a newer entity_ts
+	// must trigger regeneration regardless of file mtime.
+	if !needsUpdate(path, "2026-01-01T00:00:00Z") {
+		t.Error("newer entity timestamp should trigger update even after human edit")
+	}
+	// But same entity timestamp must NOT trigger regeneration.
+	if needsUpdate(path, entityTS) {
+		t.Error("same entity timestamp should not trigger update after human edit")
+	}
+}
+
+func TestWriteNotePreservesPreExistingContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.md")
+	// Pre-existing file with no fence (e.g. user's own Obsidian note).
+	preExisting := "# My Notes\n\nThis is my content.\n"
+	os.WriteFile(path, []byte(preExisting), 0o644)
+
+	if err := writeNote(path, "# Generated", ""); err != nil {
+		t.Fatalf("writeNote: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	s := string(raw)
+	if !strings.Contains(s, "My Notes") {
+		t.Error("pre-existing content must be preserved as human content")
+	}
+	if !strings.Contains(s, "This is my content") {
+		t.Error("pre-existing content body must survive writeNote")
+	}
+	if !strings.Contains(s, "# Generated") {
+		t.Error("generated content must be written")
+	}
+	if !strings.Contains(s, generatedFence) {
+		t.Error("fence must be present")
+	}
+	// Pre-existing content must appear after the fence.
+	fenceIdx := strings.Index(s, generatedFence)
+	userIdx := strings.Index(s, "My Notes")
+	if userIdx < fenceIdx {
+		t.Error("pre-existing content must appear after fence")
+	}
+}
+
+func TestWriteYAMLNewlineEscaping(t *testing.T) {
+	var b strings.Builder
+	writeYAML(&b, "title", "Bug: crash\nin handler")
+	got := b.String()
+	if strings.Contains(got, "\n  ") {
+		t.Errorf("newline must be escaped, got literal newline in: %q", got)
+	}
+	if !strings.Contains(got, `\n`) {
+		t.Errorf("expected \\n escape sequence, got: %q", got)
+	}
+}
+
+func TestWriteYAMLTabEscaping(t *testing.T) {
+	var b strings.Builder
+	writeYAML(&b, "key", "val\twith\ttabs")
+	got := b.String()
+	if strings.ContainsRune(got, '\t') {
+		t.Errorf("tab must be escaped, got literal tab in: %q", got)
+	}
+	if !strings.Contains(got, `\t`) {
+		t.Errorf("expected \\t escape sequence, got: %q", got)
 	}
 }
 
@@ -574,3 +665,80 @@ func TestExporterSyncCreatesFiles(t *testing.T) {
 		}
 	}
 }
+
+// TestBidirectionalSync verifies that human annotations below the fence are
+// indexed by IngestVaultAnnotations and returned by mnemo_search, while
+// generated content above the fence is not re-indexed as a vault annotation.
+func TestBidirectionalSync(t *testing.T) {
+	projDir := t.TempDir()
+	storetest.WriteJSONL(t, projDir, "-Users-alice-dev-myapp", "sess-bidir-01", []map[string]any{
+		storetest.MetaMsg("user", "hello bidir", "2026-05-10T10:00:00Z",
+			"/Users/alice/dev/myapp", "main"),
+		storetest.Msg("assistant", "bidir response", "2026-05-10T10:00:01Z"),
+	})
+
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	vaultDir := t.TempDir()
+	exp, err := New(s, vaultDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := exp.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// Locate the generated session note and add a human annotation below the fence.
+	sessionFiles, _ := filepath.Glob(filepath.Join(vaultDir, "sessions", "*", "*.md"))
+	if len(sessionFiles) == 0 {
+		t.Fatal("no session files generated")
+	}
+	noteFile := sessionFiles[0]
+	raw, _ := os.ReadFile(noteFile)
+	annotation := "\n## My note\n\nThis is my unique annotation about the bidir feature.\n"
+	annotated := string(raw) + annotation
+	if err := os.WriteFile(noteFile, []byte(annotated), 0o644); err != nil {
+		t.Fatalf("write annotation: %v", err)
+	}
+
+	// IngestVaultAnnotations should index the below-fence content.
+	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	// Verify the annotation is found by Search.
+	results, err := s.Search("unique annotation bidir feature", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Role == "vault" && strings.Contains(r.Text, "unique annotation") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		summary := fmt.Sprintf("%d results:", len(results))
+		for _, r := range results {
+			n := len(r.Text)
+		if n > 50 {
+			n = 50
+		}
+		summary += fmt.Sprintf(" [%s]%q", r.Role, r.Text[:n])
+		}
+		t.Errorf("vault annotation not found in search results; %s", summary)
+	}
+
+	// Generated content above the fence must NOT appear as a vault annotation
+	// (no feedback loop). Check that no vault result contains the session header.
+	for _, r := range results {
+		if r.Role == "vault" && strings.Contains(r.Text, "session_id:") {
+			t.Error("generated frontmatter re-indexed as vault annotation — feedback loop!")
+		}
+	}
+}
+
