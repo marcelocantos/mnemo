@@ -261,7 +261,7 @@ func TestDiscoverRepos_SkipsNoiseDirs(t *testing.T) {
 	fake := filepath.Join(root, "node_modules", "bogus")
 	mustMkdirAll(t, filepath.Join(fake, ".git"))
 
-	got := discoverRepos([]string{root})
+	got := discoverRepos([]string{root}, nil)
 
 	// Expect exactly one repo (the real one).
 	if len(got) != 1 {
@@ -275,7 +275,7 @@ func TestDiscoverRepos_SkipsNoiseDirs(t *testing.T) {
 // TestDiscoverRepos_MissingRoot is silent when a workspace root doesn't
 // exist — mnemo must not crash if the user misconfigures a root.
 func TestDiscoverRepos_MissingRoot(t *testing.T) {
-	got := discoverRepos([]string{"/nonexistent/path/that/will/never/exist"})
+	got := discoverRepos([]string{"/nonexistent/path/that/will/never/exist"}, nil)
 	if got != nil {
 		t.Errorf("expected nil for missing root, got %v", got)
 	}
@@ -647,7 +647,7 @@ func TestDiscoverRepos_GitWorktreeFile(t *testing.T) {
 	mustWriteFile(t, filepath.Join(repoDir, ".git"),
 		"gitdir: /somewhere/else/.git/worktrees/mybranch\n")
 
-	got := discoverRepos([]string{root})
+	got := discoverRepos([]string{root}, nil)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 repo, got %d: %v", len(got), got)
 	}

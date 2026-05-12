@@ -254,6 +254,9 @@ func (s *Store) ingestDocsForRepoLocked(repoRoot, repo string) (indexed, skipped
 		if !d.IsDir() {
 			return nil
 		}
+		if s.IsExcluded(path) {
+			return filepath.SkipDir
+		}
 		if path != repoRoot {
 			name := d.Name()
 			relFromRepo, _ := filepath.Rel(repoRoot, path)

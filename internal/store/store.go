@@ -69,6 +69,14 @@ type Store struct {
 	// goroutines freely; the semaphore absorbs them without overrunning
 	// the machine with concurrent claude-p / Python subprocesses.
 	imageSem chan struct{}
+
+	// exclusions are directory subtrees that ingest walkers must skip
+	// — currently used to keep the configured vault_path out of the
+	// docs / synthesis / workspace walkers, which would otherwise
+	// re-ingest mnemo's own generated output and grow the index
+	// without bound on every Sync cycle. Populated via
+	// RegisterExcludedPath, queried via IsExcluded.
+	exclusions *exclusionRegistry
 }
 
 // SetWorkspaceRoots configures the filesystem roots under which repo-
@@ -1361,6 +1369,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		projectDir: projectDir,
 		offsets:    make(map[string]int64),
 		imageSem:   make(chan struct{}, n),
+		exclusions: &exclusionRegistry{},
 	}
 
 	rows, err := db.Query("SELECT path, offset FROM ingest_state")
@@ -1926,7 +1935,7 @@ func (s *Store) knownRepoRootsLocked() []repoRoot {
 	// must be configured explicitly via SetWorkspaceRoots (production
 	// does this from ~/.mnemo/config.json with a sensible default);
 	// no implicit walk, so tests stay isolated.
-	for _, root := range discoverRepos(s.workspaceRoots) {
+	for _, root := range discoverRepos(s.workspaceRoots, s.IsExcluded) {
 		if seen[root] {
 			continue
 		}

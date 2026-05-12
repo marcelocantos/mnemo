@@ -137,6 +137,12 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	synthRoots := r.cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
 	if vaultPath := r.cfg.ResolvedVaultPath(home); vaultPath != "" {
+		// Exclude the vault path from ingest walkers before any
+		// Ingest* call runs. Without this, a vault sitting inside a
+		// synthesis root or repo docs/ tree would have its generated
+		// content re-ingested on every Sync, growing the docs index
+		// without bound.
+		s.RegisterExcludedPath(vaultPath, "vault_path")
 		exp, err := vault.New(s, vaultPath)
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
