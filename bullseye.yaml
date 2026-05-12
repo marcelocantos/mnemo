@@ -1451,21 +1451,25 @@ targets:
     origin: manual
     discovered: 2026-05-09
   T52:
-    name: Ingest is loop-safe against mnemo-generated content via fence protocol
-    status: identified
+    name: Ingest is loop-safe against mnemo-generated content via path-exclusion registry
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - '`ingestDocFileLocked` (or its post-unification successor) recognises the `&lt;!-- mnemo:generated --&gt;` fence in any indexed file.'
-    - Files containing the fence contribute only their post-fence content to the index. Files with no content below the fence contribute nothing.
+    - '`store.Store` exposes `RegisterExcludedPath(path, reason)` and `IsExcluded(path)`; paths are canonicalised via `filepath.Abs` + `filepath.EvalSymlinks` with a Clean fallback for paths that don''t exist yet.'
+    - All ingest walkers (docs, synthesis, workspace repo discovery) consult `IsExcluded` and return `filepath.SkipDir` for registered subtrees.
+    - 'When `vault_path` is configured, `registry.ForUser` registers it as an exclusion before any `Ingest*` call runs.'
     - Vault re-Sync followed by a full ingest pass produces zero net change to the docs index (idempotent).
-    - A vault_path set to a directory under a `docs/` ancestor (e.g. `~/docs`) no longer causes a file-count loop in the vault under repeated Sync cycles.
+    - A `vault_path` set to a directory under a `docs/` ancestor (e.g. `~/docs`) no longer causes file-count loop in the vault under repeated Sync cycles.
+    - A `vault_path` reached via a symlink is excluded whether the walker arrives via the symlink or the resolved target; registering before the directory exists still matches once it materialises.
     context: |-
-      Today, vault export does not cause an ingest feedback loop only by accident: `classifyTaxonomy` in `IngestSynthesis` requires a `docs/` directory ancestor, and the vault's flat layout (`sessions/`, `decisions/`, `plans/`, etc., directly under the vault root) never has one — so mnemo's own writes are rejected at the taxonomy gate and never re-ingested. Once ingestion is unified under "trees-of-interest derived from session cwds" (no taxonomy gate, walks everything not in a junk dir / .gitignore), that accidental protection disappears. Vault-generated `plans/<repo>-<base>.md`, `sessions/<repo>/<...>.md` etc. would be picked up by the walk; each cycle would create new doc rows with paths drifting from the originals (because `synthesisRepoLabel` falls back to the vault root's basename, producing names like `docs-myrepo-foo.md` → `docs-docs-myrepo-foo.md` → …), and Sync would materialise each new row as a new file. Linear file-count growth per cycle, unbounded.
+      Today, vault export does not cause an ingest feedback loop only by accident: `classifyTaxonomy` in `IngestSynthesis` requires a `docs/` directory ancestor, and the vault's flat layout (`sessions/`, `decisions/`, `plans/`, etc., directly under the vault root) never has one — so mnemo's own writes are rejected at the taxonomy gate and never re-ingested. Once ingestion is unified under "trees-of-interest derived from session cwds" (🎯T54, no taxonomy gate, walks everything not in a junk dir / .gitignore), that accidental protection disappears. Vault-generated `plans/<repo>-<base>.md`, `sessions/<repo>/<...>.md` etc. would be picked up by the walk; each cycle would create new doc rows with paths drifting from the originals, and Sync would materialise each new row as a new file. Linear file-count growth per cycle, unbounded.
 
-      Even before the unification, a corner case exists today: setting `vault_path` to any path under a `docs/` ancestor (e.g. `~/docs`, `~/Documents/Obsidian/docs`) places the vault's `plans/` at exactly the `docs/plans/` taxonomy position and triggers the same recursion. Safe vault paths (`~/Documents/mnemo-vault`, `~/.mnemo/vault`, `~/think`) avoid it.
+      Even before T54 unification, a corner case exists today: setting `vault_path` to any path under a `docs/` ancestor (e.g. `~/docs`, `~/Documents/Obsidian/docs`) places the vault's `plans/` at exactly the `docs/plans/` taxonomy position and triggers the same recursion. Safe vault paths (`~/Documents/mnemo-vault`, `~/.mnemo/vault`, `~/think`) avoid it.
 
-      The fence (`&lt;!-- mnemo:generated --&gt;`) already exists at the file level as the protocol separating generated from human content. Lifting it into ingest — "skip pre-fence content; index only post-fence content" — gives loop-safety as a general property of the system: anything mnemo (or any tool using the same convention) writes is invisible to ingest, regardless of path or which tree it lives in.
+      Original sketch proposed a `<!-- mnemo:generated -->` fence read by `ingestDocFileLocked`. Path exclusion is simpler: trivial for whole-tree generated output (the only kind mnemo currently writes), works for non-markdown outputs, robust against forgotten fences, single prefix-match per walk entry rather than open + read header. Fence remains a deferred extension if mixed-content files (half-human, half-generated single file) ever become a real use case — at that point the exclusion list handles directory-grain, the fence handles file-grain.
+
+      Implementation in PR #78: `internal/store/exclusions.go` holds the registry; canonicalisation uses `filepath.EvalSymlinks` so vault paths reached via symlinks match regardless of approach direction; lazy re-canonicalisation in `isExcluded` handles paths registered before their directories exist.
     origin: manual
     discovered: 2026-05-11
   T53:
