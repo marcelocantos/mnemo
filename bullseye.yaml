@@ -1452,13 +1452,13 @@ targets:
     discovered: 2026-05-09
   T52:
     name: Ingest is loop-safe against mnemo-generated content via path-exclusion registry
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
     - '`store.Store` exposes `RegisterExcludedPath(path, reason)` and `IsExcluded(path)`; paths are canonicalised via `filepath.Abs` + `filepath.EvalSymlinks` with a Clean fallback for paths that don''t exist yet.'
     - All ingest walkers (docs, synthesis, workspace repo discovery) consult `IsExcluded` and return `filepath.SkipDir` for registered subtrees.
-    - 'When `vault_path` is configured, `registry.ForUser` registers it as an exclusion before any `Ingest*` call runs.'
+    - When `vault_path` is configured, `registry.ForUser` registers it as an exclusion before any `Ingest*` call runs.
     - Vault re-Sync followed by a full ingest pass produces zero net change to the docs index (idempotent).
     - A `vault_path` set to a directory under a `docs/` ancestor (e.g. `~/docs`) no longer causes file-count loop in the vault under repeated Sync cycles.
     - A `vault_path` reached via a symlink is excluded whether the walker arrives via the symlink or the resolved target; registering before the directory exists still matches once it materialises.
@@ -1472,6 +1472,7 @@ targets:
       Implementation in PR #78: `internal/store/exclusions.go` holds the registry; canonicalisation uses `filepath.EvalSymlinks` so vault paths reached via symlinks match regardless of approach direction; lazy re-canonicalisation in `isExcluded` handles paths registered before their directories exist.
     origin: manual
     discovered: 2026-05-11
+    achieved: 2026-05-13
   T53:
     name: Trees-of-interest distinguish references from content for parent-child overlap
     status: identified
