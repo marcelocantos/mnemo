@@ -226,6 +226,9 @@ func (s *Store) ingestSynthesisRootLocked(root string) (indexed, skipped, onDisk
 			return nil
 		}
 		if d.IsDir() {
+			if s.IsExcluded(path) {
+				return filepath.SkipDir
+			}
 			if path != root && synthesisJunkDirs[d.Name()] {
 				return filepath.SkipDir
 			}

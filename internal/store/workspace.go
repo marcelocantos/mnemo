@@ -16,10 +16,15 @@ import (
 // walk inside a repo) and skips well-known noise directories so the
 // walk stays cheap even on large workspaces.
 //
+// isExcluded, if non-nil, is consulted for each directory and short-
+// circuits descent into registered exclusion subtrees (e.g. the
+// configured vault_path when it happens to sit inside a workspace
+// root). Pass nil from tests that have no exclusion registry.
+//
 // The result is sorted and deduplicated. Unreadable roots are skipped
 // silently — a missing or permission-denied workspace root must not
 // abort the walk.
-func discoverRepos(roots []string) []string {
+func discoverRepos(roots []string, isExcluded func(string) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 
@@ -33,6 +38,9 @@ func discoverRepos(roots []string) []string {
 			}
 			if !d.IsDir() {
 				return nil
+			}
+			if isExcluded != nil && isExcluded(path) {
+				return filepath.SkipDir
 			}
 			// A directory containing .git (file or dir) is a repo root;
 			// no need to descend further.

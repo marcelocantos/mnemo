@@ -99,6 +99,81 @@ mnemo/
 go test -tags "sqlite_fts5" ./...
 ```
 
+## Schema policy
+
+The schema of `~/.mnemo/mnemo.db` is an append-only contract.
+
+**Allowed**: new tables, new columns (nullable, or `NOT NULL` with a
+`DEFAULT`), new indexes, new views, modified trigger bodies (if
+sqlift can express the modification without a destructive op).
+Trigger and generated-column *expressions* may evolve, but their
+effect must remain reproducible by older binaries reading the data.
+
+**Forbidden**: dropped columns, dropped tables, type changes, added
+`NOT NULL` / `UNIQUE` / `CHECK` constraints on existing columns,
+*relaxed* constraints on existing columns (`NOT NULL` → nullable
+is implemented via SQLite's 12-step rebuild and is also disallowed),
+column reorders, anything that would make an older binary crash or
+lose data when reading the new DB.
+
+**Migration runner**: schema upgrades are mediated by **sqlift v0.14+**.
+The previous wipe-and-reingest path (schema-version mismatch →
+delete `mnemo.db` and reindex from `~/.claude/projects/`) is gone:
+some users' source JSONL has been pruned by Claude Code, so a wipe
+is permanent data loss.
+
+sqlift v0.14 has four independent gates:
+
+- `AllowRebuild` — permits SQLite's 12-step rebuild (column type
+  changes, dropping CHECK/FK constraints, reordering columns).
+- `AllowDestructive` — permits drops (`DROP TABLE`, `DROP COLUMN`,
+  fully removing a trigger/view/index).
+- `AllowLoosen` — permits rebuilds whose *only* changes are strict
+  constraint relaxations (`NOT NULL` → nullable, drop CHECK/FK).
+- `AllowDataDependent` — permits changes whose success depends on
+  existing data (nullable → NOT NULL, new NOT NULL column without
+  DEFAULT, new FK/CHECK on an existing table).
+
+mnemo invokes sqlift with `sqlift.ApplyOptions{}` (= `AllowNone`),
+**always**. All four gates stay off — no globally, no per-migration,
+no exceptions. This is the strictest setting sqlift offers.
+
+What `AllowNone` allows, and is sufficient for every forward
+evolution we realistically need:
+
+- `CREATE TABLE`
+- `ALTER TABLE ADD COLUMN` (nullable, or `NOT NULL` with `DEFAULT`)
+- `CREATE INDEX` / `CREATE VIEW` / `CREATE TRIGGER`
+- **Modifying a trigger body** — sqlift emits `DROP+CREATE` but the
+  `DROP` is classified non-destructive when the same-named trigger
+  appears in the desired schema (`dist/sqlift.cpp:1424`).
+
+Anything that needs a flag — including the cleaner-looking `NOT NULL`
+→ nullable on `messages.text` — must be redesigned. Encode the new
+shape in a *new* nullable column with a sentinel value or a flag
+column, not by modifying the existing one.
+
+**Deprecating data — three-phase strategy.**
+
+The append-only rule does not mean "data can never be removed". It
+means data removal is decoupled from schema change.
+
+1. **Phase 1 (additive release).** Add new columns/views to support
+   the new shape. Stop *writing* the deprecated content. Create a
+   new view (with a *new name* — do not rename existing tables) that
+   exposes reads consistently across both old and new rows. Modify
+   triggers as needed. The deprecated columns stay in the schema
+   with their existing data intact.
+2. **Phase 2 (soak).** Wait several releases / a defined period.
+   The new code path proves itself in production.
+3. **Phase 3 (GC, not a migration).** Once trusted, an in-product
+   garbage-collection pass nullifies the deprecated columns on
+   existing rows after verifying the new source has equivalent
+   content. This is **product code, not a schema migration** —
+   sqlift has no hook for application-side verification. The GC is
+   user-triggered or scheduled, customisable in scope, and
+   idempotent. The columns themselves are still not dropped.
+
 ## Delivery
 
 Merged to master via squash PR.

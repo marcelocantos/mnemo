@@ -742,9 +742,14 @@ targets:
     achieved: 2026-04-15
   T26:
     name: Adopt sqlpipe.Database as mnemo's SQLite layer
-    status: identified
+    status: set_aside
     value: 13.0
     cost: 8.0
+    showcase: true
+    set_aside_reason: |-
+      Won't fix 2026-05-09. The three pillars that justified adopting sqlpipe.Database all collapsed: (1) sqlift bundled-in is now obtainable standalone via 🎯T49, (2) sqldeep-on-every-query is cosmetic — internal Go callsites are fine in plain SQL, and (3) the replication primitives have no caller. T15 federation was achieved 2026-04-25 as query fan-out (peer-to-peer SQLite, no replication), and the only other federation model under consideration is org-/repo-centralized aggregation to a server DB — for which sqlpipe is fundamentally the wrong shape: sqlpipe assumes one master per table with read-only replicas, while centralization needs many writers contributing to a single authoritative server-DB corpus. The previously identified cost remains the same (148 Exec/Query/QueryRow callsites + 180 Scan sites, non-mechanical migration). Cost stays high; benefits collapsed; close the door. If a future need surfaces a primitive that sqlpipe genuinely provides, raise it as a fresh, scope-specific target rather than reviving this one.
+
+      Prior parking reason (2026-04-30): Blocked on sqlpipe 🎯T13 — the sqlpipe Go wrapper does not yet expose FTS5, sqlift Go bindings, or automatic sqldeep transpilation (verified empirically by the T26 surveyor on 2026-04-29). Resume when sqlpipe T13 ships and the Go wrapper exposes the three required capabilities. Re-frontier this target at that point; the v0.18.0/v0.19.0 schema-window argument from the original framing remains valid but is not load-bearing on the parked decision.
     acceptance:
     - mnemo's Store replaces the database/sql + mattn/go-sqlite3 layer with sqlpipe.Database as the primary DB handle. Calls like s.db.Exec, s.db.Query, and s.db.QueryRow become their sqlpipe.Database equivalents; s.rwmu serialisation is reviewed against sqlpipe's concurrency model.
     - 'Schema migration via sqlift is live: a single authoritative schema.sql file is the source of truth. At Store.New, sqlpipe.Database''s built-in sqlift diffs the current DB against schema.sql and applies the delta. The wipe-on-schemaVersion-mismatch branch is deleted.'
@@ -756,20 +761,19 @@ targets:
     context: |-
       Reframed 2026-04-16. Originally scoped as "use sqlift to stop wiping the DB", with sqlpipe called out as an optional superset. User direction: the sqlpipe adoption needs to happen regardless — schema migration, sqldeep everywhere, and replication primitives are all foundation work that benefits mnemo independent of any one feature. Treat the DB-layer switch as the primary work item and the three capabilities as inherent, not optional.
 
-      **What sqlpipe.Database brings:**
+      **Cross-repo prerequisite (added 2026-04-29):** This target is gated on **sqlpipe 🎯T13** ("sqlpipe Go wrapper exposes FTS5, sqlift Go bindings, and automatic sqldeep transpilation"). The T26 surveyor agent verified empirically that the sqlpipe Go wrapper today is missing all three capabilities mnemo needs — FTS5 is not enabled in cgo flags, sqlift bindings are not exposed in Go (only C++), and sqldeep transpilation is absent from Database.Exec/Query/Rows. Mnemo cannot proceed with T26 until sqlpipe T13 lands. Cross-repo link tracked in context only — bullseye does not model inter-repo deps natively.
+
+      **What sqlpipe.Database brings (once T13 lands):**
 
       - **sqlift** — declarative schema migration via structural diffing. Schema lives in a single SQL file; sqlift computes and applies deltas at startup. Destructive-operation guard prevents accidental data loss. Replaces the wipe-and-rebuild machinery that would otherwise destroy ephemeral data (daemon_connections, connection_sessions, session_chains, compactions) on every schema bump.
       - **sqldeep** — JSON5-like SQL transpilation. Currently mnemo uses sqldeep selectively in mnemo_query; under sqlpipe every query transpiles by default. The JSON object construction syntax becomes available anywhere.
       - **Replication primitives** (Master/Replica/Peer/Relay) — bidirectional, transport-agnostic. Load-bearing for 🎯T15 federation if/when that lands; zero cost to have them sitting dormant until then.
 
-      **Scope: the DB layer rewrite is the expensive part.** mnemo has ~7000 lines of Go with hundreds of `s.db.Exec` / `s.db.Query` / `s.db.QueryRow` sites, plus the `s.rwmu` read-write lock coordinating them. Each site becomes a sqlpipe.Database equivalent. Tests that seed DB state using `sql.DB` need rewriting to use `sqlpipe.Database`. The CGo build flags for FTS5 likely change since sqlpipe vendors its own SQLite.
+      **Scope: the DB layer rewrite is the expensive part.** mnemo has ~7000 lines of Go with hundreds of `s.db.Exec` / `s.db.Query` / `s.db.QueryRow` sites, plus the `s.rwmu` read-write lock coordinating them. The T26 survey counted 148 Exec/Query/QueryRow callsites and 180 *sql.Rows.Scan sites; sqlpipe returns iter.Seq[*Row] with positional accessors, so a 1:1 mechanical migration is not possible. Each callsite needs review against sqlpipe's iterator + concurrency model.
 
-      **Sequencing:** land this before the next schema bump. v0.18.0 introduced the ephemeral tables; v0.19.0 has no committed schema changes yet, so the window to switch is now before any data is captured that would need migration. Practically: T26 and 🎯T22 (Windows) are independent; T26 and 🎯T15 (federation) are coupled (federation will use sqlpipe's replication).
+      **Sequencing:** sqlpipe T13 first → mnemo T26 second. v0.18.0 introduced ephemeral tables; v0.19.0 has no committed schema changes yet, so the window to switch is now before any data is captured that would need migration. Practically: T26 and 🎯T22 (Windows) are independent; T26 and 🎯T15 (federation) are coupled (federation will use sqlpipe's replication).
 
-      Discovered 2026-04-16 during /release v0.18.0 smoke testing.</context>
-      <parameter name="origin">v0.18.0 release exposed the wipe-and-rebuild hazard with ephemeral data</parameter>
-      <parameter name="tags">["db-layer", "sqlpipe", "sqlift", "sqldeep", "durability", "foundation"]</parameter>
-      </invoke>
+      Discovered 2026-04-16 during /release v0.18.0 smoke testing. Cross-repo dependency on sqlpipe T13 surfaced 2026-04-29 during T26 survey by automated agent.
     origin: manual
     discovered: 2026-04-16
   T27:
@@ -943,9 +947,11 @@ targets:
     achieved: 2026-04-21
   T33:
     name: Windows installer is code-signed so non-technical users do not see a SmartScreen warning on first run
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    showcase: true
+    set_aside_reason: 'Parked 2026-04-30. Blocked on user procurement of an EV code-signing certificate (~$300/yr, issued to a verifiable legal entity). Until the cert and its private key are available as GitHub Actions secrets, the agent cannot integrate signtool.exe into release.yml or verify the SmartScreen-free first-run experience on a fresh Windows install. Workflow integration and acceptance-criterion #2 (signtool calls in release.yml) are mechanical work the agent can do in a single sitting once the cert exists; criterion #3 (UAC prompt with publisher name, no SmartScreen warning) requires a real Windows machine for verification. Resume when the user procures the cert and stores it in repo secrets. Mnemo continues to ship an unsigned installer in the meantime; this is a UX-polish target, not a security regression.'
     acceptance:
     - EV code signing certificate acquired and stored as GitHub Actions secrets.
     - release.yml runs signtool.exe against mnemo.exe and the setup.exe before upload.
@@ -1051,9 +1057,11 @@ targets:
     achieved: 2026-04-26
   T39:
     name: The Homebrew formula's launchd service block invokes mnemo with arguments that match an actual subcommand or flag, not a phantom "serve" positional that only works because main.go silently ignores it
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    showcase: true
+    demonstration: Verified the deployed Homebrew formula at marcelocantos/homebrew-tap (Formula/mnemo.rb at v0.33.0) has `run [opt_bin/"mnemo"]` with no phantom "serve" arg. The fix landed via `formula_includes:` in .github/workflows/release.yml (commit 41630d2, the 🎯T47 PR), so it survives homebrew-releaser regeneration. main.go documents the bare invocation as the serve mode in both the package doc (line 10) and the inline switch comment in main() (lines 70–73), satisfying the third acceptance criterion. `brew services start mnemo` runs the daemon today via this formula.
     acceptance:
     - The mnemo Homebrew formula's `service do` block has `run [opt_bin/"mnemo"]` (no `"serve"` arg) OR mnemo gains a real `serve` subcommand that aliases the bare-invocation default behaviour and is documented in main.go's package comment / CLI help.
     - The fix lands via `formula_includes` in `.github/workflows/release.yml` (so it survives homebrew-releaser regenerating the formula), not as a manual edit to the tap repo.
@@ -1079,6 +1087,7 @@ targets:
     - ops
     origin: forked-from 🎯T37 during /release v0.30.0 install verification
     discovered: 2026-04-26
+    achieved: 2026-04-30
   T4:
     name: Individual session transcript access
     status: achieved
@@ -1227,9 +1236,10 @@ targets:
   T46:
     name: mnemo_usage delivers a real-time, reconciled spend signal usable by an external broker
     kind: verify
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    set_aside_reason: 'Parked 2026-04-28. Verification blocked on ANTHROPIC_ADMIN_API_KEY not being configured anywhere reachable (not set in launchctl user-domain env; brew plist''s EnvironmentVariables block would replace inherited env regardless). Three acceptance criteria are demonstrable today (#2 session sub-day ✅ live, #4 estimated mode + one-time warning ✅ captured in daemon log 2026-04-28T22:05:24, #1 block freshness ✅ once PR #72 merges and brew installs), but #3 reconciled-mode-matches-Admin-API requires the key. Implementation is complete (estimated-only path works in production today); the gap is verification + production delivery of the reconciled half. Resume when key wiring is decided — options on the table: (1) manual plist edit, (2) formula_includes in release.yml, (3) macOS Keychain lookup at daemon startup. Option 3 is the durable one and could land as a forked sub-target. PR #72 (block freshness) stands alone and merges independently.'
     acceptance:
     - A live invocation of mnemo_usage with group_by="block" and a sub-day since/until window returns the current 5-hour Anthropic billing block's spend within 250ms on a warm index, including a freshness field.
     - A live invocation with group_by="session" and a sub-day window returns per-session spend for the same window, with the same token/cost columns as the day/model/repo views.
@@ -1254,7 +1264,7 @@ targets:
     discovered: 2026-04-27
   T47:
     name: Homebrew formula declares runtime tool deps and sets service-block PATH so the launchd-spawned mnemo daemon resolves all external tools without manual setup
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1313,6 +1323,71 @@ targets:
       If a shared PATH constant is later defined in the tap (other formulas like sawmill and vellum will need the same string), refactor to reference it. Don't block on that — duplicate the literal string for now if convenient.
     origin: forked-from spyder PATH-bug investigation in ~/think on 2026-04-27
     discovered: 2026-04-27
+    achieved: 2026-04-27
+  T48:
+    name: Docs ingest walks the entire repo recursively, picking up every .md/.txt/.pdf outside junk dirs and .gitignore
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    demonstration: 'Built the new walker into a one-shot demo program, ran it against /Users/marcelo/work/github.com/marcelocantos/csp, and verified via direct sqlite3 query that the walker discovered 147 doc files vs the ~141 the v0.33.0 whitelist would have caught. The newly-indexed files outside the old whitelist are: CLAUDE.md, CMakeLists.txt, demos/README.md, examples/log_aggregator_README.md, formal/toctou-drain-suspended.md (the motivating example — a TLA+ paper not under docs/papers/), and test/tsan_suppressions.txt. Junk dirs (.git, .claude, .sawmill, build/, build-win/, vendor/, node_modules/, scripts/__pycache__) and gitignored entries (formal/states/, logs/, states/) are correctly skipped at every depth. Also seeded an isolated test workspace with .md files at non-whitelisted depths (internal/foo/NOTES.md, cmd/bar/baz.txt, pkg/deep/nested/DESIGN.md, AdHoc.md at root) and confirmed all four are picked up while node_modules/, vendor/, and gitignored scratch/ are excluded. Demo program was discarded after verification (one-off proof, not committed).'
+    acceptance:
+    - A repo's docs ingest discovers .md/.txt/.pdf files at any depth (e.g., README.md at root, internal/foo/NOTES.md, cmd/bar/baz.txt) — not just under a fixed set of named subdirs and a root whitelist
+    - Files matched by .gitignore are skipped, and the existing junk-dir skip list (node_modules, .git, build/, dist/, etc. from T21) is respected
+    - T21's md/pdf dedup, incremental re-index, and watcher behaviour continue to hold across the wider walk — no duplicates, no full re-scans on every tick
+    - internal/store/docs.go no longer hard-codes the 'docs/, design/, notes/, papers/ + root whitelist' split; the recursion entry point is the repo root with the same gitignore + junk-dir filter applied uniformly
+    context: Today (v0.33.0, internal/store/docs.go) the docs walker treats the repo root as a whitelist (only specific top-level files are picked up) and recurses only into a fixed set of named subdirs (docs/, design/, notes/, papers/). That misses real documentation living elsewhere — module-local READMEs, design notes next to the code they describe, ad-hoc .txt/.pdf assets in cmd/ or internal/. Widening to a full recursive walk (with the same .gitignore + junk-dir skip filter T21 already established) makes mnemo_docs reflect what's actually in the repo, and removes the maintenance burden of curating the subdir whitelist as projects grow.
+    tags:
+    - ingest
+    - docs
+    origin: forked-from T21 (md/pdf docs ingest); user-raised 2026-05-06
+    discovered: 2026-05-06
+    achieved: 2026-05-06
+  T49:
+    name: Schema upgrades to mnemo.db are non-destructive and mediated by sqlift
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - sqlift v0.14.0 or later is a dependency in go.mod and is invoked against ~/.mnemo/mnemo.db at startup
+    - the wipe-and-reingest branch in internal/store/store.go (schema-version mismatch deletes mnemo.db) is removed
+    - schema is defined by versioned sqlift migration files (or an authoritative schema.sql diffed by sqlift), not inline db.Exec calls in store.go
+    - the Apply call uses sqlift.ApplyOptions{} (= AllowNone) — ALL FOUR gates (AllowRebuild, AllowDestructive, AllowLoosen, AllowDataDependent) stay off, always; there is no per-migration override
+    - running a newer mnemo binary against an older mnemo.db applies migrations forward in place without data loss
+    - running an older mnemo binary against a newer mnemo.db reads it without crashing (degraded reads acceptable)
+    - test exercises a representative upgrade across at least one schema version bump and verifies data preservation
+    - test verifies that an attempted destructive op (DROP COLUMN, DROP TABLE, full DROP TRIGGER) without AllowDestructive returns the expected sqlift error and does not modify the database
+    - test verifies that an attempted rebuild op without AllowRebuild returns *sqlift.RebuildError and does not modify the database
+    - test verifies that a pure-loosening op (NOT NULL → nullable on its own) without AllowLoosen returns the expected sqlift error and does not modify the database
+    - test verifies that a data-dependent op without AllowDataDependent returns *sqlift.BreakingChangeError at apply time (not diff time, per v0.14.0) and does not modify the database
+    - test verifies that a trigger BODY MODIFICATION (replace the body of an existing trigger with the same name) succeeds under AllowNone — sqlift classifies this as non-destructive when the same-named trigger appears in the desired schema (verified at dist/sqlift.cpp:1424)
+    context: |-
+      mnemo currently creates its schema inline in internal/store/store.go and on PRAGMA user_version mismatch (store.go:450-456) it deletes the database and re-ingests from ~/.claude/projects/. This is catastrophic for any user whose JSONL has been rotated by Claude Code — and Claude Code does evict old transcripts. mnemo has real users with multi-GB databases now, so wipe-and-reingest is no longer acceptable.
+
+      This target replaces the wipe path with sqlift v0.14.0+ as the migration runner. Schema is defined by versioned migration files (or a single authoritative schema.sql diffed against the live DB by sqlift); the inline db.Exec setup in store.go is retired. The schema-version mismatch wipe branch is removed.
+
+      **sqlift v0.14 four-gate model.** sqlift v0.14 (2026-05-09) carries four independent flags:
+
+      - AllowRebuild — permits SQLite's 12-step rebuild (column type changes, dropping CHECK/FK constraints, reordering columns).
+      - AllowDestructive — permits drops (DROP TABLE, DROP COLUMN, full DROP TRIGGER/VIEW/INDEX).
+      - AllowLoosen — permits rebuilds whose only changes are strict constraint relaxations (NOT NULL → nullable). Independent of AllowRebuild.
+      - AllowDataDependent — permits changes whose success depends on existing data (nullable → NOT NULL, new NOT NULL column without DEFAULT, new FK/CHECK on an existing table). Combines with AllowRebuild.
+
+      Default (AllowNone = 0) allows only pure additive changes. v0.14 also moved BreakingChangeError from diff-time to apply-time: Diff produces a plan with data_dependent: true annotations; Apply rejects them without the flag.
+
+      **mnemo's policy mapping — tightest possible.** The runner is invoked at startup with ApplyOptions{} (= AllowNone), always. **All four gates stay off, no exceptions, no per-migration overrides.** This is the strictest setting sqlift offers, and it is sufficient for every forward evolution we realistically need.
+
+      The full allowed change set under AllowNone:
+      - CREATE TABLE
+      - ALTER TABLE ADD COLUMN (nullable, or NOT NULL with DEFAULT)
+      - CREATE INDEX / CREATE VIEW / CREATE TRIGGER
+      - Modifying a trigger body (sqlift emits DROP+CREATE; the DROP is flagged non-destructive when the same-named trigger exists in the desired schema — verified at dist/sqlift.cpp:1424)
+
+      Anything else — including the cleaner-looking NOT NULL → nullable for messages.text — must be redesigned. The empty-string sentinel + flag column pattern in T51 Phase 1 is exactly that redesign and is sufficient.
+
+      Prerequisite for the schema additive-only policy (T50) and for the messages.text/tool_input deprecation work (T51). Until this lands, the additive-only rule is unenforceable.
+    origin: manual
+    discovered: 2026-05-09
   T5:
     name: Self-improving tool discovery
     status: achieved
@@ -1329,6 +1404,207 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-13
+  T50:
+    name: mnemo's schema is additive-only by policy
+    kind: verify
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - CLAUDE.md § Schema policy is present and current with the agreed wording
+    - project memory project_schema_policy.md is present and consistent with CLAUDE.md
+    - no destructive DDL has been merged since the rule landed (verifiable via git log on store.go and migrations)
+    - any future schema change is reviewable as additive-only against this policy
+    context: Codifies the append-only contract documented in mnemo/CLAUDE.md § Schema policy and in project memory project_schema_policy.md. Once the sqlift migration runner is in place (T49), this target is mostly documentation + enforcement — the rule is real because the runner enforces it and contributors know about it. The rule unblocks deprecation work like the messages.text/tool_input duplication elimination, which now happens through the three-phase pattern (additive Phase 1 → soak Phase 2 → in-product GC Phase 3) rather than via destructive schema migration.
+    verifies:
+    - T49
+    origin: manual
+    discovered: 2026-05-09
+  T51:
+    name: messages.text and messages.tool_input duplication is eliminated for new ingest via three-phase deprecation
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - 'Phase 1 has shipped: messages has new columns block_idx, text_in_entries, and 13 materialized tool_* columns; messages_v view exists; messages_ai trigger sources FTS5 text via entries.raw when text_in_entries=1; ingest path writes new rows with text='''', tool_input=NULL, text_in_entries=1; internal Go reads use messages_v'
+    - Phase 1 leaves all existing rows untouched (text and tool_input still readable directly on legacy rows)
+    - external-content messages_fts continues to return correct snippet/highlight for both legacy and new rows
+    - Phase 2 has soaked across the agreed release window with no rollback or data-integrity regression
+    - 'Phase 3 has shipped: mnemo provides an in-product GC command/job that idempotently nullifies deprecated columns on legacy rows after verifying entries.raw equivalence'
+    - After Phase 3 runs on the reference DB, ~960 MB of duplicate content has been recovered and all existing queries continue to return identical results
+    - messages.text and messages.tool_input columns themselves are NOT dropped — only their content is nullified for legacy rows
+    context: |-
+      messages.text (~811 MB on the reference DB) and messages.tool_input (~149 MB) duplicate content already present in entries.raw (jsonb). The duplication is denormalization for query speed: the messages table makes content blocks individually addressable and feeds the 13 generated tool_* columns and messages_fts (external-content FTS5). Total ~960 MB of pure copy on the reference DB. We cannot drop these columns under the new append-only schema rule. Instead, follow the three-phase strategy.
+
+      PHASE 1 (additive): add block_idx INTEGER and text_in_entries INTEGER NOT NULL DEFAULT 0 to messages. Add the 13 tool_* columns as regular STORED columns (additive — alongside the existing virtual generated ones; the duplicates coexist for the soak window). Create a new view messages_v (NEW NAME — do not rename messages) that exposes text and tool_input by joining messages with entries and falling back to the raw table columns when text_in_entries=0. Modify the messages_ai trigger to source FTS5 text via the same path. New writes set text='', tool_input=NULL, text_in_entries=1, populate block_idx and the materialized tool_* scalars. Internal Go reads switch to messages_v.
+
+      PHASE 2 (soak): ship Phase 1, run for several releases / a defined window. No data changes.
+
+      PHASE 3 (in-product GC): ship a `mnemo gc dedupe-messages` command (or scheduled background job) that walks legacy rows where text_in_entries=0, verifies entries.raw has equivalent content, then UPDATEs to nullify text and tool_input and populate the new shape. Idempotent, opt-in, customisable scope. The columns themselves are NEVER dropped. This is product code, NOT a sqlift migration.
+
+      Storage outcome: new rows save ~1.6 KB each (compounds linearly with ingest growth). After Phase 3 GC, existing 1.5M+ rows recover ~960 MB.
+
+      Depends on the additive-only policy + sqlift migration runner being in place, since Phase 1 introduces additive schema changes that must apply via the new runner without wiping the DB.
+    depends_on:
+    - T50
+    origin: manual
+    discovered: 2026-05-09
+  T52:
+    name: Ingest is loop-safe against mnemo-generated content via path-exclusion registry
+    status: converging
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - '`store.Store` exposes `RegisterExcludedPath(path, reason)` and `IsExcluded(path)`; paths are canonicalised via `filepath.Abs` + `filepath.EvalSymlinks` with a Clean fallback for paths that don''t exist yet.'
+    - All ingest walkers (docs, synthesis, workspace repo discovery) consult `IsExcluded` and return `filepath.SkipDir` for registered subtrees.
+    - 'When `vault_path` is configured, `registry.ForUser` registers it as an exclusion before any `Ingest*` call runs.'
+    - Vault re-Sync followed by a full ingest pass produces zero net change to the docs index (idempotent).
+    - A `vault_path` set to a directory under a `docs/` ancestor (e.g. `~/docs`) no longer causes file-count loop in the vault under repeated Sync cycles.
+    - A `vault_path` reached via a symlink is excluded whether the walker arrives via the symlink or the resolved target; registering before the directory exists still matches once it materialises.
+    context: |-
+      Today, vault export does not cause an ingest feedback loop only by accident: `classifyTaxonomy` in `IngestSynthesis` requires a `docs/` directory ancestor, and the vault's flat layout (`sessions/`, `decisions/`, `plans/`, etc., directly under the vault root) never has one — so mnemo's own writes are rejected at the taxonomy gate and never re-ingested. Once ingestion is unified under "trees-of-interest derived from session cwds" (🎯T54, no taxonomy gate, walks everything not in a junk dir / .gitignore), that accidental protection disappears. Vault-generated `plans/<repo>-<base>.md`, `sessions/<repo>/<...>.md` etc. would be picked up by the walk; each cycle would create new doc rows with paths drifting from the originals, and Sync would materialise each new row as a new file. Linear file-count growth per cycle, unbounded.
+
+      Even before T54 unification, a corner case exists today: setting `vault_path` to any path under a `docs/` ancestor (e.g. `~/docs`, `~/Documents/Obsidian/docs`) places the vault's `plans/` at exactly the `docs/plans/` taxonomy position and triggers the same recursion. Safe vault paths (`~/Documents/mnemo-vault`, `~/.mnemo/vault`, `~/think`) avoid it.
+
+      Original sketch proposed a `<!-- mnemo:generated -->` fence read by `ingestDocFileLocked`. Path exclusion is simpler: trivial for whole-tree generated output (the only kind mnemo currently writes), works for non-markdown outputs, robust against forgotten fences, single prefix-match per walk entry rather than open + read header. Fence remains a deferred extension if mixed-content files (half-human, half-generated single file) ever become a real use case — at that point the exclusion list handles directory-grain, the fence handles file-grain.
+
+      Implementation in PR #78: `internal/store/exclusions.go` holds the registry; canonicalisation uses `filepath.EvalSymlinks` so vault paths reached via symlinks match regardless of approach direction; lazy re-canonicalisation in `isExcluded` handles paths registered before their directories exist.
+    origin: manual
+    discovered: 2026-05-11
+  T53:
+    name: Trees-of-interest distinguish references from content for parent-child overlap
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A file present in the overlap of two trees-of-interest is stored once in the `docs` table.
+    - Both trees declare a reference to that file; queries scoped to either tree return it.
+    - A query for a file's reachable trees returns all trees-of-interest that contain it.
+    - Adding or removing a tree-of-interest updates references without rewriting content rows.
+    context: |-
+      Under the unified ingestion model, trees-of-interest are derived from session `cwd` values in the transcript index. Sessions frequently run in subdirs of a repo (e.g. one session in `~/work/.../mnemo`, another in `~/work/.../mnemo/internal/store`), so the set of trees can include parent-child overlaps. A naive walk from both roots double-ingests every file in the inner tree.
+
+      The right model is to distinguish content (indexed once, keyed by canonical path) from references (a tree-of-interest declares which paths are reachable from it). The same file can be referenced by multiple trees without duplicating its row or its FTS5 entries. Queries scoped to one tree return content reachable through that tree's references; cross-tree queries union the references.
+
+      Not blocking any current work — file paths in `docs` rows are already canonical, so today's double-ingest behaviour is at worst wasted writes that the content-hash dedup catches. Becomes load-bearing once trees-of-interest are derived automatically and parent-child overlap becomes common.
+    origin: manual
+    discovered: 2026-05-11
+  T54:
+    name: Ingestion is unified under trees-of-interest derived from session cwds
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Trees-of-interest are derived from `cwd` values in the indexed session transcripts (plus optional `extra_trees` config) and are not user-configured.
+    - A single ingestion entry point walks all trees-of-interest. `IngestDocs` and `IngestSynthesis` are collapsed into one code path.
+    - '`classifyTaxonomy` is used only to assign the `taxonomy` tag on indexed rows; it no longer gates inclusion.'
+    - '`synthesis_roots` and `workspace_roots` config fields are removed (or accepted-but-ignored with a deprecation warning).'
+    - The trees-of-interest list is append-only within the lifetime of a mnemo install; no automatic pruning.
+    - 🎯T52 (fence-based loop-safety) and 🎯T53 (references vs. content for parent-child overlap) are both achieved before this target retires.
+    context: |-
+      mnemo currently has two ingestion entry points with different policies: `IngestDocs` walks `knownRepoRoots` permissively (post-T48 recursive walk, .gitignore-filtered), and `IngestSynthesis` walks `synthesisRoots` restrictively (taxonomy-gated via `classifyTaxonomy`). The split uses *root type* as a sloppy proxy for *curation level* and is wrong in both directions: messy repos slip garbage in, well-organised non-repo planning dirs get most of their content rejected.
+
+      The honest unifying concept is: mnemo cares about **trees where agents work**. Operationally, those are trees with one or more Claude Code sessions on record — derivable from `cwd` values in the transcript index. A directory's status as repo vs. non-repo is incidental; whether agents have run there is the load-bearing signal.
+
+      Under the unified model:
+      - Trees-of-interest are derived data from session `cwd`s, not configured.
+      - One ingestion walk handles all trees-of-interest with a single filter stack (junk-dirs, .gitignore if present, fence-aware via 🎯T52).
+      - `classifyTaxonomy` remains as a path-derived tag function but stops doing inclusion duty — synthesis-ness becomes a label, not a gate.
+      - `synthesis_roots` and `workspace_roots` deprecate as user-configurable fields. Optional `extra_trees` provides an escape hatch for the unusual case of a tree the user wants indexed without ever running an agent there.
+      - Trees-of-interest list is monotonic — never pruned. Future GC may revisit.
+      - Parent-child overlap (sessions run in subdirs of a tree) is handled by 🎯T53's references-vs-content distinction.
+
+      Once this lands, the vault PR (#74) simplifies dramatically: the vault is just a directory like any other, picked up if agents have run there, made loop-safe by the fence. The exporter's `vault_path` config is purely a write-side concern with no role in ingest.
+    depends_on:
+    - T52
+    - T53
+    origin: manual
+    discovered: 2026-05-11
+  T55:
+    name: 'Third-party PRs #73 and #74 are dispositioned before housekeeping PRs land'
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'PR #73 (Rohit A — web dashboard UI on the same port as MCP) is reviewed and either merged or closed with feedback to the contributor.'
+    - 'PR #74 (Navnita — opt-in Obsidian/Logseq vault export) is reviewed and either merged or closed with feedback to the contributor.'
+    - 'Only after both #73 and #74 are resolved: PR #72 (🎯T46 block freshness) is merged.'
+    - 'Only after both #73 and #74 are resolved: PR #43 (T37/T38 raise — superseded) is closed.'
+    context: 'Two contributor PRs are in flight (#73 dated 2026-05-03 from Rohit A, #74 dated 2026-05-09 from Navnita). Holding back the two stale self-authored PRs (#72 mergeable, #43 close-only) until the contributor work clears, so the contributors get a clean base and a responsive review experience — not a queue of housekeeping PRs to rebase around. #72 carries the genuinely-outstanding T46 block-freshness fix (verified missing on master at internal/store/store.go:4735 usageByBlock); #43 is a visibility-only target raise whose targets (T37, T38) are already achieved.'
+    tags:
+    - pr-hygiene
+    - contributors
+    - housekeeping
+    origin: manual
+    discovered: 2026-05-11
+    achieved: 2026-05-12
+  T56:
+    name: Store.Query unconditionally transpiles via sqldeep instead of dispatching on syntax
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The isSqldeep helper and the if/else-if dispatch are removed from Store.Query in internal/store/store.go
+    - Store.Query unconditionally calls sqldeep.Transpile and executes the result against SQLite
+    - Read-only enforcement is moved to the SQLite layer (read-only connection or PRAGMA query_only = 1 on the Query path) — a destructive statement (DELETE/DROP/INSERT/UPDATE) sent through Store.Query is rejected by SQLite itself, not by a string prefix check
+    - Existing Query tests in internal/store/store_test.go (the rejection-of-destructive-statements cases and the plain-SELECT/WITH/sqldeep success cases) all still pass
+    - If a previously-working plain SQL query fails after the change, the issue is investigated and filed as an upstream sqldeep bug — not patched around in mnemo
+    context: |-
+      `internal/store/store.go:5824-5849` has `Query` sniffing the query string to decide whether to send it through `sqldeep.Transpile` or pass it straight to SQLite:
+
+      ```go
+      func isSqldeep(upper string) bool {
+          return strings.HasPrefix(upper, "FROM") || strings.Contains(upper, "SELECT {")
+      }
+
+      func (s *Store) Query(query string) ([]map[string]any, error) {
+          ...
+          if isSqldeep(upper) {
+              sql, err := sqldeep.Transpile(q)
+              ...
+          } else if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
+              return nil, fmt.Errorf("only SELECT, WITH, and sqldeep ... queries are allowed")
+          }
+          ...
+      }
+      ```
+
+      sqldeep is a strict superset of SQL — plain `SELECT`/`WITH` queries are valid sqldeep input and round-trip through Transpile unchanged. The dispatch is therefore unnecessary, and any case where it isn't (a plain-SQL query that sqldeep can't pass through) is a sqldeep bug to fix upstream, not a workaround to keep in mnemo.
+
+      **Cleanup**: drop `isSqldeep`, always call `sqldeep.Transpile(q)`, and emit whatever it returns to SQLite. The transpile path becomes the single source of truth.
+
+      **Read-only enforcement is a separate concern**: today the `strings.HasPrefix(upper, "SELECT")`/`WITH` check doubles as a write-protection gate. Once dispatch is removed, that gate is gone. The replacement is not a string prefix check — it should be SQLite-level (e.g. open a dedicated read-only connection for `Query`, or set `PRAGMA query_only = 1` on the connection used by `Query`). The user-facing contract — "only read queries" — is preserved, but enforced where it actually matters.
+
+      Cleanup-shaped. Independent of T49/T50/T51 — can ship anytime. If sqldeep round-tripping reveals a real issue with a specific SQL construct, file an upstream sqldeep target rather than adding a special case back to mnemo.
+    origin: manual
+    discovered: 2026-05-11
+  T57:
+    name: internal/store TestUsage* tests pass on master
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - '`go test -tags sqlite_fts5 ./internal/store/` passes on master with no failures.'
+    - CI runs green on both ubuntu-latest and windows-latest jobs for a master push.
+    context: 'Five TestUsage* tests in internal/store fail on plain master (last green commit: c2c6901). TestUsageHourlyRate, TestUsageGroupBySession, TestUsageGroupByBlock, TestUsageReconciledCosts, TestUsageReconciledMixedSource. Reproduces locally and on both CI platforms. Likely introduced between c2c6901 and b342e68 (the docs-ingest refactor and bullseye.yaml chores in between). Blocking work: cannot add required_status_checks to the branch ruleset until these are green, which means CI regressions continue to slip through silently. PR #73 (web dashboard) merged with the same failures showing on its CI run — confirmed by reviewer to be unrelated, but the situation should not persist.'
+    origin: manual
+    discovered: 2026-05-11
+    achieved: 2026-05-12
+  T58:
+    name: CI is enforced as a required status check on master
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The master branch ruleset (id 16212844) includes a required_status_checks rule listing both `test (ubuntu-latest, cc, c++, ar)` and `test (windows-latest, gcc, g++, ar)`.
+    - The ruleset has Marcelo (or Repository admin, role_id 5) configured as a bypass_actor so emergencies can override.
+    - A PR with a deliberately-failing test cannot be squash-merged.
+    context: 'Currently the ruleset enforces PR-only merges, linear history, and thread resolution — but does not require CI to pass. Regressions can therefore land on master, and the only signal is the next contributor noticing red CI on their own PR. Cannot enable yet because master itself is red on the TestUsage* tests; enabling now would lock out every merge. Once those tests are green, add this rule alongside a bypass_actors entry (without one, a future CI breakage produces the "Cannot update this protected ref" error we just hit). PR #73 review surfaced this.'
+    depends_on:
+    - T57
+    origin: manual
+    discovered: 2026-05-11
   T6:
     name: Session self-identification
     status: achieved
