@@ -551,7 +551,7 @@ Modes:
   - op=read (default): return the current effective config as JSON, plus a list of resolved-paths (workspace_roots, vault_path, synthesis_roots) with ~ expanded.
   - op=write: merge "patch" into the current config, validate, persist to disk, and adopt the change in the running daemon.
 
-Patch semantics: patch is a JSON object with the same shape as ~/.mnemo/config.json. Only keys present in the patch are changed; unset keys are left untouched. To clear a field, set it to its zero value (empty string for vault_path, empty array for the slices).
+Patch semantics: patch is a JSON object with the same shape as ~/.mnemo/config.json. Only keys present in the patch are changed; unset keys are left untouched. Array fields are replaced wholesale — to add or remove a single entry, read the current config first and write the full updated array. To clear a field, set it to its zero value (empty string for vault_path, empty array for the slices).
 
 Hot-reload coverage:
   - vault_path: applied live. The existing vault workers stop, a fresh exporter is built at the new path, and an initial sync starts in the background. Set vault_path to "" to disable vault export entirely.
@@ -2257,6 +2257,13 @@ var knownConfigKeys = map[string]struct{}{
 // Config field added later participates automatically as long as it
 // has a json tag, and the resulting Config goes through json.Unmarshal
 // which catches obvious type mismatches early.
+//
+// CONTRACT: every exported Config field must carry a `json:"name"`
+// tag. A field tagged `json:"-"` (runtime-only / derived) is silently
+// zeroed on every patch round-trip, even when the patch does not
+// touch it. If a future Config field needs to survive merges without
+// being patchable, switch this function to reflective field-by-field
+// merge.
 //
 // Patch keys are validated against knownConfigKeys before merging so
 // typos surface as tool errors instead of silent no-ops. Add a new

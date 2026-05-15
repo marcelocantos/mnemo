@@ -76,6 +76,51 @@ func TestWriteConfigToAtomicReplace(t *testing.T) {
 	}
 }
 
+// TestValidateVaultPathRejectsRegularFile mirrors the vault.New failure
+// mode that the WriteConfig trial-balloon must catch: a vault_path
+// pointing at an existing regular file makes MkdirAll return ENOTDIR.
+// Without this guard a "mnemo_config op=write" with a bad path would
+// persist, leaving on-disk config that the next daemon start cannot
+// bring up cleanly.
+func TestValidateVaultPathRejectsRegularFile(t *testing.T) {
+	home := t.TempDir()
+	bad := filepath.Join(home, "not-a-dir")
+	if err := os.WriteFile(bad, []byte("blocking"), 0o644); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+
+	cfg := Config{VaultPath: bad}
+	if err := cfg.validateVaultPath(home); err == nil {
+		t.Fatalf("expected error for vault_path pointing at a regular file, got nil")
+	}
+}
+
+// TestValidateVaultPathEmptyIsAllowed documents the "vault disabled"
+// semantics: an empty VaultPath passes validation without touching the
+// filesystem (so disabling vault via mnemo_config never trips the
+// trial-balloon).
+func TestValidateVaultPathEmptyIsAllowed(t *testing.T) {
+	if err := (Config{}).validateVaultPath(t.TempDir()); err != nil {
+		t.Errorf("empty vault_path should pass validation, got %v", err)
+	}
+}
+
+// TestValidateVaultPathExpandsTilde checks that ~ expansion happens
+// against the supplied home before MkdirAll runs. A literal "~/v" must
+// not be passed to MkdirAll — that would create a directory named "~"
+// in the current working directory.
+func TestValidateVaultPathExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	cfg := Config{VaultPath: "~/v"}
+	if err := cfg.validateVaultPath(home); err != nil {
+		t.Fatalf("tilde expansion: %v", err)
+	}
+	wantDir := filepath.Join(home, "v")
+	if fi, err := os.Stat(wantDir); err != nil || !fi.IsDir() {
+		t.Errorf("expected MkdirAll on %q, stat err=%v", wantDir, err)
+	}
+}
+
 func TestValidateLinkedInstancesValidPeerByName(t *testing.T) {
 	peersDir := t.TempDir()
 	writePeerCert(t, filepath.Join(peersDir, "alice.pem"))

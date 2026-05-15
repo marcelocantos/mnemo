@@ -131,6 +131,11 @@ func ConfigPath() (string, error) {
 // crashed writer cannot leave a half-formed config visible to a
 // subsequent LoadConfig call.
 //
+// vault_path is trial-balloon validated (see validateVaultPath) before
+// the rename so the persisted config is always loadable cleanly — a
+// path that vault.New would reject is rejected here too, leaving the
+// previous on-disk config intact.
+//
 // Used by the mnemo_config MCP tool to apply runtime configuration
 // changes (chiefly vault_path) without requiring a daemon restart.
 func WriteConfig(cfg Config) error {
@@ -141,8 +146,40 @@ func WriteConfig(cfg Config) error {
 	if err := cfg.validateLinkedInstances(filepath.Join(home, ".mnemo", "peers")); err != nil {
 		return err
 	}
+	if err := cfg.validateVaultPath(home); err != nil {
+		return err
+	}
 	path := filepath.Join(home, ".mnemo", "config.json")
 	return writeConfigTo(path, cfg)
+}
+
+// validateVaultPath mirrors the only fallible step of vault.New
+// (os.MkdirAll on the resolved root) so a bad vault_path is rejected
+// before WriteConfig commits the new config to disk. Without this
+// check, a write of e.g. {"vault_path": "/dev/null"} succeeds and
+// persists; the subsequent Reload's swapVault fails and surfaces a
+// Warning, but the on-disk config is already wrong and the next
+// daemon start re-hits the failure during initial setup.
+//
+// home is the daemon's home directory — used to ~-expand vault_path.
+// In the common single-user deployment this matches the per-user
+// homeDir that Reload's swapVault uses. On a multi-user Windows
+// Service install where different users may resolve ~ differently,
+// trial-balloon coverage against the daemon home is still enough to
+// catch the typical "garbage path" mistake; user-specific resolution
+// failures continue to surface as Reload Warnings.
+//
+// Empty VaultPath is the documented "vault disabled" state and skips
+// validation.
+func (c Config) validateVaultPath(home string) error {
+	resolved := c.ResolvedVaultPath(home)
+	if resolved == "" {
+		return nil
+	}
+	if err := os.MkdirAll(resolved, 0o755); err != nil {
+		return fmt.Errorf("vault_path %q is not usable: %w", c.VaultPath, err)
+	}
+	return nil
 }
 
 // writeConfigTo is the testable core of WriteConfig: it writes cfg to

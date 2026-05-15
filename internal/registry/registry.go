@@ -314,18 +314,23 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 // mnemo_config tool can stop just those goroutines when vault_path
 // changes without disturbing transcript ingest or the compactor.
 //
+// Returns the vault sub-context so callers wanting to spawn additional
+// vault-scoped goroutines (e.g. the post-reload initial sync) can tie
+// them to the same cancellation as the periodic-sync/watcher pair.
+// Returns nil when e.vault is nil (no workers started).
+//
 // PRECONDITION: caller MUST hold r.mu. ForUser owns it via its defer
 // for the entire Store-construction path; swapVault re-acquires it
 // after building the new exporter. Re-acquiring inside this function
 // would self-deadlock the ForUser path.
 //
-// No-op when e.vault is nil. The vault pointer is captured locally so a
-// concurrent hot-swap that replaces e.vault does not race with the
-// goroutines already running against the previous exporter.
-func (r *Registry) startVaultWorkers(username string, e *userEntry) {
+// The vault pointer is captured locally so a concurrent hot-swap that
+// replaces e.vault does not race with the goroutines already running
+// against the previous exporter.
+func (r *Registry) startVaultWorkers(username string, e *userEntry) context.Context {
 	vp := e.vault
 	if vp == nil {
-		return
+		return nil
 	}
 	vctx, vcancel := context.WithCancel(r.baseCtx)
 	e.vaultCancel = vcancel
@@ -428,6 +433,8 @@ func (r *Registry) startVaultWorkers(username string, e *userEntry) {
 			}
 		}
 	}()
+
+	return vctx
 }
 
 // CurrentConfig returns a snapshot of the live Config. Safe to call
@@ -587,11 +594,15 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 	}
 	r.mu.Lock()
 	e.vault = exp
-	r.startVaultWorkers(username, e)
+	vctx := r.startVaultWorkers(username, e)
 	// Track the post-reload initial sync under vaultWorkers so a
 	// subsequent swap waits for it (no two syncs against the same
 	// exporter racing through writeNote) and Close blocks on its
-	// completion before closing the Store.
+	// completion before closing the Store. Bound to vctx (not
+	// r.baseCtx) so cascaded reloads (A→B→C) abort the in-flight
+	// B-sync via oldCancel() at the next swap instead of forcing C
+	// to block on B-sync's natural completion against a path the
+	// user has already moved away from.
 	e.vaultWorkers.Add(1)
 	r.mu.Unlock()
 
@@ -599,7 +610,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 
 	go func() {
 		defer e.vaultWorkers.Done()
-		if err := exp.Sync(r.baseCtx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
+		if err := exp.Sync(vctx); err != nil && !errors.Is(err, vault.ErrSyncInFlight) {
 			logger.Warn("vault: post-reload sync failed", "err", err)
 		}
 	}()
@@ -625,6 +636,13 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
+// linkedInstancesEqual compares element-by-element with ==. All
+// LinkedInstance fields must remain comparable for this to work: adding
+// a slice field would surface as a compile error (caught), but adding a
+// map field would compile and panic at runtime when both sides are
+// non-nil. If LinkedInstance ever gains a non-comparable field, switch
+// to reflect.DeepEqual on the element (or slices.EqualFunc with an
+// explicit comparator updated alongside the struct).
 func linkedInstancesEqual(a, b []store.LinkedInstance) bool {
 	if len(a) != len(b) {
 		return false
@@ -639,7 +657,18 @@ func linkedInstancesEqual(a, b []store.LinkedInstance) bool {
 
 // Close cancels every worker context and closes every Store. Safe to
 // call once.
+//
+// Acquires reloadMu before r.mu so that an in-flight swapVault — which
+// drops r.mu between teardown and the post-Wait re-entry that spawns
+// new vault workers — cannot interleave with Close. Without this guard
+// Close could observe vaultWorkers at zero, return from Wait, and then
+// see swapVault's re-entry Add() new workers against a Store that
+// Close is about to close (closed-DB log noise on shutdown, and a
+// WaitGroup contract that depends on Wait's previous return value
+// being final).
 func (r *Registry) Close() {
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
 	r.mu.Lock()
 	r.cancel()
 	entries := make([]*userEntry, 0, len(r.stores))

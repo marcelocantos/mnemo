@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/storetest"
@@ -188,6 +189,93 @@ func TestSwapVaultEndToEnd(t *testing.T) {
 		t.Errorf("vaultCancel should be nil after disable")
 	}
 	r.mu.Unlock()
+}
+
+// TestStartVaultWorkersReturnsVctx exercises the contract that
+// startVaultWorkers returns the vault sub-context (so swapVault can
+// pipe its post-reload sync through vctx instead of r.baseCtx).
+// Pre-fix the post-reload sync used r.baseCtx; a cascaded reload
+// (A→B→C) would force C to block on B-sync's natural completion even
+// though B's vault had been decommissioned. Cancelling the returned
+// context here is equivalent to swapVault's next-swap oldCancel(): if
+// the contract holds, Done fires immediately.
+func TestStartVaultWorkersReturnsVctx(t *testing.T) {
+	projectDir := t.TempDir()
+	s := storetest.NewStore(t, projectDir)
+
+	dir := filepath.Join(t.TempDir(), "v")
+	exp, err := vault.New(s, dir)
+	if err != nil {
+		t.Fatalf("vault.New: %v", err)
+	}
+	r := NewRegistry(context.Background(), store.Config{VaultPath: dir}, "")
+	defer r.Close()
+
+	e := &userEntry{store: s, vault: exp, homeDir: t.TempDir()}
+	r.mu.Lock()
+	vctx := r.startVaultWorkers("u", e)
+	r.mu.Unlock()
+	if vctx == nil {
+		t.Fatal("startVaultWorkers must return a non-nil context when vault is set")
+	}
+
+	// Drive vctx through e.vaultCancel: this is the exact path
+	// swapVault uses (oldCancel()), so it proves vctx is the same
+	// context that the next swap will cancel.
+	e.vaultCancel()
+	select {
+	case <-vctx.Done():
+	default:
+		t.Errorf("vctx returned from startVaultWorkers must be cancelled when e.vaultCancel runs")
+	}
+	e.vaultWorkers.Wait()
+
+	// Disabled-vault path: returned context is nil and no workers
+	// run.
+	empty := &userEntry{store: s, homeDir: t.TempDir()}
+	r.mu.Lock()
+	got := r.startVaultWorkers("u2", empty)
+	r.mu.Unlock()
+	if got != nil {
+		t.Errorf("startVaultWorkers should return nil when vault is unset")
+	}
+}
+
+// TestCloseAcquiresReloadMu pins down the Close/Reload ordering: Close
+// must not return while a swapVault is mid-flight, otherwise the
+// re-entry that spawns new vault workers would race against the Store
+// being closed. The deterministic surface: with the guard in place,
+// Close blocks until a hostile no-op Reload that holds reloadMu
+// releases. Without the guard, Close returns instantly.
+func TestCloseAcquiresReloadMu(t *testing.T) {
+	r := NewRegistry(context.Background(), store.Config{}, "")
+
+	// Grab reloadMu manually to simulate an in-flight Reload that
+	// has not yet released it. swapVault's first half holds it via
+	// Reload's defer.
+	r.reloadMu.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		r.Close()
+		close(done)
+	}()
+
+	// If Close ignored reloadMu it would race past us and finish
+	// almost immediately. Give it a generous head start, then assert
+	// it is still blocked.
+	select {
+	case <-done:
+		t.Fatal("Close returned while reloadMu was held — the Close/Reload race guard is missing")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	r.reloadMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after reloadMu released")
+	}
 }
 
 // TestReloadSerialisesConcurrentSwaps fires multiple Reload calls in
