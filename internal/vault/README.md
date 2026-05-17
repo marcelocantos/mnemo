@@ -50,7 +50,22 @@ touched**.
 
 ## How to enable
 
-Add `vault_path` to `~/.mnemo/config.json`:
+Two paths, both equivalent. Pick whichever is more convenient.
+
+**Live (no restart)** — ask Claude (or any MCP client) to call
+`mnemo_config`:
+
+```
+mnemo_config(op="write", patch={"vault_path": "~/Documents/mnemo-vault"})
+```
+
+The daemon validates, persists to `~/.mnemo/config.json`, stops the
+old vault workers (if any), and starts new ones against the new path.
+An initial sync kicks off in the background. Setting `vault_path` back
+to `""` disables vault export the same way.
+
+**Edit-and-restart** — add `vault_path` to `~/.mnemo/config.json`
+directly:
 
 ```json
 {
@@ -58,14 +73,14 @@ Add `vault_path` to `~/.mnemo/config.json`:
 }
 ```
 
-`~` expands to your home directory. The directory is created on first
-startup — you don't need to create it manually.
-
-Restart the daemon after changing config:
+Then restart:
 
 ```bash
 brew services restart mnemo
 ```
+
+`~` expands to your home directory. The directory is created on first
+startup — you don't need to create it manually.
 
 **Verify it's working** — in any Claude Code session, ask Claude to
 call `mnemo_vault_status`. It will report the vault path and the number

@@ -25,6 +25,102 @@ func TestValidateLinkedInstancesEmpty(t *testing.T) {
 	}
 }
 
+func TestWriteConfigToRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := Config{
+		WorkspaceRoots:   []string{"/tmp/a", "/tmp/b"},
+		ExtraProjectDirs: []string{"/mnt/c"},
+		VaultPath:        "~/Documents/v",
+	}
+	if err := writeConfigTo(path, cfg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := loadConfigFrom(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.VaultPath != cfg.VaultPath {
+		t.Errorf("vault_path: got %q want %q", got.VaultPath, cfg.VaultPath)
+	}
+	if len(got.WorkspaceRoots) != 2 || got.WorkspaceRoots[0] != "/tmp/a" {
+		t.Errorf("workspace_roots: %v", got.WorkspaceRoots)
+	}
+	if len(got.ExtraProjectDirs) != 1 || got.ExtraProjectDirs[0] != "/mnt/c" {
+		t.Errorf("extra_project_dirs: %v", got.ExtraProjectDirs)
+	}
+}
+
+func TestWriteConfigToAtomicReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"vault_path":"/old"}`), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := writeConfigTo(path, Config{VaultPath: "/new"}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(data), `"vault_path": "/new"`) {
+		t.Errorf("expected /new in file, got: %s", data)
+	}
+	// Tmp file must not be left behind.
+	entries, _ := os.ReadDir(dir)
+	for _, ent := range entries {
+		if strings.HasPrefix(ent.Name(), ".config.json.") {
+			t.Errorf("tmp file left behind: %s", ent.Name())
+		}
+	}
+}
+
+// TestValidateVaultPathRejectsRegularFile mirrors the vault.New failure
+// mode that the WriteConfig trial-balloon must catch: a vault_path
+// pointing at an existing regular file makes MkdirAll return ENOTDIR.
+// Without this guard a "mnemo_config op=write" with a bad path would
+// persist, leaving on-disk config that the next daemon start cannot
+// bring up cleanly.
+func TestValidateVaultPathRejectsRegularFile(t *testing.T) {
+	home := t.TempDir()
+	bad := filepath.Join(home, "not-a-dir")
+	if err := os.WriteFile(bad, []byte("blocking"), 0o644); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+
+	cfg := Config{VaultPath: bad}
+	if err := cfg.validateVaultPath(home); err == nil {
+		t.Fatalf("expected error for vault_path pointing at a regular file, got nil")
+	}
+}
+
+// TestValidateVaultPathEmptyIsAllowed documents the "vault disabled"
+// semantics: an empty VaultPath passes validation without touching the
+// filesystem (so disabling vault via mnemo_config never trips the
+// trial-balloon).
+func TestValidateVaultPathEmptyIsAllowed(t *testing.T) {
+	if err := (Config{}).validateVaultPath(t.TempDir()); err != nil {
+		t.Errorf("empty vault_path should pass validation, got %v", err)
+	}
+}
+
+// TestValidateVaultPathExpandsTilde checks that ~ expansion happens
+// against the supplied home before MkdirAll runs. A literal "~/v" must
+// not be passed to MkdirAll — that would create a directory named "~"
+// in the current working directory.
+func TestValidateVaultPathExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	cfg := Config{VaultPath: "~/v"}
+	if err := cfg.validateVaultPath(home); err != nil {
+		t.Fatalf("tilde expansion: %v", err)
+	}
+	wantDir := filepath.Join(home, "v")
+	if fi, err := os.Stat(wantDir); err != nil || !fi.IsDir() {
+		t.Errorf("expected MkdirAll on %q, stat err=%v", wantDir, err)
+	}
+}
+
 func TestValidateLinkedInstancesValidPeerByName(t *testing.T) {
 	peersDir := t.TempDir()
 	writePeerCert(t, filepath.Join(peersDir, "alice.pem"))

@@ -113,6 +113,114 @@ func loadConfigFrom(path string) (Config, error) {
 	return cfg, nil
 }
 
+// ConfigPath returns the absolute path to ~/.mnemo/config.json for the
+// current process user. Returns an error only when the home directory
+// cannot be resolved.
+func ConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".mnemo", "config.json"), nil
+}
+
+// WriteConfig persists cfg to ~/.mnemo/config.json atomically and after
+// passing the same federation-peer validation that LoadConfig applies on
+// startup. The write is atomic in the rename-into-place sense: a tmp
+// file is written next to the target and renamed once fsync'd, so a
+// crashed writer cannot leave a half-formed config visible to a
+// subsequent LoadConfig call.
+//
+// vault_path is trial-balloon validated (see validateVaultPath) before
+// the rename so the persisted config is always loadable cleanly — a
+// path that vault.New would reject is rejected here too, leaving the
+// previous on-disk config intact.
+//
+// Used by the mnemo_config MCP tool to apply runtime configuration
+// changes (chiefly vault_path) without requiring a daemon restart.
+func WriteConfig(cfg Config) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if err := cfg.validateLinkedInstances(filepath.Join(home, ".mnemo", "peers")); err != nil {
+		return err
+	}
+	if err := cfg.validateVaultPath(home); err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".mnemo", "config.json")
+	return writeConfigTo(path, cfg)
+}
+
+// validateVaultPath mirrors the only fallible step of vault.New
+// (os.MkdirAll on the resolved root) so a bad vault_path is rejected
+// before WriteConfig commits the new config to disk. Without this
+// check, a write of e.g. {"vault_path": "/dev/null"} succeeds and
+// persists; the subsequent Reload's swapVault fails and surfaces a
+// Warning, but the on-disk config is already wrong and the next
+// daemon start re-hits the failure during initial setup.
+//
+// home is the daemon's home directory — used to ~-expand vault_path.
+// In the common single-user deployment this matches the per-user
+// homeDir that Reload's swapVault uses. On a multi-user Windows
+// Service install where different users may resolve ~ differently,
+// trial-balloon coverage against the daemon home is still enough to
+// catch the typical "garbage path" mistake; user-specific resolution
+// failures continue to surface as Reload Warnings.
+//
+// Empty VaultPath is the documented "vault disabled" state and skips
+// validation.
+func (c Config) validateVaultPath(home string) error {
+	resolved := c.ResolvedVaultPath(home)
+	if resolved == "" {
+		return nil
+	}
+	if err := os.MkdirAll(resolved, 0o755); err != nil {
+		return fmt.Errorf("vault_path %q is not usable: %w", c.VaultPath, err)
+	}
+	return nil
+}
+
+// writeConfigTo is the testable core of WriteConfig: it writes cfg to
+// path using a sibling tmp file + rename so concurrent readers always
+// observe either the previous or the new file, never a partial write.
+// The parent directory is created if missing (mode 0o755).
+func writeConfigTo(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.json.*")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
 // validateLinkedInstances enforces the rules documented on
 // LinkedInstance: unique names, https-only URLs, and resolvable
 // peer certificates (either as a name under peersDir or as inline

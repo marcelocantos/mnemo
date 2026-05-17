@@ -77,6 +77,7 @@ user. Good moments to reach for mnemo:
 - `mnemo_discover_patterns` — Analyze transcript history to find workaround patterns suggesting missing features. Detects direct JSONL reads, transcript dir greps, repeated query shapes, and recurring searches.
 - `mnemo_images` — Search images captured from transcripts. Inline base64 and file-path image references are extracted at ingest, stored as BLOBs with width/height/MIME metadata, and described by AI using surrounding conversation context. Searchable via FTS5 on descriptions. Requires ANTHROPIC_API_KEY for description generation.
 - `mnemo_rework_history` — Return prior rework attempts for a bullseye target, ordered most-recent first. Sourced from compaction spans where the target appeared in targets_active or targets_progressed. Returns session_id, timestamp, repo, progress note, prose summary, and open threads. Feed output as `mnemo_history` to `bullseye_rework` to avoid repeating prior failed approaches.
+- `mnemo_config` — Read or update mnemo's runtime configuration (`~/.mnemo/config.json`) without restarting the daemon. `op=read` returns the current config + resolved paths; `op=write` with a `patch` object merges and persists. Hot-reload covers `vault_path`, `workspace_roots`, `extra_project_dirs`, `synthesis_roots`; `linked_instances` is persisted but requires a restart.
 
 ## Code Structure
 
