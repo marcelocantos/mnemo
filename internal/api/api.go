@@ -183,7 +183,7 @@ func modelContextWindow(model string) int64 {
 // modelCostRates maps model slug prefixes to per-token costs in USD,
 // mirroring the rates in store.go's modelCosts table.
 var modelCostRates = []struct {
-	prefix                                   string
+	prefix                               string
 	input, output, cacheRead, cacheWrite float64
 }{
 	{"claude-opus-4", 15.0 / 1e6, 75.0 / 1e6, 1.5 / 1e6, 18.75 / 1e6},

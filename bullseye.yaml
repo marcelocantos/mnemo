@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 targets:
   T1:
     name: Broader memory beyond transcripts
@@ -56,7 +56,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - Commits from repos in session_meta indexed automatically
@@ -76,7 +75,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - PRs and issues from repos in session_meta indexed automatically
@@ -135,11 +133,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    showcase: true
-    demonstration: |-
-      All five T15 leaves shipped: T15.1 (mTLS endpoint material under ~/.mnemo/endpoint/ + peer trust store under ~/.mnemo/peers/), T15.2 (linked_instances config with strict validation), T15.3 (federated read-only mTLS MCP endpoint on :19420 exposing 23 read-only tools, all write/control tools absent), T15.4 (federation client with per-peer pinned mTLS, persistent http.Client per peer, 5s default timeout, seven typed error sentinels), T15.5 (Fanout + MergePeerResults wired into runServe behind the linked_instances config gate).
-
-      End-to-end umbrella acceptance demonstrated by the federation test suite (16 tests, all green): TestFanoutMergesAttributedResults stands up two stub mTLS-cross-trusted peer daemons each returning a distinct mnemo_search payload and asserts the merged FanoutEnvelope contains local + alice + bob attribution. TestFanoutGracefulDegradationOnSlowPeer pauses one peer 500ms with a 100ms timeout and confirms the response returns in <400ms with the fast peer's results plus a structured PeerWarning{Instance:"slow", ErrorKind:"timeout"} naming the stalled peer. TestFederatedRoundTrip + TestFederatedRejectsUntrustedClient verify the server-side read/write boundary and TLS rejection of un-pinned client certs. CLI surface ships: `mnemo print-endpoint`, `mnemo print-federated-addr`, `mnemo ping-peer <name>`.
     acceptance:
     - All sub-targets T15.1, T15.2, T15.3, T15.4, T15.5 are achieved.
     - Two mnemo daemons (separate hosts, or two local temp-dir instances for CI) are configured as each other's peers via `linked_instances` and each daemon's `~/.mnemo/peers/` holds the other's public cert.
@@ -197,8 +190,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: Ran `bin/mnemo print-endpoint --dir /tmp/...` against an empty dir — generated cert.pem (0644) + key.pem (0600) under endpoint/ and printed a 10-year self-signed ECDSA P-256 CERTIFICATE PEM (subject mnemo-colossus.lan, valid 2026→2036) to stdout. Re-ran the same command and confirmed reload (no regen warning, identical cert). Unit tests cover corrupt-cert regen, expired-cert regen, peer-dir parsing of valid + invalid + non-pem entries, key 0600 enforcement on first-run and after reload chmod.
     acceptance:
     - On first start, mnemo serve generates a self-signed X.509 cert + key pair at ~/.mnemo/endpoint/{cert.pem,key.pem} (mode 0600 on key).
     - On subsequent starts, existing cert/key are loaded. A corrupt or expired cert triggers regeneration with a warning.
@@ -219,8 +210,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: store.Config.LinkedInstances field with LinkedInstance{Name, URL, PeerCert} parses ~/.mnemo/config.json. Validation enforces unique Name, https-only URL, and resolvable PeerCert (name under ~/.mnemo/peers/ OR inline PEM containing a parseable CERTIFICATE block) at LoadConfig time. 16 sub-test cases verify the happy paths and every documented failure mode (duplicate name names both indexes; URL/PEM rejection messages name the offending entry). All tests green; full make bullseye green except expected dirty-tree of new files.
     acceptance:
     - store.Config gains a LinkedInstances []LinkedInstance field with Name (string), URL (string, https only), and PeerCert (name of cert under ~/.mnemo/peers/ OR inline PEM).
     - ~/.mnemo/config.json parses cleanly; an absent field is zero-value and disables federation entirely.
@@ -240,8 +229,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: Stood up two in-process mnemo hosts in temp dirs with cross-trusted peer certs and a real tls.Listen socket. TestFederatedRoundTrip ran a full mark3labs/mcp-go streamable-HTTP client through Initialize + ListTools over mTLS and asserted the returned tool set is exactly tools.FederatedToolNames (23 read-only tools) — confirmed that mnemo_self, mnemo_define, mnemo_evaluate, mnemo_list_templates, mnemo_restore, mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions are absent. TestFederatedRejectsUntrustedClient confirmed the TLS handshake fails with "bad certificate" when the client's cert is not in the server's trusted-peer pool. Smoke-ran `bin/mnemo print-federated-addr` and confirmed it emits https://colossus.lan:19420/mcp by default and respects --addr overrides for both port-only (--addr=:9000 → colossus.lan:9000) and host:port (foo.example:443).
     acceptance:
     - mnemo serve listens on a second configurable address (default :19420; flag `--federated-addr`; `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
     - 'Only read-shaped tools are exposed on the federated endpoint: mnemo_search, mnemo_sessions, mnemo_read_session, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, mnemo_memories, mnemo_skills, mnemo_configs, mnemo_usage, mnemo_audit, mnemo_targets, mnemo_plans, mnemo_who_ran, mnemo_ci, mnemo_query, mnemo_repos, mnemo_stats, mnemo_chain, mnemo_decisions, mnemo_images, mnemo_discover_patterns, mnemo_status. Write-shaped / control tools (mnemo_self, template writes, describers control, etc.) are absent from the federated tool set.'
@@ -264,8 +251,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: 'internal/federation Client exposes CallTool(ctx, instance, toolName, args). Eight unit/integration tests stand up real tls.Listen sockets and exercise the typed-error matrix end-to-end: happy path returns expected payload; unknown instance → ErrUnknownInstance; cert mismatch (client pins WRONG cert as the peer) → ErrTLSHandshake at handshake; connection refused (closed port) → ErrConnectionRefused; 100ms timeout against a 500ms-delayed tool → ErrTimeout (logs "federation: peer call timed out instance=stub"); server tool returning IsError=true → ErrServerError; non-JSON text/plain on /mcp → ErrMalformedResponse; PinnedClientTLSConfig accepts pinned cert and rejects any other. CLI `mnemo ping-peer` smoke-tested both error paths (no-args usage, no-config diagnostic). Connection reuse via persistent http.Client + IdleConnTimeout=90s + ForceAttemptHTTP2 per peer; one MCP Initialize per peer cached via sync.Once.'
     acceptance:
     - An internal client package (e.g. internal/federation/client) exposes a CallTool(ctx, instance, toolName, args) -> result method that targets a LinkedInstance from T15.2.
     - mTLS handshake presents the local endpoint cert/key (T15.1) as client identity and trusts only the peer cert configured for that instance (not the whole trusted-peer set).
@@ -290,8 +275,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: 'Demonstrated end-to-end via TestFanoutMergesAttributedResults: stood up two stub federated peers in temp dirs (each returning a distinct mnemo_search payload — alpha-from-alice, beta-from-bob), wired a Client with both as LinkedInstances, called Fanout("mnemo_search"), and asserted the FanoutEnvelope JSON returned local + both peers correctly attributed with no warnings. Graceful-degradation demonstrated via TestFanoutGracefulDegradationOnSlowPeer: same setup with a 500ms-delayed slow peer plus a fast peer and a 100ms per-peer timeout — Fanout returned in <400ms with the fast peer''s results and one PeerWarning{Instance:"slow", ErrorKind:"timeout"}, confirming a paused peer does not stall the local response. Backwards-compat verified by TestMergePeerResultsNoPeersIsPassThrough — when no peers are configured the wrapper returns the local text byte-for-byte unchanged. The wrapper is wired into main.go''s runServe behind the linked_instances config gate; tools NOT in FanoutToolNames (mnemo_self, mnemo_define, mnemo_evaluate, mnemo_query, mnemo_stats, mnemo_status, mnemo_chain, mnemo_restore, mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions) bypass federation entirely.'
     acceptance:
     - Read-shaped query tools (mnemo_search, mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, and others with per-record result shapes) issue local + per-peer calls in parallel via T15.4's client.
     - 'Every returned record carries an instance-source field (e.g. "local" for the host responder, "<peer name>" for peers). Response schemas extended in a backwards-compatible way: existing unattributed callers still parse.'
@@ -316,7 +299,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    showcase: true
     acceptance:
     - 'Schema: session_chains(successor_id PK, predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at) with index on predecessor_id'
     - 'Ingest-time detection: when a new JSONL''s first non-meta user event contains <command-name>/clear</command-name>, look for a predecessor in the same project directory whose last event precedes the new file''s first event; insert the link with confidence bucketed as high (<2s), medium (2-5s), or none (>5s, no link recorded but boundary noted)'
@@ -349,7 +331,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - Every repo-level stream (targets, audit logs, plans, CI runs) performs a filesystem-walk backfill on daemon startup, not a session_meta-seeded scan
@@ -385,7 +366,6 @@ targets:
     status: achieved
     value: 5.0
     cost: 8.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - 'Inline base64 images (type: image content blocks) are detected during ingest; base64 decoded and stored as binary BLOB in a dedicated images table'
@@ -432,7 +412,6 @@ targets:
     status: achieved
     value: 5.0
     cost: 5.0
-    showcase: true
     actual_cost: 3.0
     acceptance:
     - Every image in the images table has an OCR pass (or recorded error); descriptions remain untouched — OCR is additive
@@ -470,7 +449,6 @@ targets:
     status: achieved
     value: 5.0
     cost: 8.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - Every image in the images table has a CLIP/SigLIP-family embedding (or recorded error); additive to descriptions and OCR
@@ -745,7 +723,6 @@ targets:
     status: set_aside
     value: 13.0
     cost: 8.0
-    showcase: true
     set_aside_reason: |-
       Won't fix 2026-05-09. The three pillars that justified adopting sqlpipe.Database all collapsed: (1) sqlift bundled-in is now obtainable standalone via 🎯T49, (2) sqldeep-on-every-query is cosmetic — internal Go callsites are fine in plain SQL, and (3) the replication primitives have no caller. T15 federation was achieved 2026-04-25 as query fan-out (peer-to-peer SQLite, no replication), and the only other federation model under consideration is org-/repo-centralized aggregation to a server DB — for which sqlpipe is fundamentally the wrong shape: sqlpipe assumes one master per table with read-only replicas, while centralization needs many writers contributing to a single authoritative server-DB corpus. The previously identified cost remains the same (148 Exec/Query/QueryRow callsites + 180 Scan sites, non-mechanical migration). Cost stays high; benefits collapsed; close the door. If a future need surfaces a primitive that sqlpipe genuinely provides, raise it as a fresh, scope-specific target rather than reviving this one.
 
@@ -880,7 +857,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - A non-technical Windows user downloads one .exe from the release page, double-clicks it, clicks Next through a standard Windows installer, and mnemo is running as a Windows Service with MCP registered in Claude Code's config — zero terminal commands required.
     - Uninstalling via Add/Remove Programs cleanly removes the service, binary, and MCP registration.
@@ -900,7 +876,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - mnemo.exe install-service registers mnemo as a Windows Service named "mnemo" with auto-start and restart-on-failure configured.
     - mnemo.exe uninstall-service stops and removes the service.
@@ -916,7 +891,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - mnemo.exe register-mcp adds/updates the mnemo entry in ~/.claude.json, preserving all other top-level keys and other mcpServers entries.
     - mnemo.exe unregister-mcp removes the mnemo entry (and removes mcpServers if it becomes empty).
@@ -931,7 +905,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - A .iss file in the repo builds into mnemo-<version>-windows-amd64-setup.exe when compiled with iscc.exe on a windows-latest runner.
     - 'The installer: elevates to admin, copies mnemo.exe to %ProgramFiles%\\mnemo\\, runs install-service, runs register-mcp as the invoking user (so ~/.claude.json is the user''s, not SYSTEM''s), and creates a Start Menu uninstall entry.'
@@ -950,7 +923,6 @@ targets:
     status: set_aside
     value: 0.0
     cost: 0.0
-    showcase: true
     set_aside_reason: 'Parked 2026-04-30. Blocked on user procurement of an EV code-signing certificate (~$300/yr, issued to a verifiable legal entity). Until the cert and its private key are available as GitHub Actions secrets, the agent cannot integrate signtool.exe into release.yml or verify the SmartScreen-free first-run experience on a fresh Windows install. Workflow integration and acceptance-criterion #2 (signtool calls in release.yml) are mechanical work the agent can do in a single sitting once the cert exists; criterion #3 (UAC prompt with publisher name, no SmartScreen warning) requires a real Windows machine for verification. Resume when the user procures the cert and stores it in repo secrets. Mnemo continues to ship an unsigned installer in the meantime; this is a UX-polish target, not a security regression.'
     acceptance:
     - EV code signing certificate acquired and stored as GitHub Actions secrets.
@@ -964,7 +936,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - Config supports SynthesisRoots []string; defaults empty (backwards compatible)
     - docs table has a taxonomy column populated from path for paths matching docs/{papers,design,analysis,plans}/*.md and docs/{audit-log,convergence-report}.md
@@ -1060,8 +1031,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: Verified the deployed Homebrew formula at marcelocantos/homebrew-tap (Formula/mnemo.rb at v0.33.0) has `run [opt_bin/"mnemo"]` with no phantom "serve" arg. The fix landed via `formula_includes:` in .github/workflows/release.yml (commit 41630d2, the 🎯T47 PR), so it survives homebrew-releaser regeneration. main.go documents the bare invocation as the serve mode in both the package doc (line 10) and the inline switch comment in main() (lines 70–73), satisfying the third acceptance criterion. `brew services start mnemo` runs the daemon today via this formula.
     acceptance:
     - The mnemo Homebrew formula's `service do` block has `run [opt_bin/"mnemo"]` (no `"serve"` arg) OR mnemo gains a real `serve` subcommand that aliases the bare-invocation default behaviour and is documented in main.go's package comment / CLI help.
     - The fix lands via `formula_includes` in `.github/workflows/release.yml` (so it survives homebrew-releaser regenerating the formula), not as a manual edit to the tap repo.
@@ -1329,8 +1298,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: 'Built the new walker into a one-shot demo program, ran it against /Users/marcelo/work/github.com/marcelocantos/csp, and verified via direct sqlite3 query that the walker discovered 147 doc files vs the ~141 the v0.33.0 whitelist would have caught. The newly-indexed files outside the old whitelist are: CLAUDE.md, CMakeLists.txt, demos/README.md, examples/log_aggregator_README.md, formal/toctou-drain-suspended.md (the motivating example — a TLA+ paper not under docs/papers/), and test/tsan_suppressions.txt. Junk dirs (.git, .claude, .sawmill, build/, build-win/, vendor/, node_modules/, scripts/__pycache__) and gitignored entries (formal/states/, logs/, states/) are correctly skipped at every depth. Also seeded an isolated test workspace with .md files at non-whitelisted depths (internal/foo/NOTES.md, cmd/bar/baz.txt, pkg/deep/nested/DESIGN.md, AdHoc.md at root) and confirmed all four are picked up while node_modules/, vendor/, and gitignored scratch/ are excluded. Demo program was discarded after verification (one-off proof, not committed).'
     acceptance:
     - A repo's docs ingest discovers .md/.txt/.pdf files at any depth (e.g., README.md at root, internal/foo/NOTES.md, cmd/bar/baz.txt) — not just under a fixed set of named subdirs and a root whitelist
     - Files matched by .gitignore are skipped, and the existing junk-dir skip list (node_modules, .git, build/, dist/, etc. from T21) is respected
@@ -1393,7 +1360,6 @@ targets:
     status: achieved
     value: 9.0
     cost: 8.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_discover_patterns tool identifies workaround sessions
@@ -1425,7 +1391,6 @@ targets:
     status: identified
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - 'Phase 1 has shipped: messages has new columns block_idx, text_in_entries, and 13 materialized tool_* columns; messages_v view exists; messages_ai trigger sources FTS5 text via entries.raw when text_in_entries=1; ingest path writes new rows with text='''', tool_input=NULL, text_in_entries=1; internal Go reads use messages_v'
     - Phase 1 leaves all existing rows untouched (text and tool_input still readable directly on legacy rows)
@@ -1606,6 +1571,39 @@ targets:
     - T57
     origin: manual
     discovered: 2026-05-11
+  T59:
+    name: Compaction is triggered by session-activity heuristics, not by MCP connection bindings
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The compactor watcher in internal/compact/watcher.go is driven by a periodic scan over session activity, not by daemon_connections
+    - 'Selection heuristic is documented and tuneable via Config: minimum substantive_msgs since last compaction (or since first_msg), recency window, concurrency guard'
+    - Compactions table has connection_id NULL-tolerated for sessions without a binding; existing schema column stays (additive policy)
+    - A session with > N substantive messages and recent activity produces a compaction without any mnemo_self call having occurred
+    - 'mnemo_restore and chain detection continue to function: they fall back to session_id-based lookup of compactions when connection_id is unavailable'
+    - 'Integration test: ingest a synthetic transcript of > N messages with no connection binding, run one watcher tick, verify a compactions row is produced for that session'
+    - 'Integration test: an existing connection-bound session still gets its compaction tagged with the connection_id (best-effort attribution preserved)'
+    - On a real-world mnemo.db post-fix, compactions table accumulate rows for active jevons / mnemo / squz-ge sessions without /c being run
+    context: |-
+      The compactor today fires for zero sessions in practice. The compactions table contains 0 rows across mnemo's entire history; the per-connection watcher in internal/compact/watcher.go only operates on sessions that have an explicit (connection_id, session_id) row in connection_sessions; and RecordConnectionSession is called from exactly one site — internal/tools/tools.go:1392, inside the mnemo_self handler — which itself fires only from /c (verified statically across ~/.claude/skills/, ~/.claude/agents/, configs; verified empirically: just 2 invocations in the entire month of May, both inside the post-/clear session that ran /c).
+
+      The result is a structurally circular design: compactions are only generated for sessions that have called mnemo_self, and mnemo_self is only called by /c — the very skill that needs the compactions. By the time /c runs, the upstream session it's trying to recover has already closed its MCP connection, the per-connection worker has been reaped, and no compaction was ever attempted. mnemo_self issued from the post-/clear session binds a new connection_id with zero relevant history.
+
+      Binding-at-start (an auto-mnemo_self startup hook) doesn't fix this either: it only helps sessions that adopt the hook going forward, and the binding still doesn't survive a connection close.
+
+      **The fix is to drive compaction off observed session activity, not connection bindings:**
+
+      - The compactor watcher periodically scans session_summary / session_meta directly (or the equivalent view) for sessions that meet compaction-worthy criteria: more than N substantive messages since the most recent compaction for that session (or since first_msg if none), AND last_msg within some recency window (so we don't pointlessly resurrect old sessions), AND no in-progress compaction for that session (concurrency guard).
+      - For each selected session, the compactor runs Compact(ctx, "", sessionID, targets) — connection_id is left empty when no binding exists. The connection_id column on compactions stays nullable; it's best-effort metadata populated when a mnemo_self binding happens to exist, not a gating identifier.
+      - The per-connection worker model in internal/compact/watcher.go is replaced (or supplemented) by a single periodic session-activity scan. The existing daemon_connections plumbing remains but is no longer load-bearing for compaction.
+      - mnemo_restore and chain detection are affected: they currently use connection_id to find "compactions made for me". They will need to fall back to session-based lookup (which compactions cover which session_ids) — that's already the more natural model.
+
+      This unblocks the original /c use case: compactions get produced proactively for any active session with enough content, and the chain restoration on the next session reads them out via session-id linkage, with no protocol handshake required.
+
+      Discovered 2026-05-14 while investigating why /c in a fresh jevons session reported "No compactions for this chain yet" despite a 2003-message upstream session.
+    origin: manual
+    discovered: 2026-05-14
   T6:
     name: Session self-identification
     status: achieved
@@ -1618,12 +1616,38 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-07
+  T60:
+    name: Stale daemon_connections rows are reliably marked closed
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'daemon_connections rows are no longer left perpetually open: after a stale period (default 10 min since last_seen_at update), closed_at is populated by a periodic sweeper'
+    - The sweeper is a goroutine in internal/registry/registry.go alongside the other workers (compaction, vault, CI poll); interval and stale threshold are configurable via Config
+    - Existing call sites of RecordConnectionOpen and RecordConnectionSession continue to update last_seen_at so the sweeper has fresh signal for live connections
+    - After running mnemo daemon overnight, the count of daemon_connections rows with closed_at IS NULL is bounded by the number of actually-live mcpbridge connections (typically 1-3), not the cumulative open count since daemon start
+    - 'Optional: HTTP MCP server connection-close handler also calls RecordConnectionClose for faster reaping when the disconnect is cleanly observable; sweeper remains the authoritative cleanup path'
+    context: |-
+      internal/store/connections.go:45 defines RecordConnectionClose but no production code path calls it. Grep across the repo confirms zero non-test call sites. As a result, every daemon_connections row inserted by RecordConnectionOpen (tools.go:534) is orphaned — the live DB currently has 35 rows with closed_at IS NULL versus ~1-2 actual live mcpbridge connections.
+
+      This is inert today (the watcher reaps stale per-connection workers on its own poll, and after 🎯T59 the compactor stops using daemon_connections at all), but the table grows unbounded and any query/health check that filters on `closed_at IS NULL` returns nonsense.
+
+      **Two viable fixes**:
+
+      1. Hook the HTTP MCP server's connection-close lifecycle (mark3labs/mcp-go on :19419) to call RecordConnectionClose. Correct but fragile: missed on daemon crash, process kill, network drop without TCP FIN.
+
+      2. Periodic sweep: a background sweeper marks connections closed when last_seen_at is older than some threshold (e.g. 10 minutes since the last RecordConnectionOpen / RecordConnectionSession update). Robust against crashes; consistent with the heuristic-driven model adopted in 🎯T59.
+
+      Recommendation: ship (2) as the primary mechanism, optionally wire (1) on top for faster reaping when the close is cleanly observable. The sweeper interval and stale threshold are configurable.
+
+      This target is small and independent — does not depend on T49/T59. Discovered 2026-05-14 while investigating the compactor wiring gap.
+    origin: manual
+    discovered: 2026-05-14
   T7:
     name: Agent-defined query templates
     status: achieved
     value: 7.0
     cost: 8.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_define stores named parameterised query template
@@ -1732,7 +1756,6 @@ targets:
     status: achieved
     value: 5.0
     cost: 3.0
-    showcase: true
     actual_cost: 3.0
     acceptance:
     - For each live session (as identified by 🎯T9.5.1), mnemo can report current CPU, RSS, and IO metrics for the owning claude process
@@ -1751,7 +1774,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 2.0
-    showcase: true
     acceptance:
     - mnemo can report, for any given session ID, whether a Claude Code process currently has its transcript JSONL file open
     - Liveness is surfaced as an annotation on session listings (mnemo_sessions, mnemo_status) and/or a dedicated lookup tool
@@ -1771,7 +1793,6 @@ targets:
     status: achieved
     value: 8.0
     cost: 5.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - mnemo_decisions searches decisions table by keyword
