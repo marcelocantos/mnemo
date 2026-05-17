@@ -1261,4 +1261,3 @@ func TestSyncReturnsErrSyncInFlightWhenBusy(t *testing.T) {
 		t.Fatalf("Sync = %v, want ErrSyncInFlight", got)
 	}
 }
-

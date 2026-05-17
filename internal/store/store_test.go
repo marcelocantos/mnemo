@@ -2060,7 +2060,7 @@ func assistantWithUsage(ts string, model string, input, output, cacheRead, cache
 // comfortably inside the 30-day recency window queried by Usage tests.
 // Stable within a single test run; advances day-by-day across runs so
 // the fixtures never rot out of the window.
-var testAnchor = time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -3)
+var testAnchor = time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -3)
 
 // now returns testAnchor at 10:00:00 UTC formatted for JSONL timestamps.
 func now() string {

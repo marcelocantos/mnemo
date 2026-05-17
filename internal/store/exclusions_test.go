@@ -79,10 +79,10 @@ func TestExclusionRegistry_NotExcluded(t *testing.T) {
 	r.register("/tmp/vault", "vault_path")
 
 	for _, p := range []string{
-		"/tmp",                       // ancestor of excluded
-		"/var/vault",                 // different root
-		"/",                          // filesystem root
-		"/tmp/another/path",          // unrelated subtree
+		"/tmp",              // ancestor of excluded
+		"/var/vault",        // different root
+		"/",                 // filesystem root
+		"/tmp/another/path", // unrelated subtree
 	} {
 		if r.isExcluded(p) {
 			t.Errorf("path %q should not be excluded", p)

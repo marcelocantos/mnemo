@@ -390,10 +390,10 @@ func TestResolveError(t *testing.T) {
 
 func TestEstimateCost(t *testing.T) {
 	cases := []struct {
-		name                                     string
-		model                                    string
+		name                                 string
+		model                                string
 		input, output, cacheRead, cacheWrite float64
-		wantMin, wantMax                         float64
+		wantMin, wantMax                     float64
 	}{
 		{
 			name:  "opus",
@@ -482,9 +482,9 @@ func TestListClaudeProcesses(t *testing.T) {
 	lines := []string{
 		"  PID %CPU   RSS COMM  ARGS",
 		"12345  2.3 65536 claude /usr/local/bin/claude --resume abc-def-123 --model sonnet",
-		"99999  0.0 12288 iCloud iCloud Daemon",     // should be excluded
-		"  777  0.1  8192 claudia /usr/bin/claudia", // should be excluded
-		"54321  1.0 32768 claude /usr/local/bin/claude",  // fresh session, no --resume
+		"99999  0.0 12288 iCloud iCloud Daemon",         // should be excluded
+		"  777  0.1  8192 claudia /usr/bin/claudia",     // should be excluded
+		"54321  1.0 32768 claude /usr/local/bin/claude", // fresh session, no --resume
 	}
 	input := strings.Join(lines, "\n") + "\n"
 

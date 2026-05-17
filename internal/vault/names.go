@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	nonAlphanumRE      = regexp.MustCompile(`[^a-z0-9]+`)
-	usersHomePrefixRE  = regexp.MustCompile(`^users-[^-]+-(.+)$`)
+	nonAlphanumRE     = regexp.MustCompile(`[^a-z0-9]+`)
+	usersHomePrefixRE = regexp.MustCompile(`^users-[^-]+-(.+)$`)
 )
 
 // slugify creates a filename-safe slug from s: lowercase, non-alphanumeric
