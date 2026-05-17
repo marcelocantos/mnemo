@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 targets:
   T1:
     name: Broader memory beyond transcripts
@@ -1204,7 +1204,6 @@ targets:
     achieved: 2026-04-27
   T46:
     name: mnemo_usage delivers a real-time, reconciled spend signal usable by an external broker
-    kind: verify
     status: set_aside
     value: 0.0
     cost: 0.0
@@ -1217,10 +1216,6 @@ targets:
     - Demonstration captured (transcript or screenshot) showing all four behaviours above in a single session, suitable for handing to a downstream consumer (e.g. a claudia broker) as proof of fitness.
     context: 'Created 2026-04-27 to give the cost-tracking trio a reachable checkpoint. Without this verify target, T43/T44/T45 are tunnels — each lands a query-shape extension with no end-to-end demonstration that the trio actually composes into the real-time, reconciled spend signal that motivated them (claudia broker design discussion 2026-04-26). This target is the showcase: exercise all three together against a live mnemo, against the live Anthropic Cost Admin API, and confirm the shape is usable.'
     depends_on:
-    - T43
-    - T44
-    - T45
-    verifies:
     - T43
     - T44
     - T45
@@ -1333,6 +1328,8 @@ targets:
 
       This target replaces the wipe path with sqlift v0.14.0+ as the migration runner. Schema is defined by versioned migration files (or a single authoritative schema.sql diffed against the live DB by sqlift); the inline db.Exec setup in store.go is retired. The schema-version mismatch wipe branch is removed.
 
+      **Blocked on upstream sqlift: FTS5 / virtual table support.** Discovered 2026-05-17 during T49 scoping: sqlift v0.14 has no handling for `CREATE VIRTUAL TABLE` statements. The `Virtual = 2` enum at `dist/sqlift.cpp:111` is declared but never referenced. mnemo has 16 FTS5 virtual tables; each produces 5 shadow tables (`_data`, `_idx`, `_content`, `_docsize`, `_config`) that appear in sqlite_master as `type='table'` — ~80 shadow tables total. sqlift's `Extract` would see them all in the live DB but not in mnemo's hand-written `schema.sql`, and emit DROP ops that `AllowDestructive=false` then rejects, blocking every startup. Resume when sqlift gains: (a) parsing of `CREATE VIRTUAL TABLE` in desired schema, and (b) filtering of shadow tables associated with virtual tables during Extract. Tracked as a sqlift-side target.
+
       **sqlift v0.14 four-gate model.** sqlift v0.14 (2026-05-09) carries four independent flags:
 
       - AllowRebuild — permits SQLite's 12-step rebuild (column type changes, dropping CHECK/FK constraints, reordering columns).
@@ -1372,7 +1369,6 @@ targets:
     achieved: 2026-04-13
   T50:
     name: mnemo's schema is additive-only by policy
-    kind: verify
     status: identified
     value: 0.0
     cost: 0.0
@@ -1382,8 +1378,6 @@ targets:
     - no destructive DDL has been merged since the rule landed (verifiable via git log on store.go and migrations)
     - any future schema change is reviewable as additive-only against this policy
     context: Codifies the append-only contract documented in mnemo/CLAUDE.md § Schema policy and in project memory project_schema_policy.md. Once the sqlift migration runner is in place (T49), this target is mostly documentation + enforcement — the rule is real because the runner enforces it and contributors know about it. The rule unblocks deprecation work like the messages.text/tool_input duplication elimination, which now happens through the three-phase pattern (additive Phase 1 → soak Phase 2 → in-product GC Phase 3) rather than via destructive schema migration.
-    verifies:
-    - T49
     origin: manual
     discovered: 2026-05-09
   T51:
