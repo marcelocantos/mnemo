@@ -40,11 +40,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           /c/msys64/usr/bin/pacman -S --needed --noconfirm mingw-w64-x86_64-sqlite3
-          # CGO_CPPFLAGS applies to both C and C++ preprocessor passes,
-          # so sqlift's bundled sqlift.cpp (compiled via cgo's C++ path)
-          # finds sqlite3.h through it. CGO_CFLAGS alone covers only C.
+          # sqlift's bundled sqlift.cpp does #include <sqlite3.h>;
+          # CGO_CPPFLAGS applies to both C and C++ preprocessor passes so
+          # cgo's C++ compile finds the header. sqlite3 *symbols* come
+          # from mattn/go-sqlite3's bundled copy, so no -L/-l needed.
           echo "CGO_CPPFLAGS=-IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-LC:/msys64/mingw64/lib" >> "$GITHUB_ENV"
 
       - name: Build sqldeep
         working-directory: sqldeep

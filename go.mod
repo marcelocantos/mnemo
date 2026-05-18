@@ -13,7 +13,7 @@ require (
 
 require gopkg.in/yaml.v3 v3.0.1
 
-require github.com/marcelocantos/sqlift/go/sqlift v0.16.0 // indirect
+require github.com/marcelocantos/sqlift/go/sqlift v0.17.0 // indirect
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
