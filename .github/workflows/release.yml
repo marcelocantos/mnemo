@@ -78,6 +78,19 @@ jobs:
           repository: marcelocantos/sqldeep
           path: sqldeep
 
+      - name: Install sqlite3 headers (Windows)
+        # sqlift's bundled sqlift.cpp does #include <sqlite3.h>; MinGW
+        # on the Windows runner has no sqlite3 dev package preinstalled,
+        # so cgo's C++ pass can't resolve the header. Install via the
+        # pre-shipped MSYS2 pacman and expose the include path through
+        # CGO_CPPFLAGS (applies to both C and C++ preprocessor passes).
+        # The header is architecture-independent, so the same install
+        # covers both amd64 and arm64 cross-compile legs.
+        if: matrix.goos == 'windows'
+        run: |
+          /c/msys64/usr/bin/pacman -S --needed --noconfirm mingw-w64-x86_64-sqlite3
+          echo "CGO_CPPFLAGS=-IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
+
       - name: Install llvm-mingw (windows/arm64 cross)
         # windows-latest has x86_64 MinGW GCC preinstalled but no
         # arm64 target. Install llvm-mingw — a Windows-hosted,
