@@ -514,6 +514,12 @@ func applySchema(dbPath string) error {
 	// worker's retention GC can identify it; sharing the daily pool per
 	// 🎯T61 design.
 	//
+	// Skipped on a fresh DB (no existing tables) — there's nothing to
+	// protect, and every test using t.TempDir hits this path so we'd
+	// pay backup.Backup's two short-lived sql.DB opens per test for no
+	// benefit. On a real upgrade, current.Tables is populated and the
+	// backup fires.
+	//
 	// Backup uses its own read-only sqlite connection; sdb stays open
 	// throughout. Earlier versions of this hook closed sdb before the
 	// backup and reopened after — on Windows that re-open deadlocked
@@ -523,23 +529,25 @@ func applySchema(dbPath string) error {
 	// shared lock for VACUUM INTO, so the original close-and-reopen
 	// was unnecessary on every platform — Linux/macOS just tolerated
 	// it where Windows didn't.
-	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		slog.Warn("backup dir create failed; proceeding without pre-migration backup",
-			"dir", backupDir, "err", err)
-	} else {
-		destPath := filepath.Join(backupDir,
-			backup.Filename(backup.TagPreMigration, time.Now()))
-		res, berr := backup.Backup(dbPath, destPath)
-		if berr != nil {
-			slog.Warn("pre-migration backup failed; proceeding with migration anyway",
-				"err", berr)
+	if len(current.Tables) > 0 {
+		backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
+		if err := os.MkdirAll(backupDir, 0o755); err != nil {
+			slog.Warn("backup dir create failed; proceeding without pre-migration backup",
+				"dir", backupDir, "err", err)
 		} else {
-			slog.Info("pre-migration backup written",
-				"path", res.Path,
-				"raw_mb", res.RawSize/(1<<20),
-				"gz_mb", res.GzippedSize/(1<<20),
-				"elapsed", res.Elapsed.Round(time.Second))
+			destPath := filepath.Join(backupDir,
+				backup.Filename(backup.TagPreMigration, time.Now()))
+			res, berr := backup.Backup(dbPath, destPath)
+			if berr != nil {
+				slog.Warn("pre-migration backup failed; proceeding with migration anyway",
+					"err", berr)
+			} else {
+				slog.Info("pre-migration backup written",
+					"path", res.Path,
+					"raw_mb", res.RawSize/(1<<20),
+					"gz_mb", res.GzippedSize/(1<<20),
+					"elapsed", res.Elapsed.Round(time.Second))
+			}
 		}
 	}
 
