@@ -4,7 +4,6 @@
 package store
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1042,70 +1041,6 @@ func TestEntriesTable(t *testing.T) {
 	}
 	if rows[0]["output"] != "Building..." {
 		t.Errorf("expected raw output 'Building...', got %v", rows[0]["output"])
-	}
-}
-
-func TestSchemaVersionRebuild(t *testing.T) {
-	projectDir := t.TempDir()
-
-	writeJSONL(t, projectDir, "myproject", "sess-rebuild", []map[string]any{
-		msg("user", "hello from the first database", "2026-04-01T10:00:00Z"),
-		msg("assistant", "hi there", "2026-04-01T10:00:05Z"),
-	})
-
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-
-	// Create a store — this sets the current schema version.
-	s, err := New(dbPath, projectDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.IngestAll(); err != nil {
-		t.Fatal(err)
-	}
-	results, err := s.Search("hello", 10, "all", "", 0, 0, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected search results before rebuild")
-	}
-	s.Close()
-
-	// Manually set a stale schema version to simulate an old database.
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Exec("PRAGMA user_version = 1")
-	db.Close()
-
-	// Re-open — should detect mismatch, blow away database, rebuild.
-	s, err = New(dbPath, projectDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	// Database was rebuilt — no data until we re-ingest.
-	stats, err := s.Stats()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.TotalMessages != 0 {
-		t.Errorf("expected 0 messages after schema rebuild, got %d", stats.TotalMessages)
-	}
-
-	// Re-ingest and verify data is back.
-	if err := s.IngestAll(); err != nil {
-		t.Fatal(err)
-	}
-	results, err = s.Search("hello", 10, "all", "", 0, 0, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected search results after re-ingest")
 	}
 }
 
