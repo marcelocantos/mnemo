@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -312,6 +313,57 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	go func() {
 		defer e.workers.Done()
 		e.store.StartReconciler(r.baseCtx)
+	}()
+
+	// Periodic backup worker (🎯T61). Opted in by default; opt out via
+	// {"backup": {"disabled": true}} in config.json.
+	r.startBackupWorker(username, e, logger)
+}
+
+// startBackupWorker resolves the backup config and launches the daily
+// snapshot goroutine if backups are enabled. Misconfiguration (bad
+// window times, bad quiescence duration) logs a warning and skips the
+// worker — backup failures should never block the rest of the daemon.
+func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog.Logger) {
+	bcfg := r.cfg.Backup
+	if !bcfg.IsEnabled() {
+		logger.Info("backup: disabled by config")
+		return
+	}
+	winStart, winEnd, err := bcfg.EffectiveWindow()
+	if err != nil {
+		logger.Warn("backup: invalid window, worker not started", "err", err)
+		return
+	}
+	quiescence, err := bcfg.EffectiveQuiescenceMin()
+	if err != nil {
+		logger.Warn("backup: invalid quiescence_min, worker not started", "err", err)
+		return
+	}
+	dir := bcfg.EffectiveDir(e.homeDir)
+	keep := bcfg.EffectiveKeepDailies()
+
+	w, err := backup.NewWorker(backup.Config{
+		SrcPath:     e.store.DBPath(),
+		Dir:         dir,
+		Keep:        keep,
+		WindowStart: winStart,
+		WindowEnd:   winEnd,
+		Quiescence:  quiescence,
+		Activity:    e.store,
+	})
+	if err != nil {
+		logger.Warn("backup: NewWorker failed, worker not started", "err", err)
+		return
+	}
+	logger.Info("backup: worker starting",
+		"dir", dir, "keep", keep,
+		"window_start", winStart, "window_end", winEnd,
+		"quiescence_min", quiescence)
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		w.Run(r.baseCtx)
 	}()
 }
 

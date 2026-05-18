@@ -180,6 +180,8 @@ func (f *fakeBackend) ReworkHistory(targetID string, repo string, limit int) ([]
 	panic("unexpected ReworkHistory call")
 }
 
+func (f *fakeBackend) DBPath() string { return "" }
+
 // newTestHandler returns a Handler and ServeMux wired up with a fakeBackend.
 func newTestHandler(fb *fakeBackend) (*Handler, *http.ServeMux) {
 	h := New(func(string) (store.Backend, error) { return fb, nil })
