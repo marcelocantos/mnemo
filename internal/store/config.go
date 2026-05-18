@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config holds runtime configuration loaded from ~/.mnemo/config.json.
@@ -59,6 +60,150 @@ type Config struct {
 	// or an inline PEM). An absent or empty list disables federation
 	// entirely; the daemon makes no outbound peer calls.
 	LinkedInstances []LinkedInstance `json:"linked_instances,omitempty"`
+
+	// Backup controls the daemon's periodic backup worker (🎯T61).
+	// Absent in config.json → all defaults apply, backup enabled.
+	Backup BackupConfig `json:"backup,omitempty"`
+}
+
+// BackupConfig controls the periodic backup worker. Field defaults are
+// resolved via the Effective* methods so a zero-value BackupConfig (the
+// state when config.json omits the "backup" section entirely) gets
+// sensible behaviour: enabled, ~/.mnemo/backups, 7 dailies, 03:00–04:00
+// local window, 15 min quiescence threshold.
+type BackupConfig struct {
+	// Disabled opts out of periodic backups. Negated form chosen so
+	// the zero value (BackupConfig{}, what you get when config.json
+	// omits the "backup" key entirely) means enabled — backups are the
+	// safe default.
+	Disabled bool `json:"disabled,omitempty"`
+
+	// Dir is the backup directory. Supports ~ for the user's home.
+	// Empty → ~/.mnemo/backups.
+	Dir string `json:"dir,omitempty"`
+
+	// KeepDailies caps the number of snapshots retained. Older
+	// backups beyond this count are deleted after each successful run.
+	// 0 or unset → 7.
+	KeepDailies int `json:"keep_dailies,omitempty"`
+
+	// WindowStart and WindowEnd bound the local time-of-day during
+	// which the worker may take its daily snapshot. Format "HH:MM"
+	// (24h). Empty → "03:00" / "04:00".
+	WindowStart string `json:"window_start,omitempty"`
+	WindowEnd   string `json:"window_end,omitempty"`
+
+	// QuiescenceMin is the minimum time since the last recorded write
+	// activity (Store.NoteActivity) before the worker will snapshot.
+	// Format: a Go time.ParseDuration string. Empty → "15m".
+	QuiescenceMin string `json:"quiescence_min,omitempty"`
+}
+
+// IsEnabled reports whether the periodic backup worker should run.
+// Defaults to true; only an explicit `"disabled": true` opts out.
+func (b BackupConfig) IsEnabled() bool { return !b.Disabled }
+
+// EffectiveDir returns Dir with ~ expanded, or ~/.mnemo/backups when
+// Dir is empty. userHome is the home directory used for expansion.
+func (b BackupConfig) EffectiveDir(userHome string) string {
+	d := b.Dir
+	if d == "" {
+		return filepath.Join(userHome, ".mnemo", "backups")
+	}
+	if userHome != "" {
+		switch {
+		case d == "~":
+			return userHome
+		case strings.HasPrefix(d, "~/"):
+			return filepath.Join(userHome, d[2:])
+		}
+	}
+	return d
+}
+
+// EffectiveKeepDailies returns KeepDailies or 7 when unset.
+func (b BackupConfig) EffectiveKeepDailies() int {
+	if b.KeepDailies > 0 {
+		return b.KeepDailies
+	}
+	return 7
+}
+
+// EffectiveWindow returns the [start, end) local time-of-day window for
+// the daily backup attempt. Returns parsed time.Duration offsets from
+// midnight rather than parsed times, since the worker needs to compute
+// "next 03:17 today or tomorrow" against the wall clock.
+//
+// Returns an error if WindowStart/WindowEnd are set but malformed.
+// Defaults: 3h, 4h (03:00, 04:00).
+func (b BackupConfig) EffectiveWindow() (start, end time.Duration, err error) {
+	start, err = parseHHMM(b.WindowStart, 3*time.Hour)
+	if err != nil {
+		return 0, 0, fmt.Errorf("window_start: %w", err)
+	}
+	end, err = parseHHMM(b.WindowEnd, 4*time.Hour)
+	if err != nil {
+		return 0, 0, fmt.Errorf("window_end: %w", err)
+	}
+	if end <= start {
+		return 0, 0, fmt.Errorf("window_end (%v) must be > window_start (%v)", end, start)
+	}
+	return start, end, nil
+}
+
+// EffectiveQuiescenceMin returns the parsed quiescence threshold, or
+// 15 minutes when unset. Errors are surfaced so config validation can
+// catch a typo'd value at write time.
+func (b BackupConfig) EffectiveQuiescenceMin() (time.Duration, error) {
+	if b.QuiescenceMin == "" {
+		return 15 * time.Minute, nil
+	}
+	d, err := time.ParseDuration(b.QuiescenceMin)
+	if err != nil {
+		return 0, fmt.Errorf("quiescence_min: %w", err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("quiescence_min: must be non-negative, got %v", d)
+	}
+	return d, nil
+}
+
+// parseHHMM parses "HH:MM" (24-hour, leading zeros optional) and
+// returns the offset from midnight. Empty input returns dflt.
+func parseHHMM(s string, dflt time.Duration) (time.Duration, error) {
+	if s == "" {
+		return dflt, nil
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("expected HH:MM, got %q", s)
+	}
+	h, err := parseUintBounded(parts[0], 0, 23)
+	if err != nil {
+		return 0, fmt.Errorf("hour: %w", err)
+	}
+	m, err := parseUintBounded(parts[1], 0, 59)
+	if err != nil {
+		return 0, fmt.Errorf("minute: %w", err)
+	}
+	return time.Duration(h)*time.Hour + time.Duration(m)*time.Minute, nil
+}
+
+func parseUintBounded(s string, lo, hi int) (int, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("non-digit in %q", s)
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < lo || n > hi {
+		return 0, fmt.Errorf("%d out of range [%d,%d]", n, lo, hi)
+	}
+	return n, nil
 }
 
 // LinkedInstance is one peer mnemo endpoint the daemon may query.

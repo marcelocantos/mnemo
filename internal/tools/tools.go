@@ -347,6 +347,26 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
 		),
+		mcp.NewTool("mnemo_backup_status",
+			mcp.WithDescription(`List existing backups of ~/.mnemo/mnemo.db with size, age, and tag (daily / pre-migration / manual).
+
+Backups are taken by the daemon's periodic worker (03:00–04:00 local during a quiescent window), by the migration path (before any sqlift.Apply), or manually via mnemo_backup_now. The retention pool is shared across all tags — older backups are GC'd after each daily run.
+
+Returns the newest first. Restore is manual:
+  gunzip -c ~/.mnemo/backups/<file>.db.gz > ~/.mnemo/mnemo.db.restored
+  brew services stop marcelocantos/tap/mnemo
+  mv ~/.mnemo/mnemo.db ~/.mnemo/mnemo.db.bak
+  mv ~/.mnemo/mnemo.db.restored ~/.mnemo/mnemo.db
+  brew services start marcelocantos/tap/mnemo`),
+		),
+		mcp.NewTool("mnemo_backup_now",
+			mcp.WithDescription(`Trigger an immediate backup of ~/.mnemo/mnemo.db. Tagged "manual" so retention GC distinguishes it from automatic dailies.
+
+Idempotency: skips if any backup was taken within the last hour, unless force=true. The VACUUM INTO + gzip step takes ~1-2 minutes on a multi-GB DB; the call blocks until the snapshot is on disk.
+
+Useful before risky operations (manual schema edits, large deletes via mnemo_query, etc.).`),
+			mcp.WithBoolean("force", mcp.Description("Force a new snapshot even if a recent backup exists (default false)")),
+		),
 		mcp.NewTool("mnemo_prs",
 			mcp.WithDescription(`Search GitHub PRs and issues across all indexed repos. Uses FTS5 for keyword search on titles and bodies. Data is polled from GitHub repos that appear in session history and backfilled at startup.
 
@@ -627,6 +647,10 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.docs(args)
 	case "mnemo_synthesis":
 		return ch.synthesis(args)
+	case "mnemo_backup_status":
+		return ch.backupStatus()
+	case "mnemo_backup_now":
+		return ch.backupNow(args)
 	case "mnemo_who_ran":
 		return ch.whoRan(args)
 	case "mnemo_permissions":
