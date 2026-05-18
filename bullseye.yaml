@@ -1638,6 +1638,42 @@ targets:
       This target is small and independent — does not depend on T49/T59. Discovered 2026-05-14 while investigating the compactor wiring gap.
     origin: manual
     discovered: 2026-05-14
+  T61:
+    name: Automated periodic backups of mnemo.db
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Daemon goroutine snapshots ~/.mnemo/mnemo.db daily during a 03:00–04:00 local window using VACUUM INTO + gzip, written to ~/.mnemo/backups/mnemo-YYYYMMDDTHHMMSSZ.db.gz
+    - Backup only fires after observing ≥15 min of write quiescence within the 03–04 window; if no quiescence by end-of-window+1h, the day is skipped and logged
+    - Pre-migration backup fires synchronously from applySchema when sqlift.Diff is non-empty, tagged in the same daily pool (shared retention)
+    - Retention keeps last N (default 7) backups; older snapshots GC'd after each successful backup
+    - 'BackupConfig is part of Config and hot-reloadable via mnemo_config: Enabled bool (default true), Dir string (default ~/.mnemo/backups), KeepDailies int (default 7), WindowStart/WindowEnd time-of-day strings, QuiescenceMin duration'
+    - 'Activity tracking: Store exposes LastWriteAt() updated by ingest + backfill + vault + similar write paths'
+    - MCP tool mnemo_backup_status lists existing backups with size, age, and source (daily / pre-migration)
+    - 'MCP tool mnemo_backup_now triggers an immediate backup (manual override) with idempotency: skips if a backup ran within the last hour unless force=true'
+    - 'Backup output is a valid SQLite DB: open it, count rows in entries, verify against live DB''s count (within tolerance for any concurrent ingest)'
+    - On-disk layout designed so future optimization (zstd-dict, chunked dedup) can replace gzip without breaking the file-naming/scanning logic
+    - 'Tests cover: Backup() produces openable SQLite, retention GC keeps only last N, quiescence check skips when activity recent, pre-migration tag survives daily GC for at least one cycle'
+    context: |-
+      Independent of migration safety, mnemo should periodically snapshot its DB so users have a recovery path against any failure mode — bad migration, corruption, accidental rm, ransomware, disk fault. Live DBs are now multi-GB; replaying from JSONL is impossible because Claude Code rotates transcripts. Backups become the only path to recovery.
+
+      Empirical measurements on a 7.1 GB live DB:
+      - VACUUM INTO is ~35s, deterministic (consecutive runs produce byte-identical output), works against a running daemon (mode=ro client takes a shared lock)
+      - gzip -1 produces 1.9 GB in ~40s; gzip -6 trims another 200 MB for an extra 50s. -1 is the right tradeoff at 3am.
+      - Disk math: 1.7 GB × 7 dailies ≈ 12 GB at this scale; ~1.5 GB for a 500 MB DB user.
+
+      Decided design (per user 2026-05-18):
+      - Start with gzip full snapshots (MVP); layout designed so future zstd-dict or chunked dedup can drop in
+      - On by default with retention=7
+      - Pre-migration backups share the daily pool (cheaper on disk; trade-off accepted)
+      - 03:00–04:00 local random scheduling within the window
+      - ≥15 min quiescence required to actually fire
+      - Manual override via mnemo_backup_now
+
+      Future optimization opportunity: consecutive snapshots are byte-identical when no logical changes occurred. zstd-with-baseline-dict could drop power-user storage from 12 GB to ~5-6 GB at ~300 LOC; chunked dedup gets to ~2-3 GB at ~1000 LOC. Track as a follow-up target if disk pressure surfaces.
+    origin: manual
+    discovered: 2026-05-18
   T7:
     name: Agent-defined query templates
     status: achieved
