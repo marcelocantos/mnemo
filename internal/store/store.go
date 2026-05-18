@@ -22,9 +22,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/sqldeep/go/sqldeep"
 	"github.com/marcelocantos/sqlift/go/sqlift"
 	_ "github.com/mattn/go-sqlite3"
@@ -39,6 +41,7 @@ const NoncePrefix = "mnemo:self:"
 // Store is a searchable index of Claude Code transcripts.
 type Store struct {
 	db         *sql.DB
+	dbPath     string
 	projectDir string
 
 	mu      sync.Mutex
@@ -82,6 +85,40 @@ type Store struct {
 	// without bound on every Sync cycle. Populated via
 	// RegisterExcludedPath, queried via IsExcluded.
 	exclusions *exclusionRegistry
+
+	// lastWriteAt is the unix-nano timestamp of the most recent ingest
+	// or backfill that committed rows. Updated by NoteActivity; read
+	// by the backup worker via LastWriteAt() to detect a quiescent
+	// window before taking a snapshot. Tracked in-memory only — a
+	// daemon restart resets it to startup time, which is conservative
+	// (worker will wait the full quiescence period before its first
+	// backup attempt). Atomic so reads and writes don't need rwmu.
+	lastWriteAt atomic.Int64
+}
+
+// NoteActivity records that a write happened just now. The backup worker
+// reads this via LastWriteAt to detect a quiescent window before snapshotting.
+// Call from any ingest / backfill path that commits rows. Cheap (atomic
+// store of an int64).
+func (s *Store) NoteActivity() {
+	s.lastWriteAt.Store(time.Now().UnixNano())
+}
+
+// LastWriteAt returns the wall-clock time of the most recent NoteActivity
+// call, or the zero Time if nothing has been recorded since startup.
+func (s *Store) LastWriteAt() time.Time {
+	ns := s.lastWriteAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// DBPath returns the filesystem path of the underlying SQLite database.
+// Used by the backup worker to point sqlift / VACUUM INTO at the right
+// file without re-deriving the path.
+func (s *Store) DBPath() string {
+	return s.dbPath
 }
 
 // SetWorkspaceRoots configures the filesystem roots under which repo-
@@ -465,6 +502,46 @@ func applySchema(dbPath string) error {
 	if err != nil {
 		return fmt.Errorf("sqlift diff: %w", err)
 	}
+	if plan.Empty() {
+		// No diff — nothing to back up before, nothing to apply.
+		return nil
+	}
+
+	// Pre-migration backup. Cheap insurance even though AllowNone gates
+	// reject everything destructive: if a future sqlift bug or an
+	// unexpected interaction at apply time corrupts the live DB, this
+	// snapshot is the rollback point. Tagged pre-migration so the daily
+	// worker's retention GC can identify it; sharing the daily pool per
+	// 🎯T61 design.
+	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		slog.Warn("backup dir create failed; proceeding without pre-migration backup",
+			"dir", backupDir, "err", err)
+	} else {
+		destPath := filepath.Join(backupDir,
+			backup.Filename(backup.TagPreMigration, time.Now()))
+		// sqlift's connection holds a write lock; release it briefly so
+		// Backup can take a fresh shared lock via its own read-only handle.
+		sdb.Close()
+		res, berr := backup.Backup(dbPath, destPath)
+		if berr != nil {
+			slog.Warn("pre-migration backup failed; proceeding with migration anyway",
+				"err", berr)
+		} else {
+			slog.Info("pre-migration backup written",
+				"path", res.Path,
+				"raw_mb", res.RawSize/(1<<20),
+				"gz_mb", res.GzippedSize/(1<<20),
+				"elapsed", res.Elapsed.Round(time.Second))
+		}
+		// Re-open sqlift handle for Apply.
+		sdb, err = sqlift.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("sqlift reopen after backup: %w", err)
+		}
+		defer sdb.Close()
+	}
+
 	return sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone})
 }
 
@@ -498,6 +575,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 	}
 	s := &Store{
 		db:         db,
+		dbPath:     dbPath,
 		projectDir: projectDir,
 		offsets:    make(map[string]int64),
 		imageSem:   make(chan struct{}, n),
@@ -5620,6 +5698,7 @@ func (s *Store) ingestFile(path string) error {
 
 	if count > 0 {
 		slog.Debug("ingested", "file", filepath.Base(path), "messages", count)
+		s.NoteActivity()
 	}
 
 	// Detect decision pairs (proposal + confirmation) in this session.
