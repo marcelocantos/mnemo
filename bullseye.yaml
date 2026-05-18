@@ -1640,7 +1640,7 @@ targets:
     discovered: 2026-05-14
   T61:
     name: Automated periodic backups of mnemo.db
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1674,6 +1674,7 @@ targets:
       Future optimization opportunity: consecutive snapshots are byte-identical when no logical changes occurred. zstd-with-baseline-dict could drop power-user storage from 12 GB to ~5-6 GB at ~300 LOC; chunked dedup gets to ~2-3 GB at ~1000 LOC. Track as a follow-up target if disk pressure surfaces.
     origin: manual
     discovered: 2026-05-18
+    achieved: 2026-05-18
   T7:
     name: Agent-defined query templates
     status: achieved
