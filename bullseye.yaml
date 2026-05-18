@@ -1307,7 +1307,7 @@ targets:
     achieved: 2026-05-06
   T49:
     name: Schema upgrades to mnemo.db are non-destructive and mediated by sqlift
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1352,6 +1352,7 @@ targets:
       Prerequisite for the schema additive-only policy (T50) and for the messages.text/tool_input deprecation work (T51). Until this lands, the additive-only rule is unenforceable.
     origin: manual
     discovered: 2026-05-09
+    achieved: 2026-05-18
   T5:
     name: Self-improving tool discovery
     status: achieved
