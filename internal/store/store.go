@@ -513,6 +513,16 @@ func applySchema(dbPath string) error {
 	// snapshot is the rollback point. Tagged pre-migration so the daily
 	// worker's retention GC can identify it; sharing the daily pool per
 	// 🎯T61 design.
+	//
+	// Backup uses its own read-only sqlite connection; sdb stays open
+	// throughout. Earlier versions of this hook closed sdb before the
+	// backup and reopened after — on Windows that re-open deadlocked
+	// because mattn/go-sqlite3's file handle release is asynchronous
+	// (NTFS file-lock release lags Close() return). SQLite is fine with
+	// the writer connection idle while a separate reader takes a
+	// shared lock for VACUUM INTO, so the original close-and-reopen
+	// was unnecessary on every platform — Linux/macOS just tolerated
+	// it where Windows didn't.
 	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		slog.Warn("backup dir create failed; proceeding without pre-migration backup",
@@ -520,9 +530,6 @@ func applySchema(dbPath string) error {
 	} else {
 		destPath := filepath.Join(backupDir,
 			backup.Filename(backup.TagPreMigration, time.Now()))
-		// sqlift's connection holds a write lock; release it briefly so
-		// Backup can take a fresh shared lock via its own read-only handle.
-		sdb.Close()
 		res, berr := backup.Backup(dbPath, destPath)
 		if berr != nil {
 			slog.Warn("pre-migration backup failed; proceeding with migration anyway",
@@ -534,12 +541,6 @@ func applySchema(dbPath string) error {
 				"gz_mb", res.GzippedSize/(1<<20),
 				"elapsed", res.Elapsed.Round(time.Second))
 		}
-		// Re-open sqlift handle for Apply.
-		sdb, err = sqlift.Open(dbPath)
-		if err != nil {
-			return fmt.Errorf("sqlift reopen after backup: %w", err)
-		}
-		defer sdb.Close()
 	}
 
 	return sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone})
