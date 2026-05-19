@@ -1675,6 +1675,27 @@ targets:
     origin: manual
     discovered: 2026-05-18
     achieved: 2026-05-18
+  T62:
+    name: Daemon eager-starts default user's workers at boot
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - At daemon startup, after `default user` is logged, main.go invokes `Registry.ForUser(defaultUser)` once — synchronously enough to fail loud if store init fails, but the worker goroutines themselves stay async
+    - Backup worker (and all other per-user workers — compactor, reviewer, CI poller, reconciler, vault, ingest watcher) start at daemon boot rather than on the first MCP tool call
+    - 'Verified empirically: `tail /opt/homebrew/var/log/mnemo.log` immediately after `brew services restart marcelocantos/tap/mnemo` shows `backup: worker starting` and `compact: watcher starting` without an intervening MCP call'
+    - First daily backup fires within the next 03:00-04:00 local window after a daemon restart, with no human MCP traffic required
+    - Multi-user lazy startup still works — `ForUser(otherUser)` on a non-default user continues to fire only on demand
+    context: |-
+      The 🎯T61 backup worker (and every other per-user worker) is wired into `Registry.ForUser`, which is invoked lazily on the first MCP tool call after a daemon boot. For an active user this is invisible. For a passive setup — `brew services` daemon with no Claude session connected — the worker never starts, so the supposedly-automated daily backup never fires.
+
+      Discovered 2026-05-19 while verifying v0.39.0's backup behaviour on the live install: the daemon had been up 24h since the v0.39.0 brew restart, but the log between startup and the first manual MCP call showed zero worker activity. As soon as `mnemo_backup_status` ran, the worker logged "next attempt scheduled" and the system started behaving as expected.
+
+      The fix is small: at daemon startup, after `default user` is logged, call `Registry.ForUser(defaultUser)` explicitly so workers spin up at boot instead of waiting for traffic. The per-user abstraction stays where it is (real for the Windows-Service multi-tenant case); we just stop deferring the default user's initialization.
+
+      Per-MCP-client lazy initialization is a separate concern that doesn't apply here — `ForUser` is keyed by OS user, not by connection.
+    origin: manual
+    discovered: 2026-05-19
   T7:
     name: Agent-defined query templates
     status: achieved

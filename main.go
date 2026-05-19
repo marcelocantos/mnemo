@@ -517,6 +517,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		slog.Info("no default user — requests must include ?user=<name>", "reason", defErr)
 	} else {
 		slog.Info("default user", "user", defaultUser)
+		// Eager-start the default user's per-user workers (compactor,
+		// reviewer, CI poller, backup worker, etc.) at daemon boot. Without
+		// this, ForUser is only invoked when the first MCP tool call lands
+		// — so a daemon nobody pokes never starts its backup worker, never
+		// runs ingest, etc. (🎯T62).
+		//
+		// Multi-user lazy startup still works: ForUser(otherUser) for a
+		// non-default user keeps firing on demand.
+		if _, err := reg.ForUser(defaultUser); err != nil {
+			slog.Error("eager startup failed for default user", "user", defaultUser, "err", err)
+			return err
+		}
 	}
 
 	// Resolver threaded into tools.Handler. If the inbound request
