@@ -1677,7 +1677,7 @@ targets:
     achieved: 2026-05-18
   T62:
     name: Daemon eager-starts default user's workers at boot
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1696,6 +1696,7 @@ targets:
       Per-MCP-client lazy initialization is a separate concern that doesn't apply here — `ForUser` is keyed by OS user, not by connection.
     origin: manual
     discovered: 2026-05-19
+    achieved: 2026-05-19
   T7:
     name: Agent-defined query templates
     status: achieved
