@@ -239,7 +239,7 @@ func (s *Store) ingestSynthesisRootLocked(root string) (indexed, skipped, onDisk
 		}
 		onDisk++
 		repo := synthesisRepoLabel(root, path)
-		n, sk := s.ingestDocFileLocked(path, repo)
+		n, sk := s.ingestDocFileLocked(path, repo, 0)
 		indexed += n
 		skipped += sk
 		return nil
