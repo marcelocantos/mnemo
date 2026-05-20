@@ -23,11 +23,9 @@ import (
 type fakeStoreSource struct {
 	mu         sync.Mutex
 	candidates []store.CompactionCandidate
-	scans      atomic.Int64
 }
 
 func (f *fakeStoreSource) SelectCompactionCandidates(minMsgs int, recencyCutoff time.Time, limit int) ([]store.CompactionCandidate, error) {
-	f.scans.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]store.CompactionCandidate, len(f.candidates))
@@ -98,9 +96,11 @@ func captureSlog() (*bytes.Buffer, func()) {
 	return &buf, func() { slog.SetDefault(old) }
 }
 
-// runOneScan starts the watcher, waits until at least one scan has
-// observed candidates, and stops. Returns once cleanly shut down.
-func runOneScan(t *testing.T, w *Watcher, src *fakeStoreSource) {
+// runUntil starts the watcher, polls `until` until it returns true
+// (or a hard deadline elapses), and then stops it cleanly. Use this
+// to wait for a specific observable effect — LLM calls, compactions
+// written, log lines — rather than racing on "scan started".
+func runUntil(t *testing.T, w *Watcher, until func() bool) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -108,9 +108,9 @@ func runOneScan(t *testing.T, w *Watcher, src *fakeStoreSource) {
 		defer close(done)
 		w.Run(ctx)
 	}()
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if src.scans.Load() > 0 {
+		if until() {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -136,7 +136,7 @@ func TestWatcherScansAndCompactsSession(t *testing.T) {
 		ScanInterval: 10 * time.Millisecond,
 	}, "/mnemo-repo")
 
-	runOneScan(t, w, src)
+	runUntil(t, w, func() bool { return llm.calls.Load() >= 2 })
 
 	if got := llm.calls.Load(); got < 2 {
 		t.Fatalf("expected at least 2 LLM calls (one per candidate), got %d", got)
@@ -163,7 +163,7 @@ func TestWatcherUnboundSessionCompacts(t *testing.T) {
 		ScanInterval: 10 * time.Millisecond,
 	}, "")
 
-	runOneScan(t, w, src)
+	runUntil(t, w, func() bool { return llm.calls.Load() >= 1 })
 
 	if llm.calls.Load() == 0 {
 		t.Fatal("expected LLM call for unbound session, got 0")
@@ -192,7 +192,7 @@ func TestWatcherBoundSessionTagsConnection(t *testing.T) {
 		ScanInterval: 10 * time.Millisecond,
 	}, "")
 
-	runOneScan(t, w, src)
+	runUntil(t, w, func() bool { return llm.calls.Load() >= 1 })
 
 	if len(cs.compacts) == 0 {
 		t.Fatal("expected a compaction, got none")
@@ -222,7 +222,9 @@ func TestWatcherSkipsSelfSession(t *testing.T) {
 		ScanInterval: 10 * time.Millisecond,
 	}, "/mnemo-repo")
 
-	runOneScan(t, w, src)
+	runUntil(t, w, func() bool {
+		return llm.calls.Load() >= 1 && strings.Contains(buf.String(), string(outcomeSkippedSelf))
+	})
 
 	if llm.calls.Load() != 1 {
 		t.Errorf("expected exactly 1 LLM call (self skipped, user compacted), got %d", llm.calls.Load())
@@ -251,7 +253,7 @@ func TestTickLogCompacted(t *testing.T) {
 		ScanInterval: 10 * time.Millisecond,
 	}, "")
 
-	runOneScan(t, w, src)
+	runUntil(t, w, func() bool { return strings.Contains(buf.String(), string(outcomeCompacted)) })
 
 	got := buf.String()
 	if !strings.Contains(got, string(outcomeCompacted)) {
@@ -291,7 +293,7 @@ func TestTickLogNothingToCompact(t *testing.T) {
 		ScanInterval: 10 * time.Millisecond,
 	}, "")
 
-	runOneScan(t, w, src)
+	runUntil(t, w, func() bool { return strings.Contains(buf.String(), string(outcomeNothingToCompact)) })
 
 	got := buf.String()
 	if !strings.Contains(got, string(outcomeNothingToCompact)) {
