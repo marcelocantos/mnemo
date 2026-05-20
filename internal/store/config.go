@@ -74,6 +74,69 @@ type Config struct {
 	// from transcript tokens) is always on and requires zero external
 	// calls.
 	CostReconciliation CostReconciliationConfig `json:"cost_reconciliation,omitempty"`
+
+	// ConnectionSweep controls the daemon_connections sweeper
+	// (🎯T60). Absent in config.json → defaults apply, sweeper
+	// enabled. Set {"connection_sweep": {"disabled": true}} to opt
+	// out (the open-row count will then grow unbounded as it did
+	// before — accepted only if some external mechanism reaps).
+	ConnectionSweep ConnectionSweepConfig `json:"connection_sweep,omitempty"`
+}
+
+// ConnectionSweepConfig controls how often the daemon checks for
+// stale daemon_connections rows and how long a row must be idle
+// before being marked closed. A zero-value ConnectionSweepConfig
+// (i.e. the section absent from config.json) means enabled, sweep
+// every minute, idle threshold 10 minutes.
+type ConnectionSweepConfig struct {
+	// Disabled opts out of the sweeper. Negated form so the zero
+	// value (absent section) means enabled.
+	Disabled bool `json:"disabled,omitempty"`
+
+	// Interval between sweep ticks. Format: a Go time.ParseDuration
+	// string. Empty → "1m".
+	Interval string `json:"interval,omitempty"`
+
+	// StaleAfter is the duration since last_seen_at after which a
+	// connection is considered stale and marked closed. Format: a
+	// Go time.ParseDuration string. Empty → "10m".
+	StaleAfter string `json:"stale_after,omitempty"`
+}
+
+// IsEnabled reports whether the sweeper should run. Defaults to true;
+// only an explicit `"disabled": true` opts out.
+func (c ConnectionSweepConfig) IsEnabled() bool { return !c.Disabled }
+
+// EffectiveInterval returns the parsed sweep interval, or 1 minute
+// when unset.
+func (c ConnectionSweepConfig) EffectiveInterval() (time.Duration, error) {
+	if c.Interval == "" {
+		return time.Minute, nil
+	}
+	d, err := time.ParseDuration(c.Interval)
+	if err != nil {
+		return 0, fmt.Errorf("interval: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("interval must be positive, got %v", d)
+	}
+	return d, nil
+}
+
+// EffectiveStaleAfter returns the parsed idle threshold, or 10 minutes
+// when unset.
+func (c ConnectionSweepConfig) EffectiveStaleAfter() (time.Duration, error) {
+	if c.StaleAfter == "" {
+		return 10 * time.Minute, nil
+	}
+	d, err := time.ParseDuration(c.StaleAfter)
+	if err != nil {
+		return 0, fmt.Errorf("stale_after: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("stale_after must be positive, got %v", d)
+	}
+	return d, nil
 }
 
 // CostReconciliationConfig gates the Anthropic Admin API reconciler.
