@@ -1436,7 +1436,7 @@ targets:
     achieved: 2026-05-13
   T53:
     name: Trees-of-interest distinguish references from content for parent-child overlap
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1452,6 +1452,7 @@ targets:
       Not blocking any current work — file paths in `docs` rows are already canonical, so today's double-ingest behaviour is at worst wasted writes that the content-hash dedup catches. Becomes load-bearing once trees-of-interest are derived automatically and parent-child overlap becomes common.
     origin: manual
     discovered: 2026-05-11
+    achieved: 2026-05-20
   T54:
     name: Ingestion is unified under trees-of-interest derived from session cwds
     status: identified
