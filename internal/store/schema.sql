@@ -119,6 +119,12 @@ CREATE TABLE decisions (
 			timestamp TEXT NOT NULL
 		);
 
+CREATE TABLE doc_tree_refs (
+			doc_id INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+			tree_id INTEGER NOT NULL REFERENCES trees_of_interest(id) ON DELETE CASCADE,
+			PRIMARY KEY (doc_id, tree_id)
+		);
+
 CREATE TABLE docs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo TEXT NOT NULL,
@@ -405,6 +411,13 @@ CREATE TABLE targets (
 			UNIQUE(file_path, target_id)
 		);
 
+CREATE TABLE trees_of_interest (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			root_path TEXT NOT NULL UNIQUE,
+			label TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);
+
 -- Indexes
 
 CREATE INDEX idx_audit_entries_date ON audit_entries(date);
@@ -441,6 +454,8 @@ CREATE INDEX idx_decisions_repo ON decisions(repo);
 CREATE INDEX idx_decisions_session ON decisions(session_id);
 
 CREATE INDEX idx_decisions_timestamp ON decisions(timestamp);
+
+CREATE INDEX idx_doc_tree_refs_tree ON doc_tree_refs(tree_id);
 
 CREATE INDEX idx_docs_repo ON docs(repo);
 
