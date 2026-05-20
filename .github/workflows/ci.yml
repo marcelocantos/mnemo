@@ -78,4 +78,7 @@ jobs:
         working-directory: mnemo
         env:
           CGO_ENABLED: "1"
-        run: go test -tags sqlite_fts5 ./...
+        # -timeout=20m covers Windows' cgo-heavy sqlift.Apply on each
+        # newTestStore call, where the default 10m per-package ceiling
+        # was already running ~9-10m on master before any schema growth.
+        run: go test -tags sqlite_fts5 -timeout=20m ./...
