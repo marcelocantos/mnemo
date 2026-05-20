@@ -1504,7 +1504,7 @@ targets:
     achieved: 2026-05-12
   T56:
     name: Store.Query unconditionally transpiles via sqldeep instead of dispatching on syntax
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1542,6 +1542,7 @@ targets:
       Cleanup-shaped. Independent of T49/T50/T51 — can ship anytime. If sqldeep round-tripping reveals a real issue with a specific SQL construct, file an upstream sqldeep target rather than adding a special case back to mnemo.
     origin: manual
     discovered: 2026-05-11
+    achieved: 2026-05-20
   T57:
     name: internal/store TestUsage* tests pass on master
     status: achieved
@@ -1556,7 +1557,7 @@ targets:
     achieved: 2026-05-12
   T58:
     name: CI is enforced as a required status check on master
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1568,6 +1569,7 @@ targets:
     - T57
     origin: manual
     discovered: 2026-05-11
+    achieved: 2026-05-20
   T59:
     name: Compaction is triggered by session-activity heuristics, not by MCP connection bindings
     status: identified
