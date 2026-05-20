@@ -64,7 +64,34 @@ type Config struct {
 	// Backup controls the daemon's periodic backup worker (🎯T61).
 	// Absent in config.json → all defaults apply, backup enabled.
 	Backup BackupConfig `json:"backup,omitempty"`
+
+	// CostReconciliation controls the Anthropic Admin API reconciler
+	// (🎯T63). Disabled by default: even with ANTHROPIC_ADMIN_API_KEY
+	// set in the environment, no outbound Admin API call is made until
+	// the user explicitly opts in via this config block. This protects
+	// users in security-reviewed environments where unsolicited egress
+	// to hosted APIs is undesirable. The estimated-cost path (derived
+	// from transcript tokens) is always on and requires zero external
+	// calls.
+	CostReconciliation CostReconciliationConfig `json:"cost_reconciliation,omitempty"`
 }
+
+// CostReconciliationConfig gates the Anthropic Admin API reconciler.
+// A zero-value CostReconciliationConfig (i.e. the section omitted from
+// config.json) means disabled — opposite of BackupConfig's safety
+// default, because the safe default for unsolicited outbound API calls
+// is "do not call".
+type CostReconciliationConfig struct {
+	// Enabled opts in to the reconciler. When false (the zero value
+	// and documented default), StartReconciler exits immediately and
+	// makes zero Admin API calls regardless of whether
+	// ANTHROPIC_ADMIN_API_KEY is set in the daemon's environment.
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// IsEnabled reports whether the reconciler should run. False by
+// default (zero-value config = no Admin API calls).
+func (c CostReconciliationConfig) IsEnabled() bool { return c.Enabled }
 
 // BackupConfig controls the periodic backup worker. Field defaults are
 // resolved via the Effective* methods so a zero-value BackupConfig (the

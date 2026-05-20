@@ -52,13 +52,26 @@ type costReportEntry struct {
 // Admin API for authoritative daily costs and stores them via
 // UpsertReconciledCost. It stops when ctx is cancelled.
 //
-// If ANTHROPIC_ADMIN_API_KEY is not set, a one-time warning is logged and
-// the reconciler exits immediately without affecting normal operation.
-func (s *Store) StartReconciler(ctx context.Context) {
+// Gating (🎯T63):
+//   - enabled=false (the default, per CostReconciliationConfig): log an
+//     informational line and return; no Admin API call is ever made,
+//     regardless of whether ANTHROPIC_ADMIN_API_KEY is set.
+//   - enabled=true but ANTHROPIC_ADMIN_API_KEY missing: log a warning
+//     and return; the user opted in but the key is unreachable.
+//   - enabled=true with the key present: poll once immediately, then
+//     every reconcilerInterval.
+func (s *Store) StartReconciler(ctx context.Context, enabled bool) {
+	if !enabled {
+		slog.Info("cost reconciliation disabled: opt-in via " +
+			"config.cost_reconciliation.enabled = true; " +
+			"usage rows will report source=estimated")
+		return
+	}
 	apiKey := os.Getenv(anthropicAdminAPIKeyEnv)
 	if apiKey == "" {
-		slog.Warn("cost reconciliation disabled: ANTHROPIC_ADMIN_API_KEY not set; " +
-			"usage rows will report source=estimated")
+		slog.Warn("cost reconciliation enabled in config but " +
+			"ANTHROPIC_ADMIN_API_KEY not set; usage rows will " +
+			"report source=estimated")
 		return
 	}
 

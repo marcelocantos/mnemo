@@ -58,6 +58,45 @@ func TestReloadReportClassifiesFields(t *testing.T) {
 	}
 }
 
+// TestReloadFlipsCostReconciliation verifies that toggling the
+// cost_reconciliation.enabled flag through Reload appears in the
+// Changed and Adopted fields. The flag is recognised as a live-
+// adoptable config change (🎯T63), distinct from linked_instances
+// which requires a restart.
+func TestReloadFlipsCostReconciliation(t *testing.T) {
+	old := store.Config{
+		CostReconciliation: store.CostReconciliationConfig{Enabled: false},
+	}
+	r := NewRegistry(context.Background(), old, "")
+	defer r.Close()
+
+	on := store.Config{
+		CostReconciliation: store.CostReconciliationConfig{Enabled: true},
+	}
+	report := r.Reload(on)
+	if !contains(report.Changed, "cost_reconciliation.enabled") {
+		t.Errorf("Changed: got %v want cost_reconciliation.enabled", report.Changed)
+	}
+	if !contains(report.Adopted, "cost_reconciliation.enabled") {
+		t.Errorf("Adopted: got %v want cost_reconciliation.enabled", report.Adopted)
+	}
+
+	// Flip off again — should re-appear as a change.
+	report = r.Reload(old)
+	if !contains(report.Changed, "cost_reconciliation.enabled") {
+		t.Errorf("Reload back to off, Changed: got %v want cost_reconciliation.enabled", report.Changed)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestReloadFlagsLinkedInstancesAsRestart(t *testing.T) {
 	old := store.Config{LinkedInstances: nil}
 	r := NewRegistry(context.Background(), old, "")
