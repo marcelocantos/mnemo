@@ -1699,6 +1699,29 @@ targets:
     origin: manual
     discovered: 2026-05-19
     achieved: 2026-05-19
+  T63:
+    name: Cost reconciliation is gated by explicit opt-in config, not by ambient ANTHROPIC_ADMIN_API_KEY presence
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A new config key (e.g. cost_reconciliation_enabled bool, default false) lives in ~/.mnemo/config.json and is consulted by StartReconciler in internal/store/reconciler.go before any Admin API call.
+    - With the config flag off (the default), the reconciler exits early on startup with an informational log line and makes ZERO outbound Admin API calls, regardless of whether ANTHROPIC_ADMIN_API_KEY is set in the environment.
+    - With the config flag on AND the key present, the reconciler runs as today.
+    - With the config flag on AND the key missing, the reconciler logs the existing key-missing warning and exits.
+    - Documentation (CLAUDE.md or a README section) describes reconciliation as opt-in and explains the rationale (security-reviewed environments where unsolicited Admin API egress is undesirable).
+    - An mnemo_config write that flips the flag is hot-reloaded into a running daemon (start/stop the reconciler goroutine without a restart), consistent with the existing hot-reload coverage.
+    context: |-
+      User feedback 2026-05-21: \"Cost reconciliation will need to be an opt-in feature. I often operate in environments where those APIs are not available, and I don't want to have security teams ask questions about why I'm trying to call these APIs.\"
+
+      Today's behaviour (internal/store/reconciler.go:57-83): StartReconciler reads ANTHROPIC_ADMIN_API_KEY from the environment and, if present, immediately polls the Anthropic Admin API once and then every reconcilerInterval (1 minute) for the lifetime of the daemon. There is no config-level gate. If the user has the key set for any other tool, mnemo silently starts hitting the Admin API.
+
+      This is the wrong default for environments with security review on outbound egress. The fix is to add an explicit boolean (e.g. `cost_reconciliation_enabled`) in ~/.mnemo/config.json, default false, that StartReconciler must check first. Key presence is necessary but not sufficient.
+
+      Distinct from 🎯T46: T46 is about *delivering* the reconciled-mode value (verification, key wiring, production rollout). This target is about *gating* the feature so its existence doesn't impose a security-review burden by default. Both can ship independently — this one is small (one config field, one early-return branch, doc update, hot-reload hook) and should ship first so that T46's eventual resumption doesn't widen the surface.
+    origin: manual
+    discovered: 2026-05-20
+    achieved: 2026-05-20
   T7:
     name: Agent-defined query templates
     status: achieved

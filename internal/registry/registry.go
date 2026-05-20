@@ -90,12 +90,14 @@ type Registry struct {
 // poller, reconciler) all continue uninterrupted, since the Store and
 // transcript ingest pipeline are unaffected by a vault path change.
 type userEntry struct {
-	store        *store.Store
-	vault        *vault.Exporter // nil when vault_path is not configured
-	workers      sync.WaitGroup
-	vaultCancel  context.CancelFunc // cancels the vault sub-context; nil when vault disabled
-	vaultWorkers sync.WaitGroup     // tracks only vault goroutines, so reload can wait for them
-	homeDir      string             // remembered for Reload's ~/ expansion
+	store             *store.Store
+	vault             *vault.Exporter // nil when vault_path is not configured
+	workers           sync.WaitGroup
+	vaultCancel       context.CancelFunc // cancels the vault sub-context; nil when vault disabled
+	vaultWorkers      sync.WaitGroup     // tracks only vault goroutines, so reload can wait for them
+	reconcilerCancel  context.CancelFunc // cancels the reconciler sub-context; nil when disabled
+	reconcilerWorkers sync.WaitGroup     // tracks reconciler goroutine for hot-reload
+	homeDir           string             // remembered for Reload's ~/ expansion
 }
 
 // NewRegistry builds an empty Registry. The baseCtx is cancelled on
@@ -307,17 +309,62 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		}
 	}()
 
-	// Anthropic Admin API cost reconciler (🎯T45).
-	// StartReconciler is a no-op when ANTHROPIC_ADMIN_API_KEY is absent.
-	e.workers.Add(1)
-	go func() {
-		defer e.workers.Done()
-		e.store.StartReconciler(r.baseCtx)
-	}()
+	// Anthropic Admin API cost reconciler (🎯T45, 🎯T63). Opt-in via
+	// config.cost_reconciliation.enabled — disabled by default so that
+	// no outbound Admin API call is made unless the operator
+	// explicitly says so. Tracked per-userEntry so Reload can start
+	// and stop the goroutine when the flag flips.
+	r.startReconcilerWorker(e)
 
 	// Periodic backup worker (🎯T61). Opted in by default; opt out via
 	// {"backup": {"disabled": true}} in config.json.
 	r.startBackupWorker(username, e, logger)
+}
+
+// startReconcilerWorker spawns (or no-ops) the per-user Anthropic
+// Admin API reconciler goroutine. Reads the latest cfg.CostReconciliation
+// flag and tracks the cancel func + waitgroup on e so a subsequent
+// Reload can stop the goroutine cleanly when the flag flips off.
+//
+// Caller must hold no locks; this method serialises against r.mu only
+// when writing the cancel func into e. Safe to call from both
+// startWorkers (initial bring-up) and Reload (config flip).
+func (r *Registry) startReconcilerWorker(e *userEntry) {
+	enabled := r.cfg.CostReconciliation.IsEnabled()
+	if !enabled {
+		// Run the gated entry-point once anyway to surface the
+		// "disabled" log line at the same level/cadence as before.
+		// StartReconciler is a synchronous no-op in this branch.
+		e.store.StartReconciler(r.baseCtx, false)
+		return
+	}
+	ctx, cancel := context.WithCancel(r.baseCtx)
+	r.mu.Lock()
+	e.reconcilerCancel = cancel
+	r.mu.Unlock()
+	e.reconcilerWorkers.Add(1)
+	go func() {
+		defer e.reconcilerWorkers.Done()
+		e.store.StartReconciler(ctx, true)
+		// StartReconciler spawns its own inner goroutine and returns;
+		// keep this outer goroutine alive until ctx is cancelled so
+		// reconcilerWorkers.Wait() in Reload covers both layers.
+		<-ctx.Done()
+	}()
+}
+
+// stopReconcilerWorker cancels the per-user reconciler goroutine (if
+// any) and waits for it to drain. Idempotent — safe to call when the
+// reconciler is already stopped.
+func (r *Registry) stopReconcilerWorker(e *userEntry) {
+	r.mu.Lock()
+	cancel := e.reconcilerCancel
+	e.reconcilerCancel = nil
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		e.reconcilerWorkers.Wait()
+	}
 }
 
 // startBackupWorker resolves the backup config and launches the daily
@@ -609,6 +656,18 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 	if !linkedInstancesEqual(old.LinkedInstances, newCfg.LinkedInstances) {
 		report.Changed = append(report.Changed, "linked_instances")
 		report.RequiresRestart = append(report.RequiresRestart, "linked_instances")
+	}
+	if old.CostReconciliation.IsEnabled() != newCfg.CostReconciliation.IsEnabled() {
+		report.Changed = append(report.Changed, "cost_reconciliation.enabled")
+		for _, e := range entries {
+			// Tear down the existing goroutine (no-op when previously
+			// disabled) then start a fresh one if the new state opts
+			// in. startReconcilerWorker reads r.cfg, which was already
+			// swapped above under r.mu.
+			r.stopReconcilerWorker(e)
+			r.startReconcilerWorker(e)
+		}
+		report.Adopted = append(report.Adopted, "cost_reconciliation.enabled")
 	}
 	return report
 }

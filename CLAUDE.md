@@ -175,6 +175,43 @@ means data removal is decoupled from schema change.
    user-triggered or scheduled, customisable in scope, and
    idempotent. The columns themselves are still not dropped.
 
+## External API egress
+
+mnemo is conservative about outbound calls to hosted APIs. The
+ingest path is fully local (filesystem only); only a few features
+talk to external services, and each is gated independently.
+
+**Anthropic Admin API (cost reconciliation, 🎯T63).** Disabled by
+default. The reconciler — which fetches authoritative daily costs
+from the Admin API to populate `reconciled_costs` — only starts when
+**both** of these hold:
+
+1. `cost_reconciliation.enabled: true` is set in `~/.mnemo/config.json`.
+2. `ANTHROPIC_ADMIN_API_KEY` is present in the daemon's environment.
+
+The key alone is not sufficient. A user who keeps the key around for
+other tooling will **not** trigger any mnemo Admin API call until
+they explicitly opt in via config. The estimated-cost path (derived
+from transcript tokens by the ingest layer) is always on and
+requires zero external calls — the default `mnemo_usage` view runs
+purely off local data.
+
+This default exists for users operating in environments where
+unsolicited outbound calls to hosted APIs require security-team
+review. Opt-in must be deliberate; defaults are silent.
+
+**GitHub API.** Used by the PR/issue/CI backfill workers per repo
+that already appears in session history. No org-scope fan-out; no
+secret material required (relies on the local `gh` auth).
+
+**Federation (🎯T15 / linked instances).** Outbound calls to peer
+mnemo daemons are gated on `linked_instances` being non-empty in
+config. Absent → zero federation calls.
+
+The append-only schema policy and the opt-in egress posture compose:
+restoring an older backup never silently triggers a backfill of
+data from external APIs that the user did not authorise.
+
 ## Delivery
 
 Merged to master via squash PR.
