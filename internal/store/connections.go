@@ -39,9 +39,9 @@ func (s *Store) RecordConnectionOpen(connectionID string, pid int, acceptedAt ti
 }
 
 // RecordConnectionClose marks a connection as closed. The HTTP MCP
-// transport does not expose a reliable disconnect signal, so this is
-// currently only called when the daemon shuts down or when a future
-// idle-timeout sweeper is added. Existing callers (tests) still work.
+// transport does not expose a reliable disconnect signal, so direct
+// callers are limited to daemon shutdown paths. The authoritative
+// reaper is the periodic sweeper in MarkStaleConnectionsClosed.
 func (s *Store) RecordConnectionClose(connectionID string, closedAt time.Time) {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
@@ -53,6 +53,31 @@ func (s *Store) RecordConnectionClose(connectionID string, closedAt time.Time) {
 	`, ts, ts, connectionID); err != nil {
 		slog.Warn("connection close update failed", "conn", connectionID, "err", err)
 	}
+}
+
+// MarkStaleConnectionsClosed marks open daemon_connections rows whose
+// last_seen_at falls outside threshold of now as closed. Returns the
+// number of rows updated. Idempotent: rows already closed, or with
+// last_seen_at still within threshold, are not touched. The
+// authoritative reaper for 🎯T60 — the HTTP MCP transport gives no
+// reliable disconnect signal, so a periodic sweep is the only way to
+// bound the open-connection count against crashes, kill -9, and
+// network drops.
+func (s *Store) MarkStaleConnectionsClosed(threshold time.Duration, now time.Time) (int, error) {
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	cutoff := now.UTC().Add(-threshold).Format(time.RFC3339Nano)
+	nowTS := now.UTC().Format(time.RFC3339Nano)
+	res, err := s.db.Exec(`
+		UPDATE daemon_connections
+		SET closed_at = ?
+		WHERE closed_at IS NULL AND last_seen_at < ?
+	`, nowTS, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // RecordConnectionSession upserts the (connection_id, session_id)

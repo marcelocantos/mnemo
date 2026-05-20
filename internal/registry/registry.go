@@ -319,6 +319,57 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	// Periodic backup worker (🎯T61). Opted in by default; opt out via
 	// {"backup": {"disabled": true}} in config.json.
 	r.startBackupWorker(username, e, logger)
+
+	// Daemon connection sweeper (🎯T60). Marks daemon_connections rows
+	// closed once last_seen_at falls outside the idle threshold. The
+	// HTTP MCP transport has no reliable disconnect signal, so this
+	// sweep is the authoritative reaper. Opted in by default; opt out
+	// via {"connection_sweep": {"disabled": true}}.
+	r.startConnectionSweeper(e, logger)
+}
+
+// startConnectionSweeper spawns the per-user daemon_connections
+// sweeper goroutine. On each tick it calls
+// Store.MarkStaleConnectionsClosed; rows whose last_seen_at fell
+// outside the idle threshold are marked closed. No-ops when the
+// sweeper is disabled in config.
+func (r *Registry) startConnectionSweeper(e *userEntry, logger *slog.Logger) {
+	cfg := r.cfg.ConnectionSweep
+	if !cfg.IsEnabled() {
+		logger.Info("connection sweeper: disabled by config")
+		return
+	}
+	interval, err := cfg.EffectiveInterval()
+	if err != nil {
+		logger.Warn("connection sweeper: bad interval, falling back to 1m", "err", err)
+		interval = time.Minute
+	}
+	stale, err := cfg.EffectiveStaleAfter()
+	if err != nil {
+		logger.Warn("connection sweeper: bad stale_after, falling back to 10m", "err", err)
+		stale = 10 * time.Minute
+	}
+
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			n, err := e.store.MarkStaleConnectionsClosed(stale, time.Now())
+			if err != nil {
+				logger.Warn("connection sweeper: failed", "err", err)
+			} else if n > 0 {
+				logger.Info("connection sweeper: closed stale rows",
+					"count", n, "stale_after", stale)
+			}
+			select {
+			case <-r.baseCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }
 
 // startReconcilerWorker spawns (or no-ops) the per-user Anthropic

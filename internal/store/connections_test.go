@@ -56,6 +56,61 @@ func TestConnectionLifecycle(t *testing.T) {
 	}
 }
 
+// TestMarkStaleConnectionsClosed verifies the sweeper closes only
+// rows whose last_seen_at falls outside the threshold, leaves fresh
+// and already-closed rows alone, and is idempotent on a second pass.
+func TestMarkStaleConnectionsClosed(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	t0 := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	// Three open rows with varied last_seen_at, one already-closed row.
+	s.RecordConnectionOpen("stale", 1001, t0)                      // last_seen = t0
+	s.RecordConnectionOpen("fresh", 1002, t0.Add(20*time.Minute))  // last_seen = t0+20m
+	s.RecordConnectionOpen("border", 1003, t0.Add(15*time.Minute)) // last_seen = t0+15m (exactly threshold)
+	s.RecordConnectionOpen("closed", 1004, t0)                     // pre-closed below
+	s.RecordConnectionClose("closed", t0.Add(time.Minute))
+
+	now := t0.Add(25 * time.Minute) // threshold 10m → cutoff t0+15m
+	n, err := s.MarkStaleConnectionsClosed(10*time.Minute, now)
+	if err != nil {
+		t.Fatalf("MarkStaleConnectionsClosed: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 stale row closed, got %d", n)
+	}
+
+	open, err := s.OpenConnections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("expected 2 open rows after sweep, got %d: %+v", len(open), open)
+	}
+	for _, c := range open {
+		if c.ConnectionID == "stale" {
+			t.Errorf("stale row should have been closed: %+v", c)
+		}
+	}
+
+	// Second pass: nothing should change.
+	n2, err := s.MarkStaleConnectionsClosed(10*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 0 {
+		t.Errorf("expected idempotent second pass, got %d rows updated", n2)
+	}
+
+	// Border row crosses the threshold once `now` advances enough.
+	n3, err := s.MarkStaleConnectionsClosed(10*time.Minute, t0.Add(26*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n3 != 1 {
+		t.Errorf("expected border row to close after now advances, got %d", n3)
+	}
+}
+
 // TestConnectionSessionBinding verifies the upsert semantics of
 // RecordConnectionSession: first-seen is preserved, last-seen is
 // bumped on repeat observations, and SessionsForConnection /
