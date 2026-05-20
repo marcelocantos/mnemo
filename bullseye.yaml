@@ -1617,7 +1617,7 @@ targets:
     achieved: 2026-04-07
   T60:
     name: Stale daemon_connections rows are reliably marked closed
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1642,6 +1642,7 @@ targets:
       This target is small and independent — does not depend on T49/T59. Discovered 2026-05-14 while investigating the compactor wiring gap.
     origin: manual
     discovered: 2026-05-14
+    achieved: 2026-05-20
   T61:
     name: Automated periodic backups of mnemo.db
     status: achieved
