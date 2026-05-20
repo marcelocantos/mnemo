@@ -8,6 +8,7 @@ package store
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	_ "embed"
 	"encoding/json"
@@ -5155,34 +5156,39 @@ func parseLsofOutput(data []byte) map[string]int {
 	return result
 }
 
-// isSqldeep returns true if the query uses sqldeep nested syntax.
-func isSqldeep(upper string) bool {
-	return strings.HasPrefix(upper, "FROM") || strings.Contains(upper, "SELECT {")
-}
-
-// Query runs a read-only SQL query and returns rows as maps.
-// Accepts both plain SQL (SELECT/WITH) and sqldeep nested syntax
-// (FROM ... SELECT { ... }). sqldeep queries are transparently
-// transpiled to SQL before execution.
+// Query runs a read-only SQL query and returns rows as maps. Input is
+// unconditionally passed through sqldeep.Transpile — sqldeep is a strict
+// superset of SQL, so plain SELECT/WITH round-trips unchanged. Read-only
+// enforcement is delegated to SQLite via PRAGMA query_only on the
+// dedicated connection used for the query; write statements are rejected
+// by SQLite itself, not by a string-prefix sniff in Go.
 func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
-	q := strings.TrimSpace(query)
-	upper := strings.ToUpper(q)
-
-	execSQL := query
-	if isSqldeep(upper) {
-		sql, err := sqldeep.Transpile(q)
-		if err != nil {
-			return nil, fmt.Errorf("sqldeep transpile: %w", err)
-		}
-		execSQL = sql
-	} else if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
-		return nil, fmt.Errorf("only SELECT, WITH, and sqldeep (FROM ... SELECT { }) queries are allowed")
+	execSQL, err := sqldeep.Transpile(strings.TrimSpace(query))
+	if err != nil {
+		return nil, fmt.Errorf("sqldeep transpile: %w", err)
 	}
 
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query(execSQL, args...)
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		// Reset before releasing so the next user of the (single-pool)
+		// connection isn't accidentally read-only. Use a background
+		// context so cancellation of the caller's query doesn't also
+		// cancel the reset.
+		_, _ = conn.ExecContext(context.Background(), "PRAGMA query_only = 0")
+		conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = 1"); err != nil {
+		return nil, fmt.Errorf("set query_only: %w", err)
+	}
+
+	rows, err := conn.QueryContext(ctx, execSQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -5207,6 +5213,13 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 		if len(results) >= 100 {
 			break
 		}
+	}
+	// SQLITE_READONLY from PRAGMA query_only fires at sqlite3_step time,
+	// which surfaces as rows.Err() rather than the QueryContext result —
+	// so write statements (DELETE/DROP/INSERT/UPDATE) reach this check
+	// without an earlier prepare-time error.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

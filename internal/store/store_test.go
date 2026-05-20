@@ -418,14 +418,26 @@ func TestQuery(t *testing.T) {
 		t.Errorf("expected count=2, got %v", rows[0]["cnt"])
 	}
 
-	// Write queries must be rejected.
-	_, err = s.Query("DELETE FROM messages")
-	if err == nil {
-		t.Error("expected error for DELETE query")
+	// Write queries must be rejected by the SQLite query_only layer,
+	// not by Go-side string-prefix sniffing.
+	for _, q := range []string{
+		"DELETE FROM messages",
+		"DROP TABLE messages",
+		"INSERT INTO messages (session_id, project, role, text) VALUES ('x','y','user','z')",
+		"UPDATE messages SET text = 'x'",
+	} {
+		if _, err := s.Query(q); err == nil {
+			t.Errorf("expected error for write query %q", q)
+		}
 	}
-	_, err = s.Query("DROP TABLE messages")
-	if err == nil {
-		t.Error("expected error for DROP query")
+
+	// Writes through Query must not have actually mutated state.
+	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM messages WHERE session_id = 'sess-query'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cnt, _ := rows[0]["cnt"].(int64); cnt != 2 {
+		t.Errorf("expected count still 2 after blocked writes, got %v", rows[0]["cnt"])
 	}
 
 	// WITH (CTE) queries should work.
@@ -435,6 +447,12 @@ func TestQuery(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row from CTE, got %d", len(rows))
+	}
+
+	// After a Query, subsequent writes via the normal store path
+	// must still work — query_only must not leak into the shared pool.
+	if _, err := s.db.Exec("CREATE TEMP TABLE _t (x INT)"); err != nil {
+		t.Errorf("query_only leaked into shared connection: %v", err)
 	}
 }
 
