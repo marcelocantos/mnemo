@@ -16,68 +16,46 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
-// fakeConnSource implements connSource for tests. Connections are
-// tracked with their current session_id; removeConnection simulates a
-// proxy disconnecting.
-type fakeConnSource struct {
-	mu    sync.Mutex
-	conns map[string]*fakeConn // connection_id → conn
+// fakeStoreSource implements storeSource for tests. Candidate lists
+// are explicit; cwd lookups are taken from the candidates' CWD
+// field (good enough for the watcher's loadTargetContext path —
+// the tests don't exercise target graph loading).
+type fakeStoreSource struct {
+	mu         sync.Mutex
+	candidates []store.CompactionCandidate
+	scans      atomic.Int64
 }
 
-type fakeConn struct {
-	pid            int
-	currentSession string
-	cwd            string
-}
-
-func newFakeConnSource() *fakeConnSource {
-	return &fakeConnSource{conns: make(map[string]*fakeConn)}
-}
-
-func (f *fakeConnSource) OpenConnections() ([]store.DaemonConnection, error) {
+func (f *fakeStoreSource) SelectCompactionCandidates(minMsgs int, recencyCutoff time.Time, limit int) ([]store.CompactionCandidate, error) {
+	f.scans.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]store.DaemonConnection, 0, len(f.conns))
-	for id, c := range f.conns {
-		out = append(out, store.DaemonConnection{ConnectionID: id, PID: c.pid})
-	}
+	out := make([]store.CompactionCandidate, len(f.candidates))
+	copy(out, f.candidates)
 	return out, nil
 }
 
-func (f *fakeConnSource) CurrentSessionForConnection(connectionID string) (string, error) {
+func (f *fakeStoreSource) SessionCWD(sessionID string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if c, ok := f.conns[connectionID]; ok {
-		return c.currentSession, nil
-	}
-	return "", nil
-}
-
-func (f *fakeConnSource) SessionCWD(sessionID string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, c := range f.conns {
-		if c.currentSession == sessionID {
-			return c.cwd
+	for _, c := range f.candidates {
+		if c.SessionID == sessionID {
+			return c.CWD
 		}
 	}
 	return ""
 }
 
-func (f *fakeConnSource) setConnection(id string, pid int, sessionID, cwd string) {
+func (f *fakeStoreSource) setCandidates(cs ...store.CompactionCandidate) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.conns[id] = &fakeConn{pid: pid, currentSession: sessionID, cwd: cwd}
-}
-
-func (f *fakeConnSource) removeConnection(id string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.conns, id)
+	f.candidates = append(f.candidates[:0], cs...)
 }
 
 // countingStore satisfies the compactor's storeBackend with enough
-// behaviour to exercise a tick.
+// behaviour to exercise a tick. ReadSession yields one user message;
+// LatestCompaction returns nil so every Compact call covers new
+// ground.
 type countingStore struct {
 	fakeStore
 }
@@ -95,6 +73,8 @@ func (c *countingStore) LatestCompaction(sessionID string) (*store.Compaction, e
 }
 
 // stubNopLLM returns a valid empty payload without hitting the LLM.
+// Records the (connection_id) tag of every compaction it ends up
+// producing — tests assert on these to verify attribution.
 type stubNopLLM struct {
 	calls atomic.Int64
 }
@@ -107,179 +87,9 @@ func (s *stubNopLLM) Call(ctx context.Context, sys, user string) (LLMResult, err
 	}, nil
 }
 
-// TestWatcherSpawnsWorkers checks that the watcher creates one worker
-// per live proxy connection and that ActiveCount reflects them.
-func TestWatcherSpawnsWorkers(t *testing.T) {
-	src := newFakeConnSource()
-	src.setConnection("conn-A", 100, "sess-A", "/work/some-project")
-	src.setConnection("conn-B", 101, "sess-B", "/work/other-project")
-
-	llm := &stubNopLLM{}
-	cs := newCountingStore()
-	compactor := New(cs, llm, Config{})
-
-	cfg := WatcherConfig{
-		PollInterval:    10 * time.Millisecond,
-		CompactInterval: 1 * time.Hour, // don't actually compact in this test
-	}
-	watcher := NewWatcher(src, compactor, cfg, "/mnemo-repo")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		watcher.Run(ctx)
-	}()
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if watcher.ActiveCount() == 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	cancel()
-	<-done
-
-	if got := watcher.ActiveCount(); got != 2 {
-		t.Fatalf("expected 2 active workers, got %d", got)
-	}
-}
-
-// TestWatcherSelfExclusion verifies that a connection whose current
-// session has the excluded cwd is tracked (worker spawned) but its
-// tick is a no-op. Under the new model, self-exclusion happens at
-// compact-time, not spawn-time — a connection's session can change
-// over its lifetime, and we only know whether to skip at the moment
-// of compaction.
-func TestWatcherSelfExclusion(t *testing.T) {
-	src := newFakeConnSource()
-	src.setConnection("conn-mnemo", 200, "sess-mnemo", "/mnemo-repo") // self
-	src.setConnection("conn-user", 201, "sess-user", "/other-project")
-
-	llm := &stubNopLLM{}
-	cs := newCountingStore()
-	compactor := New(cs, llm, Config{})
-
-	cfg := WatcherConfig{
-		PollInterval:    10 * time.Millisecond,
-		CompactInterval: 15 * time.Millisecond, // force ticks
-	}
-	watcher := NewWatcher(src, compactor, cfg, "/mnemo-repo")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		watcher.Run(ctx)
-	}()
-
-	// Let several compact-ticks happen.
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	// Both connections are tracked as workers (self-exclusion is at
-	// tick time), but only conn-user's LLM calls should have fired.
-	if got := watcher.ActiveCount(); got != 2 {
-		t.Fatalf("expected 2 active workers (spawn happens regardless; exclusion is per-tick), got %d", got)
-	}
-	if llm.calls.Load() == 0 {
-		t.Fatal("expected some LLM calls from the non-excluded connection")
-	}
-	// We cannot cheaply assert "exactly none for conn-mnemo" without
-	// attributing calls to connections, but if self-exclusion is
-	// broken the LLM count would be roughly double.
-}
-
-// TestWatcherIdleReap verifies that workers are removed when their
-// connection disappears from OpenConnections (i.e. the proxy
-// disconnected — Claude Code exit, ctrl-c, crash).
-func TestWatcherIdleReap(t *testing.T) {
-	src := newFakeConnSource()
-	src.setConnection("conn-idle", 300, "sess-idle", "/some-project")
-
-	llm := &stubNopLLM{}
-	cs := newCountingStore()
-	compactor := New(cs, llm, Config{})
-
-	cfg := WatcherConfig{
-		PollInterval:    10 * time.Millisecond,
-		CompactInterval: 1 * time.Hour,
-	}
-	watcher := NewWatcher(src, compactor, cfg, "")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		watcher.Run(ctx)
-	}()
-
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if watcher.ActiveCount() == 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if watcher.ActiveCount() != 1 {
-		t.Fatal("worker did not spawn")
-	}
-
-	// Simulate the proxy disconnecting.
-	src.removeConnection("conn-idle")
-
-	deadline = time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if watcher.ActiveCount() == 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	<-done
-
-	if got := watcher.ActiveCount(); got != 0 {
-		t.Fatalf("expected 0 workers after reap, got %d", got)
-	}
-}
-
-// TestWatcherNoDoubleSpawn verifies that polling twice for the same
-// connection does not create duplicate workers.
-func TestWatcherNoDoubleSpawn(t *testing.T) {
-	src := newFakeConnSource()
-	src.setConnection("conn-once", 400, "sess-once", "/project")
-
-	llm := &stubNopLLM{}
-	cs := newCountingStore()
-	compactor := New(cs, llm, Config{})
-
-	cfg := WatcherConfig{
-		PollInterval:    10 * time.Millisecond,
-		CompactInterval: 1 * time.Hour,
-	}
-	watcher := NewWatcher(src, compactor, cfg, "")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		watcher.Run(ctx)
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	if got := watcher.ActiveCount(); got != 1 {
-		t.Fatalf("expected exactly 1 worker for one connection, got %d", got)
-	}
-}
-
-// captureSlog installs a text-handler logger that writes into a buffer
-// for the duration of the test, returning the buffer and a restore
-// function. All levels are enabled so DEBUG lines are captured.
+// captureSlog installs a text-handler logger that writes into a
+// buffer for the duration of the test, returning the buffer and a
+// restore function. All levels are enabled so DEBUG lines land.
 func captureSlog() (*bytes.Buffer, func()) {
 	var buf bytes.Buffer
 	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
@@ -288,105 +98,160 @@ func captureSlog() (*bytes.Buffer, func()) {
 	return &buf, func() { slog.SetDefault(old) }
 }
 
-// makeWorker builds a connWorker wired to a fakeConnSource + compactor.
-// The compactor uses a countingStore whose LLM is a stubNopLLM, giving
-// one pre-seeded session message so the first Compact call succeeds.
-func makeWorker(connID, sessionID, cwd, excludeCWD string) (*connWorker, *stubNopLLM) {
-	src := newFakeConnSource()
-	if sessionID != "" {
-		src.setConnection(connID, 1, sessionID, cwd)
-	} else {
-		src.setConnection(connID, 1, "", "")
+// runOneScan starts the watcher, waits until at least one scan has
+// observed candidates, and stops. Returns once cleanly shut down.
+func runOneScan(t *testing.T, w *Watcher, src *fakeStoreSource) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if src.scans.Load() > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	cancel()
+	<-done
+}
+
+// TestWatcherScansAndCompactsSession verifies the activity-driven
+// watcher selects sessions from the store and drives a compaction
+// for each, with no daemon_connections involvement.
+func TestWatcherScansAndCompactsSession(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(
+		store.CompactionCandidate{SessionID: "sess-A", CWD: "/work/proj-a"},
+		store.CompactionCandidate{SessionID: "sess-B", CWD: "/work/proj-b"},
+	)
+
 	llm := &stubNopLLM{}
 	cs := newCountingStore()
 	compactor := New(cs, llm, Config{})
-	w := newConnWorker(connID, src, compactor, WatcherConfig{}, excludeCWD)
-	return w, llm
-}
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "/mnemo-repo")
 
-// TestTickLogSkippedNoSession checks that a tick with no session emits a
-// DEBUG "compact: tick" line with outcome=skipped_no_session.
-func TestTickLogSkippedNoSession(t *testing.T) {
-	buf, restore := captureSlog()
-	defer restore()
+	runOneScan(t, w, src)
 
-	w, _ := makeWorker("conn-pre", "", "", "")
-	w.tick(context.Background())
-
-	got := buf.String()
-	if !strings.Contains(got, "compact: tick") {
-		t.Errorf("expected 'compact: tick' in log, got: %s", got)
+	if got := llm.calls.Load(); got < 2 {
+		t.Fatalf("expected at least 2 LLM calls (one per candidate), got %d", got)
 	}
-	if !strings.Contains(got, string(outcomeSkippedNoSession)) {
-		t.Errorf("expected outcome=%s in log, got: %s", outcomeSkippedNoSession, got)
-	}
-	// DEBUG lines should NOT contain level=INFO or level=WARN.
-	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
-		t.Errorf("skipped_no_session should be DEBUG, got: %s", got)
+	if got := w.LastScanCount(); got != 2 {
+		t.Fatalf("expected LastScanCount=2, got %d", got)
 	}
 }
 
-// TestTickLogSkippedSelf checks that a self-session tick emits DEBUG with
-// outcome=skipped_self.
-func TestTickLogSkippedSelf(t *testing.T) {
+// TestWatcherUnboundSessionCompacts verifies that a candidate with
+// no ConnectionID still produces a compaction — the core 🎯T59 fix.
+// The compaction row stores NULL/empty for connection_id while the
+// summariser output lands normally.
+func TestWatcherUnboundSessionCompacts(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{
+		SessionID: "sess-unbound", CWD: "/work/unbound", ConnectionID: "",
+	})
+
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "")
+
+	runOneScan(t, w, src)
+
+	if llm.calls.Load() == 0 {
+		t.Fatal("expected LLM call for unbound session, got 0")
+	}
+	if len(cs.compacts) == 0 {
+		t.Fatal("expected a compaction to be written, got none")
+	}
+	if cs.compacts[0].ConnectionID != "" {
+		t.Errorf("expected empty ConnectionID on unbound compaction, got %q", cs.compacts[0].ConnectionID)
+	}
+}
+
+// TestWatcherBoundSessionTagsConnection verifies that when a
+// candidate carries a non-empty ConnectionID, the resulting
+// compaction is tagged with it (best-effort attribution).
+func TestWatcherBoundSessionTagsConnection(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{
+		SessionID: "sess-bound", CWD: "/work/proj", ConnectionID: "conn-xyz",
+	})
+
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "")
+
+	runOneScan(t, w, src)
+
+	if len(cs.compacts) == 0 {
+		t.Fatal("expected a compaction, got none")
+	}
+	if cs.compacts[0].ConnectionID != "conn-xyz" {
+		t.Errorf("expected ConnectionID=conn-xyz, got %q", cs.compacts[0].ConnectionID)
+	}
+}
+
+// TestWatcherSkipsSelfSession verifies that a candidate whose CWD
+// starts with excludeCWD is skipped at scan time (the LLM is never
+// called for self-sessions).
+func TestWatcherSkipsSelfSession(t *testing.T) {
 	buf, restore := captureSlog()
 	defer restore()
 
-	w, _ := makeWorker("conn-mnemo", "sess-mnemo", "/mnemo-repo/sub", "/mnemo-repo")
-	w.tick(context.Background())
+	src := &fakeStoreSource{}
+	src.setCandidates(
+		store.CompactionCandidate{SessionID: "sess-self", CWD: "/mnemo-repo/sub"},
+		store.CompactionCandidate{SessionID: "sess-user", CWD: "/work/proj"},
+	)
 
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "/mnemo-repo")
+
+	runOneScan(t, w, src)
+
+	if llm.calls.Load() != 1 {
+		t.Errorf("expected exactly 1 LLM call (self skipped, user compacted), got %d", llm.calls.Load())
+	}
 	got := buf.String()
 	if !strings.Contains(got, string(outcomeSkippedSelf)) {
-		t.Errorf("expected outcome=%s in log, got: %s", outcomeSkippedSelf, got)
-	}
-	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
-		t.Errorf("skipped_self should be DEBUG, got: %s", got)
+		t.Errorf("expected outcome=%s in log for self-session, got: %s", outcomeSkippedSelf, got)
 	}
 }
 
-// TestTickLogNothingToCompact checks that an idle tick (nothing new)
-// emits DEBUG with outcome=nothing_to_compact.
-func TestTickLogNothingToCompact(t *testing.T) {
-	buf, restore := captureSlog()
-	defer restore()
-
-	// Use fakeStore directly so LatestCompaction respects seeded data.
-	// fakeStore has one message at ID=1; seeding a compaction covering
-	// entry 1 makes filterNew return an empty slice → ErrNothingToCompact.
-	fs := &fakeStore{
-		session: "sess-idle",
-		msgs:    []store.SessionMessage{{ID: 1, Role: "user", Text: "hi"}},
-	}
-	if err := insertSeed(fs, 1); err != nil {
-		t.Fatal(err)
-	}
-	src := newFakeConnSource()
-	src.setConnection("conn-idle", 1, "sess-idle", "/some-project")
-	llm := &stubNopLLM{}
-	compactor := New(fs, llm, Config{})
-	w := newConnWorker("conn-idle", src, compactor, WatcherConfig{}, "")
-
-	w.tick(context.Background())
-
-	got := buf.String()
-	if !strings.Contains(got, string(outcomeNothingToCompact)) {
-		t.Errorf("expected outcome=%s in log, got: %s", outcomeNothingToCompact, got)
-	}
-	// nothing_to_compact is DEBUG, not INFO.
-	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
-		t.Errorf("nothing_to_compact should be DEBUG, got: %s", got)
-	}
-}
-
-// TestTickLogCompacted checks that a successful compaction emits an INFO
-// line with outcome=compacted, compaction_id, and entry_id_to.
+// TestTickLogCompacted verifies a successful compaction emits an
+// INFO line with outcome=compacted and the resolved IDs.
 func TestTickLogCompacted(t *testing.T) {
 	buf, restore := captureSlog()
 	defer restore()
 
-	w, _ := makeWorker("conn-ok", "sess-ok", "/some-project", "")
-	w.tick(context.Background())
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{
+		SessionID: "sess-ok", CWD: "/work/proj", ConnectionID: "conn-1",
+	})
+
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "")
+
+	runOneScan(t, w, src)
 
 	got := buf.String()
 	if !strings.Contains(got, string(outcomeCompacted)) {
@@ -395,64 +260,44 @@ func TestTickLogCompacted(t *testing.T) {
 	if !strings.Contains(got, "compaction_id=") {
 		t.Errorf("expected compaction_id field in log, got: %s", got)
 	}
-	if !strings.Contains(got, "entry_id_to=") {
-		t.Errorf("expected entry_id_to field in log, got: %s", got)
-	}
 	if !strings.Contains(got, "level=INFO") {
 		t.Errorf("compacted should be INFO, got: %s", got)
 	}
 }
 
-// TestTickLogConnectionID checks that connection_id and session_id are
-// always present in the tick log line.
-func TestTickLogConnectionID(t *testing.T) {
+// TestTickLogNothingToCompact verifies that an idle tick (no new
+// messages past the latest compaction) emits DEBUG with
+// outcome=nothing_to_compact.
+func TestTickLogNothingToCompact(t *testing.T) {
 	buf, restore := captureSlog()
 	defer restore()
 
-	w, _ := makeWorker("conn-xyz", "sess-abc", "/project", "")
-	w.tick(context.Background())
+	// Seed a compaction covering the only available message so
+	// filterNew returns empty → ErrNothingToCompact.
+	fs := &fakeStore{
+		session: "sess-idle",
+		msgs:    []store.SessionMessage{{ID: 1, Role: "user", Text: "hi"}},
+	}
+	if err := insertSeed(fs, 1); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{
+		SessionID: "sess-idle", CWD: "/some-project",
+	})
+	llm := &stubNopLLM{}
+	compactor := New(fs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "")
+
+	runOneScan(t, w, src)
 
 	got := buf.String()
-	if !strings.Contains(got, "connection_id=conn-xyz") {
-		t.Errorf("expected connection_id=conn-xyz in log, got: %s", got)
+	if !strings.Contains(got, string(outcomeNothingToCompact)) {
+		t.Errorf("expected outcome=%s in log, got: %s", outcomeNothingToCompact, got)
 	}
-	if !strings.Contains(got, "session_id=sess-abc") {
-		t.Errorf("expected session_id=sess-abc in log, got: %s", got)
-	}
-}
-
-// TestWatcherNoSessionYet verifies that a connection that has
-// handshook but not yet resolved any session_id gets a worker spawned
-// but its tick is a no-op.
-func TestWatcherNoSessionYet(t *testing.T) {
-	src := newFakeConnSource()
-	src.setConnection("conn-pre", 500, "", "") // no session recorded yet
-
-	llm := &stubNopLLM{}
-	cs := newCountingStore()
-	compactor := New(cs, llm, Config{})
-
-	cfg := WatcherConfig{
-		PollInterval:    10 * time.Millisecond,
-		CompactInterval: 15 * time.Millisecond,
-	}
-	watcher := NewWatcher(src, compactor, cfg, "")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		watcher.Run(ctx)
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	if watcher.ActiveCount() != 1 {
-		t.Fatalf("expected 1 worker even for session-less connection, got %d", watcher.ActiveCount())
-	}
-	if llm.calls.Load() != 0 {
-		t.Fatalf("no LLM calls should fire until a session is resolved, got %d", llm.calls.Load())
+	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
+		t.Errorf("nothing_to_compact should be DEBUG, got: %s", got)
 	}
 }

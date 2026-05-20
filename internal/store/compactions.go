@@ -191,6 +191,68 @@ func (s *Store) CompactionsForConnection(connectionID string) ([]Compaction, err
 	return scanCompactions(rows)
 }
 
+// CompactionCandidate is one session the activity-driven watcher
+// considers worth a compaction tick (🎯T59). ConnectionID is best-
+// effort attribution — the most recently observed connection bound
+// to this session, or empty if no binding exists.
+type CompactionCandidate struct {
+	SessionID    string
+	CWD          string
+	ConnectionID string
+}
+
+// SelectCompactionCandidates returns sessions whose substantive
+// message count is at least minMsgs and whose last_msg falls after
+// recencyCutoff. Ordered most-recently-active first; capped at
+// limit rows. Used by the activity-driven compactor watcher
+// (🎯T59) to pick targets independently of any MCP connection
+// binding, so sessions that never called mnemo_self still get
+// compacted.
+//
+// ConnectionID is filled from the most recent connection_sessions
+// row for the session if one exists, otherwise left empty. The
+// compactor passes the empty value straight through and
+// PutCompaction stores NULL — the schema column is unchanged
+// (additive policy).
+func (s *Store) SelectCompactionCandidates(minMsgs int, recencyCutoff time.Time, limit int) ([]CompactionCandidate, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	cutoff := recencyCutoff.UTC().Format(time.RFC3339Nano)
+	rows, err := s.db.Query(`
+		SELECT
+		  ss.session_id,
+		  COALESCE(sm.cwd, '') AS cwd,
+		  COALESCE((
+		    SELECT cs.connection_id FROM connection_sessions cs
+		    WHERE cs.session_id = ss.session_id
+		    ORDER BY cs.last_seen_at DESC
+		    LIMIT 1
+		  ), '') AS connection_id
+		FROM session_summary ss
+		LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
+		WHERE ss.last_msg > ?
+		  AND ss.substantive_msgs >= ?
+		ORDER BY ss.last_msg DESC
+		LIMIT ?
+	`, cutoff, minMsgs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select compaction candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []CompactionCandidate
+	for rows.Next() {
+		var c CompactionCandidate
+		if err := rows.Scan(&c.SessionID, &c.CWD, &c.ConnectionID); err != nil {
+			return nil, fmt.Errorf("scan candidate: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // SessionTokens returns the total input + output tokens consumed by
 // assistant messages in a session. Cache tokens are excluded — they
 // are not paid tokens in the same sense, and the AC for 🎯T10
