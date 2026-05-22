@@ -152,6 +152,9 @@ func (f *fakeBackend) ChainCompactions(sessionID string) ([]store.Compaction, er
 func (f *fakeBackend) CompactionsForConnection(connectionID string) ([]store.Compaction, error) {
 	panic("unexpected CompactionsForConnection call")
 }
+func (f *fakeBackend) ListCompactions(sessionID string, limit int) ([]store.Compaction, error) {
+	panic("unexpected ListCompactions call")
+}
 func (f *fakeBackend) SessionTokens(sessionID string) (int64, int64, error) {
 	panic("unexpected SessionTokens call")
 }

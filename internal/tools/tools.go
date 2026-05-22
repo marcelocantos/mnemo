@@ -1504,31 +1504,44 @@ func (h *callHandler) restore(args map[string]any) (string, bool, error) {
 		return "session_id is required", true, nil
 	}
 
-	// Primary path: resolve session_id → connection_id via
-	// connection_sessions (definitive, deterministic). Return all
-	// compactions tagged to any connection that ever owned this
-	// session. Typically one connection; two after ctrl-c +
-	// `claude --continue`.
+	// Walk the session chain and union compactions across every
+	// session in the chain. Under the activity-driven compactor
+	// (🎯T59), compactions are tagged with connection_id only
+	// best-effort: a session that never had an MCP binding still
+	// produces compactions, just with NULL connection_id. So we
+	// resolve via session_id (which always exists on a compaction
+	// row) rather than via connection_id (which may not).
+	//
+	// session_chains drives the chain walk, so /clear boundaries
+	// are honoured regardless of whether any connection ever
+	// observed both halves.
+	var sessionIDs []string
+	if chain, err := h.mem.Chain(sessionID); err == nil && len(chain) > 0 {
+		for _, link := range chain {
+			sessionIDs = append(sessionIDs, link.SessionID)
+		}
+	} else {
+		sessionIDs = []string{sessionID}
+	}
+
 	var compactions []store.Compaction
-	if conns, err := h.mem.ConnectionsForSession(sessionID); err == nil {
-		seen := map[int64]bool{}
-		for _, cs := range conns {
-			cc, err := h.mem.CompactionsForConnection(cs.ConnectionID)
-			if err != nil {
+	seen := map[int64]bool{}
+	for _, sid := range sessionIDs {
+		cc, err := h.mem.ListCompactions(sid, 0)
+		if err != nil {
+			continue
+		}
+		for _, c := range cc {
+			if seen[c.ID] {
 				continue
 			}
-			for _, c := range cc {
-				if seen[c.ID] {
-					continue
-				}
-				seen[c.ID] = true
-				compactions = append(compactions, c)
-			}
+			seen[c.ID] = true
+			compactions = append(compactions, c)
 		}
 	}
 
 	if len(compactions) == 0 {
-		return "No compactions available yet for this session. The background compactor runs every 5 minutes on live connections; a fresh session with no prior /clear will have nothing to restore.", false, nil
+		return "No compactions available yet for this session. The background compactor scans session activity periodically; a session below the substantive-message threshold or outside the recency window will not yet have a compaction.", false, nil
 	}
 
 	var b strings.Builder

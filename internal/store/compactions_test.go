@@ -71,6 +71,138 @@ func TestCompactionsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSelectCompactionCandidatesUnboundSession covers 🎯T59 #6:
+// an ingested session with enough substantive messages is returned
+// by SelectCompactionCandidates even though no connection_session
+// row has ever been recorded for it. Its ConnectionID comes back
+// empty so a subsequent PutCompaction stores NULL.
+func TestSelectCompactionCandidatesUnboundSession(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	// 5 substantive user/assistant messages, all recent.
+	entries := []map[string]any{
+		msg("user", "hello one", now.Add(-5*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "reply one", now.Add(-4*time.Minute).Format(time.RFC3339)),
+		msg("user", "hello two", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "reply two", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		msg("user", "hello three", now.Add(-1*time.Minute).Format(time.RFC3339)),
+	}
+	writeJSONL(t, dir, "unbound-project", "sess-unbound", entries)
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	cands, err := s.SelectCompactionCandidates(3, now.Add(-1*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	var found *CompactionCandidate
+	for i, c := range cands {
+		if c.SessionID == "sess-unbound" {
+			found = &cands[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected sess-unbound in candidates, got %+v", cands)
+	}
+	if found.ConnectionID != "" {
+		t.Errorf("expected empty ConnectionID for unbound session, got %q", found.ConnectionID)
+	}
+}
+
+// TestSelectCompactionCandidatesBoundSession covers 🎯T59 #7:
+// a session with a recorded connection binding is returned with
+// its best-effort ConnectionID populated, so the resulting
+// compaction can be tagged for backwards compatibility with the
+// pre-T59 connection-based restore path.
+func TestSelectCompactionCandidatesBoundSession(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	entries := []map[string]any{
+		msg("user", "bound one", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "bound reply", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		msg("user", "bound two", now.Add(-1*time.Minute).Format(time.RFC3339)),
+	}
+	writeJSONL(t, dir, "bound-project", "sess-bound", entries)
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Simulate a live MCP binding for this session.
+	s.RecordConnectionSessionAt("conn-xyz", "sess-bound", now)
+
+	cands, err := s.SelectCompactionCandidates(2, now.Add(-1*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	var found *CompactionCandidate
+	for i, c := range cands {
+		if c.SessionID == "sess-bound" {
+			found = &cands[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected sess-bound in candidates, got %+v", cands)
+	}
+	if found.ConnectionID != "conn-xyz" {
+		t.Errorf("expected ConnectionID=conn-xyz, got %q", found.ConnectionID)
+	}
+}
+
+// TestSelectCompactionCandidatesFilters verifies the threshold +
+// recency filters reject ineligible sessions.
+func TestSelectCompactionCandidatesFilters(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	// "tiny" — recent but below minMsgs.
+	writeJSONL(t, dir, "p", "sess-tiny", []map[string]any{
+		msg("user", "lonely", now.Add(-1*time.Minute).Format(time.RFC3339)),
+	})
+	// "stale" — enough msgs but last_msg way outside recency window.
+	staleStart := now.Add(-24 * time.Hour)
+	writeJSONL(t, dir, "p", "sess-stale", []map[string]any{
+		msg("user", "x1", staleStart.Format(time.RFC3339)),
+		msg("assistant", "x2", staleStart.Add(time.Minute).Format(time.RFC3339)),
+		msg("user", "x3", staleStart.Add(2*time.Minute).Format(time.RFC3339)),
+	})
+	// "good" — meets both criteria.
+	writeJSONL(t, dir, "p", "sess-good", []map[string]any{
+		msg("user", "y1", now.Add(-5*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "y2", now.Add(-4*time.Minute).Format(time.RFC3339)),
+		msg("user", "y3", now.Add(-3*time.Minute).Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	cands, err := s.SelectCompactionCandidates(3, now.Add(-1*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, c := range cands {
+		ids[c.SessionID] = true
+	}
+	if !ids["sess-good"] {
+		t.Errorf("expected sess-good in candidates")
+	}
+	if ids["sess-tiny"] {
+		t.Errorf("sess-tiny should be filtered (below minMsgs)")
+	}
+	if ids["sess-stale"] {
+		t.Errorf("sess-stale should be filtered (outside recency)")
+	}
+}
+
 func TestChainCompactionsNoChain(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 

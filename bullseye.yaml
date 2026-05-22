@@ -1572,7 +1572,7 @@ targets:
     achieved: 2026-05-20
   T59:
     name: Compaction is triggered by session-activity heuristics, not by MCP connection bindings
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1603,6 +1603,7 @@ targets:
       Discovered 2026-05-14 while investigating why /c in a fresh jevons session reported "No compactions for this chain yet" despite a 2003-message upstream session.
     origin: manual
     discovered: 2026-05-14
+    achieved: 2026-05-20
   T6:
     name: Session self-identification
     status: achieved

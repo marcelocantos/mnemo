@@ -49,6 +49,7 @@ type Backend interface {
 	ToolResult(sessionID, toolUseID string, offset, truncateLen int) (*ToolResultPayload, error)
 	ChainCompactions(sessionID string) ([]Compaction, error)
 	CompactionsForConnection(connectionID string) ([]Compaction, error)
+	ListCompactions(sessionID string, limit int) ([]Compaction, error)
 	SessionTokens(sessionID string) (int64, int64, error)
 	CompactionTokens(sessionID string) (int64, int64, error)
 	RecordConnectionOpen(connectionID string, pid int, acceptedAt time.Time)
