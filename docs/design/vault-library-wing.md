@@ -1,8 +1,28 @@
 # Vault Library Wing
 
-*Status: design draft — 2026-05-20.*
+*Status: design draft — 2026-05-20 (rev 2026-05-22, review pass 1).*
 *Supersedes the original vault export design (PR #74) and informs the next major
 version of `vault_path`.*
+
+**Tracking.** Per project convention, this RFC is anchored to a parent
+bullseye target with one sub-target per slice. The bullseye targets are
+the followable unit; this document is the design source they reference.
+
+- **🎯T64** — parent (Vault library wing redesign)
+- **🎯T64.1** — indexing scope + `.mnemoignore` (consent fix)
+- **🎯T64.2** — `_mnemo/` namespace + `vault_layout` config
+- **🎯T64.3** — move decisions + memories under `_mnemo/`
+- **🎯T64.4** — drop session/CI/PR/repo writers (closes MVP v2)
+- **🎯T64.5** — PKM profile + mtime-based auto-detect
+- **🎯T64.6** — bridges
+- **🎯T64.7** — patterns (persisted + rendered)
+- **🎯T64.8** — themes + cross-repo (clustering engine; subordinate
+  design `docs/design/vault-clustering.md`)
+- **🎯T64.9** — lessons + GC tool
+
+Full target definitions in `docs/targets.md`. Status, weight, and
+rework history are queryable via `mnemo_targets` and
+`mnemo_rework_history`.
 
 ---
 
@@ -24,6 +44,23 @@ Three audiences are first-class: new users picking up mnemo today, existing
 users with no vault configured, and existing users who already have a vault
 populated by the v1 layout. All three converge on the same end state without
 forced data loss.
+
+### MVP v2 boundary
+
+The full nine-slice arc takes weeks to months even with agent assistance.
+The first four slices form a coherent, independently shippable **MVP v2**:
+
+1. Slice 1 — indexing scope + `.mnemoignore` (fixes the v1 silent
+   full-vault read; the only real shipped *bug* in v1).
+2. Slice 2 — `_mnemo/` namespace + layout config.
+3. Slice 3 — move decisions + memories under `_mnemo/`.
+4. Slice 4 — drop session/CI/PR/repo writers from `_mnemo/`.
+
+After MVP v2 the wing is calm, scoped, and consent-correct. Themes,
+patterns, lessons, bridges, and the clustering engine (Slices 5–9) are
+independent follow-ups that ship when ready. The MVP boundary lets the
+consent fix land promptly without waiting for the clustering engine to
+prove out.
 
 ---
 
@@ -173,9 +210,11 @@ fences do not interfere with readability.
 └── _mnemo/
     ├── index.md
     ├── README.md
-    ├── MIGRATION.md          # written once when v1 layout detected
+    ├── MIGRATION.md          # write-once when v1 layout detected; opt-in regen via mnemo_vault_migration_doc
     ├── themes/
     │   ├── _index.md
+    │   ├── _archive/
+    │   │   └── <theme-slug>.md            # auto-retired themes (config: retire_after)
     │   └── <theme-slug>.md
     ├── patterns/
     │   ├── _index.md
@@ -197,6 +236,17 @@ fences do not interfere with readability.
 
 There is no `sessions/`, no `ci/`, no `prs/`, no `repos/`, no `commits/`,
 no `images/`. Those tables remain in SQLite and are queried on demand.
+
+**Naming note.** Collection directories are plural nouns (`themes/`,
+`patterns/`, `lessons/`, `decisions/`, `memories/`) with one
+deliberate exception: `cross-repo/` reads as an adjectival
+qualifier ("cross-repo views over themes") rather than a noun in
+its own right. Renaming to `cross-repo-themes/` was considered and
+rejected for verbosity; renaming the others to a singular form
+would be more disruptive than the inconsistency is worth.
+Implementers should treat `cross-repo` as a derived view, not a
+peer of `themes`. See `docs/design/vault-clustering.md` for the
+derivation rule.
 
 ### Tag namespace
 
@@ -229,6 +279,33 @@ The fence is line-anchored (matches the fix from PR #74 sixth-pass review).
 A file with no fence is treated as user-owned and never overwritten (also
 preserved from v1).
 
+#### MIGRATION.md — write-once exception
+
+`_mnemo/MIGRATION.md` is an explicit exception to the regen-above-fence
+contract. It is **written once** at the moment of v1-detection on a
+vault, then never touched again by mnemo. Specifically:
+
+- The file is created with no fence. Once on disk, it is treated as
+  fully user-owned content from mnemo's point of view.
+- mnemo does not regenerate MIGRATION.md on subsequent syncs, even if
+  v1 dirs disappear or the layout changes.
+- If the user deletes `_mnemo/MIGRATION.md`, mnemo does **not**
+  recreate it. The deletion is taken as "I have read this; move on."
+- A user who wants the doc back can invoke
+  `mnemo_vault_migration_doc(write: true)`, which idempotently writes
+  the current state-of-vault snapshot to `_mnemo/MIGRATION.md`. The
+  same tool with `write: false` returns the snapshot without writing,
+  for users who prefer to read it via MCP rather than the filesystem.
+
+This rule lives outside the standard fence contract because the doc's
+contract is "say something once, then get out of the user's way." A
+regenerating MIGRATION.md would nag indefinitely; a content-less file
+would be confusing if the user re-opened the vault months later. The
+write-once shape captures both intents cleanly.
+
+The exception is local to MIGRATION.md. Every other file in `_mnemo/`
+honours the standard fence contract.
+
 ### Bridges
 
 Optional. Configured per user.
@@ -259,6 +336,74 @@ Properties:
 - The anchor file may live anywhere in the vault; mnemo creates it if absent
   but only when explicitly named in `vault_bridges` (no silent file creation).
 
+#### Bridge edge cases
+
+The behaviour of the bridge writer is fully specified for the awkward
+cases — none of these are theoretical, all of them can happen in real
+vaults.
+
+- **Bridge configured, fence absent from anchor file.** mnemo appends
+  a new `<!-- mnemo:bridge:<name> -->` block at the end of the anchor
+  file (after a single blank line separator). The user's existing
+  content above is untouched. On every subsequent sync the writer
+  re-locates the named fence; once present, future writes happen
+  in-place.
+- **Bridge configured, fence present but moved by the user.** The
+  writer locates the fence by its `<!-- mnemo:bridge:<name> -->`
+  delimiter pair, not by line offset, so a user reordering or
+  relocating the block within the file is honoured. Two competing
+  blocks with the same name in one file are not allowed: on
+  encountering them, mnemo logs an error, leaves the file alone, and
+  reports the conflict via `mnemo_vault_status`.
+- **Bridge configured, anchor file missing.** mnemo creates the file
+  with just the bridge fence inside and a one-line header (e.g.
+  `# Themes MOC`). Filenames containing spaces / non-ASCII work
+  exactly as on the filesystem; no normalisation. Parent
+  directories are created as needed.
+- **Bridge configured, anchor file unwritable** (read-only, perm
+  error, symlink loop, etc.). The writer logs a warn-level error
+  with the path and reason, skips the bridge for this pass, and
+  surfaces the failure in `mnemo_vault_status`. No retry storm.
+- **Two bridges target the same anchor file.** Each bridge gets its
+  own uniquely named fence (`mnemo:bridge:themes`,
+  `mnemo:bridge:patterns`). Order in the file follows order of first
+  appearance: if a fence does not yet exist, it is appended after
+  the existing mnemo blocks. The two bridges never share a fence.
+- **Bridge name in config does not match any configured entity
+  collection.** A bridge maps a *collection name* (e.g. `themes`,
+  `patterns`, `cross-repo`, `lessons`, `decisions`, `memories`) to an
+  anchor path. Bridge names outside this enum (typos, future
+  collections, custom names) are **skipped with a warning** — the
+  unknown bridge is not written, the error is surfaced via
+  `mnemo_vault_status` and a structured log line, and the daemon
+  proceeds with the rest of the valid bridges. This is fail-soft:
+  one typo does not break the others. The daemon never blocks
+  startup on bridge config.
+- **Bridge removed from config after blocks were written.** Next
+  sync strips the corresponding fenced block but leaves the anchor
+  file otherwise intact. The file is not deleted even if the bridge
+  block was the entire content.
+
+#### Per-collection bridge content
+
+Bridge bodies differ by collection. The default renderings are:
+
+- `themes`, `patterns`, `cross-repo`, `lessons`, `decisions` — flat
+  bulleted list of wikilinks to the collection's pages, sorted by
+  weight (or last-touched for decisions), capped at
+  `vault_bridges.max_links` (default 50) per bridge to avoid the
+  bridge becoming its own hairball.
+- `memories` — grouped by source project; subsections of the form
+  `### <project-name>` followed by the wikilinks to that project's
+  memories. Because memories use `<project>-<name>.md` filename
+  namespacing, the bridge is the place where they become navigable
+  by project. Capped per project at `vault_bridges.max_links`.
+
+Templates from `~/.mnemo/vault_templates/v2/bridge_<collection>.tmpl`
+override the per-collection rendering. Standard template
+error-handling rules apply (load-time validation, no silent
+fallback).
+
 ### PKM profile
 
 ```json
@@ -275,31 +420,89 @@ Profile controls:
 | Journal awareness    | no             | yes (read-only) | no             | no             |
 | Filename casing      | kebab          | kebab           | kebab          | kebab          |
 
-Auto-detected at first sync from vault contents:
+Auto-detected at first sync from vault contents. Detection by **mere
+presence** of a tool's dot-directory is brittle — multi-tool PKM users
+(notably Logseq + Obsidian against the same directory) are common,
+and `.obsidian/` can persist after a single exploratory open
+months ago. mnemo uses recency-of-modification of the canonical signal
+files instead:
 
-- `<vault>/.obsidian/` present → `obsidian`
-- `<vault>/logseq/` present → `logseq`
-- `<vault>/.foam/` present → `foam`
-- Otherwise → `generic`
+| Tool      | Signal file                              |
+|-----------|------------------------------------------|
+| obsidian  | `<vault>/.obsidian/workspace.json`       |
+| logseq    | `<vault>/logseq/config/config.edn`       |
+| foam      | `<vault>/.foam/settings.json`            |
 
-User override via `vault_profile` config key always wins.
+Detection rule:
+
+1. Stat each signal file. Files that do not exist are dropped.
+2. If exactly one signal file exists → that tool's profile.
+3. If multiple signal files exist → pick the one whose mtime is most
+   recent. Ties (≤ 1 hour apart) → prefer `obsidian` (most common),
+   then `logseq`, then `foam`. Log the chosen tool + the alternative
+   so the user can spot a mis-detection.
+4. If none exist → `generic`.
+
+User override via `vault_profile` config key always wins; auto-detect
+only seeds the value when the user has not configured one.
+
+The detection result is recorded in `mnemo_vault_status` alongside
+the signal file path and its mtime, so the user can immediately see
+why a given profile was picked.
 
 ### Templates (escape hatch)
 
 ```
 ~/.mnemo/vault_templates/
-├── theme.tmpl
-├── pattern.tmpl
-├── cross-repo.tmpl
-├── lesson.tmpl
-├── decision.tmpl
-├── memory.tmpl
-└── index.tmpl
+└── v2/
+    ├── theme.tmpl
+    ├── pattern.tmpl
+    ├── cross-repo.tmpl
+    ├── lesson.tmpl
+    ├── decision.tmpl
+    ├── memory.tmpl
+    └── index.tmpl
 ```
 
-Standard Go templates with the entity struct exposed. Missing template
-files fall back to the binary's embedded defaults. Documented in
-`internal/vault/README.md`.
+Standard Go templates with the entity struct exposed. The shape of the
+exposed entity struct is **versioned** by the parent directory (`v2/`
+here). When the entity shape changes incompatibly in a future
+release, mnemo will look in `v3/` (or whatever the new version is)
+without silently rotting user templates: a `v2/theme.tmpl` written
+today continues to render its v2 entity shape if mnemo still ships
+the v2 renderer, otherwise it is reported as out-of-date and the
+embedded default is used until the user upgrades it.
+
+#### Load-time validation, not silent fallback
+
+Behaviour when mnemo reads `~/.mnemo/vault_templates/v2/*.tmpl` at
+startup and on every hot-reload:
+
+- **File absent** → embedded default used. Quiet, expected. Logged at
+  debug level.
+- **File present, parses cleanly** → user template used.
+- **File present, fails to parse / fails to execute against a probe
+  entity** → error logged at warn level with the parse error and the
+  template path. The vault sync worker for that specific entity type
+  is **not** started until the template is fixed (or the file is
+  removed). Other entity types continue rendering with their
+  templates. The failure is surfaced in `mnemo_vault_status` so the
+  user can see exactly which template is broken without grepping
+  logs.
+
+Silent fall-through to the embedded default on a malformed user
+template is explicitly rejected: a user who has invested in a custom
+template wants to know it broke, not have mnemo quietly render with
+an unrelated shape and leave them puzzled about why their Dataview
+queries stopped working.
+
+Each template is executed once against a synthesised probe entity at
+startup as part of validation. A template that parses but blows up
+on execution (e.g. referencing a missing field) is caught here
+rather than at first render.
+
+Documented in `internal/vault/README.md` alongside the probe-entity
+shape so users can author against a stable contract.
 
 ### Indexing scope
 
@@ -353,6 +556,19 @@ Accepted values for `vault_indexing_scope`:
 gitignore-syntax file. Patterns matched relative to vault root are
 excluded regardless of scope. Default name `.mnemoignore`. Absent file
 means no extra exclusions.
+
+**Scope of `.mnemoignore`.** Patterns apply throughout the configured
+scope, including inside `_mnemo/`. A user who wants to exclude a
+specific generated page from the search index (e.g. an experimental
+theme they have not curated yet) can add `_mnemo/themes/draft-*.md`
+to the ignore file. The ignore file is **not** itself indexed.
+
+Only one `.mnemoignore` is consulted (the one named by
+`vault_indexing_ignore_file`, default `<vault>/.mnemoignore`). Nested
+`.mnemoignore` files inside subdirectories are not honoured — keep
+all patterns in the root file. This matches the gitignore-syntax
+intent but not gitignore's nested-file behaviour; the simplification
+is documented in `MIGRATION.md` for upgraders.
 
 #### What "read" means
 
@@ -431,9 +647,13 @@ engine in Slice 8 gains a strong signal:
 - Cluster IDs become stable across runs because the label is anchored
   in human content, not in LLM-generated text that drifts pass to
   pass.
-- Cross-repo themes get qualitatively better: the user's own
-  high-level notes already span repos by topic, so they bridge
-  sessions that the embedding model might cluster only weakly.
+- Cross-repo themes get qualitatively better: user-authored notes
+  in the vault are not attributed to any specific repo, so they
+  function as topical magnets that pull together session content
+  from multiple repos that the embedding model might otherwise
+  cluster only weakly. (Vault content contributes to a cluster's
+  topical centre but does not contribute to its `repos` field; the
+  repo set comes from the session-attributed members.)
 
 Slice 8's design document (`docs/design/vault-clustering.md`, to be
 written) treats `vault_indexing_scope` as a first-class input.
@@ -445,18 +665,22 @@ recipe, and a representation in the wing.
 
 #### 1. Themes (`themes/`)
 
-**Source.** Decisions + compaction span summaries + targets, grouped by
-topical similarity.
+**Source.** Decisions + compaction span summaries + persisted patterns
+(Slice 7) + indexed user vault content (when scope permits), grouped by
+topical similarity. Full spec lives in
+`docs/design/vault-clustering.md`.
 
-**Extraction.** Embedding-based clustering. For each decision summary and
-each compaction prose summary, compute a vector embedding (via the
-already-present image embedder infrastructure repurposed for text, or an
-external embedding service when `ANTHROPIC_API_KEY` is set). Run a streaming
-clustering algorithm (HDBSCAN or online k-means) over the corpus at sync
-time. Clusters of weight ≥ 3 (i.e. at least three contributing sessions or
-spans) become themes. Each cluster gets an auto-generated label by feeding
-the top-N representative excerpts to an LLM with a "label this theme in
-≤6 words" prompt.
+**Extraction.** Two-engine clustering pipeline. The **heuristic engine**
+(TF-IDF + single-link agglomerative) is the **default and the realistic
+engine** that ships with Slice 8 — fully local, no external dependencies.
+An opt-in **embeddings engine** (per T63 egress posture; explicit
+`vault_clustering.engine: "embeddings"` plus a provider key) swaps the
+TF-IDF vectorisation for hosted-provider embeddings but reuses the
+single-link clustering downstream. HDBSCAN is reserved for a follow-up
+slice once a pure-Go binding meets the quality bar. Clusters of weight ≥
+3 become themes. Labelling chain: user-anchored title (if a qualifying
+`vault_user` member passes the quality gates) → optional LLM label
+(separate egress opt-in) → bigram fallback.
 
 **Update.** Recomputed on a long cadence (daily, default) because clustering
 is order-dependent and noisy on short windows.
@@ -566,6 +790,22 @@ repo · "quote"` rather than a wikilink to a session page. Session pages no
 longer exist. The session UUID is retrievable via `mnemo_chain` if the
 reader wants drill-down.
 
+The "Underlying decisions" heading in the example above is theme-
+specific. Each entity type uses its own heading for the
+provenance section:
+
+| Entity type  | Provenance heading       |
+|--------------|--------------------------|
+| theme        | "Underlying decisions" (when sourced from decisions/compactions) or "Underlying entities" (mixed) |
+| pattern      | "Occurrences"            |
+| cross-repo   | "Per-repo evidence"      |
+| lesson       | "Source decisions"       |
+| decision     | "Proposal & confirmation" |
+| memory       | (no provenance section — the page *is* the memory) |
+
+Templates pick the heading by entity type; the embedded defaults
+encode the table above. Custom templates can override per-entity.
+
 ### Graph topology
 
 ```
@@ -591,6 +831,131 @@ Properties:
   mnemo subgraph. Each is opt-in and configurable.
 - `#mnemo` tag is the user's filter handle for the entire wing.
 
+### Worked example: post-Slice-8 vault for a real corpus
+
+A reader cannot fully picture the design without seeing one
+end-to-end output against plausible input. Concrete scenario: a
+user has been running mnemo for six months across three repos
+(`mnemo`, `foo`, `bar`), uses Obsidian, and has opted into
+`vault_indexing_scope: "full"` and `vault_clustering.engine:
+"embeddings"` with Voyage.
+
+After the first post-Slice-8 sync, `<vault>/_mnemo/` looks like:
+
+```
+_mnemo/
+├── index.md
+├── README.md
+├── themes/
+│   ├── _index.md
+│   ├── auth-middleware-redesign.md         ← user-anchored label
+│   ├── schema-migration-safety.md          ← LLM label
+│   ├── test-flake-investigations.md
+│   └── ci-runner-tuning.md
+├── patterns/
+│   ├── _index.md
+│   ├── direct-jsonl-reads.md               ← from Slice 7 patterns
+│   └── repeated-decision-queries.md
+├── cross-repo/
+│   ├── _index.md
+│   └── auth-middleware-redesign.md         ← same slug as themes/, mirrored
+├── lessons/
+│   ├── _index.md
+│   ├── compliance-over-ergonomics.md
+│   └── prefer-bundled-prs-for-area-refactors.md
+├── decisions/
+│   ├── _index.md
+│   └── (12 high-signal decisions across 3 repos)
+└── memories/
+    ├── _index.md
+    ├── mnemo-vault_library_wing.md
+    ├── mnemo-user_preferences.md
+    └── (10 more, one per source memory file)
+```
+
+Excerpt from `_mnemo/themes/auth-middleware-redesign.md` (the
+user-anchored case — the user already had a note titled "Auth
+middleware redesign" in their vault, body ≥ 200 tokens, no
+daily-note filename, title shared "auth" with the cluster centroid):
+
+```markdown
+---
+type: theme
+tags: [mnemo, mnemo/theme]
+aliases: ["Auth middleware redesign"]
+weight: 11.4
+first-seen: 2025-12-04
+last-touched: 2026-05-18
+repos: [mnemo, foo, bar]
+label-source: vault_user
+label-source-path: 10-areas/engineering/Auth middleware redesign.md
+---
+
+# Auth middleware redesign
+
+<!-- mnemo:generated 2026-05-22T14:01:55Z -->
+
+## Summary
+Three repos converged on rip-and-replace pattern driven by legal review of
+session-token storage. Decisions across mnemo, foo, and bar all favoured
+clean rewrites over incremental patching.
+
+## Evidence
+- 2026-03-15 · mnemo · "legal flagged session-token storage in cookies"
+- 2026-04-02 · foo · "compliance review demanded same change"
+- 2026-04-28 · bar · "auth rewrite scheduled for Q2"
+- 2026-05-09 · mnemo · "session token format finalised"
+- 2026-05-14 · foo · "rip and replace landed without rollback"
+
+## Related
+- [[_mnemo/patterns/repeated-decision-queries|Repeated decision queries]]
+- [[_mnemo/lessons/compliance-over-ergonomics|Compliance over ergonomics]]
+- [[_mnemo/cross-repo/auth-middleware-redesign|Auth middleware redesign (cross-repo view)]]
+
+## Underlying decisions
+- mnemo · 2026-03-15 · `decision-id-abc1234`
+- foo · 2026-04-02 · `decision-id-def5678`
+- bar · 2026-04-28 · `decision-id-ghi9012`
+
+<!-- /mnemo:generated -->
+
+<!-- Your notes below this line — preserved across syncs. -->
+```
+
+Excerpt from `mnemo_vault_status` for the same session (truncated
+to the relevant fields):
+
+```json
+{
+  "vault_layout":   { "active": "v2", "first_seen": "2026-05-18T...", "days_in_both": 0 },
+  "indexing_scope": { "active": "full", "external_files_indexed": 1284 },
+  "abstractions":   { "themes": { "rendered": 4 }, "lessons": { "rendered": 2 } },
+  "last_cluster_run": { "engine": "embeddings", "estimated_cost": 0.04 }
+}
+```
+
+Bridge anchor file `10-areas/knowledge/Themes MOC.md` after the
+sync (user content untouched above, mnemo block appended once):
+
+```markdown
+# Themes MOC
+(user's own MOC notes here, unchanged)
+
+<!-- mnemo:bridge:themes -->
+- [[_mnemo/themes/auth-middleware-redesign|Auth middleware redesign]]
+- [[_mnemo/themes/schema-migration-safety|Schema migration safety]]
+- [[_mnemo/themes/test-flake-investigations|Test flake investigations]]
+- [[_mnemo/themes/ci-runner-tuning|CI runner tuning]]
+<!-- /mnemo:bridge:themes -->
+```
+
+This is what a reviewer can hold in their head while reading the
+rest of the design. The numbers in this example (4 themes,
+`weight: 11.4`, `external_files_indexed: 1284`) are illustrative
+and do not need to match other example snippets elsewhere in the
+doc — each example was crafted for its surrounding context, not
+woven into a single coherent fictional corpus.
+
 ---
 
 ## Configuration surface
@@ -608,7 +973,7 @@ Properties:
   "vault_indexing_includes": [],
   "vault_indexing_ignore_file": ".mnemoignore",
   "vault_clustering": {
-    "engine": "embeddings",
+    "engine": "heuristic",
     "min_cluster_weight": 3,
     "recompute_interval": "24h"
   }
@@ -620,6 +985,7 @@ Properties:
 | `vault_path`                 | `""` (disabled)                  | yes (#77)   |
 | `vault_profile`              | auto-detect, fall back to obsidian | yes      |
 | `vault_layout`               | `"v2"` for new vaults; `"both"` for v1-populated vaults | yes |
+| `vault_layout.soak_warn_after` | `"720h"` (30 days; soak window before "both"-layout warning fires) | yes |
 | `vault_bridges`              | `{}`                             | yes         |
 | `vault_indexing_scope`       | `"_mnemo_only"` for new vaults; `"full"` for v1-populated vaults | yes |
 | `vault_indexing_includes`    | `[]`                             | yes         |
@@ -627,6 +993,11 @@ Properties:
 | `vault_clustering.engine`    | `"heuristic"` (explicit opt-in to `"embeddings"`, per T63 egress posture) | yes |
 | `vault_clustering.min_cluster_weight` | `3`                     | yes         |
 | `vault_clustering.recompute_interval` | `"24h"`                 | yes         |
+| `vault_clustering.retire_after` | `"4320h"` (180 days)            | yes         |
+| `vault_clustering.max_themes` | `200`                               | yes         |
+| `vault_clustering.max_cross_repo` | `50`                            | yes         |
+| `vault_bridges.max_links`    | `50`                                 | yes         |
+| `vault_legacy_annotations.max_file_kb` | `512` (split aggregate when exceeded) | yes |
 
 `vault_layout` accepted values:
 
@@ -634,7 +1005,385 @@ Properties:
 - `"both"` — write to both `_mnemo/` and v1 root-level dirs. Used during
   migration window.
 - `"v1"` — write to v1 root-level dirs only. Available as an emergency
-  escape hatch; not advertised; removed in a later release.
+  escape hatch; not advertised; **removed in the release after the
+  Slice 9 GC tool reaches General Availability** (i.e. once the
+  user-paced migration path is fully proven). Until then, setting
+  this value logs a warning each sync ("vault_layout=v1 is the
+  emergency escape hatch and will be removed in release X.Y").
+  The removal slice replaces the value with a hard error at config
+  load and is tracked as its own bullseye sub-target.
+
+#### Soak-time TTL for `"both"`
+
+`"both"` is meant as a migration window, not a steady state. A user who
+upgrades and forgets sits in dual-write indefinitely, doubling
+mnemo's footprint inside the vault and producing two parallel
+graph hairballs (one for the v1 root-level dirs, one for `_mnemo/`).
+
+To prevent silent indefinite dual-write:
+
+- A `vault_layout_first_seen` timestamp is written to `~/.mnemo/state.json`
+  the first sync mnemo observes the active layout (separate from
+  `~/.mnemo/config.json` so the user does not edit it).
+- While `vault_layout == "both"`:
+  - The first sync after **30 days** of soak emits a structured warning
+    log: `vault_layout="both" for N days — opt into "v2" or run
+    mnemo_vault_gc_legacy to finish migrating`.
+  - `mnemo_vault_status` surfaces `vault_layout`, `days_in_both`, and a
+    recommendation (`"opt into v2"`, `"run gc_legacy"`, `"still within
+    soak"`) on every call. The user sees the state without enabling
+    debug logging.
+  - The warning repeats on a weekly cadence afterwards, never
+    auto-promoting the layout. The user retains the timing decision.
+- The soak window is configurable via `vault_layout.soak_warn_after`
+  (default `"720h"` = 30 days). A user who genuinely wants long-running
+  dual-write sets the value higher; the warning is suppressed
+  accordingly.
+
+The recommendation surface is one-way (warn, never auto-narrow): the v1
+data may still be load-bearing for a workflow we cannot infer. The
+"`both` during soak" review question raised on PR #95 is resolved by
+this TTL/visibility mechanism plus the explicit `gc_legacy` tool —
+there is no auto-deletion, but there is no silent forever-dual-write
+either.
+
+#### Recommendation state machine
+
+The `mnemo_vault_status.vault_layout.recommendation` string takes
+one of four values, deterministic from observable state:
+
+| Observed state                                                                 | Recommendation       |
+|--------------------------------------------------------------------------------|----------------------|
+| `vault_layout == "both"` AND `hours_in_both < soak_warn_after_hours`           | `"still within soak"` |
+| `vault_layout == "both"` AND `hours_in_both ≥ soak_warn_after_hours`           | `"opt into v2"`       |
+| `vault_layout == "v2"` AND v1 root-level dirs still present in the vault       | `"run gc_legacy"`     |
+| any other state                                                                | `""` (empty)          |
+
+`hours_in_both` is derived from `state.json.vault_layout_first_seen.both`;
+`soak_warn_after_hours` is the parsed duration of
+`vault_layout.soak_warn_after` (default `"720h"`). The comparison
+is done in hours throughout to avoid integer-day rounding errors
+near the soak boundary. `days_in_both` exposed on the status response
+is `hours_in_both ÷ 24` rounded to the nearest integer.
+
+The empty-recommendation row covers: `vault_layout == "v1"` (no
+migration owed); `vault_layout == "v2"` with no v1 leftovers
+(migration complete); `vault_layout == "both"` with no v1 dirs
+present yet (transient first-sync state — v1 dirs get created on
+the same sync; subsequent sync flips to one of the warn rows).
+
+Transitions are observation-driven: the recommendation is
+recomputed each `mnemo_vault_status` call and each sync. There is
+no persistent state machine in the daemon — the recommendation is
+a pure function of the observable state. A user who runs
+`gc_legacy` and removes the v1 dirs gets the empty recommendation
+on the next status call, no manual reset needed.
+
+---
+
+## Operational invariants
+
+A small set of invariants the implementation honours across the whole
+design. Each is testable in CI.
+
+### Daemon-managed state file (`state.json`)
+
+`~/.mnemo/state.json` is a daemon-managed sidecar that holds
+runtime-derived state that should not pollute the user-editable
+`config.json` but must survive daemon restarts. It is created on
+first daemon boot post-Slice 1 with empty defaults; it is read on
+every boot and written atomically (`tmp + rename`) whenever a
+tracked field changes.
+
+Schema (additive only — new fields appear over time, old ones never
+disappear silently):
+
+```json
+{
+  "version": 1,
+  "vault_path": "~/Documents/PKM",
+  "vault_layout_first_seen": {
+    "v1":   "2025-11-04T09:12:33Z",
+    "both": "2026-05-22T14:01:55Z",
+    "v2":   null
+  },
+  "indexing_scope_first_seen": {
+    "_mnemo_only": null,
+    "full":        "2025-11-04T09:12:33Z",
+    "includes":    null
+  },
+  "embedding_fingerprint": null,
+  "last_cluster_run_id": 184,
+  "broken_templates": [],
+  "bridge_errors":    []
+}
+```
+
+`embedding_fingerprint` is `null` when the active clustering engine
+is `"heuristic"`. When the user opts into `"embeddings"`, the
+fingerprint object materialises on the next pass:
+
+```json
+"embedding_fingerprint": {
+  "provider": "voyage",
+  "model":    "voyage-3-lite",
+  "version":  "2025-09",
+  "last_used": "2026-05-22T14:01:55Z"
+}
+```
+
+`vault_path` records the path mnemo wrote against on the most
+recent sync. The "`vault_path` change semantics" rule compares the
+new config-loaded `vault_path` against this recorded value to
+detect a change and reset the soak-TTL counters.
+
+`last_cluster_run_id` mirrors `cluster_runs.id` for the most
+recent successful pass; the daemon uses it on boot to detect
+whether a pass was in progress at last shutdown without scanning
+the table.
+
+Properties:
+
+- Single-user. The library wing serves the local daemon's single
+  user; team-mnemo (T36) maintains its own per-user sidecars in a
+  different location.
+- Forbidden as a configuration surface. Users edit `config.json`,
+  never `state.json`. `mnemo_vault_status` exposes a read view if
+  the user wants to inspect.
+- Atomic writes. Implementations write `~/.mnemo/.state.json.tmp`
+  on the same filesystem, `fsync`, then `rename` over
+  `~/.mnemo/state.json`. The tempfile uses the same leading-dot
+  convention as the in-vault rendered files. A daemon crash
+  mid-write leaves at most one stale `.state.json.tmp`, swept on
+  next boot before any new write begins.
+- Version handling. The top-level `version` integer governs
+  schema-shape changes that go beyond additive-field. Rules:
+  - Daemon reads `state.json` with `version == X`. If `X` equals
+    the daemon's known version, proceed normally.
+  - If `X` is below the daemon's known version, the daemon
+    upgrades the file in place (migration functions registered per
+    version step; rewrite atomically; bump `version`).
+  - If `X` is above the daemon's known version (running an older
+    binary against newer state), the daemon refuses to write
+    `state.json` for this boot and runs in **read-only state mode**
+    — soak-TTL counters report against the recorded data but no
+    new layout transitions are persisted. Logs prominent warning
+    so the user can choose to upgrade the binary or revert the
+    state file from backup. Refusing-to-write prevents the older
+    daemon from silently dropping fields it does not understand.
+- Forward compatibility within a version. Unknown top-level keys
+  inside a known `version` are preserved on rewrite (read as
+  opaque, written back verbatim) so a newer daemon's additions
+  survive a downgrade-then-upgrade cycle.
+- Concurrency. Only one daemon process per user is supported; a
+  second process attempting to start with `state.json` already
+  locked aborts with a clear error rather than racing.
+
+### Sync atomicity
+
+The renderer never leaves the vault in a torn state. Every generated
+file follows the same write protocol:
+
+1. Render the new content in memory (including the regenerated
+   above-fence block and the preserved below-fence content read at
+   the start of the cycle).
+2. Write to a sibling tempfile `.<name>.mnemo.tmp` in the target
+   directory. The leading-dot prefix is intentional: most PKM tools
+   (Obsidian, Logseq, Foam) skip dotfiles when building their note
+   index and graph view, so a half-written `.foo.md.mnemo.tmp` does
+   not transiently appear as a broken note even if the user's PKM
+   tool scans the directory during the rename window.
+3. `fsync` the tempfile.
+4. `rename` over the destination — atomic on every supported
+   filesystem.
+5. Remove any stale `.<name>.mnemo.tmp` from a prior crashed run on
+   startup, before any new write begins.
+
+The bridge writer follows the same protocol against the anchor
+file with one additional rule: the anchor file is rewritten **as a
+whole**, not edited in place. The writer reads the existing anchor
+file, splices the new fenced block(s) into the read content
+(preserving every byte outside the bridge fences), writes the
+spliced result to a sibling `.<name>.mnemo.tmp`, fsyncs, and
+renames. Atomic-rename gives whole-file atomicity; the in-memory
+splice gives fence-boundary correctness. A reader of the anchor
+file at any moment sees either the old whole or the new whole,
+never a mix.
+
+Concurrent reads from the user's PKM tool always observe a
+complete file with matching fences. A daemon crash mid-sync
+leaves at most one extra `.tmp` file, swept on next boot.
+
+### `vault_path` change semantics
+
+Hot-reload of `vault_path` is permitted (via `mnemo_config`) with
+explicit semantics:
+
+- The old `vault_path` is **not** auto-migrated to the new location.
+  Files at the old path remain where they are; mnemo simply stops
+  writing there.
+- The new path is treated as a fresh vault: the same auto-detect
+  rules run (v1 dirs present? `_mnemo/` present? profile signal
+  files?). Defaults seed accordingly.
+- `state.json` records the change in `vault_layout_first_seen` /
+  `indexing_scope_first_seen` against the new path's detected
+  layout, so soak-TTL counters reset.
+- `mnemo_vault_status` reports the change at the next call. A
+  warning surfaces if the old path still contains a `_mnemo/`
+  wing — the user is informed but mnemo takes no action.
+
+The "don't auto-migrate" rule is deliberate: cross-path moves can
+cross filesystems / mountpoints / sync providers (Dropbox, iCloud)
+where mnemo cannot guarantee write semantics. A user who wants the
+content moved does so themselves before pointing `vault_path`.
+
+### `_mnemo/` self-exclusion from ingest
+
+The path-exclusion registry (PR #78) is updated on every
+`vault_path` change to include the new `_mnemo/` location. This
+prevents mnemo from re-ingesting its own output as session corpus —
+a v1 footgun. The exclusion is observable via
+`mnemo_vault_status.excluded_paths`.
+
+### Back-pressure on clustering pass output
+
+Several sections demand caps (`max_themes`, `max_cross_repo`,
+`vault_bridges.max_links`). The implementation enforces them
+**before** the expensive work:
+
+- Embedding pass cost is bounded by the total corpus size at the
+  active (provider, model, model_version) fingerprint — every
+  embed call corresponds to one cache miss, never speculative
+  over-embedding. Caps on cluster count do not prevent corpus
+  vectorisation (every member of every cluster still needs a
+  vector) — they prevent unbounded *page emission* and *LLM
+  labelling*, which are the next two bullets.
+- Renderer hard-caps page emission per pass: themes ranked by
+  weight, excess kept in the `themes` table but not rendered. The
+  capped themes are listed in `_mnemo/themes/_index.md` under
+  "Below cap (not rendered)" so the user sees the cap is binding.
+- LLM labelling is invoked at most `max_themes` times per pass;
+  excess clusters use the bigram fallback even if LLM labelling is
+  otherwise enabled.
+- Bridge writer truncates lists at `vault_bridges.max_links` and
+  appends a "(N more, see <collection>/_index.md)" trailing line so
+  the truncation is visible.
+
+### `mnemo_vault_status` response schema
+
+The status tool is the single canonical surface for everything the
+design demands users be able to observe. It is consulted in dozens
+of places throughout this doc; the schema lives here so
+implementers do not have to grep.
+
+```json
+{
+  "vault_path": "~/Documents/PKM",
+  "vault_path_exists": true,
+  "vault_profile": {
+    "active":         "obsidian",
+    "source":         "auto-detect",
+    "signal_file":    ".obsidian/workspace.json",
+    "signal_mtime":   "2026-05-15T08:11:02Z",
+    "alternatives":   [
+      { "profile": "logseq", "signal_mtime": "2024-11-03T17:55:08Z" }
+    ]
+  },
+  "vault_layout": {
+    "active":          "both",
+    "first_seen":      "2026-05-01T09:12:33Z",
+    "days_in_both":    22,
+    "recommendation":  "still within soak",
+    "soak_warn_after_hours": 720
+  },
+  "indexing_scope": {
+    "active":         "full",
+    "includes":       [],
+    "ignore_file":    ".mnemoignore",
+    "external_files_indexed": 1284
+  },
+  "abstractions": {
+    "themes":     { "rendered": 47,  "archived": 6, "below_cap": 0 },
+    "patterns":   { "rendered": 18,  "below_cap": 0 },
+    "cross-repo": { "rendered": 11 },
+    "lessons":    { "rendered": 23 },
+    "decisions":  { "rendered": 156 },
+    "memories":   { "rendered": 84 }
+  },
+  "v1_leftovers": { "sessions": 412, "ci": 53, "prs": 89, "repos": 7 },
+  "last_cluster_run": {
+    "id":             184,
+    "started_at":     "2026-05-22T13:58:30Z",
+    "ended_at":       "2026-05-22T13:58:32Z",
+    "engine":         "heuristic",
+    "estimated_cost": 0.0,
+    "trigger":        "interval"
+  },
+  "embedding_fingerprint": null,
+  "broken_templates":  [],
+  "bridge_errors":     [],
+  "excluded_paths":    ["~/Documents/PKM/_mnemo", "~/Documents/PKM/.git"],
+  "warnings":          []
+}
+```
+
+The `embedding_fingerprint` field is `null` whenever the active
+clustering engine is `"heuristic"` (matching the `state.json` rule
+above). When the user opts into `"embeddings"`, the field
+materialises:
+
+```json
+"embedding_fingerprint": {
+  "provider":  "voyage",
+  "model":     "voyage-3-lite",
+  "version":   "2025-09",
+  "last_used": "2026-05-22T13:58:32Z"
+}
+```
+
+`abstractions.themes` reports both `rendered` (live in
+`_mnemo/themes/`) and `archived` (live in `_mnemo/themes/_archive/`
+per the retirement rule).
+
+Entry shapes for the array fields:
+
+```json
+"broken_templates": [
+  {
+    "template_path": "~/.mnemo/vault_templates/v2/theme.tmpl",
+    "entity_type":   "theme",
+    "phase":         "parse" | "execute",
+    "error":         "undefined field .Repos at line 14"
+  }
+]
+
+"bridge_errors": [
+  {
+    "name":         "themes",
+    "anchor_path":  "10-areas/knowledge/Themes MOC.md",
+    "reason":       "unknown_collection" | "anchor_unwritable" | "duplicate_fence" | "anchor_create_failed",
+    "detail":       "permission denied (ENOENT on parent)"
+  }
+]
+
+"warnings": [
+  {
+    "code":      "embedding_model_changed",
+    "message":   "embedding model changed from voyage-3-lite to voyage-3; clusters will be regenerated",
+    "since":     "2026-05-22T14:01:55Z"
+  }
+]
+```
+
+All fields are stable across daemon restarts insofar as the
+underlying state permits. New fields are additive; old fields never
+disappear silently.
+
+`warnings[]` is the bucket for one-off transient signals — broken
+state, recent crash recovery, soak past the warning threshold.
+Implementers should prefer surfacing structured state in the typed
+fields above and reserve `warnings[]` for things that genuinely do
+not fit.
 
 ---
 
@@ -651,9 +1400,15 @@ section), adapted for filesystem rather than schema.
   - If `_mnemo/` exists and any v1 root-level dirs (`sessions/`, `decisions/`,
     etc.) exist → assume in-progress migration; honour configured `vault_layout`.
   - If v1 dirs exist and `_mnemo/` does not → new release on existing vault;
-    auto-default `vault_layout` to `"both"`; emit `_mnemo/MIGRATION.md`
-    explaining the change, what to expect, and how to opt fully in.
+    auto-default `vault_layout` to `"both"`; **write-once** emit
+    `_mnemo/MIGRATION.md` explaining the change, what to expect, and how
+    to opt fully in. The MIGRATION.md doc is never regenerated; once
+    written or deleted by the user, mnemo does not touch it again.
   - If neither → new vault; default `vault_layout` to `"v2"`.
+- On every startup that observes a layout transition (especially into
+  `"both"`), update `~/.mnemo/state.json` with `vault_layout_first_seen`
+  for that layout value, used by the "both" soak-TTL warning logic
+  documented under the configuration section.
 - v1 paths continue to be written when `vault_layout` is `"both"` or `"v1"`.
   Above-fence content stays fresh. Below-fence annotations are preserved
   exactly as in v1.
@@ -670,6 +1425,16 @@ section), adapted for filesystem rather than schema.
   original path and harvested annotation text). The user's annotations
   remain reachable through search even if they later `rm -rf <vault>/sessions/`
   manually.
+  - **Pagination.** If the aggregate would exceed
+    `vault_legacy_annotations.max_file_kb` (default 512 KB), the
+    sweep splits into numbered files
+    (`legacy-annotations-001.md`, `-002.md`, …) grouped by source
+    subdir (`sessions/`, `ci/`, `prs/`, …) so the per-file table
+    of contents stays navigable. An index page
+    `_mnemo/legacy-annotations.md` lists the parts when split.
+    Files that contain zero below-fence content are omitted from
+    the aggregate entirely (a v1 dir of pure generated content
+    has nothing to harvest).
 - `mnemo_vault_status` reports "v1 dirs present but unused; safe to delete
   after verifying legacy-annotations.md".
 
@@ -698,8 +1463,8 @@ No automatic deletion. The user owns the timing.
   until they choose. Phase 2: opts into `"v2"` at their pace; annotations
   harvested. Phase 3: optionally runs `mnemo_vault_gc_legacy` to clean up.
 - **Archetype E (power user).** Drops templates into
-  `~/.mnemo/vault_templates/` once layout v2 stabilises. No interaction
-  with the migration path.
+  `~/.mnemo/vault_templates/v2/` once layout v2 stabilises. No
+  interaction with the migration path.
 - **Archetype F (casual reader).** Opens `_mnemo/index.md`. Finds themes,
   patterns, lessons. Does nothing else.
 
@@ -709,36 +1474,10 @@ No automatic deletion. The user owns the timing.
 
 Nine slices. Each is independently shippable, reviewable, and reversible.
 
-### Slice 1 — `_mnemo/` namespace + layout config
+Slices 1–4 form the **MVP v2** boundary — coherent and shippable on its
+own. Slices 5–9 are independent follow-ups, not a single arc.
 
-Plumbs the new directory root and the `vault_layout` config key. No new
-abstractions yet. v1 writers retained, gated on `vault_layout`. Adds
-`_mnemo/index.md` and `_mnemo/README.md` as static-ish content.
-
-*Value:* nothing user-visible yet, but establishes the namespace and lets
-later slices write into it. Required precondition for everything else.
-
-### Slice 2 — move decisions + memories under `_mnemo/`
-
-Re-render the two existing abstractions (decisions, memories) under their
-new paths inside `_mnemo/`. Above-fence content gets the new frontmatter
-shape. Old v1 decision/memory files are still written when
-`vault_layout="both"`.
-
-*Value:* the two existing semantic exports become available in the new
-layout. Validates the rendering shape, frontmatter, and graph topology
-before more abstractions are added.
-
-### Slice 3 — drop session/CI/PR/repo writers from `_mnemo/`
-
-When `vault_layout="v2"`, do not write session, CI, PR, or repo-index pages
-to `_mnemo/`. v1 paths continue to honour the old behaviour under
-`vault_layout="both"` or `"v1"`.
-
-*Value:* validates the principle that raw signal stays in SQLite. The user
-opting into v2 immediately sees a calmer, smaller wing.
-
-### Slice 4 — indexing scope + `.mnemoignore`
+### Slice 1 — indexing scope + `.mnemoignore` (consent fix)
 
 Introduce `vault_indexing_scope`, `vault_indexing_includes`, and
 `vault_indexing_ignore_file` config keys. Refactor `IngestVaultAnnotations`
@@ -746,6 +1485,15 @@ to walk only the configured scope. Implement gitignore-syntax matcher
 against the `.mnemoignore` file. Wire migration defaults: new vaults
 default to `"_mnemo_only"`; existing v1-populated vaults default to
 `"full"` for continuity. Report active scope in `mnemo_vault_status`.
+
+This slice lands **first**, ahead of any `_mnemo/` namespace work, because
+it is the only slice in the plan that fixes a real shipped *bug* — v1's
+silent full-vault read without user consent. The fix is independently
+correct even before the rest of the redesign exists. New vaults get the
+default `"_mnemo_only"` scope (which trivially reads nothing while
+`_mnemo/` does not yet exist); existing v1 vaults keep `"full"` semantics
+for continuity. Either way, the user-visible behaviour is the right one
+from day one of the v2 release window.
 
 Reuse `trees_of_interest` + `doc_tree_refs` (landed via T53, PR #91)
 for the multi-tree case. Each configured scope produces one or more
@@ -771,12 +1519,52 @@ which both depend on a well-defined read surface. Building on T53
 instead of inventing a parallel mechanism keeps the data model lean
 and reuses tested code.
 
+### Slice 2 — `_mnemo/` namespace + layout config
+
+Plumbs the new directory root and the `vault_layout` config key. No new
+abstractions yet. v1 writers retained, gated on `vault_layout`. Adds
+`_mnemo/index.md` and `_mnemo/README.md` as static-ish content.
+
+*Value:* nothing user-visible yet, but establishes the namespace and lets
+later slices write into it. Required precondition for everything below
+Slice 4.
+
+### Slice 3 — move decisions + memories under `_mnemo/`
+
+Re-render the two existing abstractions (decisions, memories) under their
+new paths inside `_mnemo/`. Above-fence content gets the new frontmatter
+shape. Old v1 decision/memory files are still written when
+`vault_layout="both"`.
+
+*Value:* the two existing semantic exports become available in the new
+layout. Validates the rendering shape, frontmatter, and graph topology
+before more abstractions are added.
+
+### Slice 4 — drop session/CI/PR/repo writers from `_mnemo/`
+
+When `vault_layout="v2"`, do not write session, CI, PR, or repo-index pages
+to `_mnemo/`. v1 paths continue to honour the old behaviour under
+`vault_layout="both"` or `"v1"`.
+
+*Value:* validates the principle that raw signal stays in SQLite. The user
+opting into v2 immediately sees a calmer, smaller wing.
+
+**Slices 1–4 are the MVP v2 boundary.** After Slice 4, the wing is
+consent-correct, namespaced, and free of raw-signal noise. Each of
+Slices 5–9 below ships independently afterwards.
+
 ### Slice 5 — PKM profile + auto-detect
 
 Introduce the `vault_profile` config key, the per-profile renderer hooks,
-and the auto-detect-from-vault-contents logic.
+and the auto-detect logic. Detection uses **mtime of the canonical
+signal files** (`.obsidian/workspace.json`, `logseq/config/config.edn`,
+`.foam/settings.json`), not directory presence — see "PKM profile" in
+the Architecture section for the full rule. The detected profile, the
+signal file path, and its mtime are recorded in `mnemo_vault_status`.
 
-*Value:* Logseq/Foam/generic users get a usable wing.
+*Value:* Logseq/Foam/generic users get a usable wing. Multi-tool PKM
+users (Obsidian + Logseq on the same directory) are detected by
+recent-activity, not first-open accident.
 
 ### Slice 6 — bridges
 
@@ -791,21 +1579,52 @@ MOCs without invading.
 ### Slice 7 — patterns (persisted + rendered)
 
 Promote `mnemo_discover_patterns` from live-queried to persisted. New
-`patterns` table (additive, append-only per schema policy). Renderer
-emits `_mnemo/patterns/` pages.
+`patterns` table (additive, append-only per schema policy):
+
+```sql
+CREATE TABLE patterns (
+  id              TEXT PRIMARY KEY,         -- pattern_<sha1(type+canonical_signature)[:8]>
+  pattern_type    TEXT NOT NULL,            -- "direct_jsonl_read" | "repeated_query_shape" | ...
+  signature       TEXT NOT NULL,            -- canonicalised input snippet that defines the pattern
+  occurrence_count INTEGER NOT NULL,
+  session_count   INTEGER NOT NULL,         -- distinct sessions where pattern observed
+  repos           TEXT NOT NULL,            -- JSON array of repo names
+  first_seen      TEXT NOT NULL,
+  last_seen       TEXT NOT NULL,
+  representative_excerpts TEXT NOT NULL,    -- JSON array of excerpt strings
+  computed_at     TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE patterns_fts USING fts5(
+  pattern_type, signature, representative_excerpts,
+  content='patterns', content_rowid='rowid'
+);
+```
+
+Renderer emits `_mnemo/patterns/` pages for patterns meeting the
+`occurrence ≥ 3` and `session_count ≥ 2` threshold (carried over
+from the live `mnemo_discover_patterns` filter).
 
 *Value:* first new abstraction. Patterns are the cheapest abstraction to
 extract (purely heuristic) and the highest signal per unit effort.
+Slice 8's clustering corpus (`vault-clustering.md` Inputs §3) reads
+this table directly.
 
 ### Slice 8 — themes + cross-repo (clustering engine)
 
-The research-shaped slice. Embedding-based clustering over decisions +
-compaction summaries, plus indexed user content when scope permits. New
-`themes` table (additive). Cross-repo pages derived from themes with
-repo set ≥ 2.
+The research-shaped slice. Two-engine clustering pipeline over
+decisions + compaction summaries + persisted patterns (Slice 7) +
+indexed user content when scope permits. The **heuristic engine**
+(TF-IDF + single-link agglomerative) is the default and ships first;
+the **embeddings engine** is opt-in (per T63 egress posture) and
+reuses single-link clustering downstream of vectorisation. HDBSCAN
+is deferred. New tables: `themes`, `theme_members`,
+`cluster_embeddings`, `themes_fts`, `cluster_runs`, `theme_overrides`,
+`theme_pins` (additive). Cross-repo pages derived from themes with
+repo set ≥ 2 and weight ≥ 4.0.
 
-This slice carries the most risk and warrants its own subordinate design
-document (`docs/design/vault-clustering.md`) once Slice 7 lands.
+This slice carries the most risk and is governed by the subordinate
+design document `docs/design/vault-clustering.md`.
 
 *Value:* the core promise of the redesign. Without themes, the wing is a
 better-organised v1; with themes, it is genuinely new.
@@ -813,23 +1632,46 @@ better-organised v1; with themes, it is genuinely new.
 ### Slice 9 — lessons + GC tool
 
 Lessons extractor (feedback memories + confirmed-and-surviving decisions).
-`mnemo_vault_gc_legacy` tool. `_mnemo/legacy-annotations.md` harvester.
+`mnemo_vault_gc_legacy` tool. `mnemo_vault_migration_doc` tool (opt-in
+regen of MIGRATION.md per the fence-contract exception).
+`_mnemo/legacy-annotations.md` harvester.
 
 *Value:* completes the abstraction set and gives Archetype D users a
 clean migration path off v1.
 
+### MCP tool inventory (cross-slice)
+
+Every new MCP tool introduced by this design, indexed by the slice
+that owns it. Implementers should treat this as the canonical
+checklist — an item missing from a slice's PR is a slice not done.
+
+| Tool                                | Slice | Purpose                                                 |
+|-------------------------------------|-------|---------------------------------------------------------|
+| (config keys via existing `mnemo_config`) | 1 | indexing-scope keys land via the existing hot-reload  |
+| `mnemo_vault_status` (extended)     | 1+    | reports active layout, profile, scope, indexed-file count outside `_mnemo/`, soak-TTL recommendation, broken-template list, bridge errors, last `cluster_runs` row. Single canonical surface — see "`mnemo_vault_status` response schema" below. |
+| `mnemo_vault_bridge_list`           | 6     | inspect active bridges and their anchor files           |
+| `mnemo_vault_recluster`             | 8     | trigger an immediate clustering pass. Params: `engine` optional override (`"heuristic"`/`"embeddings"`); `force_reembed: bool` (default false) to invalidate the active-fingerprint cache rows and re-embed cleanly — useful when a provider silently revises a model under the same version string. Returns the new `cluster_runs` row. |
+| `mnemo_vault_themes_inspect`        | 8     | full member list + distances + centroid + labelling source for a theme slug or ID |
+| `mnemo_vault_themes_split`          | 8+    | mark theme for split on next pass; persisted in `theme_overrides` |
+| `mnemo_vault_themes_merge`          | 8+    | inverse of split                                        |
+| `mnemo_vault_themes_pin`            | 8+    | mark theme as never-auto-retire; persisted in `theme_pins` |
+| `mnemo_vault_gc_legacy`             | 9     | user-initiated deletion of v1 root-level dirs after annotation-safety check |
+| `mnemo_vault_migration_doc`         | 9     | opt-in regen of `_mnemo/MIGRATION.md` (write-once exception to the fence contract) |
+
 ### Templates (cross-cutting)
 
-Shipped between Slice 3 and Slice 5 as a refactor: the renderer is
-restructured to load templates from `~/.mnemo/vault_templates/` with
-embedded defaults. No user-facing change at landing; unblocks Archetype E
+Shipped between Slice 4 and Slice 5 as a refactor: the renderer is
+restructured to load templates from `~/.mnemo/vault_templates/v2/`
+with embedded defaults. Validation runs at startup; broken
+user templates surface in `mnemo_vault_status` rather than silently
+falling back. No user-facing change at landing; unblocks Archetype E
 once layout v2 is stable.
 
 ---
 
 ## Risks and open questions
 
-### Indexing-scope consent migration (Slice 4)
+### Indexing-scope consent migration (Slice 1)
 
 v1 effectively shipped in `"full"` scope without an opt-in. Some users
 may rely on `mnemo_search` returning hits from notes they deliberately
@@ -871,9 +1713,12 @@ Themes are the riskiest abstraction. Bad clusters look like:
   theme).
 - Labels that are vague or misleading ("various topics").
 
-**Mitigation:** ship Slice 8 behind a `vault_clustering.engine=heuristic`
-fallback (TF-IDF + jaccard over n-grams, no embeddings). Document the
-known failure modes. Allow `min_cluster_weight` tuning. Provide
+**Mitigation:** Slice 8 ships with the heuristic engine
+(`vault_clustering.engine="heuristic"`) as the **default and the
+realistic engine**, not a fallback. The embeddings engine is an opt-in
+addition. The heuristic engine is explicitly designed to be non-toy
+(see `docs/design/vault-clustering.md` Engine B). Document the known
+failure modes. Allow `min_cluster_weight` tuning. Provide
 `mnemo_vault_themes_inspect` for users to see cluster membership and
 flag misclusters.
 
@@ -885,8 +1730,17 @@ deployments (team-mnemo, T36), the cross-repo surface area becomes a
 policy question.
 
 **Resolution:** out of scope here. team-mnemo's access model governs that
-case. For single-user vaults, all content is the same user's, so the
-question does not arise.
+case. For single-user vaults, all content is the same user's — but
+that does not mean it is all of the same *domain*. A solo user's
+vault commonly mixes work, personal, and side-project content; a
+theme that surfaces a cluster spanning work decisions and personal
+journal notes can be unwelcome even if technically owned by the
+same user. `.mnemoignore` is the user's only knob for this case:
+add `personal/`, `journal/`, or similar to keep them out of the
+clustering corpus. `mnemo_vault_status.indexing_scope.external_files_indexed`
+exposes how many user notes are reaching the corpus so the user
+can audit the surface area. Per-note `mnemo: ignore` (out-of-scope
+follow-up) will be the finer-grained knob.
 
 ### Embedding cost
 
@@ -894,20 +1748,25 @@ Computing embeddings for every decision summary and compaction span at
 each clustering pass is bounded but not free. A user with 1000 sessions ×
 several decisions each is plausible.
 
-**Resolution:** cache embeddings keyed by (entity_kind, entity_id,
-content_hash). Recompute only on content change. Estimated cost for the
-median user is single-digit cents per re-cluster. For users without an
-embedding API key, the heuristic engine handles the corpus.
+**Resolution:** cache embeddings keyed by `(doc_kind, entity_id,
+content_hash, provider, model, model_version)`. Recompute only when any
+of those change; a model swap leaves the prior rows in the cache for
+revert. Estimated cost for the median user is single-digit cents per
+re-cluster. For users who do not opt into the embeddings engine, the
+heuristic engine handles the corpus with zero external calls.
 
 ### Profile auto-detect false positives
 
-A vault containing `.obsidian/` because the user opened it once in Obsidian
-but actually uses Logseq daily would be mis-detected.
+A vault containing `.obsidian/` because the user opened it once in
+Obsidian but actually uses Logseq daily would be mis-detected by a
+mere-presence check.
 
-**Resolution:** `vault_profile` config key always wins. Profile detection
-result is logged at startup. Future enhancement: detect more strongly by
-looking for tool-specific *content* signatures (Logseq `journals/` with
-recent edits, Obsidian `.obsidian/workspace.json` with recent activity).
+**Resolution:** detection is by **mtime of the canonical signal file**,
+not directory presence (see "PKM profile" above). The
+most-recently-modified signal file wins; ties tip towards Obsidian.
+Result is recorded in `mnemo_vault_status` with the signal file path
+and mtime so the user can audit. `vault_profile` config key always
+overrides regardless of auto-detect.
 
 ### `_mnemo/` collides with user's own folder
 
@@ -924,15 +1783,25 @@ with an error. Require the user to rename or move their folder, or point
 A user has both `_mnemo/` (from a previous run) and v1 root-level dirs
 (from an even earlier run). Which is current?
 
-**Resolution:** treat as `vault_layout="both"` until the user explicitly
-sets it. `MIGRATION.md` documents the state and asks them to choose.
+**Resolution:** two orthogonal keys, two defaults:
+
+- `vault_layout` — defaults to `"both"` until the user explicitly sets
+  it. Continued dual-write is the safe choice; the soak-TTL warning
+  kicks in after 30 days.
+- `vault_indexing_scope` — if unset, defaults to `"full"` (continuity
+  with the v1 vault's effective read scope).
+
+These resolve independently because they govern different surfaces
+(write vs. read). `MIGRATION.md` documents both states and shows the
+one-line `mnemo_config` calls to commit either way.
 
 ---
 
 ## Success metrics
 
 These determine whether the design delivered its promised value once
-shipped. Reviewable post-launch.
+shipped. All are **[metric]** rather than gates — reviewable in the
+post-launch retro, not blocking on slice landing.
 
 - **For new users:** ≥ 90% of new vault configurations land on `v2` without
   any `vault_*` config beyond `vault_path`. Validated by surveying
@@ -967,7 +1836,7 @@ shipped. Reviewable post-launch.
   via the template mechanism once core profiles ship.
 - **Block-level outliner support.** Logseq/Roam block refs. Distinct
   representational model; not pursued.
-- **Vault-as-input override layer.** Slice 4 makes the vault readable as
+- **Vault-as-input override layer.** Slice 1 makes the vault readable as
   clustering signal under `"full"` or `"includes"` scopes. A stronger
   step — treating specific curated user notes (e.g. hand-written
   `_mnemo/themes/foo.md` augmentations or user-promoted MOC pages) as
@@ -984,28 +1853,79 @@ shipped. Reviewable post-launch.
 ## Acceptance criteria
 
 The work covered by this design is considered complete when all of the
-following are true:
+following are true. Each item is marked **[gate]** (ship-blocking,
+CI-testable) or **[metric]** (post-launch signal, validated
+qualitatively or via survey). A slice does not ship without its
+gates passing; metrics are reviewed in the post-launch retro.
 
-1. `<vault>/_mnemo/` is the only directory written by mnemo for new vault
-   configurations.
-2. Existing v1 vaults can be migrated to v2 with zero annotation loss and
-   user-paced timing.
-3. Themes, patterns, cross-repo, lessons, decisions (filtered), and
-   memories are all materialised under `_mnemo/`.
-4. The wing renders correctly in Obsidian, Logseq, Foam, and a plain
-   Markdown editor without per-tool configuration.
-5. Bridges work end-to-end against at least Obsidian and Logseq.
-6. Template overrides work for at least one entity type end-to-end.
-7. `mnemo_vault_status` reports layout, profile, indexing scope,
-   abstraction counts, count of indexed user files outside `_mnemo/`,
-   and any v1 leftovers.
-8. `mnemo_vault_gc_legacy` removes v1 leftovers after annotation safety
-   check.
-9. Indexing scope defaults to `"_mnemo_only"` on new vaults and `"full"`
-   on v1-populated vaults at upgrade; both behaviours covered by tests.
-10. `.mnemoignore` (gitignore syntax) is honoured at vault root in
-    `"full"` and `"includes"` scopes; verified by tests including
-    nested-pattern cases.
+1. **[gate]** `<vault>/_mnemo/` is the only directory written by mnemo
+   for new vault configurations.
+2. **[gate]** Existing v1 vaults can be migrated to v2 with zero
+   annotation loss and user-paced timing.
+3. **[gate]** Themes, patterns, cross-repo, lessons, decisions
+   (filtered), and memories are all materialised under `_mnemo/`.
+4. **[gate]** The wing renders correctly in Obsidian, Logseq, Foam, and
+   a plain Markdown editor without per-tool configuration. Verified by
+   golden-file tests per profile.
+5. **[gate]** Bridges work end-to-end against at least Obsidian and
+   Logseq.
+6. **[gate]** Template overrides work for at least one entity type
+   end-to-end.
+7. **[gate]** `mnemo_vault_status` returns the full schema documented in
+   "Operational invariants → `mnemo_vault_status` response schema",
+   including layout, profile, indexing scope, abstraction counts,
+   `external_files_indexed`, `v1_leftovers`, `embedding_fingerprint`,
+   `broken_templates`, `bridge_errors`.
+8. **[gate]** `mnemo_vault_gc_legacy` removes v1 leftovers after
+   annotation safety check.
+9. **[gate]** Indexing scope defaults to `"_mnemo_only"` on new vaults
+   and `"full"` on v1-populated vaults at upgrade; both behaviours
+   covered by tests.
+10. **[gate]** `.mnemoignore` (gitignore syntax) is honoured at vault
+    root in `"full"` and `"includes"` scopes; verified by tests
+    including nested-pattern cases and patterns inside `_mnemo/`.
+11. **[gate]** MVP v2 (Slices 1–4) is independently shippable and
+    reviewable as a coherent release. Slice 1 (indexing-scope consent
+    fix) lands ahead of any `_mnemo/` namespace work.
+12. **[gate]** `vault_layout="both"` triggers a structured warning +
+    status surface after the configured soak window (default 30 days).
+    The warning never auto-promotes or auto-deletes; the user owns the
+    timing.
+13. **[gate]** PKM profile auto-detect uses mtime of signal files
+    (`.obsidian/workspace.json`, `logseq/config/config.edn`,
+    `.foam/settings.json`), not directory presence. Tied vaults log
+    the alternative.
+14. **[gate]** `_mnemo/MIGRATION.md` is write-once and not regenerated.
+    `mnemo_vault_migration_doc` (Slice 9) exists for opt-in
+    regeneration.
+15. **[gate]** Custom templates live in `~/.mnemo/vault_templates/v2/`
+    and are validated at startup. A malformed user template surfaces
+    in `mnemo_vault_status.broken_templates` and does not silently
+    fall through to the embedded default.
+16. **[gate]** Bridge edge cases (missing fence, two bridges per
+    anchor, unknown bridge name, unwritable anchor) all have specified
+    behaviour matching the doc; verified by tests.
+17. **[gate]** Sync atomicity protocol holds: a daemon crashed
+    mid-write leaves no torn `<file>.md` and at most one
+    `.<name>.mnemo.tmp` per affected directory, cleaned on next boot.
+18. **[gate]** `state.json` survives daemon restart, supports forward-
+    and backward-compatible field set, and is never read or written
+    by user-facing config flows.
+19. **[gate]** Hot-reload of `vault_path` does not auto-migrate the old
+    location, seeds fresh defaults for the new path, and surfaces a
+    warning if a `_mnemo/` wing remains at the old path.
+20. **[gate]** Back-pressure: `max_themes`, `max_cross_repo`,
+    `vault_bridges.max_links` short-circuit the expensive paths
+    (embedding, LLM labelling, rendering) and not just the final
+    output stage.
+21. **[gate]** `_mnemo/` is registered with the path-exclusion
+    registry (PR #78) on every `vault_path` change, observable via
+    `mnemo_vault_status.excluded_paths`.
+22. **[gate]** Themes whose most recent member `ts` exceeds
+    `vault_clustering.retire_after` (default 180 days) move to
+    `_mnemo/themes/_archive/` on the next clustering pass. Themes
+    listed in `theme_pins` are never auto-retired regardless of age.
+    `mnemo_vault_themes_pin` adds and removes pins.
 
 ---
 
@@ -1028,7 +1948,7 @@ following are true:
   source of truth; sqlift's `AllowNone` gate is the enforcement
   mechanism.
 - **PR #91 / T53** (trees_of_interest + doc_tree_refs) — the
-  scope-as-trees model in Slice 4 reuses these tables. Each scope
+  scope-as-trees model in Slice 1 reuses these tables. Each scope
   becomes one or more tree roots; overlapping trees share content rows
   via doc_tree_refs.
 - **PR #86 / #87 / T61** (backup primitive + periodic backup worker) —
