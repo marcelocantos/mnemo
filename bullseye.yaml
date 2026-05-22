@@ -1726,6 +1726,185 @@ targets:
     origin: manual
     discovered: 2026-05-20
     achieved: 2026-05-20
+  T64:
+    name: Vault library wing redesign (v2 vault_path)
+    status: identified
+    value: 10.0
+    cost: 0.0
+    acceptance:
+    - All nine sub-targets (T64.1–T64.9) achieve their individual acceptance.
+    - The full set of 22 parent-design ship gates + 19 clustering-doc ship gates listed in docs/design/vault-library-wing.md and docs/design/vault-clustering.md pass on a real corpus.
+    - MVP v2 boundary (T64.1–T64.4) is independently shippable — at that point the wing is consent-correct, namespaced, and free of raw-signal noise. T64.5–T64.9 are independent follow-ups, not a single arc.
+    context: |-
+      Parent target for the vault library wing redesign accepted in PR #95 (commit c9cc08c). Replaces v1's flat root-level vault export (PRs #74, #77, #78) with a fenced `<vault>/_mnemo/` wing carrying second-order abstractions (themes, patterns, cross-repo, lessons, filtered decisions, memories).
+
+      Canonical design lives in docs/design/vault-library-wing.md; clustering engine is the subordinate design in docs/design/vault-clustering.md. Both docs went through one review pass before merge — concerns are recorded in the PR's resolution table.
+
+      Decomposes into nine independently reviewable slices. The first four constitute the MVP v2 release boundary; the consent fix (T64.1) is the only piece that closes a real shipped bug.
+    depends_on:
+    - T49
+    - T53
+    - T61
+    - T62
+    - T63
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.1:
+    name: Indexing scope + .mnemoignore (consent fix)
+    status: identified
+    value: 3.0
+    cost: 0.0
+    acceptance:
+    - Three scope modes are configurable — vault_indexing_scope can be set to "_mnemo_only", "full", or "includes" — and the ingest walker honours each.
+    - vault_indexing_includes and vault_indexing_ignore_file config keys plumbed through to the ingest path.
+    - .mnemoignore (gitignore-syntax matcher) is honoured at the vault root.
+    - IngestVaultAnnotations refactored to walk only the configured scope; pre-PR-95 silent full-vault read is gone.
+    - New vaults default to "_mnemo_only"; existing v1 vaults default to "full" for continuity.
+    - mnemo_vault_status surfaces the active scope.
+    context: |-
+      The only sub-target that fixes a real shipped bug — v1's silent full-vault read happened without user consent. Lands ahead of any `_mnemo/` namespace work for that reason. Reuses 🎯T53 trees_of_interest + doc_tree_refs for the "includes" mode rather than inventing a parallel mechanism.
+    depends_on:
+    - T53
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.2:
+    name: '`_mnemo/` namespace + vault_layout config'
+    status: identified
+    value: 2.0
+    cost: 0.0
+    acceptance:
+    - vault_layout config key accepts "v2", "both", or "v1"; default is "both" for existing vaults, "v2" for new.
+    - _mnemo/index.md and _mnemo/README.md exist with the standard fence contract.
+    - _mnemo/MIGRATION.md is written once on v1-detection and never regenerated; deletion is respected ("I have read this; move on"). Idempotent regen available via mnemo_vault_migration_doc(write: true).
+    - state.json tracks vault_layout_first_seen for soak-TTL warning purposes.
+    - mnemo_vault_status surfaces vault_layout, days_in_both, and a recommendation string (one of "still within soak", "opt into v2", "run gc_legacy", or empty).
+    - vault_layout="both" past the configurable soak window (default 720h) emits a weekly structured warning; the layout never auto-narrows.
+    context: |-
+      Plumbs the new directory root and the layout config knob. v1 writers retained, gated on vault_layout. The MIGRATION.md write-once exception lives here (rule scoped to MIGRATION.md only; every other file in _mnemo/ honours the standard fence contract).
+    depends_on:
+    - T64.1
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.3:
+    name: Move decisions + memories under _mnemo/
+    status: identified
+    value: 2.0
+    cost: 0.0
+    acceptance:
+    - decisions/ and memories/ pages render under _mnemo/decisions/ and _mnemo/memories/ with the design's new frontmatter shape and #mnemo/decision / #mnemo/memory tag namespace.
+    - Old v1 decision/memory files still written when vault_layout="both".
+    - The atomic write protocol (tempfile + fsync + rename) is in place and survives a daemon crash mid-write.
+    - Sync atomicity gate from parent acceptance #17 passes.
+    context: |-
+      Re-renders the two existing v1 abstractions under the new wing. Validates the rendering shape, frontmatter, graph topology, and atomic write protocol before any genuinely new abstractions (themes, patterns, lessons, cross-repo) land.
+    depends_on:
+    - T64.2
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.4:
+    name: Drop session/CI/PR/repo writers from _mnemo/
+    status: identified
+    value: 1.0
+    cost: 0.0
+    acceptance:
+    - When vault_layout="v2", session, CI, PR, and repo-index pages are NOT written to _mnemo/. v1 paths continue under vault_layout="both" or "v1".
+    - acceptance #1 of the parent design passes — _mnemo/ is the only directory written, and it contains only the abstraction shapes, not raw event dumps.
+    - Marks the MVP v2 boundary — the wing is now calm, scoped, and consent-correct.
+    context: |-
+      Validates the principle that raw signal stays in SQLite and is queried on demand. After this slice lands, T64 is half-cashed: the wing is correct in shape and consent, but the new abstractions (themes, patterns, lessons, cross-repo) are still missing. The remaining sub-targets land those.
+    depends_on:
+    - T64.3
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.5:
+    name: PKM profile + auto-detect (mtime-based)
+    status: identified
+    value: 2.0
+    cost: 0.0
+    acceptance:
+    - vault_profile config key accepts "obsidian", "logseq", "foam", or "generic".
+    - Per-profile renderer hooks plumbed for link syntax + properties differences (Obsidian alias links, Logseq prop:: syntax, etc.).
+    - Auto-detect uses mtime of canonical signal files (.obsidian/workspace.json, logseq/config/config.edn, .foam/settings.json) rather than directory presence; tie-break ≤ 1 hour → obsidian → logseq → foam.
+    - mnemo_vault_status reports the detected profile, the signal file path, its mtime, and any alternative profiles whose signal files exist.
+    context: |-
+      Mere directory presence is too brittle — multi-tool PKM users (notably Obsidian + Logseq on the same directory) are common, and a single exploratory open months ago can persist .obsidian/ forever. Recency-of-modification on the canonical signal file is the better signal.
+    depends_on:
+    - T64.2
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.6:
+    name: Bridges
+    status: identified
+    value: 2.0
+    cost: 0.0
+    acceptance:
+    - vault_bridges config maps collection name (themes / patterns / cross-repo / lessons / decisions / memories) to an anchor-file path anywhere in the vault.
+    - Whole-file atomic write inserts a fenced block ('<!-- mnemo:bridge:<name> --> ... <!-- /mnemo:bridge:<name> -->') into the named anchor file.
+    - Seven bridge edge cases handled per the design — missing fence (append at end), fence moved by user (re-locate by delimiter), missing anchor file (create with header), unwritable anchor (warn + skip, status surface, no retry storm), duplicate fences in one file (error + log, leave file alone), unknown collection name (fail-soft skip), bridge removed from config (strip block, leave file).
+    - vault_bridges.max_links capping applies per bridge (default 50); memories bridge groups by source project.
+    - bridge_<collection>.tmpl template overrides supported; standard template error handling applies.
+    - mnemo_vault_bridge_list MCP tool reports active bridges, anchor paths, and any errors.
+    context: |-
+      Optional, opt-in pointer from the user's existing PKM structure into the wing. One-way: anchor file points at _mnemo/ pages, never the reverse. Anchor files live outside _mnemo/; a bridge pointing at a path inside _mnemo/ should be rejected at config time (not yet specified — flag as a residual issue).
+    depends_on:
+    - T64.2
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.7:
+    name: Patterns (persisted + rendered)
+    status: identified
+    value: 3.0
+    cost: 0.0
+    acceptance:
+    - New `patterns` and `patterns_fts` tables, additive and append-only per 🎯T49 schema policy.
+    - mnemo_discover_patterns promoted from live-queried to backed by the persisted table.
+    - Renderer emits _mnemo/patterns/ pages for patterns meeting occurrence ≥ 3 AND session_count ≥ 2.
+    - Patterns become one of four input streams to the clustering engine (T64.8) with weight 1.2 per the clustering doc.
+    context: |-
+      The cheapest new abstraction to extract — pattern detection already exists as a live query. Promoting to persisted gives clustering a deterministic input and lets patterns survive across sessions. Prerequisite for T64.8.
+    depends_on:
+    - T64.4
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.8:
+    name: Themes + cross-repo (clustering engine)
+    status: identified
+    value: 5.0
+    cost: 0.0
+    acceptance:
+    - Two engines as specified — heuristic (TF-IDF + single-link agglomerative, fully local) is the default; embeddings (Voyage AI vectors + same single-link downstream) is opt-in. HDBSCAN is deferred until a pure-Go binding meets the correctness bar.
+    - 'Two-key egress matrix — with both API keys present in the environment but neither vault_clustering.engine: "embeddings" nor vault_clustering.label.engine: "llm" set, a clustering pass produces zero outbound HTTP requests.'
+    - Label quality gates all four pass — centroid-closeness (must be the centroid-closest vault_user member), ≥ 200-token body, daily-note filename exclusion, title-content token overlap. mnemo_vault_themes_inspect reports which gate fired when a user-anchor candidate was rejected.
+    - 'cluster_embeddings cache PK is (doc_kind, entity_id, content_hash, provider, model, model_version); switching models triggers clean re-embed; mnemo_vault_recluster(force_reembed: true) supported.'
+    - Cluster IDs derived from sha1(sorted member set), stable within a fixed (provider, model, model_version) fingerprint.
+    - Cross-repo pages derived from themes with len(repos) ≥ 2 AND weight ≥ 4.0.
+    - Theme retirement at vault_clustering.retire_after (180 days default) moves to _mnemo/themes/_archive/; pin via mnemo_vault_themes_pin exempts. Cluster ID survives archive→active round-trip if membership is stable.
+    - New tables — themes, theme_members, cluster_embeddings, themes_fts, cluster_runs, theme_overrides, theme_pins — all additive per 🎯T49.
+    - New MCP tools — mnemo_vault_recluster, mnemo_vault_themes_inspect, mnemo_vault_themes_pin — work end-to-end. Stubs for themes_split / themes_merge land config-rejecting placeholders.
+    - All 19 acceptance criteria in docs/design/vault-clustering.md pass.
+    context: |-
+      The research-shaped slice; carries the most risk. Subordinate design doc (docs/design/vault-clustering.md) is the canonical spec. Heuristic engine ships fully offline. Embeddings engine is opt-in per 🎯T63 egress posture; labelling engine is an independent opt-in (two-key matrix). HDBSCAN deferred to a follow-up slice.
+    depends_on:
+    - T64.7
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
+  T64.9:
+    name: Lessons + GC tool
+    status: identified
+    value: 3.0
+    cost: 0.0
+    acceptance:
+    - Lessons extractor surfaces feedback-type auto-memories plus confirmed decisions surviving ≥ 2 weeks, clustered via the same engine as T64.8.
+    - _mnemo/lessons/ pages rendered with appropriate frontmatter and tag namespace.
+    - mnemo_vault_gc_legacy is user-initiated, never automatic, and refuses to run if the annotation-safety check identifies unmigrated user content in v1 root-level dirs.
+    - mnemo_vault_migration_doc(write: true / false) supports idempotent regen of the write-once MIGRATION.md (write:false returns the snapshot without writing).
+    - _mnemo/legacy-annotations.md harvester paginates above max_file_kb.
+    context: |-
+      Completes the abstraction set and gives existing v1-vault users a clean off-ramp. After this slice lands the full nine-slice arc is done — the wing is calm, scoped, abstraction-rich, and has a user-controlled migration path.
+    depends_on:
+    - T64.8
+    origin: PR #95 (RFC)
+    discovered: 2026-05-22
   T7:
     name: Agent-defined query templates
     status: achieved
