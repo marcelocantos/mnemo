@@ -55,7 +55,7 @@ user. Good moments to reach for mnemo:
 - `mnemo_configs` — Search across CLAUDE.md project instruction files from all repos. Find build instructions, conventions, and delivery definitions.
 - `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with cost estimates. Filters by repo, model, date range. Groups by day, model, or repo.
 - `mnemo_audit` — Search across audit logs (docs/audit-log.md) from all repos. Filters by repo, skill (release/audit/docs). Use to check when a project was last released or find maintenance patterns.
-- `mnemo_targets` — Search across convergence targets (docs/targets.md) from all repos. Filters by repo, status. Cross-project target search.
+- `mnemo_targets` — Search across convergence targets (`docs/targets.md`) from all repos. Filters by repo, status. Cross-project target search. **Note**: today the indexer only reads `docs/targets.md`. mnemo's own targets live in `bullseye.yaml` at the repo root (matching the global bullseye convention) and are therefore not visible to this tool. Teaching the indexer to also read `bullseye.yaml` is a known follow-up.
 - `mnemo_plans` — Search across implementation plans (.planning/ directories) from all repos. Use this to find past design decisions or understand how features were planned.
 - `mnemo_who_ran` — Find sessions that ran a specific shell command. Searches Bash tool_use entries by command pattern, returning session, repo, command, and timestamp. Supports days window and repo filter.
 - `mnemo_permissions` — Analyze tool_use patterns to identify most-used tools and Bash command prefixes, then suggest concrete allowedTools rules for settings.json.
@@ -211,6 +211,18 @@ config. Absent → zero federation calls.
 The append-only schema policy and the opt-in egress posture compose:
 restoring an older backup never silently triggers a backfill of
 data from external APIs that the user did not authorise.
+
+## Convergence
+
+Targets live in `bullseye.yaml` at the repo root, managed by the
+bullseye MCP server (`bullseye_list`, `bullseye_put`,
+`bullseye_retire`, etc.). This matches the global convention.
+
+The `mnemo_targets` MCP tool — which reads `docs/targets.md` across
+all repos — does **not** index `bullseye.yaml` today, so mnemo's own
+targets are invisible to it. If you want a cross-project target
+search that includes mnemo, use `bullseye_list(cwd)` directly until
+the indexer is taught to read `bullseye.yaml`.
 
 ## Delivery
 
