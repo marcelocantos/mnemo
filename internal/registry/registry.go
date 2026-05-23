@@ -582,10 +582,11 @@ func (r *Registry) startVaultWorkers(username string, e *userEntry) context.Cont
 				}
 				logger.Warn("vault: watcher error", "err", err)
 			case <-debounce.C:
-				if err := e.store.IngestVaultAnnotations(vaultPath); err != nil {
+				opts := r.vaultIndexingOptionsFor(vaultPath)
+				if err := e.store.IngestVaultAnnotations(vaultPath, opts); err != nil {
 					logger.Warn("vault: annotation ingest failed", "err", err)
 				}
-				logger.Info("vault: annotations indexed from file change")
+				logger.Info("vault: annotations indexed from file change", "scope", opts.Scope)
 			}
 		}
 	}()
@@ -599,6 +600,22 @@ func (r *Registry) CurrentConfig() store.Config {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.cfg
+}
+
+// vaultIndexingOptionsFor builds the VaultIndexingOptions struct
+// IngestVaultAnnotations expects, resolving any auto-default scope
+// against the live vault tree (🎯T64.1). Reads the live config under
+// the registry mutex so a concurrent Reload that swaps the indexing
+// fields doesn't observe a half-updated struct.
+func (r *Registry) vaultIndexingOptionsFor(resolvedVaultPath string) store.VaultIndexingOptions {
+	r.mu.Lock()
+	cfg := r.cfg
+	r.mu.Unlock()
+	return store.VaultIndexingOptions{
+		Scope:      cfg.ResolvedVaultIndexingScope(resolvedVaultPath),
+		Includes:   cfg.VaultIndexingIncludes,
+		IgnoreFile: cfg.ResolvedVaultIndexingIgnoreFile(),
+	}
 }
 
 // ReloadReport summarises what changed during a Reload call and which

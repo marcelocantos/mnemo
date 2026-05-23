@@ -1751,7 +1751,7 @@ targets:
     discovered: 2026-05-22
   T64.1:
     name: Indexing scope + .mnemoignore (consent fix)
-    status: identified
+    status: achieved
     value: 3.0
     cost: 0.0
     acceptance:
@@ -1766,6 +1766,7 @@ targets:
     - T53
     origin: PR
     discovered: 2026-05-22
+    achieved: 2026-05-23
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: identified
