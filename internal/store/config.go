@@ -54,6 +54,35 @@ type Config struct {
 	// When absent or empty, vault export is completely disabled.
 	VaultPath string `json:"vault_path,omitempty"`
 
+	// VaultIndexingScope bounds what mnemo reads from the vault for the
+	// search index and clustering (🎯T64.1). Accepted values:
+	//   "_mnemo_only"  — only <vault>/_mnemo/ is read (safest)
+	//   "full"         — entire <vault> tree minus hidden dirs (v1
+	//                    behaviour; non-trivial surprise-consent risk
+	//                    on vaults with private content)
+	//   "includes"     — <vault>/_mnemo/ plus each path in
+	//                    VaultIndexingIncludes
+	//
+	// Empty selects a per-vault default via
+	// EffectiveVaultIndexingScope: "_mnemo_only" on fresh vaults,
+	// "full" on vaults populated by the v1 layout (so existing v1
+	// users do not lose hits silently on upgrade).
+	VaultIndexingScope string `json:"vault_indexing_scope,omitempty"`
+
+	// VaultIndexingIncludes lists vault-relative paths walked in
+	// addition to <vault>/_mnemo/ when VaultIndexingScope=="includes".
+	// Each entry is a directory or file path relative to the vault
+	// root (e.g. "areas/knowledge", "projects/auth-redesign.md").
+	// Ignored unless scope is "includes".
+	VaultIndexingIncludes []string `json:"vault_indexing_includes,omitempty"`
+
+	// VaultIndexingIgnoreFile names a gitignore-syntax file at the
+	// vault root whose patterns are honoured by the ingest walker
+	// regardless of scope. Empty falls back to ".mnemoignore". Only
+	// one ignore file is consulted; nested .mnemoignore files inside
+	// subdirectories are not honoured (documented in MIGRATION.md).
+	VaultIndexingIgnoreFile string `json:"vault_indexing_ignore_file,omitempty"`
+
 	// LinkedInstances declares peer mnemo endpoints to federate with
 	// (🎯T15). Each peer is identified by a https URL and a trusted
 	// peer certificate (either a name resolved under ~/.mnemo/peers/
@@ -384,8 +413,22 @@ func WriteConfig(cfg Config) error {
 	if err := cfg.validateVaultPath(home); err != nil {
 		return err
 	}
+	if err := cfg.validateVaultIndexingScope(); err != nil {
+		return err
+	}
 	path := filepath.Join(home, ".mnemo", "config.json")
 	return writeConfigTo(path, cfg)
+}
+
+// validateVaultIndexingScope rejects an unrecognised
+// vault_indexing_scope value at write time so a typo cannot silently
+// fall back to "full" the next time the ingest walker runs.
+func (c Config) validateVaultIndexingScope() error {
+	if !IsValidVaultIndexingScope(c.VaultIndexingScope) {
+		return fmt.Errorf("vault_indexing_scope %q is not one of \"\", %q, %q, %q",
+			c.VaultIndexingScope, VaultScopeMnemoOnly, VaultScopeFull, VaultScopeIncludes)
+	}
+	return nil
 }
 
 // validateVaultPath mirrors the only fallible step of vault.New
@@ -582,6 +625,117 @@ func (c Config) ResolvedVaultPath(userHome string) string {
 		}
 	}
 	return p
+}
+
+// Indexing-scope mode constants. VaultIndexingScope accepts any of
+// these as a string value; empty means "use detected default".
+const (
+	VaultScopeMnemoOnly = "_mnemo_only"
+	VaultScopeFull      = "full"
+	VaultScopeIncludes  = "includes"
+)
+
+// IsValidVaultIndexingScope reports whether s names one of the three
+// supported scope modes. The empty string is also accepted (it selects
+// the per-vault default at runtime via EffectiveVaultIndexingScope).
+func IsValidVaultIndexingScope(s string) bool {
+	switch s {
+	case "", VaultScopeMnemoOnly, VaultScopeFull, VaultScopeIncludes:
+		return true
+	}
+	return false
+}
+
+// v1VaultLayoutDirs are the root-level directory names the v1 writer
+// created in <vault>/. Their presence (without a sibling _mnemo/) is
+// the signal that an existing user is upgrading and silent narrowing
+// of scope would lose them search hits they relied on.
+var v1VaultLayoutDirs = []string{
+	"sessions", "decisions", "memories", "skills",
+	"configs", "plans", "targets", "ci", "prs", "repos",
+}
+
+// EffectiveVaultIndexingScope returns the scope to apply for the given
+// resolved vault path. Explicit configuration always wins. When the
+// config value is empty, the default is detected:
+//
+//   - Vault contains _mnemo/ (any state)            → "_mnemo_only"
+//   - Vault lacks _mnemo/ but has v1 layout dirs    → "full"
+//   - Vault lacks both (fresh or empty directory)   → "_mnemo_only"
+//
+// The middle case is the migration safety valve: a user upgrading from
+// v1 keeps the silent-full-vault read behaviour they were depending on
+// until they explicitly narrow scope. MIGRATION.md documents the knob.
+func (c Config) EffectiveVaultIndexingScope(resolvedVaultPath string) string {
+	if c.VaultIndexingScope != "" {
+		return c.VaultIndexingScope
+	}
+	if resolvedVaultPath == "" {
+		return VaultScopeMnemoOnly
+	}
+	if fi, err := os.Stat(filepath.Join(resolvedVaultPath, "_mnemo")); err == nil && fi.IsDir() {
+		return VaultScopeMnemoOnly
+	}
+	for _, name := range v1VaultLayoutDirs {
+		if fi, err := os.Stat(filepath.Join(resolvedVaultPath, name)); err == nil && fi.IsDir() {
+			return VaultScopeFull
+		}
+	}
+	return VaultScopeMnemoOnly
+}
+
+// ResolvedVaultIndexingIncludes returns includes joined to the resolved
+// vault path. Entries that escape the vault root (via ".." segments,
+// absolute paths, or symlink resolution outside the root) are dropped
+// with no error — bad config should narrow scope, never widen it.
+//
+// Order is preserved so log/status output matches user-written config.
+// Empty entries are skipped.
+func (c Config) ResolvedVaultIndexingIncludes(resolvedVaultPath string) []string {
+	if resolvedVaultPath == "" || len(c.VaultIndexingIncludes) == 0 {
+		return nil
+	}
+	root, err := filepath.Abs(resolvedVaultPath)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(c.VaultIndexingIncludes))
+	for _, inc := range c.VaultIndexingIncludes {
+		inc = strings.TrimSpace(inc)
+		if inc == "" {
+			continue
+		}
+		var joined string
+		if filepath.IsAbs(inc) {
+			joined = filepath.Clean(inc)
+		} else {
+			joined = filepath.Join(root, inc)
+		}
+		rel, err := filepath.Rel(root, joined)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		out = append(out, joined)
+	}
+	return out
+}
+
+// ResolvedVaultIgnoreFile returns the absolute path to the gitignore-
+// syntax file consulted at vault read time. Defaults to
+// "<vault>/.mnemoignore" when VaultIndexingIgnoreFile is empty. The
+// file may not exist; callers treat ENOENT as "no patterns".
+func (c Config) ResolvedVaultIgnoreFile(resolvedVaultPath string) string {
+	if resolvedVaultPath == "" {
+		return ""
+	}
+	name := c.VaultIndexingIgnoreFile
+	if name == "" {
+		name = ".mnemoignore"
+	}
+	if filepath.IsAbs(name) {
+		return filepath.Clean(name)
+	}
+	return filepath.Join(resolvedVaultPath, name)
 }
 
 // ResolvedSynthesisRoots returns SynthesisRoots with ~ expanded to the

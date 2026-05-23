@@ -692,7 +692,7 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	case "mnemo_vault_sync":
 		return ch.vaultSync()
 	case "mnemo_vault_status":
-		return ch.vaultStatus()
+		return ch.vaultStatus(h.cfgCtl)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2186,7 +2186,7 @@ func (h *callHandler) vaultSync() (string, bool, error) {
 		time.Since(start).Round(time.Millisecond), h.vault.Path()), false, nil
 }
 
-func (h *callHandler) vaultStatus() (string, bool, error) {
+func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 	if h.vault == nil {
 		return vaultNotConfigured, false, nil
 	}
@@ -2194,6 +2194,46 @@ func (h *callHandler) vaultStatus() (string, bool, error) {
 	sections := []string{"sessions", "decisions", "memories", "skills", "configs", "plans", "targets", "ci", "prs", "repos"}
 	var b strings.Builder
 	fmt.Fprintf(&b, "vault path: %s\n\n", vaultPath)
+
+	if ctl != nil {
+		cfg := ctl.Get()
+		scope := cfg.EffectiveVaultIndexingScope(vaultPath)
+		fmt.Fprintf(&b, "Indexing scope: %s", scope)
+		if cfg.VaultIndexingScope == "" {
+			fmt.Fprintf(&b, " (default)")
+		}
+		b.WriteString("\n")
+		if scope == store.VaultScopeIncludes {
+			b.WriteString("Includes:\n")
+			includes := cfg.ResolvedVaultIndexingIncludes(vaultPath)
+			if len(includes) == 0 {
+				b.WriteString("  (none configured)\n")
+			}
+			for _, inc := range includes {
+				rel, err := filepath.Rel(vaultPath, inc)
+				if err != nil {
+					rel = inc
+				}
+				fmt.Fprintf(&b, "  %s\n", rel)
+			}
+		}
+		ignoreFile := cfg.ResolvedVaultIgnoreFile(vaultPath)
+		ignoreState := "absent"
+		if _, err := os.Stat(ignoreFile); err == nil {
+			ignoreState = "present"
+		}
+		rel, err := filepath.Rel(vaultPath, ignoreFile)
+		if err != nil {
+			rel = ignoreFile
+		}
+		fmt.Fprintf(&b, "Ignore file: %s (%s)\n", rel, ignoreState)
+		if scope == store.VaultScopeFull || scope == store.VaultScopeIncludes {
+			outside := countMDFilesOutsideMnemo(vaultPath)
+			fmt.Fprintf(&b, "User files outside _mnemo/: %d\n", outside)
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("Notes on disk:\n")
 	total := 0
 	for _, sec := range sections {
@@ -2203,6 +2243,40 @@ func (h *callHandler) vaultStatus() (string, bool, error) {
 	}
 	fmt.Fprintf(&b, "  %-12s %d\n", "total", total)
 	return b.String(), false, nil
+}
+
+// countMDFilesOutsideMnemo counts user-authored .md files that live
+// anywhere in the vault other than under _mnemo/. Hidden directories
+// (the same set skipped by the ingest walker) are excluded so dot-dir
+// caches do not inflate the user-visible number.
+func countMDFilesOutsideMnemo(vaultPath string) int {
+	if vaultPath == "" {
+		return 0
+	}
+	count := 0
+	_ = filepath.WalkDir(vaultPath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if p == vaultPath {
+				return nil
+			}
+			if name == "_mnemo" {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".md") {
+			count++
+		}
+		return nil
+	})
+	return count
 }
 
 // countMDFiles counts *.md files recursively under dir.
@@ -2281,11 +2355,14 @@ func (h *callHandler) callerHome() string {
 // "vaultpath" produces an error rather than being silently dropped by
 // json.Unmarshal's unknown-field handling.
 var knownConfigKeys = map[string]struct{}{
-	"workspace_roots":    {},
-	"extra_project_dirs": {},
-	"synthesis_roots":    {},
-	"vault_path":         {},
-	"linked_instances":   {},
+	"workspace_roots":            {},
+	"extra_project_dirs":         {},
+	"synthesis_roots":            {},
+	"vault_path":                 {},
+	"vault_indexing_scope":       {},
+	"vault_indexing_includes":    {},
+	"vault_indexing_ignore_file": {},
+	"linked_instances":           {},
 }
 
 // mergeConfigPatch round-trips current through JSON so the patch's

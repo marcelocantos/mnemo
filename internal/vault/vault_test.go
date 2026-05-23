@@ -917,7 +917,7 @@ func TestBidirectionalSync(t *testing.T) {
 	}
 
 	// IngestVaultAnnotations should index the below-fence content.
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -957,7 +957,7 @@ func TestBidirectionalSync(t *testing.T) {
 	if err := os.WriteFile(noteFile, raw, 0o644); err != nil {
 		t.Fatalf("rewrite without annotation: %v", err)
 	}
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations after removal: %v", err)
 	}
 	results, err = s.Search("unique annotation bidir feature", 10, "all", "", 0, 0, false)
@@ -999,7 +999,7 @@ func TestVaultOnlySearch(t *testing.T) {
 	raw, _ := os.ReadFile(sessionFiles[0])
 	annotated := string(raw) + "\nzymurgist-quibble-paradigm\n"
 	os.WriteFile(sessionFiles[0], []byte(annotated), 0o644)
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -1035,7 +1035,7 @@ func TestUserCreatedFileIsIndexed(t *testing.T) {
 		t.Fatalf("write user file: %v", err)
 	}
 
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -1121,7 +1121,7 @@ func TestVaultDeletionPrunesRow(t *testing.T) {
 	if err := os.WriteFile(notePath, []byte(body), 0o644); err != nil {
 		t.Fatalf("write note: %v", err)
 	}
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
 
@@ -1135,7 +1135,7 @@ func TestVaultDeletionPrunesRow(t *testing.T) {
 	if err := os.Remove(notePath); err != nil {
 		t.Fatalf("remove note: %v", err)
 	}
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("post-deletion ingest: %v", err)
 	}
 
@@ -1167,7 +1167,7 @@ func TestVaultSkipsHiddenDirs(t *testing.T) {
 		t.Fatalf("write hidden file: %v", err)
 	}
 
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIngestOptions{Scope: store.VaultScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 

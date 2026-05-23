@@ -582,15 +582,31 @@ func (r *Registry) startVaultWorkers(username string, e *userEntry) context.Cont
 				}
 				logger.Warn("vault: watcher error", "err", err)
 			case <-debounce.C:
-				if err := e.store.IngestVaultAnnotations(vaultPath); err != nil {
+				opts := r.vaultIngestOpts(vaultPath)
+				if err := e.store.IngestVaultAnnotations(vaultPath, opts); err != nil {
 					logger.Warn("vault: annotation ingest failed", "err", err)
 				}
-				logger.Info("vault: annotations indexed from file change")
+				logger.Info("vault: annotations indexed from file change",
+					"scope", opts.Scope)
 			}
 		}
 	}()
 
 	return vctx
+}
+
+// vaultIngestOpts assembles store.VaultIngestOptions from the live
+// config for the given resolved vault path. Reads r.cfg under r.mu so
+// a concurrent Reload sees a coherent snapshot.
+func (r *Registry) vaultIngestOpts(vaultPath string) store.VaultIngestOptions {
+	r.mu.Lock()
+	cfg := r.cfg
+	r.mu.Unlock()
+	return store.VaultIngestOptions{
+		Scope:    cfg.EffectiveVaultIndexingScope(vaultPath),
+		Includes: cfg.ResolvedVaultIndexingIncludes(vaultPath),
+		Ignore:   store.LoadVaultIgnore(cfg.ResolvedVaultIgnoreFile(vaultPath)),
+	}
 }
 
 // CurrentConfig returns a snapshot of the live Config. Safe to call
