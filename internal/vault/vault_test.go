@@ -917,7 +917,7 @@ func TestBidirectionalSync(t *testing.T) {
 	}
 
 	// IngestVaultAnnotations should index the below-fence content.
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -957,7 +957,7 @@ func TestBidirectionalSync(t *testing.T) {
 	if err := os.WriteFile(noteFile, raw, 0o644); err != nil {
 		t.Fatalf("rewrite without annotation: %v", err)
 	}
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations after removal: %v", err)
 	}
 	results, err = s.Search("unique annotation bidir feature", 10, "all", "", 0, 0, false)
@@ -999,7 +999,7 @@ func TestVaultOnlySearch(t *testing.T) {
 	raw, _ := os.ReadFile(sessionFiles[0])
 	annotated := string(raw) + "\nzymurgist-quibble-paradigm\n"
 	os.WriteFile(sessionFiles[0], []byte(annotated), 0o644)
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -1035,7 +1035,7 @@ func TestUserCreatedFileIsIndexed(t *testing.T) {
 		t.Fatalf("write user file: %v", err)
 	}
 
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -1121,7 +1121,7 @@ func TestVaultDeletionPrunesRow(t *testing.T) {
 	if err := os.WriteFile(notePath, []byte(body), 0o644); err != nil {
 		t.Fatalf("write note: %v", err)
 	}
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
 
@@ -1135,7 +1135,7 @@ func TestVaultDeletionPrunesRow(t *testing.T) {
 	if err := os.Remove(notePath); err != nil {
 		t.Fatalf("remove note: %v", err)
 	}
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("post-deletion ingest: %v", err)
 	}
 
@@ -1167,7 +1167,7 @@ func TestVaultSkipsHiddenDirs(t *testing.T) {
 		t.Fatalf("write hidden file: %v", err)
 	}
 
-	if err := s.IngestVaultAnnotations(vaultDir); err != nil {
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{Scope: store.VaultIndexingScopeFull}); err != nil {
 		t.Fatalf("IngestVaultAnnotations: %v", err)
 	}
 
@@ -1238,6 +1238,179 @@ func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
 	raw, _ := os.ReadFile(sessionFiles[0])
 	if c := strings.Count(string(raw), generatedFence); c != 1 {
 		t.Errorf("expected 1 fence after concurrent Sync, got %d", c)
+	}
+}
+
+// TestIndexingScopeMnemoOnlySkipsOutsideContent verifies that under
+// "_mnemo_only" scope (the new-vault default), user notes dropped at
+// the vault root (outside <vault>/_mnemo/) are NOT indexed — fixes
+// the v1 silent full-vault read called out in 🎯T64.1.
+func TestIndexingScopeMnemoOnlySkipsOutsideContent(t *testing.T) {
+	projDir := t.TempDir()
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+
+	// Outside the wing — must not be indexed under _mnemo_only.
+	outsideFile := filepath.Join(vaultDir, "private-journal.md")
+	outsideBody := "# Journal\n\nflugelhorn-sasquatch-confidential.\n"
+	if err := os.WriteFile(outsideFile, []byte(outsideBody), 0o644); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	// Inside the wing — must be indexed.
+	insideDir := filepath.Join(vaultDir, "_mnemo")
+	if err := os.MkdirAll(insideDir, 0o755); err != nil {
+		t.Fatalf("mkdir _mnemo: %v", err)
+	}
+	insideFile := filepath.Join(insideDir, "lesson.md")
+	insideBody := "# Lesson\n\npublishable-content-rhubarb.\n"
+	if err := os.WriteFile(insideFile, []byte(insideBody), 0o644); err != nil {
+		t.Fatalf("write inside: %v", err)
+	}
+
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{
+		Scope: store.VaultIndexingScopeMnemoOnly,
+	}); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	results, err := s.Search("flugelhorn sasquatch confidential", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatalf("Search outside: %v", err)
+	}
+	for _, r := range results {
+		if r.Role == "vault" {
+			t.Errorf("outside-wing content leaked under _mnemo_only: %q", r.Text)
+		}
+	}
+
+	results, err = s.Search("publishable content rhubarb", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatalf("Search inside: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Role == "vault" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("inside-wing content should be indexed under _mnemo_only")
+	}
+}
+
+// TestIndexingScopeIncludes verifies that "includes" scope reads
+// <vault>/_mnemo/ plus the listed extra trees, and only those.
+func TestIndexingScopeIncludes(t *testing.T) {
+	projDir := t.TempDir()
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+
+	type seed struct {
+		rel  string
+		body string
+	}
+	seeds := []seed{
+		{"_mnemo/themes/note.md", "wingcontentvermicelli\n"},
+		{"areas/included/included.md", "includedtreequokka\n"},
+		{"areas/excluded/excluded.md", "excludedtreearmadillo\n"},
+	}
+	for _, sd := range seeds {
+		p := filepath.Join(vaultDir, sd.rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(sd.body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", sd.rel, err)
+		}
+	}
+
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{
+		Scope:    store.VaultIndexingScopeIncludes,
+		Includes: []string{"areas/included"},
+	}); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	for _, term := range []string{"wingcontentvermicelli", "includedtreequokka"} {
+		results, _ := s.Search(term, 10, "all", "", 0, 0, false)
+		ok := false
+		for _, r := range results {
+			if r.Role == "vault" {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("expected term %q to be indexed", term)
+		}
+	}
+
+	results, _ := s.Search("excludedtreearmadillo", 10, "all", "", 0, 0, false)
+	for _, r := range results {
+		if r.Role == "vault" {
+			t.Errorf("excluded tree leaked: %q", r.Text)
+		}
+	}
+}
+
+// TestMnemoIgnoreExcludesContent verifies that patterns in
+// <vault>/.mnemoignore are honoured during ingest, including inside
+// _mnemo/ (matching the design's "patterns apply throughout the
+// configured scope" rule).
+func TestMnemoIgnoreExcludesContent(t *testing.T) {
+	projDir := t.TempDir()
+	s := storetest.NewStore(t, projDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	vaultDir := t.TempDir()
+
+	ignored := filepath.Join(vaultDir, "_mnemo", "themes", "draft-experiment.md")
+	kept := filepath.Join(vaultDir, "_mnemo", "themes", "published.md")
+	for _, p := range []string{ignored, kept} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := os.WriteFile(ignored, []byte("# draft\n\ndraftonly-zibblewort-experimental\n"), 0o644); err != nil {
+		t.Fatalf("write ignored: %v", err)
+	}
+	if err := os.WriteFile(kept, []byte("# published\n\npublishedonly-marigold-canon\n"), 0o644); err != nil {
+		t.Fatalf("write kept: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, ".mnemoignore"),
+		[]byte("_mnemo/themes/draft-*.md\n"), 0o644); err != nil {
+		t.Fatalf("write .mnemoignore: %v", err)
+	}
+
+	if err := s.IngestVaultAnnotations(vaultDir, store.VaultIndexingOptions{
+		Scope: store.VaultIndexingScopeMnemoOnly,
+	}); err != nil {
+		t.Fatalf("IngestVaultAnnotations: %v", err)
+	}
+
+	results, _ := s.Search("draftonly zibblewort experimental", 10, "all", "", 0, 0, false)
+	for _, r := range results {
+		if r.Role == "vault" {
+			t.Errorf(".mnemoignore did not exclude draft: %q", r.Text)
+		}
+	}
+
+	results, _ = s.Search("publishedonly marigold canon", 10, "all", "", 0, 0, false)
+	ok := false
+	for _, r := range results {
+		if r.Role == "vault" {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Errorf("published note should still be indexed")
 	}
 }
 

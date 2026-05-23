@@ -19,6 +19,28 @@ import (
 // must be kept in sync with vault.generatedFence.
 const vaultGeneratedFence = "<!-- mnemo:generated -->"
 
+// VaultIndexingOptions controls which subtree(s) of the vault
+// IngestVaultAnnotations walks (🎯T64.1 — consent fix).
+//
+// A zero-value VaultIndexingOptions resolves to "_mnemo_only" scope
+// with the default ".mnemoignore" filename and no includes. Callers
+// that want to honour the user's config should fill this struct from
+// Config (typically via Config.ResolvedVaultIndexingScope and
+// Config.ResolvedVaultIndexingIgnoreFile).
+type VaultIndexingOptions struct {
+	// Scope is one of "_mnemo_only", "full", "includes". Empty resolves
+	// to "_mnemo_only" inside IngestVaultAnnotations.
+	Scope string
+
+	// Includes lists vault-relative paths walked in addition to
+	// <vault>/_mnemo/ when Scope == "includes". Ignored otherwise.
+	Includes []string
+
+	// IgnoreFile is the basename or vault-relative path of the
+	// gitignore-syntax exclude file. Empty resolves to ".mnemoignore".
+	IgnoreFile string
+}
+
 // humanContentOf returns the human-authored portion of a vault Markdown file.
 //
 // Two cases:
@@ -53,26 +75,59 @@ func humanContentOf(raw string) string {
 }
 
 // IngestVaultAnnotations walks vaultPath and indexes human-authored content
-// from every .md file:
+// from every .md file within the configured indexing scope.
 //
 //   - mnemo-generated notes (with a <!-- mnemo:generated --> fence): only
 //     content BELOW the fence is indexed, so generated blocks (sessions,
 //     decisions, plans, …) are never re-ingested. No feedback loop.
 //   - User-created standalone files (no fence): the whole file is indexed
-//     as human knowledge. This lets users drop their own .md files into the
-//     vault and have them flow into mnemo_search alongside transcripts.
+//     as human knowledge.
 //
-// Files with no human content are removed from the docs table (kind='vault')
-// so stale rows don't accumulate.
+// opts selects the read surface:
+//   - Scope "_mnemo_only" (default) walks only <vault>/_mnemo/.
+//   - Scope "full" walks the entire vault (hidden dirs excluded).
+//   - Scope "includes" walks <vault>/_mnemo/ plus each Includes path.
+//
+// Patterns in opts.IgnoreFile (default ".mnemoignore") at the vault
+// root are honoured across every walked tree.
+//
+// Files with no human content are removed from the docs table
+// (kind='vault') so stale rows don't accumulate. Files that fall
+// outside the configured scope are NOT pruned — they remain
+// indexed if a prior call captured them under a broader scope and
+// the user has since narrowed it. This is by design: silent removal
+// on scope narrowing would be a surprise consent issue in the
+// opposite direction. Users who want to drop pre-existing rows can
+// rebuild the index.
 //
 // Indexed rows use kind='vault' and repo=basename(vaultPath). They appear in
 // SearchDocs(kind="vault") and in the main Search results alongside transcript
 // messages.
-func (s *Store) IngestVaultAnnotations(vaultPath string) error {
+func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptions) error {
 	if fi, err := os.Stat(vaultPath); err != nil {
 		return fmt.Errorf("vault: stat %s: %w", vaultPath, err)
 	} else if !fi.IsDir() {
 		return fmt.Errorf("vault: %s is not a directory", vaultPath)
+	}
+
+	scope := opts.Scope
+	if scope == "" {
+		scope = VaultIndexingScopeMnemoOnly
+	}
+
+	roots, err := resolveVaultIndexingRoots(vaultPath, scope, opts.Includes)
+	if err != nil {
+		return err
+	}
+
+	ignoreFileName := opts.IgnoreFile
+	if ignoreFileName == "" {
+		ignoreFileName = defaultVaultIgnoreFile
+	}
+	mi, err := LoadMnemoIgnore(filepath.Join(vaultPath, ignoreFileName))
+	if err != nil {
+		slog.Warn("vault: load .mnemoignore failed", "file", ignoreFileName, "err", err)
+		mi = &MnemoIgnore{}
 	}
 
 	s.rwmu.Lock()
@@ -82,9 +137,11 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 	indexed, skipped, removed := 0, 0, 0
 
 	// Snapshot existing vault rows so we can prune any whose source file
-	// has been deleted, moved, or now lives outside this vault root (e.g.
-	// after vault_path is reconfigured). Without this, deleting a note
-	// would leave a stale row visible in search.
+	// has been deleted, moved, or now lives outside the walked roots
+	// (e.g. after vault_path is reconfigured to a different directory).
+	// Files that exist but fall outside the configured scope are NOT
+	// pruned — they're handed over to delete(stale, path) via the
+	// inWalkedTree check below.
 	stale := map[string]bool{}
 	if rows, err := s.db.Query(
 		"SELECT file_path FROM docs WHERE kind = 'vault'",
@@ -98,100 +155,133 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 		rows.Close()
 	}
 
-	walkErr := filepath.WalkDir(vaultPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		// Skip hidden dirs (.obsidian/, .git/, .trash/, …) entirely — they
-		// hold tool config and aren't human knowledge. Saves IO + watcher
-		// slots on Linux inotify.
-		if d.IsDir() {
-			if path != vaultPath && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
+	// Track every path the walker visited (even when we skipped indexing
+	// it for an ignore-file match or unchanged hash). Anything in the
+	// stale map that wasn't visited AND no longer exists on disk is
+	// pruned at the end.
+	visited := map[string]bool{}
+
+	walkOne := func(walkRoot string) error {
+		return filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
 			}
-			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".md") {
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-
-		human := humanContentOf(string(data))
-
-		// This file still exists under the current vault root — don't prune it.
-		delete(stale, path)
-
-		if human == "" {
-			// No human content: remove any previously indexed row.
-			if res, err := s.db.Exec(
-				"DELETE FROM docs WHERE file_path = ? AND kind = 'vault'", path,
-			); err == nil {
-				if n, _ := res.RowsAffected(); n > 0 {
-					removed++
+			rel := vaultRelPath(vaultPath, path)
+			if d.IsDir() {
+				// Skip hidden dirs (.obsidian/, .git/, .trash/, …) entirely.
+				if path != walkRoot && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
 				}
+				if rel != "" && mi.Match(rel, true) {
+					return filepath.SkipDir
+				}
+				return nil
 			}
+			if !strings.HasSuffix(d.Name(), ".md") {
+				return nil
+			}
+			if mi.Match(rel, false) {
+				visited[path] = true
+				delete(stale, path)
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+
+			human := humanContentOf(string(data))
+			visited[path] = true
+			delete(stale, path)
+
+			if human == "" {
+				// No human content: remove any previously indexed row.
+				if res, err := s.db.Exec(
+					"DELETE FROM docs WHERE file_path = ? AND kind = 'vault'", path,
+				); err == nil {
+					if n, _ := res.RowsAffected(); n > 0 {
+						removed++
+					}
+				}
+				return nil
+			}
+
+			// If an existing row at this file_path is NOT a vault annotation
+			// (e.g. a synthesis doc indexed via IngestDocs), leave it alone —
+			// vault must never clobber a more authoritative doc kind.
+			var existingKind, existingHash string
+			_ = s.db.QueryRow(
+				"SELECT kind, content_hash FROM docs WHERE file_path = ?", path,
+			).Scan(&existingKind, &existingHash)
+			if existingKind != "" && existingKind != "vault" {
+				skipped++
+				return nil
+			}
+
+			hash := contentHash([]byte(human))
+			if existingHash == hash {
+				skipped++
+				return nil
+			}
+
+			title := extractTitle(human)
+			if title == "" {
+				title = strings.TrimSuffix(rel, ".md")
+			}
+			now := time.Now().Format(time.RFC3339)
+
+			_, err = s.db.Exec(`
+				INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
+					size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
+				VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '')
+				ON CONFLICT(file_path) DO UPDATE SET
+					repo         = excluded.repo,
+					kind         = excluded.kind,
+					title        = excluded.title,
+					content      = excluded.content,
+					content_hash = excluded.content_hash,
+					size         = excluded.size,
+					mtime        = excluded.mtime,
+					indexed_at   = excluded.indexed_at,
+					taxonomy     = '',
+					doc_date     = '',
+					doc_status   = '',
+					doc_target   = '',
+					doc_source   = ''
+				WHERE docs.kind = 'vault'
+			`, vaultRepo, path, title, human, hash, int64(len(human)), now, now)
+			if err != nil {
+				slog.Error("vault: ingest annotation failed", "file", path, "err", err)
+				return nil
+			}
+			indexed++
 			return nil
-		}
+		})
+	}
 
-		// If an existing row at this file_path is NOT a vault annotation
-		// (e.g. a synthesis doc indexed via IngestDocs), leave it alone —
-		// vault must never clobber a more authoritative doc kind.
-		var existingKind, existingHash string
-		_ = s.db.QueryRow(
-			"SELECT kind, content_hash FROM docs WHERE file_path = ?", path,
-		).Scan(&existingKind, &existingHash)
-		if existingKind != "" && existingKind != "vault" {
-			skipped++
-			return nil
+	var walkErr error
+	for _, r := range roots {
+		// Missing roots are tolerated (a configured includes path may
+		// not yet exist, and <vault>/_mnemo/ may not exist on a brand
+		// new vault).
+		if fi, err := os.Stat(r); err != nil || !fi.IsDir() {
+			continue
 		}
-
-		hash := contentHash([]byte(human))
-		if existingHash == hash {
-			skipped++
-			return nil
+		if err := walkOne(r); err != nil && walkErr == nil {
+			walkErr = err
 		}
+	}
 
-		rel, _ := filepath.Rel(vaultPath, path)
-		title := extractTitle(human)
-		if title == "" {
-			title = strings.TrimSuffix(rel, ".md")
-		}
-		now := time.Now().Format(time.RFC3339)
-
-		_, err = s.db.Exec(`
-			INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
-				size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
-			VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '')
-			ON CONFLICT(file_path) DO UPDATE SET
-				repo         = excluded.repo,
-				kind         = excluded.kind,
-				title        = excluded.title,
-				content      = excluded.content,
-				content_hash = excluded.content_hash,
-				size         = excluded.size,
-				mtime        = excluded.mtime,
-				indexed_at   = excluded.indexed_at,
-				taxonomy     = '',
-				doc_date     = '',
-				doc_status   = '',
-				doc_target   = '',
-				doc_source   = ''
-			WHERE docs.kind = 'vault'
-		`, vaultRepo, path, title, human, hash, int64(len(human)), now, now)
-		if err != nil {
-			slog.Error("vault: ingest annotation failed", "file", path, "err", err)
-			return nil
-		}
-		indexed++
-		return nil
-	})
-
-	// Prune rows whose source file no longer exists under this vault root.
+	// Prune rows whose source file no longer exists on disk AND fell
+	// outside every walked tree. A row that simply moved out of scope
+	// (e.g. user narrowed from "full" to "_mnemo_only" with the file
+	// still present on disk) is left in place — narrowing scope does
+	// not silently un-index.
 	for p := range stale {
+		if _, err := os.Stat(p); err == nil {
+			// File still on disk; out-of-scope rows kept as-is.
+			continue
+		}
 		if _, err := s.db.Exec(
 			"DELETE FROM docs WHERE file_path = ? AND kind = 'vault'", p,
 		); err == nil {
@@ -200,7 +290,55 @@ func (s *Store) IngestVaultAnnotations(vaultPath string) error {
 	}
 
 	slog.Info("vault: annotations ingested",
-		"path", vaultPath,
+		"path", vaultPath, "scope", scope,
 		"indexed", indexed, "skipped", skipped, "removed", removed)
 	return walkErr
+}
+
+// resolveVaultIndexingRoots returns the absolute directory roots to
+// walk for the given scope. The result preserves caller order and is
+// not deduplicated — overlapping roots are tolerated by the walker
+// (the visited map ensures each file is processed at most once).
+func resolveVaultIndexingRoots(vaultPath, scope string, includes []string) ([]string, error) {
+	mnemoSubtree := filepath.Join(vaultPath, "_mnemo")
+	switch scope {
+	case VaultIndexingScopeFull:
+		return []string{vaultPath}, nil
+	case VaultIndexingScopeIncludes:
+		roots := []string{mnemoSubtree}
+		for _, inc := range includes {
+			cleaned := strings.TrimSpace(inc)
+			if cleaned == "" {
+				continue
+			}
+			if filepath.IsAbs(cleaned) {
+				return nil, fmt.Errorf("vault_indexing_includes %q: must be vault-relative", inc)
+			}
+			cleaned = filepath.Clean(cleaned)
+			if cleaned == "." || strings.HasPrefix(cleaned, "..") {
+				return nil, fmt.Errorf("vault_indexing_includes %q: must stay inside vault", inc)
+			}
+			roots = append(roots, filepath.Join(vaultPath, cleaned))
+		}
+		return roots, nil
+	case VaultIndexingScopeMnemoOnly, "":
+		return []string{mnemoSubtree}, nil
+	default:
+		return nil, fmt.Errorf("vault_indexing_scope %q: must be one of %q, %q, %q",
+			scope,
+			VaultIndexingScopeMnemoOnly,
+			VaultIndexingScopeFull,
+			VaultIndexingScopeIncludes)
+	}
+}
+
+// vaultRelPath returns path relative to vaultPath using forward
+// slashes (so ignore patterns behave identically on every host OS),
+// or the basename when the inputs are unrelated.
+func vaultRelPath(vaultPath, path string) string {
+	rel, err := filepath.Rel(vaultPath, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	return filepath.ToSlash(rel)
 }

@@ -562,7 +562,7 @@ Human content added below the <!-- mnemo:generated --> fence in any vault note i
 Vault must be configured via vault_path in ~/.mnemo/config.json.`),
 		),
 		mcp.NewTool("mnemo_vault_status",
-			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, and a count of notes on disk by section."),
+			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, and a count of notes on disk by section."),
 		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
@@ -692,7 +692,7 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	case "mnemo_vault_sync":
 		return ch.vaultSync()
 	case "mnemo_vault_status":
-		return ch.vaultStatus()
+		return ch.vaultStatus(h.cfgCtl)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2186,7 +2186,7 @@ func (h *callHandler) vaultSync() (string, bool, error) {
 		time.Since(start).Round(time.Millisecond), h.vault.Path()), false, nil
 }
 
-func (h *callHandler) vaultStatus() (string, bool, error) {
+func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 	if h.vault == nil {
 		return vaultNotConfigured, false, nil
 	}
@@ -2194,6 +2194,33 @@ func (h *callHandler) vaultStatus() (string, bool, error) {
 	sections := []string{"sessions", "decisions", "memories", "skills", "configs", "plans", "targets", "ci", "prs", "repos"}
 	var b strings.Builder
 	fmt.Fprintf(&b, "vault path: %s\n\n", vaultPath)
+
+	// Indexing scope (🎯T64.1): report the configured surface so the
+	// user can audit what mnemo can see. When ctl is wired (the normal
+	// runtime), resolve against the live config; otherwise fall back
+	// to the defaults so the section is never silently missing.
+	var cfg store.Config
+	if ctl != nil {
+		cfg = ctl.Get()
+	}
+	scope := cfg.ResolvedVaultIndexingScope(vaultPath)
+	ignoreFile := cfg.ResolvedVaultIndexingIgnoreFile()
+	b.WriteString("Indexing scope:\n")
+	fmt.Fprintf(&b, "  scope:       %s", scope)
+	if cfg.VaultIndexingScope == "" {
+		b.WriteString("  (auto-default)")
+	}
+	b.WriteString("\n")
+	if scope == store.VaultIndexingScopeIncludes {
+		fmt.Fprintf(&b, "  includes:    %v\n", cfg.VaultIndexingIncludes)
+	}
+	ignorePath := filepath.Join(vaultPath, ignoreFile)
+	ignoreState := "absent"
+	if _, err := os.Stat(ignorePath); err == nil {
+		ignoreState = "present"
+	}
+	fmt.Fprintf(&b, "  ignore_file: %s (%s)\n\n", ignoreFile, ignoreState)
+
 	b.WriteString("Notes on disk:\n")
 	total := 0
 	for _, sec := range sections {
@@ -2281,11 +2308,14 @@ func (h *callHandler) callerHome() string {
 // "vaultpath" produces an error rather than being silently dropped by
 // json.Unmarshal's unknown-field handling.
 var knownConfigKeys = map[string]struct{}{
-	"workspace_roots":    {},
-	"extra_project_dirs": {},
-	"synthesis_roots":    {},
-	"vault_path":         {},
-	"linked_instances":   {},
+	"workspace_roots":            {},
+	"extra_project_dirs":         {},
+	"synthesis_roots":            {},
+	"vault_path":                 {},
+	"vault_indexing_scope":       {},
+	"vault_indexing_includes":    {},
+	"vault_indexing_ignore_file": {},
+	"linked_instances":           {},
 }
 
 // mergeConfigPatch round-trips current through JSON so the patch's

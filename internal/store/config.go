@@ -54,6 +54,36 @@ type Config struct {
 	// When absent or empty, vault export is completely disabled.
 	VaultPath string `json:"vault_path,omitempty"`
 
+	// VaultIndexingScope selects which subtree of the vault mnemo reads
+	// during IngestVaultAnnotations (🎯T64.1 — consent fix). One of:
+	//   - "_mnemo_only" — only <vault>/_mnemo/ is walked. Below-fence
+	//     annotations on generated pages plus user Markdown placed
+	//     inside the wing surface in mnemo_search; nothing outside the
+	//     wing is touched.
+	//   - "full"        — the entire vault is walked (hidden dirs like
+	//     .obsidian/, .git/, .trash/ excluded). Matches v1 behaviour.
+	//   - "includes"    — <vault>/_mnemo/ plus each path listed in
+	//     VaultIndexingIncludes is walked.
+	//
+	// Empty resolves via ResolvedVaultIndexingScope at runtime: new
+	// vaults default to "_mnemo_only" (the safest scope), pre-existing
+	// v1-populated vaults default to "full" for continuity. The detection
+	// is documented under "Indexing scope" in docs/design/vault-library-wing.md.
+	VaultIndexingScope string `json:"vault_indexing_scope,omitempty"`
+
+	// VaultIndexingIncludes lists vault-relative paths walked in
+	// addition to <vault>/_mnemo/ when VaultIndexingScope == "includes".
+	// Ignored under "_mnemo_only" or "full". Paths use forward slashes;
+	// `..` and absolute paths are rejected at validation.
+	VaultIndexingIncludes []string `json:"vault_indexing_includes,omitempty"`
+
+	// VaultIndexingIgnoreFile is the vault-relative path to a
+	// gitignore-syntax file applied across the configured scope
+	// (including inside _mnemo/). Empty defaults to ".mnemoignore"; an
+	// absent file means no extra exclusions. Only this single file is
+	// consulted — nested .mnemoignore files are not honoured.
+	VaultIndexingIgnoreFile string `json:"vault_indexing_ignore_file,omitempty"`
+
 	// LinkedInstances declares peer mnemo endpoints to federate with
 	// (🎯T15). Each peer is identified by a https URL and a trusted
 	// peer certificate (either a name resolved under ~/.mnemo/peers/
@@ -582,6 +612,65 @@ func (c Config) ResolvedVaultPath(userHome string) string {
 		}
 	}
 	return p
+}
+
+// Vault indexing scope constants. Use these instead of bare string
+// literals so a typo surfaces at compile time.
+const (
+	VaultIndexingScopeMnemoOnly = "_mnemo_only"
+	VaultIndexingScopeFull      = "full"
+	VaultIndexingScopeIncludes  = "includes"
+)
+
+// defaultVaultIgnoreFile is the conventional name of the gitignore-
+// syntax exclude file at the vault root.
+const defaultVaultIgnoreFile = ".mnemoignore"
+
+// v1VaultMarkerDirs are the root-level subdirectories the v1 vault
+// layout writes to. The presence of any of these without a sibling
+// `_mnemo/` indicates a pre-Slice 1 vault that should default to
+// "full" indexing scope for continuity.
+var v1VaultMarkerDirs = []string{
+	"sessions", "decisions", "memories", "skills", "configs",
+	"plans", "targets", "ci", "prs", "repos",
+}
+
+// ResolvedVaultIndexingScope returns the effective indexing scope for
+// the vault at resolvedVaultPath. When VaultIndexingScope is set, it
+// wins. Otherwise the default is computed by inspecting the vault:
+//
+//   - <vault>/_mnemo/ exists                       → "_mnemo_only"
+//   - any v1 marker dir exists (sessions/, ...)    → "full"  (continuity)
+//   - otherwise (empty or missing directory)       → "_mnemo_only"
+//
+// An empty resolvedVaultPath returns "_mnemo_only" — the call site is
+// responsible for not invoking the walker when vault is disabled.
+func (c Config) ResolvedVaultIndexingScope(resolvedVaultPath string) string {
+	switch c.VaultIndexingScope {
+	case VaultIndexingScopeMnemoOnly, VaultIndexingScopeFull, VaultIndexingScopeIncludes:
+		return c.VaultIndexingScope
+	}
+	if resolvedVaultPath == "" {
+		return VaultIndexingScopeMnemoOnly
+	}
+	if fi, err := os.Stat(filepath.Join(resolvedVaultPath, "_mnemo")); err == nil && fi.IsDir() {
+		return VaultIndexingScopeMnemoOnly
+	}
+	for _, d := range v1VaultMarkerDirs {
+		if fi, err := os.Stat(filepath.Join(resolvedVaultPath, d)); err == nil && fi.IsDir() {
+			return VaultIndexingScopeFull
+		}
+	}
+	return VaultIndexingScopeMnemoOnly
+}
+
+// ResolvedVaultIndexingIgnoreFile returns the configured ignore-file
+// basename, or ".mnemoignore" when unset.
+func (c Config) ResolvedVaultIndexingIgnoreFile() string {
+	if c.VaultIndexingIgnoreFile != "" {
+		return c.VaultIndexingIgnoreFile
+	}
+	return defaultVaultIgnoreFile
 }
 
 // ResolvedSynthesisRoots returns SynthesisRoots with ~ expanded to the
