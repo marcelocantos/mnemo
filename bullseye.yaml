@@ -1775,7 +1775,7 @@ targets:
     acceptance:
     - vault_layout config key accepts "v2", "both", or "v1"; default is "both" for existing vaults, "v2" for new.
     - _mnemo/index.md and _mnemo/README.md exist with the standard fence contract.
-    - _mnemo/MIGRATION.md is written once on v1-detection and never regenerated; deletion is respected ("I have read this; move on"). Idempotent regen available via mnemo_vault_migration_doc(write: true).
+    - '_mnemo/MIGRATION.md is written once on v1-detection and never regenerated; deletion is respected ("I have read this; move on"). Idempotent regen available via mnemo_vault_migration_doc(write: true).'
     - state.json tracks vault_layout_first_seen for soak-TTL warning purposes.
     - mnemo_vault_status surfaces vault_layout, days_in_both, and a recommendation string (one of "still within soak", "opt into v2", "run gc_legacy", or empty).
     - vault_layout="both" past the configurable soak window (default 720h) emits a weekly structured warning; the layout never auto-narrows.
@@ -1823,7 +1823,7 @@ targets:
     cost: 0.0
     acceptance:
     - vault_profile config key accepts "obsidian", "logseq", "foam", or "generic".
-    - Per-profile renderer hooks plumbed for link syntax + properties differences (Obsidian alias links, Logseq prop:: syntax, etc.).
+    - 'Per-profile renderer hooks plumbed for link syntax + properties differences (Obsidian alias links, Logseq prop:: syntax, etc.).'
     - Auto-detect uses mtime of canonical signal files (.obsidian/workspace.json, logseq/config/config.edn, .foam/settings.json) rather than directory presence; tie-break ≤ 1 hour → obsidian → logseq → foam.
     - mnemo_vault_status reports the detected profile, the signal file path, its mtime, and any alternative profiles whose signal files exist.
     context: |-
@@ -1897,7 +1897,7 @@ targets:
     - Lessons extractor surfaces feedback-type auto-memories plus confirmed decisions surviving ≥ 2 weeks, clustered via the same engine as T64.8.
     - _mnemo/lessons/ pages rendered with appropriate frontmatter and tag namespace.
     - mnemo_vault_gc_legacy is user-initiated, never automatic, and refuses to run if the annotation-safety check identifies unmigrated user content in v1 root-level dirs.
-    - mnemo_vault_migration_doc(write: true / false) supports idempotent regen of the write-once MIGRATION.md (write:false returns the snapshot without writing).
+    - 'mnemo_vault_migration_doc(write: true / false) supports idempotent regen of the write-once MIGRATION.md (write:false returns the snapshot without writing).'
     - _mnemo/legacy-annotations.md harvester paginates above max_file_kb.
     context: |-
       Completes the abstraction set and gives existing v1-vault users a clean off-ramp. After this slice lands the full nine-slice arc is done — the wing is calm, scoped, abstraction-rich, and has a user-controlled migration path.
