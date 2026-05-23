@@ -76,7 +76,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: marcelocantos/sqldeep
+          ref: v0.22.0
           path: sqldeep
+          submodules: recursive
 
       - name: Install sqlite3 headers (Windows)
         # sqlift's bundled sqlift.cpp does #include <sqlite3.h>; MinGW
@@ -114,10 +116,20 @@ jobs:
           CXX: ${{ matrix.cxx }}
           AR: ${{ matrix.ar }}
         run: |
-          mkdir -p build
-          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
+          # sqldeep v0.22.0+ pulls liteparser/arena from the vendored
+          # deepparser submodule. Mirror sqldeep's own mkfile rules:
+          # compile each deepparser .c into build/deepparser/, compile
+          # sqldeep.o with -Ivendor/deepparser/src, then pack everything
+          # into libsqldeep.a so downstream cgo links cleanly.
+          mkdir -p build/deepparser
+          DP_SRC=vendor/deepparser/src
+          DP_CFLAGS="-Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -O2 -DNDEBUG -I${DP_SRC}"
+          for f in arena liteparser lp_tokenize lp_unparse parse; do
+            "$CC" $DP_CFLAGS -c "${DP_SRC}/${f}.c" -o "build/deepparser/${f}.o"
+          done
+          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -I${DP_SRC} -c dist/sqldeep.cpp -o build/sqldeep.o
           "$CC" -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
-          "$AR" rcs build/libsqldeep.a build/sqldeep.o
+          "$AR" rcs build/libsqldeep.a build/sqldeep.o build/deepparser/*.o
 
       - uses: actions/setup-go@v5
         with:
@@ -213,13 +225,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: marcelocantos/sqldeep
+          ref: v0.22.0
           path: sqldeep
+          submodules: recursive
       - name: Build sqldeep
+        working-directory: sqldeep
         run: |
-          cd sqldeep && mkdir -p build
-          c++ -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -c dist/sqldeep.cpp -o build/sqldeep.o
+          mkdir -p build/deepparser
+          DP_SRC=vendor/deepparser/src
+          DP_CFLAGS="-Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -O2 -DNDEBUG -I${DP_SRC}"
+          for f in arena liteparser lp_tokenize lp_unparse parse; do
+            cc $DP_CFLAGS -c "${DP_SRC}/${f}.c" -o "build/deepparser/${f}.o"
+          done
+          c++ -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -I${DP_SRC} -c dist/sqldeep.cpp -o build/sqldeep.o
           cc -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
-          ar rcs build/libsqldeep.a build/sqldeep.o
+          ar rcs build/libsqldeep.a build/sqldeep.o build/deepparser/*.o
       - uses: actions/setup-go@v5
         with:
           go-version-file: mnemo/go.mod
