@@ -73,7 +73,14 @@ func TestResolvedVaultIndexingIgnoreFileDefault(t *testing.T) {
 }
 
 func TestResolveVaultIndexingRoots(t *testing.T) {
-	vault := "/vault"
+	// Use a host-absolute vault root and assemble expected paths via
+	// filepath.Join so the test runs identically on POSIX and Windows
+	// (filepath.Join emits "\" on Windows).
+	vault := filepath.Join(t.TempDir(), "vault")
+	// A host-absolute path the includes-rejects test can pass —
+	// "/etc/passwd" would not trip filepath.IsAbs on Windows, which
+	// requires either a drive letter or a UNC path.
+	absInclude := filepath.Join(t.TempDir(), "absolute")
 	cases := []struct {
 		name     string
 		scope    string
@@ -81,20 +88,24 @@ func TestResolveVaultIndexingRoots(t *testing.T) {
 		want     []string
 		wantErr  bool
 	}{
-		{"mnemo only", VaultIndexingScopeMnemoOnly, nil, []string{"/vault/_mnemo"}, false},
-		{"empty scope defaults", "", nil, []string{"/vault/_mnemo"}, false},
-		{"full", VaultIndexingScopeFull, nil, []string{"/vault"}, false},
+		{"mnemo only", VaultIndexingScopeMnemoOnly, nil, []string{filepath.Join(vault, "_mnemo")}, false},
+		{"empty scope defaults", "", nil, []string{filepath.Join(vault, "_mnemo")}, false},
+		{"full", VaultIndexingScopeFull, nil, []string{vault}, false},
 		{
 			"includes",
 			VaultIndexingScopeIncludes,
 			[]string{"areas/knowledge", "projects"},
-			[]string{"/vault/_mnemo", "/vault/areas/knowledge", "/vault/projects"},
+			[]string{
+				filepath.Join(vault, "_mnemo"),
+				filepath.Join(vault, "areas", "knowledge"),
+				filepath.Join(vault, "projects"),
+			},
 			false,
 		},
 		{
 			"includes rejects absolute paths",
 			VaultIndexingScopeIncludes,
-			[]string{"/etc/passwd"},
+			[]string{absInclude},
 			nil,
 			true,
 		},
