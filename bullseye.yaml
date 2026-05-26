@@ -1937,6 +1937,63 @@ targets:
     - T49
     origin: '2026-05-23 design discussion (this session); supersedes the abandoned mid-flight T64 from 2026-05-21 which lost its slot to PR #95''s vault-library-wing parent'
     discovered: 2026-05-23
+  T66:
+    name: mnemo_query's documented schema is the only schema agents reach for; sqlite_master/PRAGMA introspection is structurally discouraged
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'mnemo_query''s tool description opens with an explicit exhaustiveness directive: tables/columns listed are the complete public schema for agent queries, sqlite_master/sqlite_schema/PRAGMA table_info are named as anti-patterns, and the agent is told to report a missing-table case as a documentation bug rather than introspect.'
+    - mnemo_query refuses queries that reference sqlite_master, sqlite_schema, or PRAGMA-table-introspection statements; the rejection error points back to the documented schema with the same wording as the tool description, so an agent that didn't read the description learns the rule from the error.
+    - The schema listed in mnemo_query's description is generated at startup from PRAGMA table_info (or equivalent runtime introspection) rather than maintained by hand. Drift between the description and the actual database becomes impossible.
+    - agents-guide.md and the mnemo_query tool description no longer disagree on which tables exist. Either one source is authoritative and the other links to it, or both derive from the same runtime-generated list.
+    - An agent (Claude Sonnet 4.6+ / Opus 4.7+) given an unfamiliar query task against mnemo never reaches for sqlite_master in a fresh-context evaluation run — verified with a representative prompt batch (e.g., 'list all tables', 'find tables related to compactions', 'what columns does messages have').
+    context: |-
+      Recurring observation across multiple Claude sessions: agents asked to query mnemo's DB reach for `SELECT name FROM sqlite_master ...` even though the `mnemo_query` tool description fully enumerates the schema. Two compounding causes: (a) the description never says "this list is exhaustive" so agents read it as a selection rather than a contract, and (b) the description and agents-guide.md have drifted — each looks incomplete next to the other, which itself cues an agent to introspect "to see what else is there". Fixing both the directive wording and the drift removes the cue; a runtime rejection of sqlite_master queries provides a defence-in-depth that teaches the rule via the error message for agents that skipped the description.
+
+      Also exposed an unrelated documentation gap: tables like `compactions`, `targets`, `plans`, `session_chains`, `notes` (post-T65) are missing from one or both of the two documentation sources.
+
+      Discovered 2026-05-26 during compactor-status diagnosis: the parent session attempted `SELECT name FROM sqlite_master ...` after a prior session had made the same mistake.
+    origin: manual
+    discovered: 2026-05-26
+  T67:
+    name: Compactor watcher converges promptly under normal load, never goes silent for hours, and self-reports its health
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'SelectCompactionCandidates picks sessions using TWO triggers OR-ed together: (a) >= N substantive messages SINCE the latest compaction''s entry_id_to (or since first_msg when no prior compaction exists), OR (b) >= 1 such message AND >= t minutes elapsed since session.last_msg. N and t are configurable on WatcherConfig with sensible defaults (e.g., N=50, t=15min). This matches T59''s original design (bullseye.yaml:1596 specified ''since most recent compaction''; the implementation drifted to lifetime substantive_msgs) AND captures small sessions that never reach N but go quiet — currently those never get compacted at all.'
+    - SelectCompactionCandidates excludes sessions whose cumulative compaction tokens already meet or exceed Compactor.maxRatio of the session's tokens. The budget check, currently post-selection, is also a candidate-set filter so wasted ticks on budget-exhausted sessions go to zero in steady state.
+    - outcomeBudgetExceeded logs at DEBUG, not INFO. The default daemon log no longer accumulates thousands of budget_exceeded INFO lines per day.
+    - pollCIForRepo does NOT hold store.rwmu.Lock across any gh subprocess invocation or log fetch. Either the subprocess calls happen before the lock is taken, or the upsert+log-fetch loop drops and re-acquires the lock per row. Compactor RLock acquisition latency under steady CI-poll load stays bounded (a few seconds at worst).
+    - The Watcher applies a per-tick timeout (e.g. 5 minutes) so a single stuck tick — claudia subprocess hang, lock contention, runaway query — cannot silence the entire watcher loop. A timed-out tick is logged at WARN with the candidate's session_id and elapsed time.
+    - The daemon exposes a goroutine dump on demand — pprof endpoint, a SIGUSR1 handler that writes a runtime stack dump to a known path, or a mnemo_self / new MCP tool that surfaces watcher progress (last_scan_at, last_tick_at, in_flight_session). Future silences can be diagnosed without restarting the daemon.
+    - Compactor exposes lifecycle metrics queryable via mnemo (e.g. last successful compaction timestamp, candidates returned by last scan, count of budget_exceeded vs compacted in last N ticks). A mnemo_status or dedicated tool surfaces them so 'is the compactor working?' is answerable without grepping /opt/homebrew/var/log/mnemo.log.
+    context: |-
+      Diagnosed 2026-05-26 during a 'is the compactor working?' investigation.
+
+      Observations:
+      - 35 successful compactions over 2 days, vs 9,376 budget_exceeded ticks — the wasted-tick ratio is ~270:1.
+      - Today's tick log: compactor ran every ~60s from 07:00–07:34 Sydney, then intervals grew (37min, 47min, 2h, 5h+), then went silent at 11:05. Daemon otherwise alive (CI poller, backup, connection sweeper still firing) and no claudia subprocess present. Strongly suggests the watcher goroutine is blocked on a sync primitive, most likely rwmu.RLock contention.
+
+      Root causes (in priority order):
+
+      1. **Trigger drift from T59 design + missing OR-clause.** T59's context (bullseye.yaml:1596) specified "more than N substantive messages SINCE THE MOST RECENT COMPACTION for that session (or since first_msg if none)". Implementation uses ss.substantive_msgs (lifetime total) — so once a session has ever crossed 50, it stays a candidate forever, leading to the wasted-tick storm. Additionally, the original design only fires on the message-count trigger; short sessions (< N substantive) never compact at all, even after going dormant. The right shape is OR-ed:
+         - >= N substantive messages SINCE last compaction's entry_id_to, OR
+         - >= 1 such message AND >= t minutes idle since last_msg
+         The second clause captures small but settled sessions. Not found in the written design or session transcripts — either lost from a verbal discussion or just intuitive design that was never codified. Both halves go in.
+
+      2. **rwmu.Lock-during-gh-subprocess.** pollCIForRepo (store.go:2499) takes s.rwmu.Lock() and then shells out to `gh run view --log` for every failed run before releasing. With 3190 'CI poll failed' messages today (~11 per 5-min cycle) the write lock is held across many slow subprocess calls per poll. The compactor's checkBudget path takes RLock, blocks behind that. Load-bearing cause of today's silence.
+
+      3. **No per-tick timeout in Watcher.** A single stuck tick blocks the whole watcher loop indefinitely.
+
+      4. **Observability gap.** There is no in-product way to ask the daemon 'is the compactor running, when did it last tick, what was the outcome'. Diagnosis required reading /opt/homebrew/var/log/mnemo.log and pid inspection.
+
+      Currently, session 73837c9a (this conversation, 441 substantive msgs, never compacted) is a fresh candidate but no scan has acknowledged it for 5+ hours.
+
+      Fix scope: the trigger redesign + rwmu-during-gh issue are the load-bearing root causes; everything else is supporting hardening.
+    origin: manual
+    discovered: 2026-05-26
   T7:
     name: Agent-defined query templates
     status: achieved
