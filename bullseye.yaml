@@ -1958,7 +1958,7 @@ targets:
     discovered: 2026-05-26
   T67:
     name: Compactor watcher converges promptly under normal load, never goes silent for hours, and self-reports its health
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1994,6 +1994,7 @@ targets:
       Fix scope: the trigger redesign + rwmu-during-gh issue are the load-bearing root causes; everything else is supporting hardening.
     origin: manual
     discovered: 2026-05-26
+    achieved: 2026-05-26
   T7:
     name: Agent-defined query templates
     status: achieved
