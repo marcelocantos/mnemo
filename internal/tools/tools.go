@@ -34,6 +34,34 @@ type VaultSyncer interface {
 	Path() string
 }
 
+// CompactorHealthReporter is satisfied by *compact.Watcher.
+// Surfaced as an interface so this package doesn't need to import
+// the compact package (which would create a circular dependency
+// hierarchy in tests and main). Backed by Watcher.Health() — see
+// internal/compact/watcher.go.
+type CompactorHealthReporter interface {
+	Health() CompactorHealth
+}
+
+// CompactorHealth is the externally-visible snapshot returned by the
+// mnemo_compactor_status MCP tool (🎯T67). Mirrors
+// compact.HealthSnapshot field-for-field; duplicated here to keep
+// the tools→compact import direction clean.
+type CompactorHealth struct {
+	LastScanAt       time.Time
+	LastScanCount    int
+	LastTickAt       time.Time
+	LastTickOutcome  string
+	InFlightSession  string
+	Counts           map[string]int64
+	ScanInterval     time.Duration
+	IdleTimeout      time.Duration
+	RecencyWindow    time.Duration
+	TickTimeout      time.Duration
+	MinDeltaMessages int
+	MaxTokenRatio    float64
+}
+
 // ConfigReport mirrors registry.ReloadReport without importing the
 // registry package. The mnemo_config write handler returns these four
 // slices verbatim so the caller can see which fields were applied live,
@@ -64,10 +92,11 @@ type ConfigController interface {
 // hierarchy in tests and future refactors). seen deduplicates the
 // first-call RecordConnectionOpen per (username, MCP session) pair.
 type Handler struct {
-	resolve      func(username string) (store.Backend, error)
-	resolveVault func(username string) VaultSyncer // nil when vault disabled
-	cfgCtl       ConfigController                  // nil when mnemo_config disabled
-	seen         sync.Map
+	resolve          func(username string) (store.Backend, error)
+	resolveVault     func(username string) VaultSyncer             // nil when vault disabled
+	resolveCompactor func(username string) CompactorHealthReporter // nil when compactor health not wired
+	cfgCtl           ConfigController                              // nil when mnemo_config disabled
+	seen             sync.Map
 }
 
 // NewHandler creates a tool handler that resolves each call's
@@ -82,6 +111,15 @@ func NewHandler(resolve func(string) (store.Backend, error)) *Handler {
 // the vault tools report "vault not configured".
 func (h *Handler) SetVaultResolver(fn func(string) VaultSyncer) {
 	h.resolveVault = fn
+}
+
+// SetCompactorResolver configures a per-user compactor health
+// resolver. Calling this is optional; when not called (or when the
+// resolver returns nil) mnemo_compactor_status reports that the
+// watcher's runtime state is not available (typically the daemon's
+// startup hasn't completed yet for the calling user).
+func (h *Handler) SetCompactorResolver(fn func(string) CompactorHealthReporter) {
+	h.resolveCompactor = fn
 }
 
 // SetConfigController wires the mnemo_config tool to a live config
@@ -564,6 +602,22 @@ Vault must be configured via vault_path in ~/.mnemo/config.json.`),
 		mcp.NewTool("mnemo_vault_status",
 			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, and a count of notes on disk by section."),
 		),
+		mcp.NewTool("mnemo_compactor_status",
+			mcp.WithDescription(`Report the live state of mnemo's background session compactor (🎯T67). Returns:
+
+  - Last scan timestamp and number of candidates the scan returned.
+  - Last tick timestamp and its outcome (one of: compacted,
+    nothing_to_compact, budget_exceeded, failed, timeout, skipped_self).
+  - In-flight session ID, if a tick is currently running.
+  - Lifetime counts of each tick outcome since the daemon started.
+  - Configuration in effect: scan interval, idle timeout, recency
+    window, per-tick timeout, minimum delta-messages trigger, and
+    the configured max token-budget ratio.
+
+Use this to answer "is the compactor working?" without grepping the
+daemon log. A LastScanAt that is older than ScanInterval × 2 is the
+clearest "watcher is wedged" signal.`),
+		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
 
@@ -693,6 +747,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultSync()
 	case "mnemo_vault_status":
 		return ch.vaultStatus(h.cfgCtl)
+	case "mnemo_compactor_status":
+		return ch.compactorStatus(h.resolveCompactor)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2229,6 +2285,75 @@ func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 		fmt.Fprintf(&b, "  %-12s %d\n", sec, count)
 	}
 	fmt.Fprintf(&b, "  %-12s %d\n", "total", total)
+	return b.String(), false, nil
+}
+
+// compactorStatus implements mnemo_compactor_status (🎯T67). It
+// returns a snapshot of the compactor watcher's runtime state so
+// callers can answer "is the compactor working?" without grepping
+// the daemon log.
+//
+// The resolver may be nil (daemon started without compactor health
+// wired) or may return nil (the user's workers haven't started
+// yet); both surface as a helpful "not available" message rather
+// than an error.
+func (h *callHandler) compactorStatus(resolve func(username string) CompactorHealthReporter) (string, bool, error) {
+	if resolve == nil {
+		return "Compactor status not available (daemon was started without the compactor health resolver wired).", false, nil
+	}
+	reporter := resolve(h.cc.Username)
+	if reporter == nil {
+		return "Compactor status not available (the watcher hasn't started for this user yet — usually the daemon is still booting).", false, nil
+	}
+	hs := reporter.Health()
+
+	var b strings.Builder
+	b.WriteString("Compactor watcher status:\n\n")
+
+	now := time.Now()
+	formatAge := func(t time.Time) string {
+		if t.IsZero() {
+			return "never"
+		}
+		return fmt.Sprintf("%s (%s ago)", t.Format(time.RFC3339), now.Sub(t).Round(time.Second))
+	}
+
+	fmt.Fprintf(&b, "  last_scan_at:        %s\n", formatAge(hs.LastScanAt))
+	fmt.Fprintf(&b, "  last_scan_count:     %d\n", hs.LastScanCount)
+	fmt.Fprintf(&b, "  last_tick_at:        %s\n", formatAge(hs.LastTickAt))
+	if hs.LastTickOutcome != "" {
+		fmt.Fprintf(&b, "  last_tick_outcome:   %s\n", hs.LastTickOutcome)
+	}
+	if hs.InFlightSession != "" {
+		fmt.Fprintf(&b, "  in_flight_session:   %s\n", hs.InFlightSession)
+	} else {
+		b.WriteString("  in_flight_session:   (idle)\n")
+	}
+
+	b.WriteString("\nLifetime tick counts:\n")
+	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "skipped_self"}
+	for _, o := range outcomes {
+		fmt.Fprintf(&b, "  %-20s %d\n", o+":", hs.Counts[o])
+	}
+
+	b.WriteString("\nConfiguration:\n")
+	fmt.Fprintf(&b, "  scan_interval:       %s\n", hs.ScanInterval)
+	fmt.Fprintf(&b, "  idle_timeout:        %s\n", hs.IdleTimeout)
+	fmt.Fprintf(&b, "  recency_window:      %s\n", hs.RecencyWindow)
+	fmt.Fprintf(&b, "  tick_timeout:        %s\n", hs.TickTimeout)
+	fmt.Fprintf(&b, "  min_delta_messages:  %d\n", hs.MinDeltaMessages)
+	fmt.Fprintf(&b, "  max_token_ratio:     %.2f\n", hs.MaxTokenRatio)
+
+	// Health heuristic: if the watcher hasn't scanned in more than
+	// 2x its configured interval, something is wrong. Surface it.
+	if !hs.LastScanAt.IsZero() {
+		stale := 2 * hs.ScanInterval
+		if now.Sub(hs.LastScanAt) > stale {
+			fmt.Fprintf(&b, "\n⚠ Watcher appears stuck: last scan was %s ago (> 2× scan_interval).\n",
+				now.Sub(hs.LastScanAt).Round(time.Second))
+		}
+	}
+
 	return b.String(), false, nil
 }
 

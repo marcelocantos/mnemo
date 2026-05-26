@@ -25,7 +25,13 @@ type fakeStoreSource struct {
 	candidates []store.CompactionCandidate
 }
 
-func (f *fakeStoreSource) SelectCompactionCandidates(minMsgs int, recencyCutoff time.Time, limit int) ([]store.CompactionCandidate, error) {
+func (f *fakeStoreSource) SelectCompactionCandidates(
+	minDeltaMsgs int,
+	idleCutoff time.Time,
+	recencyCutoff time.Time,
+	maxBudgetRatio float64,
+	limit int,
+) ([]store.CompactionCandidate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]store.CompactionCandidate, len(f.candidates))
@@ -264,6 +270,100 @@ func TestTickLogCompacted(t *testing.T) {
 	}
 	if !strings.Contains(got, "level=INFO") {
 		t.Errorf("compacted should be INFO, got: %s", got)
+	}
+}
+
+// TestTickLogBudgetExceededIsDebug verifies 🎯T67's log-level
+// demotion: budget_exceeded ticks log at DEBUG, not INFO, so the
+// default daemon log no longer accumulates thousands of
+// budget_exceeded INFO lines per day.
+func TestTickLogBudgetExceededIsDebug(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	// fakeStore configured so checkBudget returns ErrBudgetExceeded
+	// on the very first call (compTokens=100, sessTokens=100, ratio
+	// 1.0 >> 0.10).
+	// Seed: session tokens 100 in / 0 out, plus a prior compaction
+	// of 80 + 20 = 100 tokens. The ratio (100/100 = 1.0) exceeds
+	// the default 0.10 budget, so the next Compact call returns
+	// ErrBudgetExceeded.
+	fs := &fakeStore{
+		session:   "sess-broke",
+		msgs:      []store.SessionMessage{{ID: 1, Role: "user", Text: "hi"}},
+		sessionIn: 100,
+	}
+	if _, err := fs.PutCompaction(store.Compaction{
+		SessionID:    "sess-broke",
+		PromptTokens: 80,
+		OutputTokens: 20,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{
+		SessionID: "sess-broke", CWD: "/work/proj",
+	})
+	llm := &stubNopLLM{}
+	compactor := New(fs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "")
+
+	runUntil(t, w, func() bool { return strings.Contains(buf.String(), string(outcomeBudgetExceeded)) })
+
+	got := buf.String()
+	if !strings.Contains(got, string(outcomeBudgetExceeded)) {
+		t.Errorf("expected outcome=%s in log, got: %s", outcomeBudgetExceeded, got)
+	}
+	// The pre-T67 implementation logged this at INFO. The 🎯T67 fix
+	// demotes it to DEBUG; the only INFO lines we should see are from
+	// the test harness itself (vault, etc.) — there should be no
+	// compact: tick INFO entry for budget_exceeded.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "compact: tick") &&
+			strings.Contains(line, string(outcomeBudgetExceeded)) &&
+			strings.Contains(line, "level=INFO") {
+			t.Errorf("budget_exceeded should be DEBUG, got INFO line: %s", line)
+		}
+	}
+}
+
+// TestWatcherHealthSnapshot verifies the runtime introspection
+// surface added in 🎯T67: Health() reflects scan/tick activity and
+// the lifetime outcome counters increment correctly.
+func TestWatcherHealthSnapshot(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{
+		SessionID: "sess-ok", CWD: "/work/proj",
+	})
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 10 * time.Millisecond,
+	}, "")
+
+	runUntil(t, w, func() bool { return llm.calls.Load() >= 1 })
+
+	hs := w.Health()
+	if hs.LastScanAt.IsZero() {
+		t.Errorf("expected LastScanAt to be set after at least one scan")
+	}
+	if hs.LastTickAt.IsZero() {
+		t.Errorf("expected LastTickAt to be set after at least one tick")
+	}
+	if hs.LastTickOutcome != string(outcomeCompacted) {
+		t.Errorf("expected LastTickOutcome=%s, got %q", outcomeCompacted, hs.LastTickOutcome)
+	}
+	if hs.Counts[string(outcomeCompacted)] < 1 {
+		t.Errorf("expected compacted count >= 1, got %d", hs.Counts[string(outcomeCompacted)])
+	}
+	if hs.ScanInterval == 0 {
+		t.Errorf("expected ScanInterval to be reported")
+	}
+	if hs.MinDeltaMessages == 0 {
+		t.Errorf("expected MinDeltaMessages default to be reported")
 	}
 }
 

@@ -38,6 +38,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/api"
+	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
@@ -65,7 +66,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.43.0"
+	version              = "0.44.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 )
@@ -570,6 +571,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		return v
 	})
 
+	// Wire the per-user compactor health reporter so
+	// mnemo_compactor_status (🎯T67) can surface live watcher state.
+	// Returns nil when the user's workers haven't started yet; the
+	// tool gracefully reports "not available" in that case.
+	handler.SetCompactorResolver(func(username string) tools.CompactorHealthReporter {
+		w := reg.CompactWatcherFor(username)
+		if w == nil {
+			return nil
+		}
+		return compactorAdapter{w: w}
+	})
+
 	// Wire the mnemo_config tool to the live Registry. Get returns a
 	// snapshot of the current Config; Put persists the new config to
 	// disk via store.WriteConfig (which re-runs the same validation as
@@ -688,6 +701,33 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			}
 		}
 		return nil
+	}
+}
+
+// compactorAdapter satisfies tools.CompactorHealthReporter by
+// projecting a *compact.Watcher's HealthSnapshot into the tools
+// package's CompactorHealth type. Lives in main so the tools and
+// compact packages stay free of each other (compact has no business
+// importing tools and vice versa).
+type compactorAdapter struct {
+	w *compact.Watcher
+}
+
+func (a compactorAdapter) Health() tools.CompactorHealth {
+	hs := a.w.Health()
+	return tools.CompactorHealth{
+		LastScanAt:       hs.LastScanAt,
+		LastScanCount:    hs.LastScanCount,
+		LastTickAt:       hs.LastTickAt,
+		LastTickOutcome:  hs.LastTickOutcome,
+		InFlightSession:  hs.InFlightSession,
+		Counts:           hs.Counts,
+		ScanInterval:     hs.ScanInterval,
+		IdleTimeout:      hs.IdleTimeout,
+		RecencyWindow:    hs.RecencyWindow,
+		TickTimeout:      hs.TickTimeout,
+		MinDeltaMessages: hs.MinDeltaMessages,
+		MaxTokenRatio:    hs.MaxTokenRatio,
 	}
 }
 

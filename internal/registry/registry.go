@@ -91,7 +91,8 @@ type Registry struct {
 // transcript ingest pipeline are unaffected by a vault path change.
 type userEntry struct {
 	store             *store.Store
-	vault             *vault.Exporter // nil when vault_path is not configured
+	vault             *vault.Exporter  // nil when vault_path is not configured
+	compactWatcher    *compact.Watcher // background compaction watcher; nil before startWorkers
 	workers           sync.WaitGroup
 	vaultCancel       context.CancelFunc // cancels the vault sub-context; nil when vault disabled
 	vaultWorkers      sync.WaitGroup     // tracks only vault goroutines, so reload can wait for them
@@ -190,6 +191,20 @@ func (r *Registry) VaultFor(username string) *vault.Exporter {
 	return nil
 }
 
+// CompactWatcherFor returns the compaction Watcher for username, or
+// nil when the user has not yet been initialised. Used by the
+// mnemo_compactor_status MCP tool (🎯T67) to surface watcher health
+// — last scan / tick timestamps, in-flight session, lifetime tick
+// counts — without grepping the daemon log.
+func (r *Registry) CompactWatcherFor(username string) *compact.Watcher {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.stores[username]; ok {
+		return e.compactWatcher
+	}
+	return nil
+}
+
 // startWorkers kicks off the per-user ingest / watcher / compactor /
 // CI-poll goroutines. Each goroutine runs until r.baseCtx is
 // cancelled (Registry.Close) or until it hits a terminal error.
@@ -276,6 +291,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		caller := compact.NewClaudiaCaller(r.mnemoRepoDir, r.compactorModel)
 		compactor := compact.New(e.store, caller, compact.Config{})
 		watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{}, r.mnemoRepoDir)
+		e.compactWatcher = watcher
 		logger.Info("compact: watcher starting")
 		watcher.Run(r.baseCtx)
 	}()

@@ -201,43 +201,116 @@ type CompactionCandidate struct {
 	ConnectionID string
 }
 
-// SelectCompactionCandidates returns sessions whose substantive
-// message count is at least minMsgs and whose last_msg falls after
-// recencyCutoff. Ordered most-recently-active first; capped at
-// limit rows. Used by the activity-driven compactor watcher
-// (🎯T59) to pick targets independently of any MCP connection
-// binding, so sessions that never called mnemo_self still get
-// compacted.
+// SelectCompactionCandidates returns sessions worth a compaction tick
+// under 🎯T67's dual-trigger model (replaces the pre-T67 lifetime-
+// substantive AND-gated filter that left already-compacted sessions
+// spinning forever and starved small sessions of compaction
+// entirely).
 //
-// ConnectionID is filled from the most recent connection_sessions
-// row for the session if one exists, otherwise left empty. The
-// compactor passes the empty value straight through and
-// PutCompaction stores NULL — the schema column is unchanged
-// (additive policy).
-func (s *Store) SelectCompactionCandidates(minMsgs int, recencyCutoff time.Time, limit int) ([]CompactionCandidate, error) {
+// A session qualifies when its last_msg falls within recencyCutoff
+// (an absolute "don't pointlessly resurrect old sessions" floor) AND
+// it has new substantive messages since the most recent compaction's
+// entry_id_to (or since first_msg if none) — measured against the
+// messages table directly, not the lifetime substantive_msgs counter.
+// Among new-content sessions, EITHER of two triggers fires:
+//
+//  1. delta_substantive_msgs >= minDeltaMsgs (the original T59
+//     spirit, but counted as a delta from latest entry_id_to rather
+//     than from session start).
+//  2. delta_substantive_msgs >= 1 AND last_msg <= idleCutoff —
+//     captures small but settled sessions that never reach
+//     minDeltaMsgs but have gone quiet long enough to be worth
+//     summarising for restore.
+//
+// Sessions whose cumulative compaction-token cost already meets or
+// exceeds maxBudgetRatio of the session's assistant token cost are
+// filtered out at the candidate level, not just inside
+// Compactor.Compact's checkBudget path. This eliminates the
+// budget_exceeded tick storm where the same exhausted session was
+// re-selected every scan until recencyCutoff aged it out.
+//
+// Ordered most-recently-active first; capped at limit rows.
+// ConnectionID is best-effort attribution: the most recently
+// observed connection bound to this session, or empty when no
+// binding exists (additive-only schema, NULL-tolerated).
+func (s *Store) SelectCompactionCandidates(
+	minDeltaMsgs int,
+	idleCutoff time.Time,
+	recencyCutoff time.Time,
+	maxBudgetRatio float64,
+	limit int,
+) ([]CompactionCandidate, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 	if limit <= 0 {
 		limit = 100
 	}
-	cutoff := recencyCutoff.UTC().Format(time.RFC3339Nano)
+	if maxBudgetRatio <= 0 {
+		maxBudgetRatio = 0.10
+	}
+	idleCutoffStr := idleCutoff.UTC().Format(time.RFC3339Nano)
+	recencyCutoffStr := recencyCutoff.UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.Query(`
-		SELECT
-		  ss.session_id,
-		  COALESCE(sm.cwd, '') AS cwd,
-		  COALESCE((
-		    SELECT cs.connection_id FROM connection_sessions cs
-		    WHERE cs.session_id = ss.session_id
-		    ORDER BY cs.last_seen_at DESC
-		    LIMIT 1
-		  ), '') AS connection_id
-		FROM session_summary ss
-		LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
-		WHERE ss.last_msg > ?
-		  AND ss.substantive_msgs >= ?
-		ORDER BY ss.last_msg DESC
+		WITH session_state AS (
+		  SELECT
+		    ss.session_id,
+		    ss.last_msg,
+		    COALESCE(sm.cwd, '')                                                                    AS cwd,
+		    COALESCE((
+		      SELECT cs.connection_id FROM connection_sessions cs
+		      WHERE cs.session_id = ss.session_id
+		      ORDER BY cs.last_seen_at DESC
+		      LIMIT 1
+		    ), '')                                                                                  AS connection_id,
+		    COALESCE((
+		      SELECT MAX(entry_id_to) FROM compactions
+		      WHERE session_id = ss.session_id
+		    ), 0)                                                                                   AS last_entry_id,
+		    COALESCE((
+		      SELECT SUM(prompt_tokens + output_tokens) FROM compactions
+		      WHERE session_id = ss.session_id
+		    ), 0)                                                                                   AS comp_tokens,
+		    COALESCE((
+		      SELECT SUM(input_tokens + output_tokens) FROM entries
+		      WHERE session_id = ss.session_id AND type = 'assistant'
+		    ), 0)                                                                                   AS sess_tokens
+		  FROM session_summary ss
+		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
+		  WHERE ss.last_msg > ?
+		)
+		SELECT s.session_id, s.cwd, s.connection_id
+		FROM session_state s
+		WHERE
+		  -- Budget filter: skip sessions whose summariser cost has
+		  -- already met the configured ratio. Unmeasurable sessions
+		  -- (zero session tokens) are allowed through; the first
+		  -- compaction has to run before there's anything to measure.
+		  (s.sess_tokens = 0 OR s.comp_tokens * 1.0 / s.sess_tokens < ?)
+		  AND (
+		    -- Trigger A: enough new substantive messages since the
+		    -- session's latest compaction (or since the start of the
+		    -- transcript if none exists).
+		    (SELECT COUNT(*) FROM messages m
+		     WHERE m.session_id = s.session_id
+		       AND m.entry_id > s.last_entry_id
+		       AND m.is_noise = 0
+		    ) >= ?
+		    OR
+		    -- Trigger B: at least one new substantive message AND
+		    -- the session has been idle long enough. Captures small
+		    -- one-shot sessions that never reach the message
+		    -- threshold but are worth summarising once they settle.
+		    (s.last_msg <= ?
+		     AND EXISTS (
+		       SELECT 1 FROM messages m
+		       WHERE m.session_id = s.session_id
+		         AND m.entry_id > s.last_entry_id
+		         AND m.is_noise = 0
+		     ))
+		  )
+		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, cutoff, minMsgs, limit)
+	`, recencyCutoffStr, maxBudgetRatio, minDeltaMsgs, idleCutoffStr, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select compaction candidates: %w", err)
 	}
