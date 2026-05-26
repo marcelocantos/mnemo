@@ -2496,6 +2496,16 @@ func (s *Store) PollCI() error {
 }
 
 // pollCIForRepo fetches and upserts CI runs for a single repo.
+//
+// 🎯T67: the gh subprocess calls (both `gh run list` and the per-
+// failed-run `gh run view --log`) happen OUTSIDE the rwmu write lock.
+// Previously the function took the write lock before iterating runs
+// and called fetchRunLog inside the loop, so a poll cycle held the
+// write lock across many seconds of subprocess + HTTP latency per
+// repo. With ~11 'CI poll failed' messages per 5-min cycle, this
+// starved the compactor's RLock long enough to wedge its scan loop
+// for hours. Now logs are fetched first (no lock), then a short
+// upsert-only critical section completes per repo.
 func (s *Store) pollCIForRepo(ghPath, repo string) error {
 	out, err := exec.Command(ghPath, "run", "list",
 		"--repo", repo,
@@ -2511,15 +2521,21 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 		return fmt.Errorf("parse gh output: %w", err)
 	}
 
+	// Fetch logs for failed runs BEFORE taking the write lock so the
+	// compactor (and other readers) can make progress while we wait on
+	// the gh subprocess. Order preserved so the subsequent upsert loop
+	// keeps the runs/logSummaries arrays in step.
+	logSummaries := make([]string, len(runs))
+	for i, run := range runs {
+		if run.Conclusion == "failure" {
+			logSummaries[i] = s.fetchRunLog(ghPath, repo, run.DatabaseID)
+		}
+	}
+
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 
-	for _, run := range runs {
-		var logSummary string
-		if run.Conclusion == "failure" {
-			logSummary = s.fetchRunLog(ghPath, repo, run.DatabaseID)
-		}
-
+	for i, run := range runs {
 		_, err := s.db.Exec(`
 			INSERT INTO ci_runs (repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2530,7 +2546,7 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 				log_summary = COALESCE(excluded.log_summary, ci_runs.log_summary),
 				updated_at = datetime('now')
 		`, repo, run.DatabaseID, run.WorkflowName, run.HeadBranch, run.HeadSHA,
-			run.Status, run.Conclusion, run.CreatedAt, run.UpdatedAt, logSummary, run.URL)
+			run.Status, run.Conclusion, run.CreatedAt, run.UpdatedAt, logSummaries[i], run.URL)
 		if err != nil {
 			slog.Warn("upsert ci_run failed", "run_id", run.DatabaseID, "err", err)
 		}

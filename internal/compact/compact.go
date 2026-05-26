@@ -164,6 +164,13 @@ func New(s storeBackend, caller LLMCaller, cfg Config) *Compactor {
 	return c
 }
 
+// MaxTokenRatio reports the configured cumulative-summariser-cost
+// budget cap as a ratio of the tracked session's own token cost.
+// The Watcher reads it to pre-filter budget-exhausted sessions at
+// the candidate-selection level (🎯T67), so checkBudget no longer
+// has to be load-bearing for the budget_exceeded outcome.
+func (c *Compactor) MaxTokenRatio() float64 { return c.maxRatio }
+
 // ErrNothingToCompact indicates the session has no messages past the
 // most recent compaction. Not a real error — callers poll on this.
 var ErrNothingToCompact = errors.New("compact: nothing new to compact")

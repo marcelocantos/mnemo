@@ -94,7 +94,8 @@ func TestSelectCompactionCandidatesUnboundSession(t *testing.T) {
 		t.Fatalf("IngestAll: %v", err)
 	}
 
-	cands, err := s.SelectCompactionCandidates(3, now.Add(-1*time.Hour), 100)
+	cands, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -136,7 +137,8 @@ func TestSelectCompactionCandidatesBoundSession(t *testing.T) {
 	// Simulate a live MCP binding for this session.
 	s.RecordConnectionSessionAt("conn-xyz", "sess-bound", now)
 
-	cands, err := s.SelectCompactionCandidates(2, now.Add(-1*time.Hour), 100)
+	cands, err := s.SelectCompactionCandidates(
+		2, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -184,7 +186,8 @@ func TestSelectCompactionCandidatesFilters(t *testing.T) {
 		t.Fatalf("IngestAll: %v", err)
 	}
 
-	cands, err := s.SelectCompactionCandidates(3, now.Add(-1*time.Hour), 100)
+	cands, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -200,6 +203,195 @@ func TestSelectCompactionCandidatesFilters(t *testing.T) {
 	}
 	if ids["sess-stale"] {
 		t.Errorf("sess-stale should be filtered (outside recency)")
+	}
+}
+
+// TestSelectCompactionCandidatesDeltaTrigger verifies 🎯T67's
+// trigger A: candidate qualifies when delta messages SINCE the
+// session's latest compaction.entry_id_to clear the threshold —
+// even if the lifetime substantive_msgs count is much higher
+// (i.e. the session has already been compacted past most of its
+// history).
+func TestSelectCompactionCandidatesDeltaTrigger(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	// 6 substantive messages, all recent.
+	entries := []map[string]any{
+		msg("user", "m1", now.Add(-6*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "m2", now.Add(-5*time.Minute).Format(time.RFC3339)),
+		msg("user", "m3", now.Add(-4*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "m4", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		msg("user", "m5", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "m6", now.Add(-1*time.Minute).Format(time.RFC3339)),
+	}
+	writeJSONL(t, dir, "p", "sess-delta", entries)
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Plant a compaction that covers ALL six messages so the delta
+	// drops to zero. Even though lifetime substantive_msgs is 6
+	// (which would qualify under the pre-T67 filter), the session
+	// must NOT be selected because there's nothing new since the
+	// compaction.
+	var maxMsgID int64
+	if err := s.db.QueryRow(`SELECT MAX(id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxMsgID); err != nil {
+		t.Fatalf("max msg id: %v", err)
+	}
+	var maxEntryID int64
+	if err := s.db.QueryRow(`SELECT MAX(entry_id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxEntryID); err != nil {
+		t.Fatalf("max entry id: %v", err)
+	}
+	if _, err := s.PutCompaction(Compaction{
+		SessionID:    "sess-delta",
+		EntryIDFrom:  0,
+		EntryIDTo:    maxEntryID,
+		PromptTokens: 100,
+		OutputTokens: 20,
+		Summary:      "covers everything",
+	}); err != nil {
+		t.Fatalf("PutCompaction: %v", err)
+	}
+
+	cands, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	for _, c := range cands {
+		if c.SessionID == "sess-delta" {
+			t.Errorf("sess-delta should be filtered: prior compaction covers all messages")
+		}
+	}
+}
+
+// TestSelectCompactionCandidatesIdleTrigger verifies 🎯T67's
+// trigger B: a session with fewer than MinDeltaMessages new
+// substantive messages still qualifies when last_msg is older than
+// idleCutoff. Captures small one-shot sessions that would otherwise
+// never be compacted.
+func TestSelectCompactionCandidatesIdleTrigger(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	// 2 substantive messages, both posted ~30 min ago — below the
+	// MinDeltaMessages=10 threshold but past the idleCutoff=15min mark.
+	writeJSONL(t, dir, "p", "sess-idle", []map[string]any{
+		msg("user", "small q", now.Add(-30*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "small a", now.Add(-29*time.Minute).Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	cands, err := s.SelectCompactionCandidates(
+		10,                       // minDeltaMsgs — well above the 2 we have
+		now.Add(-15*time.Minute), // idleCutoff: last_msg must be older than this
+		now.Add(-2*time.Hour),    // recencyCutoff: last_msg must be newer than this
+		0.10,
+		100,
+	)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.SessionID == "sess-idle" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("sess-idle should qualify via the idle trigger; got %+v", cands)
+	}
+}
+
+// TestSelectCompactionCandidatesBudgetFilter verifies 🎯T67's
+// candidate-level budget filter: a session whose cumulative
+// compaction tokens already meet maxBudgetRatio of its assistant
+// token cost is dropped from the candidate set, so the watcher
+// never wakes up just to log budget_exceeded.
+func TestSelectCompactionCandidatesBudgetFilter(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	// Build a session with assistant entries carrying real token
+	// counts so the budget ratio resolves to something meaningful.
+	asst := func(text string, ts time.Time, in, out int) map[string]any {
+		return map[string]any{
+			"type":      "assistant",
+			"timestamp": ts.Format(time.RFC3339),
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": text,
+				"usage": map[string]any{
+					"input_tokens":  in,
+					"output_tokens": out,
+				},
+			},
+		}
+	}
+	writeJSONL(t, dir, "p", "sess-broke", []map[string]any{
+		asst("a1", now.Add(-10*time.Minute), 100, 50),
+		msg("user", "u1", now.Add(-9*time.Minute).Format(time.RFC3339)),
+		asst("a2", now.Add(-8*time.Minute), 100, 50),
+		msg("user", "u2", now.Add(-7*time.Minute).Format(time.RFC3339)),
+		asst("a3", now.Add(-6*time.Minute), 100, 50),
+		msg("user", "u3", now.Add(-5*time.Minute).Format(time.RFC3339)),
+		msg("user", "u4", now.Add(-4*time.Minute).Format(time.RFC3339)),
+		msg("user", "u5", now.Add(-3*time.Minute).Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Plant a compaction whose prompt+output already exceed 50% of
+	// the session's 450-token cost (3 × (100+50)).
+	if _, err := s.PutCompaction(Compaction{
+		SessionID:    "sess-broke",
+		EntryIDFrom:  0,
+		EntryIDTo:    1,
+		PromptTokens: 300,
+		OutputTokens: 100,
+		Summary:      "spent",
+	}); err != nil {
+		t.Fatalf("PutCompaction: %v", err)
+	}
+
+	// 50% budget — already exceeded.
+	cands, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.50, 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	for _, c := range cands {
+		if c.SessionID == "sess-broke" {
+			t.Errorf("sess-broke should be filtered by the budget ratio; got %+v", cands)
+		}
+	}
+
+	// Raising the budget to 200% lets it through (now well under).
+	cands, err = s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 2.0, 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.SessionID == "sess-broke" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("sess-broke should pass when budget ratio raised; got %+v", cands)
 	}
 }
 
