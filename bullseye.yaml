@@ -2043,7 +2043,7 @@ targets:
     achieved: 2026-05-29
   T68.2:
     name: Compaction advances by a cursor so sessions of any length fully converge
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2051,17 +2051,13 @@ targets:
     - A session with more substantive messages than the per-call window is fully compacted over multiple ticks (no messages beyond the first window are stranded) — covered by a test that seeds > window-size substantive messages and asserts successive Compact calls cover disjoint, advancing spans until quiescent.
     - 'When a session is fully compacted, the owed-predicate (T68.1) and Compact agree: the predicate reports not-owed and Compact returns ErrNothingToCompact — no session sits permanently in the candidate set producing cheap no-op ticks every scan.'
     - Existing compaction chaining / restore (ChainCompactions, mnemo_restore) continue to pass.
-    context: |-
-      Discovered during 🎯T68.1 (2026-05-29). Compactor.Compact (internal/compact/compact.go:237) reads `ReadSession(sessionID, \"\", 0, c.maxMsgs)` — offset 0, limit 500 (maxMsgs) — then filters to messages past the cursor. ReadSession (internal/store/store.go:5006) is positional: `ORDER BY id ASC LIMIT ? OFFSET ?`. So Compact only ever sees the FIRST 500 messages of a session. Once a session exceeds 500 substantive messages and a prior compaction covered the first 500, the next read returns those same first 500, all filtered out → ErrNothingToCompact, and messages 501+ are never compacted.
-
-      This is pre-existing (present under the old 24h-recency model too, for any >500-msg session), but T68.1's removal of the recency floor makes it acute: long historical sessions now enter the candidate set, get one span covering their first 500 messages, then sit owed-by-predicate-but-nothing-to-compact forever, producing perpetual cheap no-op ticks. That contradicts the convergence/quiescence goal — a session should reach a true fixed point.
-
-      Fix: make Compact advance by a real cursor (read messages with id/entry_id past the stored to-cursor, ordered ascending, limited to the window) rather than always reading from offset 0. Likely needs a store method like ReadSessionAfter(sessionID, afterID, limit). Coordinate with 🎯T68.3 (the to-cursor's key space).
+    context: 'Achieved 2026-05-29 (commit 8ee5902, stacked on the T68 branch, not yet pushed). Compactor.Compact now reads via Store.ReadSessionAfter(sessionID, afterID, limit) — substantive (is_noise=0) messages with id > afterID, ascending, capped at maxMsgs — instead of ReadSession(offset 0, limit 500)+filterNew. A session longer than one window drains window-by-window across ticks (each advancing past the prior span''s messages.id cursor) and then reaches ErrNothingToCompact. ReadSessionAfter excludes noise in SQL so owed-predicate ⟺ Compact-yields-a-span exactly (resolved jointly with T68.3). Removed dead filterNew. Test: TestCompactAdvancesAcrossWindows. Delivery: rides the T68 branch to master.'
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-29
   T68.3:
     name: The compaction owed-predicate and Compact's advance cursor use one consistent key space
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2069,12 +2065,10 @@ targets:
     - 'If inconsistent: the selection predicate and Compact''s filter/store are aligned to a single, documented key space so that "owed" means exactly "Compact will produce a non-empty span" — a true desired-state predicate.'
     - 'If already consistent: the equivalence is documented at both sites (the predicate in store.SelectCompactionCandidates and the EntryIDTo assignment in Compactor.Compact) so the next reader does not have to re-derive it.'
     - Compaction selection/coverage behaviour is covered by a test that would fail if the two key spaces drift apart again.
-    context: |-
-      Discovered during 🎯T68.1 (2026-05-29), needs verification before action. Apparent mismatch: Compactor.Compact stores `EntryIDTo: int64(msgs[len(msgs)-1].ID)` (internal/compact/compact.go:267) where msgs come from ReadSession's `SELECT id ... FROM messages` — i.e. messages.id — and filters new messages on `m.ID > fromID` (filterNew). But the owed-predicate in store.SelectCompactionCandidates compares `m.entry_id > s.last_entry_id` where last_entry_id = MAX(entry_id_to) from compactions. messages.id (row PK) and messages.entry_id (FK into entries) are different columns/number spaces (schema has both: idx_messages_entry_id is separate from the PK). If they differ, the predicate computes \"owed\" in entry_id space while Compact advances in messages.id space, so selection and coverage can disagree.
-
-      This is latent and pre-existing (T67's predicate already used entry_id). T68.1 deliberately did NOT touch predicate semantics (only lifted the recency floor), so this is filed rather than fixed inline. It is foundational to \"predicate-driven reconciliation\" being correct, and couples tightly with 🎯T68.2 (the cursor Compact advances on). Resolve T68.2 and T68.3 together: pick one key space (probably messages.id, since that is what Compact already does end-to-end) and make selection match it.
+    context: 'Achieved 2026-05-29 (commit 8ee5902, stacked on the T68 branch, not yet pushed). Verified: compactions.entry_id_to/from hold messages.id values (Compact records msgs[last].ID = messages.id; filterNew/ReadSessionAfter compare messages.id; nothing joins these columns to entries.id — confirmed by grepping all EntryID*/entry_id_* usages). The column name is a historical misnomer, now documented on the Compaction struct. The lone inconsistency — the owed-predicate comparing m.entry_id against that messages.id value — is fixed: both subqueries now compare m.id > s.last_entry_id, matching Compact''s cursor, so "owed" ⟺ "Compact yields a span." Partial index realigned to messages(session_id, id) WHERE is_noise=0. Test that conflated the spaces (DeltaTrigger) reseeded to MAX(id). Delivery: rides the T68 branch to master.'
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-29
   T7:
     name: Agent-defined query templates
     status: achieved
