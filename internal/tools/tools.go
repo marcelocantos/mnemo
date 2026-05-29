@@ -611,13 +611,22 @@ Vault must be configured via vault_path in ~/.mnemo/config.json.`),
     nothing_to_compact, budget_exceeded, failed, timeout, skipped_self).
   - In-flight session ID, if a tick is currently running.
   - Lifetime counts of each tick outcome since the daemon started.
-  - Configuration in effect: scan interval, idle timeout, recency
-    window, per-tick timeout, minimum delta-messages trigger, and
-    the configured max token-budget ratio.
+  - Configuration in effect: scan interval, idle timeout, per-tick
+    timeout, minimum delta-messages trigger, per-scan compaction cap,
+    and the configured max token-budget ratio.
+  - Backlog: the count of owed-but-uncompacted sessions (the gap to
+    the compactor's fixed point).
 
 Use this to answer "is the compactor working?" without grepping the
 daemon log. A LastScanAt that is older than ScanInterval × 2 is the
 clearest "watcher is wedged" signal.`),
+		),
+		mcp.NewTool("mnemo_divergence",
+			mcp.WithDescription(`Report, per derived data stream, the gap between desired and actual state — how far each stream is from its convergence fixed point (🎯T68.4).
+
+For each stream returns: whether a gap metric is known, the gap (in the stream's unit; 0 = converged), when it last reconciled, and a note. Streams with a cheap metric today: compactions (owed-but-uncompacted sessions), transcript_index (un-ingested transcript bytes), and the repo-level document streams (docs:* — files on disk not yet indexed). Streams not yet instrumented (images, vault, github_mirrors) report known=false rather than a fabricated number; each becomes known as its reconciler slice lands.
+
+Use this to see what derived state is stale and by how much — the single surface for "is anything behind?" across the data plane.`),
 		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
@@ -750,6 +759,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultStatus(h.cfgCtl)
 	case "mnemo_compactor_status":
 		return ch.compactorStatus(h.resolveCompactor)
+	case "mnemo_divergence":
+		return ch.divergence()
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2356,6 +2367,43 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 		}
 	}
 
+	return b.String(), false, nil
+}
+
+// divergence implements mnemo_divergence (🎯T68.4): a uniform
+// per-stream actual-vs-desired gap report across the derived data
+// plane. Streams without a cheap gap metric are shown as "unknown"
+// rather than a fabricated number.
+func (h *callHandler) divergence() (string, bool, error) {
+	rows := h.mem.StreamDivergences()
+
+	var b strings.Builder
+	b.WriteString("Derived-stream divergence (gap to fixed point):\n\n")
+	if len(rows) == 0 {
+		b.WriteString("  (no streams reported)\n")
+		return b.String(), false, nil
+	}
+
+	converged := 0
+	for _, d := range rows {
+		if !d.Known {
+			fmt.Fprintf(&b, "  %-22s unknown — %s\n", d.Stream+":", d.Note)
+			continue
+		}
+		if d.Gap == 0 {
+			converged++
+		}
+		last := d.LastReconciled
+		if last == "" {
+			last = "never"
+		}
+		fmt.Fprintf(&b, "  %-22s gap=%d %s (last reconciled: %s)\n",
+			d.Stream+":", d.Gap, d.Unit, last)
+		if d.Note != "" {
+			fmt.Fprintf(&b, "  %-22s   %s\n", "", d.Note)
+		}
+	}
+	fmt.Fprintf(&b, "\n%d stream(s) reported; %d converged (gap=0).\n", len(rows), converged)
 	return b.String(), false, nil
 }
 
