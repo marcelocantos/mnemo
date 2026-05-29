@@ -5,7 +5,10 @@ package store
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 )
 
 // SourceDriftEntry is one indexed transcript source that has drifted
@@ -80,4 +83,104 @@ func (s *Store) SourceDrift() SourceDriftReport {
 		}
 	}
 	return rep
+}
+
+// ReconcileSourceState propagates the current state of each indexed
+// transcript source onto session_meta as a valid-time tag — the Law 2
+// (state convergence) reconciler of 🎯T68.6's bitemporal model. It
+// never removes rows; it only writes the tag.
+//
+// For each indexed source path:
+//   - file gone                → tag the session "deleted_at=<now>"
+//   - size < ingested offset   → tag the session "truncated_at=<now>"
+//   - otherwise                → no-op (session stays "live")
+//
+// Idempotent within a status class: a session already tagged
+// "deleted_at=…" is not re-tagged just because the file is still gone;
+// only a status-class transition (e.g. live → deleted, truncated →
+// deleted) writes. Re-livening (deleted → live when a source returns)
+// is intentionally NOT modelled here — a tag is informational and a
+// once-pruned source coming back is rare; conservative defer.
+//
+// Maps source path → session_id via the Claude Code convention
+// (basename without ".jsonl"). Paths that don't match the convention
+// are skipped.
+//
+// Returns the number of sessions whose tag was newly written or
+// transitioned class.
+func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
+	s.mu.Lock()
+	offsets := make(map[string]int64, len(s.offsets))
+	for p, o := range s.offsets {
+		offsets[p] = o
+	}
+	s.mu.Unlock()
+
+	nowStr := now.UTC().Format(time.RFC3339)
+	type tagUpdate struct {
+		sessionID string
+		status    string
+	}
+	var candidates []tagUpdate
+	for path, off := range offsets {
+		var newStatus string
+		info, err := os.Stat(path)
+		switch {
+		case os.IsNotExist(err):
+			newStatus = "deleted_at=" + nowStr
+		case err != nil:
+			continue
+		case info.Size() < off:
+			newStatus = "truncated_at=" + nowStr
+		default:
+			continue // live; no tag change
+		}
+		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		if sessionID == "" || sessionID == filepath.Base(path) {
+			continue // didn't match the .jsonl convention
+		}
+		candidates = append(candidates, tagUpdate{sessionID, newStatus})
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	s.rwmu.Lock()
+	defer s.rwmu.Unlock()
+	tagged := 0
+	for _, c := range candidates {
+		var current string
+		_ = s.db.QueryRow(
+			`SELECT source_status FROM session_meta WHERE session_id = ?`,
+			c.sessionID).Scan(&current)
+		if sourceStatusClass(current) == sourceStatusClass(c.status) {
+			continue // idempotent within class
+		}
+		// UPSERT: session_meta only gets a row when ingest sees
+		// cwd/branch/topic, so a tag may be the first row for a
+		// session. The row's other defaults ('' for repo/cwd/etc) are
+		// fine — they reflect "unknown" and are populated if ingest
+		// later sees the metadata.
+		if _, err := s.db.Exec(`
+			INSERT INTO session_meta (session_id, source_status, source_state_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				source_status = excluded.source_status,
+				source_state_at = excluded.source_state_at
+		`, c.sessionID, c.status, nowStr); err != nil {
+			return tagged, err
+		}
+		tagged++
+	}
+	return tagged, nil
+}
+
+// sourceStatusClass returns the status class — the portion before the
+// "=" timestamp. "live" / "" stay as-is; "deleted_at=…" → "deleted_at";
+// "truncated_at=…" → "truncated_at".
+func sourceStatusClass(s string) string {
+	if i := strings.Index(s, "="); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

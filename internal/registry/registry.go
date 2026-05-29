@@ -319,10 +319,19 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
-			if n, err := e.store.ReconcileStaleMirrors(time.Now()); err != nil {
+			now := time.Now()
+			if n, err := e.store.ReconcileStaleMirrors(now); err != nil {
 				logger.Warn("mirror reconcile failed", "err", err)
 			} else if n > 0 {
 				logger.Info("mirror: reconciled stale streams", "count", n)
+			}
+			// 🎯T68.6 Law 2: state-convergence sweep. Tags
+			// session_meta.source_status for sessions whose source has
+			// drifted (deleted / truncated). Never removes rows.
+			if n, err := e.store.ReconcileSourceState(now); err != nil {
+				logger.Warn("source-state reconcile failed", "err", err)
+			} else if n > 0 {
+				logger.Info("source-state: tagged sessions", "count", n)
 			}
 			select {
 			case <-r.baseCtx.Done():

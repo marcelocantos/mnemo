@@ -4,6 +4,7 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,5 +70,93 @@ func TestSourceDrift(t *testing.T) {
 	}
 	if rep.Truncated != 1 {
 		t.Errorf("expected 1 truncated, got %d (%+v)", rep.Truncated, rep)
+	}
+}
+
+// TestReconcileSourceState verifies the Law-2 reconciler tags
+// session_meta with the current source state without removing rows,
+// and is idempotent within a status class.
+func TestReconcileSourceState(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	writeJSONL(t, dir, "proj", "sess-del", []map[string]any{
+		msg("user", "to be deleted", now.Format(time.RFC3339)),
+	})
+	writeJSONL(t, dir, "proj", "sess-trunc", []map[string]any{
+		msg("user", "to be truncated one", now.Format(time.RFC3339)),
+		msg("assistant", "to be truncated two", now.Add(time.Second).Format(time.RFC3339)),
+	})
+	writeJSONL(t, dir, "proj", "sess-keep", []map[string]any{
+		msg("user", "intact", now.Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Find and mutate the source files.
+	projDir := filepath.Join(dir, "proj")
+	entries, _ := os.ReadDir(projDir)
+	for _, e := range entries {
+		p := filepath.Join(projDir, e.Name())
+		switch {
+		case strings.Contains(p, "sess-del"):
+			if err := os.Remove(p); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+		case strings.Contains(p, "sess-trunc"):
+			if err := os.Truncate(p, 1); err != nil {
+				t.Fatalf("truncate: %v", err)
+			}
+		}
+	}
+
+	tagged, err := s.ReconcileSourceState(now)
+	if err != nil {
+		t.Fatalf("ReconcileSourceState: %v", err)
+	}
+	if tagged != 2 {
+		t.Errorf("expected 2 sessions tagged (deleted + truncated), got %d", tagged)
+	}
+
+	check := func(sessionID, wantClass string) {
+		var status string
+		err := s.db.QueryRow(
+			`SELECT source_status FROM session_meta WHERE session_id = ?`,
+			sessionID).Scan(&status)
+		if err == sql.ErrNoRows {
+			status = "live" // no row → ingest never wrote metadata; effectively live
+		} else if err != nil {
+			t.Fatalf("read session_meta for %s: %v", sessionID, err)
+		}
+		if sourceStatusClass(status) != wantClass {
+			t.Errorf("session %s: status class %q, want %q (full status=%q)",
+				sessionID, sourceStatusClass(status), wantClass, status)
+		}
+	}
+	check("sess-del", "deleted_at")
+	check("sess-trunc", "truncated_at")
+	check("sess-keep", "live")
+
+	// Idempotent within class: a second pass with the same state must
+	// tag zero sessions (no re-write of timestamps).
+	if tagged2, err := s.ReconcileSourceState(now.Add(time.Minute)); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	} else if tagged2 != 0 {
+		t.Errorf("expected idempotent second pass (0 updates), got %d", tagged2)
+	}
+
+	// Content rows survive: the deleted session's entries/messages are
+	// retained under the durable-tier model. Spot-check the messages
+	// table is non-empty for the deleted session.
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE session_id = ?`, "sess-del").Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count == 0 {
+		t.Errorf("deleted session's content rows must be retained (Law 1: content is durable)")
 	}
 }
