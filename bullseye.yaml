@@ -1995,6 +1995,86 @@ targets:
     origin: manual
     discovered: 2026-05-26
     achieved: 2026-05-26
+  T68:
+    name: mnemo's derived data plane is uniformly convergence-driven
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Every derived data stream (FTS index, compactions, vault export, git/PR/CI mirrors, image descriptions, persisted patterns) is defined as a function of declared sources with an explicit freshness predicate and a persisted cursor.
+    - A single reconciler abstraction drives all streams toward their fixed point; cost/recency limits act as scheduling priority, never as a filter that permanently excludes work from the desired set.
+    - '"Backfill" is not a distinct mode: a cold cursor meeting a large initial gap and steady-state catch-up are the same code path.'
+    - 'Divergence is observable: a per-stream query/status reports what derived state is stale relative to its sources (the gap to the fixed point).'
+    - The index's role as an authoritative, lossy-source-tolerant tier is explicit (Claude Code prunes source JSONL), with backups (T61) as the reconcile-from-cold path, and orphan/deletion handling (GC of derived rows and vault notes whose source is gone) is specified rather than absent.
+    - All sub-targets (T68.1+) achieve their individual acceptance.
+    context: |-
+      Architectural reframe (2026-05-29 design discussion). Seen as a dataflow engine, mnemo SHOULD be fundamentally driven by a convergence/reconciliation model: derived artifacts are pure functions of sources, a reconciler drives actual→desired idempotently regardless of how the gap arose, the engine is quiescent at the fixed point, and backfill is just the reconciler meeting a cold cursor.
+
+      Today mnemo is ~half convergent. Convergence-shaped already: transcript→index ingest (persisted per-file byte cursor s.offsets, reconcile-on-boot, per-table backfill passes in IngestAll at store.go:2612), schema migration (sqlift AllowNone — the purest case), and the vault exporter's needsUpdate staleness reconcile. NOT convergent: the expensive/external + LLM-derived streams, where convergence was traded for cost control by FILTERING the work set rather than PRIORITISING a reconciler over the full desired set.
+
+      Five gaps (full analysis in docs/design/convergence-data-plane.md): (1) compaction is recency-windowed polling, not a desired-state predicate — historical sessions permanently divergent [T68.1]; (2) git/PR/CI mirrors reconcile on boot or fixed poll, not on divergence; (3) no general divergence-detection surface (BackfillStatuses is a partial step); (4) asymmetric source handling — append-grow only, no reconcile of pruned/rewritten JSONL, no GC of orphaned rows or vault notes, and the index-as-authority inversion is implicit not designed; (5) three trigger paradigms (event/poll/boot) instead of one reconciler abstraction = (inputs, transform, freshness predicate, cursor).
+
+      Meta-irony driving this target: the project's DEVELOPMENT is already fully convergence-driven (bullseye targets → frontier gap → reconcile via /cv), but mnemo's runtime DATA PLANE only partially is. This target turns that philosophy inward. Aligns with the project design philosophy (general facilities + feedback loops): a uniform reconciler is exactly such a general facility.
+
+      Decompose leaf-first; T68.1 (compaction reconciler) is the highest-leverage, independently shippable slice and was the concrete probe that surfaced this.
+    origin: manual
+    discovered: 2026-05-29
+  T68.1:
+    name: Compaction is predicate-driven reconciliation, not recency-windowed polling
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Compaction candidate selection is expressed as a desired-state predicate — "a session is owed a compaction when it has substantive messages newer than its latest compaction's entry_id_to (or has never been compacted)" — with NO recency floor inside the predicate.
+    - 'RecencyWindow becomes a scheduling-priority input (process most-recently-active candidates first) rather than a WHERE filter that drops old sessions from the candidate set (today: store.go SelectCompactionCandidates `WHERE ss.last_msg > recencyCutoff`).'
+    - A historical, never-compacted session (last_msg far outside the former 24h window) eventually becomes a candidate and is compacted without manual intervention or a config override — covered by a test that seeds such a session and asserts it is selected.
+    - Convergence is bounded by the per-session token budget (maxBudgetRatio) and scan throughput, not by recency; the T67 anti-tick-storm guarantee (already-compacted and budget-exhausted sessions are not re-selected indefinitely) is preserved and still covered by tests.
+    - Self-exclusion (excludeCWD) and the budget pre-filter continue to apply unchanged.
+    - mnemo_compactor_status surfaces the outstanding backlog (count of owed-but-uncompacted sessions) so the gap to the fixed point is observable, not silently abandoned.
+    - Throughput is bounded so a large initial backlog (every historical session) does not starve live sessions or exhaust the LLM budget in one scan — e.g. a per-scan compaction cap with recent sessions prioritised; whatever bound is chosen is logged, never a silent truncation.
+    context: |-
+      Achieved 2026-05-29. Compaction selection is now the convergence predicate "owed = new substantive messages since the latest compaction, AND (delta>=min OR idle)" with NO recency floor (internal/store/compactions.go SelectCompactionCandidates). Recency is ORDER BY last_msg DESC only. The query returns the total backlog via COUNT(*) OVER (); the watcher enforces a per-scan compaction cap (WatcherConfig.MaxCompactionsPerScan, default 20) so a large historical backlog drains over scans, recent-first, without starving live sessions or flooding the LLM — the cap is logged, never silent. mnemo_compactor_status surfaces backlog + max_compactions_per_scan; recency_window is gone. Added partial index idx_messages_session_entry_substantive for the now-full-corpus predicate. Budget pre-filter and T67 anti-tick-storm guarantee preserved. Tests: TestSelectCompactionCandidatesHistoricalBacklog (month-old never-compacted session is owed + backlog counts it), repurposed TestSelectCompactionCandidatesFilters (stale session now owed, not filtered), TestWatcherPerScanCap. Full suite + vet green.
+
+      Discovered two pre-existing follow-ups while here: 🎯T68.2 (Compact only reads first 500 messages — can't fully drain long sessions) and 🎯T68.3 (owed-predicate uses messages.entry_id while Compact advances on messages.id — possible key-space mismatch). Both deliberately out of T68.1 scope.
+
+      Delivery: rides the T68 PR to master.
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-29
+  T68.2:
+    name: Compaction advances by a cursor so sessions of any length fully converge
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Compactor.Compact reads the next window of messages by cursor (messages past the latest compaction's stored to-cursor), not via ReadSession(offset 0, limit 500), so it advances through a session of arbitrary length across successive ticks instead of permanently re-reading the first 500 messages.
+    - A session with more substantive messages than the per-call window is fully compacted over multiple ticks (no messages beyond the first window are stranded) — covered by a test that seeds > window-size substantive messages and asserts successive Compact calls cover disjoint, advancing spans until quiescent.
+    - 'When a session is fully compacted, the owed-predicate (T68.1) and Compact agree: the predicate reports not-owed and Compact returns ErrNothingToCompact — no session sits permanently in the candidate set producing cheap no-op ticks every scan.'
+    - Existing compaction chaining / restore (ChainCompactions, mnemo_restore) continue to pass.
+    context: |-
+      Discovered during 🎯T68.1 (2026-05-29). Compactor.Compact (internal/compact/compact.go:237) reads `ReadSession(sessionID, \"\", 0, c.maxMsgs)` — offset 0, limit 500 (maxMsgs) — then filters to messages past the cursor. ReadSession (internal/store/store.go:5006) is positional: `ORDER BY id ASC LIMIT ? OFFSET ?`. So Compact only ever sees the FIRST 500 messages of a session. Once a session exceeds 500 substantive messages and a prior compaction covered the first 500, the next read returns those same first 500, all filtered out → ErrNothingToCompact, and messages 501+ are never compacted.
+
+      This is pre-existing (present under the old 24h-recency model too, for any >500-msg session), but T68.1's removal of the recency floor makes it acute: long historical sessions now enter the candidate set, get one span covering their first 500 messages, then sit owed-by-predicate-but-nothing-to-compact forever, producing perpetual cheap no-op ticks. That contradicts the convergence/quiescence goal — a session should reach a true fixed point.
+
+      Fix: make Compact advance by a real cursor (read messages with id/entry_id past the stored to-cursor, ordered ascending, limited to the window) rather than always reading from offset 0. Likely needs a store method like ReadSessionAfter(sessionID, afterID, limit). Coordinate with 🎯T68.3 (the to-cursor's key space).
+    origin: manual
+    discovered: 2026-05-29
+  T68.3:
+    name: The compaction owed-predicate and Compact's advance cursor use one consistent key space
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - It is verified (with evidence) whether the value stored in compactions.entry_id_to is a messages.id or a messages.entry_id, and whether the owed-predicate's `m.entry_id > last_entry_id` comparison is therefore consistent or comparing across two distinct key spaces.
+    - 'If inconsistent: the selection predicate and Compact''s filter/store are aligned to a single, documented key space so that "owed" means exactly "Compact will produce a non-empty span" — a true desired-state predicate.'
+    - 'If already consistent: the equivalence is documented at both sites (the predicate in store.SelectCompactionCandidates and the EntryIDTo assignment in Compactor.Compact) so the next reader does not have to re-derive it.'
+    - Compaction selection/coverage behaviour is covered by a test that would fail if the two key spaces drift apart again.
+    context: |-
+      Discovered during 🎯T68.1 (2026-05-29), needs verification before action. Apparent mismatch: Compactor.Compact stores `EntryIDTo: int64(msgs[len(msgs)-1].ID)` (internal/compact/compact.go:267) where msgs come from ReadSession's `SELECT id ... FROM messages` — i.e. messages.id — and filters new messages on `m.ID > fromID` (filterNew). But the owed-predicate in store.SelectCompactionCandidates compares `m.entry_id > s.last_entry_id` where last_entry_id = MAX(entry_id_to) from compactions. messages.id (row PK) and messages.entry_id (FK into entries) are different columns/number spaces (schema has both: idx_messages_entry_id is separate from the PK). If they differ, the predicate computes \"owed\" in entry_id space while Compact advances in messages.id space, so selection and coverage can disagree.
+
+      This is latent and pre-existing (T67's predicate already used entry_id). T68.1 deliberately did NOT touch predicate semantics (only lifted the recency floor), so this is filed rather than fixed inline. It is foundational to \"predicate-driven reconciliation\" being correct, and couples tightly with 🎯T68.2 (the cursor Compact advances on). Resolve T68.2 and T68.3 together: pick one key space (probably messages.id, since that is what Compact already does end-to-end) and make selection match it.
+    origin: manual
+    discovered: 2026-05-29
   T7:
     name: Agent-defined query templates
     status: achieved
