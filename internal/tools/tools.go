@@ -628,6 +628,11 @@ For each stream returns: whether a gap metric is known, the gap (in the stream's
 
 Use this to see what derived state is stale and by how much — the single surface for "is anything behind?" across the data plane.`),
 		),
+		mcp.NewTool("mnemo_source_drift",
+			mcp.WithDescription(`Report indexed transcript sources that have been pruned or truncated out from under the index (🎯T68.6).
+
+Returns counts of "deleted" (the source .jsonl no longer exists) and "truncated" (its current size is below the ingested offset — pruned or rewritten shorter), plus example paths. Under mnemo's durable-tier model this is NOT an error: Claude Code prunes transcripts, and the index is the authoritative durable copy of that content. This surface exists so you can see how much indexed content no longer has a live source — informational, not a reconcile gap.`),
+		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
 
@@ -761,6 +766,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.compactorStatus(h.resolveCompactor)
 	case "mnemo_divergence":
 		return ch.divergence()
+	case "mnemo_source_drift":
+		return ch.sourceDrift()
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2404,6 +2411,31 @@ func (h *callHandler) divergence() (string, bool, error) {
 		}
 	}
 	fmt.Fprintf(&b, "\n%d stream(s) reported; %d converged (gap=0).\n", len(rows), converged)
+	return b.String(), false, nil
+}
+
+// sourceDrift implements mnemo_source_drift (🎯T68.6): a read-only
+// report of indexed transcript sources pruned/truncated out from under
+// the index. Informational under the durable-tier model — the index
+// retains the content.
+func (h *callHandler) sourceDrift() (string, bool, error) {
+	rep := h.mem.SourceDrift()
+
+	var b strings.Builder
+	b.WriteString("Source drift (indexed transcripts whose source is gone or shrank):\n\n")
+	fmt.Fprintf(&b, "  deleted:    %d (source .jsonl no longer exists)\n", rep.Deleted)
+	fmt.Fprintf(&b, "  truncated:  %d (current size below ingested offset)\n", rep.Truncated)
+	if rep.Deleted == 0 && rep.Truncated == 0 {
+		b.WriteString("\nNo drift — every indexed source is still present and intact.\n")
+		return b.String(), false, nil
+	}
+	b.WriteString("\nThe index retains this content (durable tier); this is informational, not a reconcile gap.\n")
+	if len(rep.Examples) > 0 {
+		b.WriteString("\nExamples:\n")
+		for _, e := range rep.Examples {
+			fmt.Fprintf(&b, "  %-10s offset=%d size=%d  %s\n", e.Kind+":", e.Offset, e.Size, e.Path)
+		}
+	}
 	return b.String(), false, nil
 }
 

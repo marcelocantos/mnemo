@@ -60,5 +60,6 @@ type Backend interface {
 	LocateUUID(prefix string, contextBefore, contextAfter int) ([]UUIDMatch, error)
 	ReworkHistory(targetID string, repo string, limit int) ([]ReworkAttempt, error)
 	StreamDivergences() []StreamDivergence
+	SourceDrift() SourceDriftReport
 	DBPath() string
 }
