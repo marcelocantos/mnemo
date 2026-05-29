@@ -93,22 +93,73 @@ recorded. On scan:
 (additive, nullable — old rows simply fall back to the size-only
 check until next ingest re-stamps them).
 
-### B. Orphaned derived rows
+### B. Orphaned derived rows (index-internal)
 
-A derived row is orphaned when the index entity it derives from is
-gone. This is an **index-internal** check (no filesystem needed): e.g.
-a `git_commits` row whose `repo` no longer appears in
-`knownRepoRoots()` *and* has no session activity; a `messages_fts` row
-with no backing `messages` row; a vault note (below). Orphan detection
-is a query, run by the GC pass, never by ingest.
+A derived row is orphaned when the index row it derives from is gone,
+detected by an exact-key query — e.g. a `messages_fts` row with no
+backing `messages` row. No filesystem and no slug parsing.
+
+Two cautions:
+
+- The *index* tables (entries, messages, compactions, git_commits,
+  github_prs, …) are the **durable tier**, never orphan-GC targets.
+  Only genuinely regenerable derived state qualifies. In particular
+  `git_commits`/`github_prs` rows are NOT deleted because a repo is
+  currently absent from `knownRepoRoots()` — absence is ambiguous
+  (an unmounted checkout, a temporarily-unavailable workspace root)
+  and "source gone" never licenses deleting durable-tier rows.
+- Orphan detection is a read-only query run by the GC pass, never by
+  ingest.
 
 ### C. Orphaned vault notes
 
-A note under `<vault>/_mnemo/…` whose entity ID no longer resolves in
-the index. The vault exporter already tracks what it writes; GC cross-
-references on-disk notes against the live entity set and flags notes
-with no backing entity. (Below-fence human annotations are sacred —
-see Safety.)
+A note under `<vault>/_mnemo/…` whose backing entity no longer exists
+in the index. (Below-fence human annotations are sacred — see Safety.)
+
+**Detection must be forward, not reverse.** A note's path is a lossy
+slug of its entity (`names.go`: lowercased, non-alphanumerics
+collapsed, capped at 60 chars). Reconstructing the entity *from* the
+filename to ask "does it still exist?" is therefore ambiguous — two
+entities can slug to the same name, and the slug isn't a key. In a
+**delete** path, that ambiguity is unacceptable: a false "orphan"
+deletes a live note. So reverse-mapping is rejected.
+
+Instead the exporter maintains an **output manifest** — a
+`vault_outputs(entity_kind, entity_id, note_path, content_hash,
+written_at)` table written transactionally as each note is rendered.
+Orphan detection is then two exact set-differences, no slug parsing:
+
+1. **Manifest entry whose entity is gone** — `vault_outputs` row whose
+   `(entity_kind, entity_id)` no longer resolves in the index. Its
+   `note_path` is a deletion candidate.
+2. **On-disk note absent from the manifest** — a `*.md` under the wing
+   that no manifest row claims (e.g. left by an older layout, or a
+   path the current exporter no longer produces). Candidate, but
+   treated more conservatively (it may predate manifest tracking):
+   require the standard mnemo fence with no below-fence content before
+   it is eligible, else only report.
+
+The manifest also makes the GC's verify-before-delete cheap: the
+recorded `content_hash` lets the pass confirm the on-disk note is still
+the generated artifact it wrote (not something a human replaced at that
+path) before removing it.
+
+This adds a small forward-path change to the exporter (write the
+manifest row alongside each note, in the same transaction) — landing
+that is the first step of the GC increment, ahead of the delete logic.
+
+**Sequencing constraint — coordinate with 🎯T64.** The vault exporter
+is being actively redesigned under the vault-library-wing work
+(🎯T64: the v2 `<vault>/_mnemo/` layout). The `vault_outputs` manifest
+must be written by whatever exporter produces the notes, and the
+note-path scheme it records is exactly what T64 is changing. Adding
+the manifest to the v1 exporter now would both collide with that
+in-flight work and bake in a path scheme that's about to change.
+Therefore the manifest (and the vault-note GC built on it) should land
+**with or after** the T64 v2 exporter, not against the v1 code. The
+non-vault pieces of T68.6 — `SourceDrift` (shipped) and the
+index-internal exact-key orphan queries (§B) — have no such coupling
+and can proceed independently.
 
 ---
 
@@ -159,13 +210,18 @@ notes must:
 
 ## Acceptance gates (for 🎯T68.6)
 
-1. `ingest_state` records size+mtime (or fingerprint); a shrunk/
-   rewritten source is detected and flagged, not silently skipped.
+1. A pruned/truncated source is detected (`SourceDrift`, **shipped**),
+   read-only, and surfaced. Same-size in-place rewrite detection
+   additionally records size+mtime (or a fingerprint) on `ingest_state`
+   so the rewrite is caught, not silently skipped.
 2. A pruned source's indexed rows are retained (durable tier) and the
    condition is observable; the offset stops advancing rather than
    masking the change.
-3. Orphan detection queries exist for the regenerable derived streams
-   (FTS, vault notes, dangling mirror rows) and feed a new orphan
+3. The vault exporter writes a `vault_outputs` manifest
+   (entity_kind, entity_id, note_path, content_hash) transactionally
+   with each note; orphan detection is exact set-difference over the
+   manifest (no lossy slug reverse-mapping), plus exact-key index
+   queries for non-vault derived rows. The orphan backlog feeds a new
    stream in the 🎯T68.4 divergence surface.
 4. `mnemo gc` removes verified orphaned derived state: dry-run by
    default, `confirm` required, scoped, idempotent, reports removals.
