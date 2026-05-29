@@ -70,8 +70,11 @@ func newCountingStore() *countingStore {
 	return &countingStore{fakeStore: fakeStore{session: "any"}}
 }
 
-func (c *countingStore) ReadSession(sessionID, role string, offset, limit int) ([]store.SessionMessage, error) {
-	return []store.SessionMessage{{ID: 1, Role: "user", Text: "hello"}}, nil
+func (c *countingStore) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]store.SessionMessage, error) {
+	// Always yield one fresh message past the cursor so every tick
+	// produces a compaction (the watcher tests assert on compaction
+	// counts, not on convergence).
+	return []store.SessionMessage{{ID: int(afterID) + 1, Role: "user", Text: "hello"}}, nil
 }
 
 func (c *countingStore) LatestCompaction(sessionID string) (*store.Compaction, error) {

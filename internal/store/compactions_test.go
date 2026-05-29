@@ -285,18 +285,16 @@ func TestSelectCompactionCandidatesDeltaTrigger(t *testing.T) {
 	// (which would qualify under the pre-T67 filter), the session
 	// must NOT be selected because there's nothing new since the
 	// compaction.
+	// entry_id_to is a messages.id (🎯T68.3), so a span "covering
+	// everything" records MAX(id), not MAX(entry_id).
 	var maxMsgID int64
 	if err := s.db.QueryRow(`SELECT MAX(id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxMsgID); err != nil {
 		t.Fatalf("max msg id: %v", err)
 	}
-	var maxEntryID int64
-	if err := s.db.QueryRow(`SELECT MAX(entry_id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxEntryID); err != nil {
-		t.Fatalf("max entry id: %v", err)
-	}
 	if _, err := s.PutCompaction(Compaction{
 		SessionID:    "sess-delta",
 		EntryIDFrom:  0,
-		EntryIDTo:    maxEntryID,
+		EntryIDTo:    maxMsgID,
 		PromptTokens: 100,
 		OutputTokens: 20,
 		Summary:      "covers everything",

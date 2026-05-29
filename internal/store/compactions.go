@@ -22,10 +22,17 @@ type Compaction struct {
 	PromptTokens int
 	OutputTokens int
 	CostUSD      float64
-	EntryIDFrom  int64
-	EntryIDTo    int64
-	PayloadJSON  string
-	Summary      string
+	// EntryIDFrom / EntryIDTo bound the compacted span. Despite the
+	// "entry_id" name, these hold messages.id values (the autoincrement
+	// PK), NOT entries.id: Compactor.Compact records the last compacted
+	// message's messages.id, and ReadSessionAfter / the owed-predicate
+	// in SelectCompactionCandidates advance and test against messages.id
+	// to match (🎯T68.3). The column name is a historical misnomer; do
+	// not join these to entries.id.
+	EntryIDFrom int64
+	EntryIDTo   int64
+	PayloadJSON string
+	Summary     string
 }
 
 // PutCompaction inserts a compaction row and returns the assigned ID.
@@ -296,10 +303,13 @@ func (s *Store) SelectCompactionCandidates(
 		  AND (
 		    -- Trigger A: enough new substantive messages since the
 		    -- session's latest compaction (or since the start of the
-		    -- transcript if none exists).
+		    -- transcript if none exists). last_entry_id is a messages.id
+		    -- (compactions.entry_id_to is a misnamed messages.id, 🎯T68.3),
+		    -- so the cursor comparison is m.id — matching ReadSessionAfter
+		    -- and Compact, so owed ⟺ Compact yields a span.
 		    (SELECT COUNT(*) FROM messages m
 		     WHERE m.session_id = s.session_id
-		       AND m.entry_id > s.last_entry_id
+		       AND m.id > s.last_entry_id
 		       AND m.is_noise = 0
 		    ) >= ?
 		    OR
@@ -312,7 +322,7 @@ func (s *Store) SelectCompactionCandidates(
 		     AND EXISTS (
 		       SELECT 1 FROM messages m
 		       WHERE m.session_id = s.session_id
-		         AND m.entry_id > s.last_entry_id
+		         AND m.id > s.last_entry_id
 		         AND m.is_noise = 0
 		     ))
 		  )

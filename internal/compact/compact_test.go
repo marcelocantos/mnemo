@@ -26,18 +26,24 @@ type fakeStore struct {
 	sessionOut int64
 }
 
-func (f *fakeStore) ReadSession(sessionID, role string, offset, limit int) ([]store.SessionMessage, error) {
+func (f *fakeStore) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]store.SessionMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if sessionID != f.session {
 		return nil, nil
 	}
+	if limit <= 0 {
+		limit = 500
+	}
 	out := make([]store.SessionMessage, 0, len(f.msgs))
 	for _, m := range f.msgs {
-		if role != "" && m.Role != role {
+		if int64(m.ID) <= afterID || m.IsNoise {
 			continue
 		}
 		out = append(out, m)
+		if len(out) >= limit {
+			break
+		}
 	}
 	return out, nil
 }
@@ -181,6 +187,51 @@ func TestCompactPicksUpAfterLatest(t *testing.T) {
 	}
 	if !strings.Contains(llm.lastUser, "new 1") {
 		t.Fatalf("prompt missing new message: %q", llm.lastUser)
+	}
+}
+
+// TestCompactAdvancesAcrossWindows verifies 🎯T68.2: a session longer
+// than one compaction window is fully drained over successive Compact
+// calls (each advancing past the prior span's cursor), then reaches a
+// fixed point (ErrNothingToCompact) — rather than stalling on the
+// first window as the pre-T68.2 offset-0 read did.
+func TestCompactAdvancesAcrossWindows(t *testing.T) {
+	s := &fakeStore{
+		session: "sess-long",
+		msgs: []store.SessionMessage{
+			{ID: 1, Role: "user", Text: "m1"},
+			{ID: 2, Role: "assistant", Text: "m2"},
+			{ID: 3, Role: "user", Text: "m3"},
+			{ID: 4, Role: "assistant", Text: "m4"},
+			{ID: 5, Role: "user", Text: "m5"},
+		},
+	}
+	llm := &stubLLM{response: LLMResult{
+		Text: `{"targets":[],"decisions":[],"files":[],"open_threads":[],"summary":"window"}`,
+	}}
+	// Window of 2 messages per call, so 5 messages need 3 spans.
+	c := New(s, llm, Config{MaxMessages: 2})
+
+	var spans [][2]int64
+	for {
+		got, err := c.Compact(context.Background(), "", "sess-long", nil)
+		if errors.Is(err, ErrNothingToCompact) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		spans = append(spans, [2]int64{got.EntryIDFrom, got.EntryIDTo})
+	}
+
+	want := [][2]int64{{0, 2}, {2, 4}, {4, 5}}
+	if len(spans) != len(want) {
+		t.Fatalf("expected %d advancing spans, got %v", len(want), spans)
+	}
+	for i, w := range want {
+		if spans[i] != w {
+			t.Errorf("span %d = %v, want %v (spans must advance disjointly)", i, spans[i], w)
+		}
 	}
 }
 

@@ -5051,6 +5051,55 @@ func (s *Store) ReadSession(sessionID string, role string, offset int, limit int
 	return results, nil
 }
 
+// ReadSessionAfter returns substantive (non-noise) messages for a
+// session whose messages.id is strictly greater than afterID, ordered
+// ascending and capped at limit (default 500). It is the cursor-based
+// read the compactor uses to advance through a session window by
+// window (🎯T68.2): unlike ReadSession's positional offset, passing
+// the previous compaction's to-cursor as afterID yields the *next*
+// span, so a session longer than one window fully converges across
+// successive ticks instead of stalling on its first 500 messages.
+//
+// afterID is a messages.id (the value stored in compactions.entry_id_to
+// — see the Compaction type for the key-space note). is_noise rows are
+// excluded in SQL so the result matches the owed-predicate in
+// SelectCompactionCandidates exactly: owed ⟺ this returns ≥1 row.
+func (s *Store) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]SessionMessage, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 500
+	}
+
+	resolvedID, err := s.resolveSessionID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, role, text, timestamp, is_noise FROM messages
+		WHERE session_id = ? AND id > ? AND is_noise = 0
+		ORDER BY id ASC
+		LIMIT ?`, resolvedID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SessionMessage
+	for rows.Next() {
+		var m SessionMessage
+		var noise int
+		if err := rows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp, &noise); err != nil {
+			continue
+		}
+		m.IsNoise = noise != 0
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
 // resolveSessionID resolves a full or prefix session ID to an exact session ID.
 func (s *Store) resolveSessionID(id string) (string, error) {
 	// Try exact match first (session_summary has one row per session).

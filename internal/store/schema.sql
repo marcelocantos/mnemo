@@ -531,11 +531,12 @@ CREATE INDEX idx_messages_project ON messages(project);
 
 CREATE INDEX idx_messages_session ON messages(session_id);
 
--- Supports the compaction owed-predicate (🎯T68.1), which counts
--- substantive messages per session past a cursor. Since the predicate
--- now scans every session each scan (no recency floor), this partial
--- composite turns the per-session COUNT into an index range scan.
-CREATE INDEX idx_messages_session_entry_substantive ON messages(session_id, entry_id) WHERE is_noise = 0;
+-- Supports the compaction owed-predicate (🎯T68.1/🎯T68.3) and
+-- ReadSessionAfter (🎯T68.2), which count / page substantive messages
+-- per session past a messages.id cursor. Since the predicate now scans
+-- every session each scan (no recency floor), this partial composite
+-- turns the per-session range scan into an index lookup.
+CREATE INDEX idx_messages_session_id_substantive ON messages(session_id, id) WHERE is_noise = 0;
 
 CREATE INDEX idx_messages_tool_command ON messages(tool_command) WHERE tool_command IS NOT NULL;
 
