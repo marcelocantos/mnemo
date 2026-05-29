@@ -2472,29 +2472,6 @@ type ghRunJSON struct {
 	URL          string `json:"url"`
 }
 
-// PollCI fetches recent CI runs from GitHub Actions for all repos seen in session_meta
-// and upserts them into ci_runs. Failed runs have their logs indexed.
-// Silently skips if gh is not installed.
-func (s *Store) PollCI() error {
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		// gh not installed — skip silently.
-		return nil
-	}
-
-	repos, err := s.ciRepos()
-	if err != nil {
-		return fmt.Errorf("ciRepos: %w", err)
-	}
-
-	for _, repo := range repos {
-		if err := s.pollCIForRepo(ghPath, repo); err != nil {
-			slog.Warn("CI poll failed", "repo", repo, "err", err)
-		}
-	}
-	return nil
-}
-
 // pollCIForRepo fetches and upserts CI runs for a single repo.
 //
 // 🎯T67: the gh subprocess calls (both `gh run list` and the per-
@@ -2710,14 +2687,11 @@ func (s *Store) IngestAll() error {
 	// happens separately in the background worker started by StartImageDescriber.
 	backfillImages(s)
 
-	// Index git commit history from all known repos.
-	backfillGitCommits(s)
-
-	// GitHub PRs/issues are no longer backfilled at boot: the "github"
-	// mirror stream is divergence-driven (🎯T68.5). On a fresh start
-	// every repo's github cursor is missing → reconciled on the first
-	// mirror-reconcile tick, equivalent to the old boot backfill but
-	// self-healing afterwards.
+	// Git commits and GitHub PRs/issues are no longer backfilled at
+	// boot: the "commits" and "github" mirror streams are
+	// divergence-driven (🎯T68.5). On a fresh start each repo's cursor
+	// is missing → reconciled on the first mirror-reconcile tick,
+	// equivalent to the old boot backfill but self-healing afterwards.
 
 	// FTS5 optimize (segment merging) is skipped intentionally.
 	// On a fresh 577k-message database it takes 10+ minutes of solid
@@ -6517,27 +6491,6 @@ func (s *Store) SearchGitHubActivity(query string, repo string, state string, au
 	return results, nil
 }
 
-// PollGitHubActivity fetches recent PRs and issues for all known repos.
-// Silently skips if gh is not installed.
-func (s *Store) PollGitHubActivity() error {
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		return nil // gh not installed
-	}
-
-	repos, err := s.ciRepos()
-	if err != nil {
-		return fmt.Errorf("ciRepos: %w", err)
-	}
-
-	for _, repo := range repos {
-		if err := s.pollGitHubForRepo(ghPath, repo); err != nil {
-			slog.Warn("GitHub activity poll failed", "repo", repo, "err", err)
-		}
-	}
-	return nil
-}
-
 // pollGitHubForRepo fetches and upserts PRs and issues for a single repo.
 func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
 	// Find the most recent updated_at for incremental fetches.
@@ -6866,35 +6819,6 @@ func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) i
 		return 0
 	}
 	return count
-}
-
-// backfillGitCommits indexes git commit history for all known repos.
-// For repos already partially indexed, it does an incremental fetch.
-// For new repos, it fetches the last 365 days.
-func backfillGitCommits(s *Store) {
-	roots := s.knownRepoRoots()
-	if len(roots) == 0 {
-		return
-	}
-
-	totalNew := 0
-	for _, rr := range roots {
-		// Look up the most recent commit already indexed for this repo.
-		var lastDate string
-		s.db.QueryRow(
-			`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`,
-			rr.repo,
-		).Scan(&lastDate) //nolint:errcheck
-
-		// For incremental runs, pass the last indexed date.
-		// For initial backfill, pass empty (ingestGitCommits will use 365 days ago).
-		n := ingestGitCommits(s.db, rr.root, rr.repo, lastDate)
-		totalNew += n
-	}
-
-	if totalNew > 0 {
-		slog.Info("backfilled git commits", "new_commits", totalNew)
-	}
 }
 
 // --- Image indexing ---

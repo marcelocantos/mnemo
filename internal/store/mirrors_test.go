@@ -43,6 +43,22 @@ func TestMirrorStaleness(t *testing.T) {
 	}
 }
 
+// TestMirrorReconcilersRegistered verifies all three mirror streams
+// (ci, github, commits) are registered as divergence-driven
+// reconcilers (🎯T68.5 complete).
+func TestMirrorReconcilersRegistered(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	got := map[string]bool{}
+	for _, mr := range s.mirrorReconcilers() {
+		got[mr.stream] = true
+	}
+	for _, want := range []string{"ci", "github", "commits"} {
+		if !got[want] {
+			t.Errorf("mirror stream %q not registered; have %v", want, got)
+		}
+	}
+}
+
 // TestReconcileStaleMirrorsEmpty verifies the reconciler is a safe
 // no-op when there are no repos to reconcile (fresh store, no sessions)
 // — it must not panic or error regardless of gh availability.

@@ -23,12 +23,28 @@ type mirrorReconciler struct {
 	reconcile func(ghPath, repo string) error
 }
 
-// mirrorReconcilers is the registry of converted mirror streams. CI is
-// converted first (🎯T68.5); github (s.ciRepos / s.pollGitHubForRepo)
-// and commits (knownRepoRoots / ingestGitCommits) register here in
-// follow-up increments, at which point they too become divergence-
-// driven and the github_mirrors divergence gap covers them.
+// mirrorReconcilers is the registry of converted mirror streams
+// (🎯T68.5): ci and github (gh-backed, keyed by ciRepos) and commits
+// (local git, keyed by repo name with the on-disk root resolved once
+// per pass). All three are divergence-driven; the github_mirrors
+// divergence gap covers all of them.
+//
+// Called once per reconcile pass (and per MirrorBacklog call), so the
+// one knownRepoRoots filesystem walk needed to map commit repos to
+// their roots happens at most once per pass, not per repo.
 func (s *Store) mirrorReconcilers() []mirrorReconciler {
+	// Resolve commit repo name → on-disk root once. A repo without a
+	// local checkout (gh-only) simply has no commits stream.
+	commitRoots := map[string]string{}
+	var commitNames []string
+	for _, rr := range s.knownRepoRoots() {
+		if rr.repo == "" || commitRoots[rr.repo] != "" {
+			continue
+		}
+		commitRoots[rr.repo] = rr.root
+		commitNames = append(commitNames, rr.repo)
+	}
+
 	return []mirrorReconciler{
 		{
 			stream:    "ci",
@@ -43,6 +59,25 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 			needsGh:   true,
 			listRepos: s.ciRepos,
 			reconcile: s.pollGitHubForRepo,
+		},
+		{
+			stream:    "commits",
+			interval:  30 * time.Minute,
+			needsGh:   false,
+			listRepos: func() ([]string, error) { return commitNames, nil },
+			reconcile: func(_, repo string) error {
+				root := commitRoots[repo]
+				if root == "" {
+					return nil // no local checkout → nothing to index
+				}
+				var lastDate string
+				s.rwmu.RLock()
+				_ = s.db.QueryRow(
+					`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`, repo).Scan(&lastDate)
+				s.rwmu.RUnlock()
+				ingestGitCommits(s.db, root, repo, lastDate)
+				return nil
+			},
 		},
 	}
 }

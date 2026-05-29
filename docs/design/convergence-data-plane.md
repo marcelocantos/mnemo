@@ -253,12 +253,14 @@ independent follow-ups, each its own subsystem and PR.
    per-stream actual-vs-desired gap report via a gatherer registry.
    Compaction / transcript-index / doc streams report real gaps;
    not-yet-instrumented streams report `unknown` honestly.
-3. **🎯T68.5 — external-mirror reconcilers.** *Converging.* Mirror
-   streams move from boot/poll to a per-repo reconcile cursor
-   (`mirror_status`) + staleness predicate. **CI converted** (the
-   5-min `PollCI` ticker → a divergence-driven reconcile worker; gap
-   surfaced via `github_mirrors`). GitHub PRs/issues and git commits
-   convert in follow-up increments (same `mirrorReconcilers` registry).
+3. **🎯T68.5 — external-mirror reconcilers.** **Achieved 2026-05-29.**
+   All three mirror streams (ci, github, commits) move from boot/poll
+   to a per-repo reconcile cursor (`mirror_status`) + staleness
+   predicate via the `mirrorReconcilers` registry. The 5-min `PollCI`
+   ticker and the boot `backfillGitCommits`/`backfillGitHubActivity`
+   are replaced by one divergence-driven reconcile worker; the dead
+   `PollCI`/`PollGitHubActivity` wrappers are retired. Gap surfaced via
+   the `github_mirrors` divergence row.
 4. **🎯T68.6 — source-loss + orphan GC** (future; needs its own design
    note). Formalise the index as a durable tier; GC orphaned derived
    rows and vault notes; reconcile pruned/rewritten sources.
