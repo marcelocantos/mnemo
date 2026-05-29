@@ -2092,7 +2092,7 @@ targets:
     achieved: 2026-05-29
   T68.5:
     name: Git/PR/CI mirrors reconcile on divergence, not on boot or fixed poll
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2101,7 +2101,12 @@ targets:
     - Reconcile work is idempotent (upsert-by-id preserved) and reports its gap/last-reconcile through the T68.4 divergence surface.
     - Existing PR/CI/commit search behaviour is unchanged from the consumer side; only the freshness mechanism changes.
     - 'Egress posture is preserved: GitHub calls remain gated on the local gh auth and per-repo scope (no org fan-out), per the project''s external-egress rules.'
-    context: Slice 3 of the T68 roadmap. Today these mirrors are boot-driven (commits/PRs backfill once at startup) or fixed-poll (CI every 5 min) — temporal triggers, not gap-driven, so between triggers nothing notices or repairs drift. Reframe each as a reconciler with a cursor + staleness predicate. Medium–large (three streams). Depends on T68.4 (reports its gap there).
+    context: |-
+      Converging (2026-05-29, commit f558dd3 on the t68.5-mirrors branch, stacked; not pushed). Spans multiple increments by design.
+
+      DONE — CI stream converted: new mirror_status(repo, stream, last_reconciled_at) table + a mirrorReconcilers registry (internal/store/mirrors.go). ReconcileStaleMirrors reconciles a repo's stream only when its cursor is missing/older than the stream interval (CI: 5m); the fixed 5-min PollCI ticker in registry is replaced by a 1-min mirror-reconcile worker reusing pollCIForRepo. github_mirrors divergence row (T68.4) is now Known (gap = stale/missing cursors). Tests: TestMirrorStaleness, TestReconcileStaleMirrorsEmpty.
+
+      REMAINING for achieved: (1) convert the GitHub PR/issue stream — register {stream:\"github\", listRepos: ciRepos, reconcile: pollGitHubForRepo} and drop the boot-only backfillGitHubActivity trigger; (2) convert the git-commit stream — register {stream:\"commits\", listRepos from knownRepoRoots (needs the repo ROOT path, not just name, so the registry entry or reconcile signature must carry the root), reconcile via ingestGitCommits} and drop the boot-only backfillGitCommits; (3) once all three are on the cursor, retire the now-dead PollCI/PollGitHubActivity all-repos entry points; (4) extend tests to cover the multi-stream backlog. Then T68.5 acceptance (all three mirrors divergence-driven) is met.
     depends_on:
     - T68.4
     origin: manual
