@@ -57,6 +57,7 @@ func (s *Store) StreamDivergences() []StreamDivergence {
 	gatherers := []streamDivergenceGatherer{
 		{"compactions", s.compactionDivergence},
 		{"transcript_index", s.transcriptIndexDivergence},
+		{"source_state", s.sourceStateDivergence},
 		{"images", s.imagesDivergence},
 		{"vault", s.vaultDivergence},
 		{"github_mirrors", s.githubMirrorsDivergence},
@@ -169,6 +170,64 @@ func (s *Store) vaultDivergence() StreamDivergence {
 	return StreamDivergence{
 		Stream: "vault", Known: false,
 		Note: "per-entity staleness not summarised; needs a vault-sync high-water mark",
+	}
+}
+
+// sourceStateDivergence reports the state-convergence gap (Law 2 of
+// 🎯T68.6): sessions whose source has drifted (file gone or shrunk
+// below the ingested offset) but whose source_status tag is still
+// 'live' — i.e. work the next ReconcileSourceState pass will pick up.
+// In steady state this is 0 because the reconciler runs each minute.
+// A non-zero gap means recent drift not yet tagged, or the worker is
+// stalled.
+func (s *Store) sourceStateDivergence() StreamDivergence {
+	s.mu.Lock()
+	offsets := make(map[string]int64, len(s.offsets))
+	for p, o := range s.offsets {
+		offsets[p] = o
+	}
+	s.mu.Unlock()
+
+	gap := 0
+	for path, off := range offsets {
+		var drifted bool
+		info, err := os.Stat(path)
+		switch {
+		case os.IsNotExist(err):
+			drifted = true
+		case err != nil:
+			continue
+		case info.Size() < off:
+			drifted = true
+		}
+		if !drifted {
+			continue
+		}
+		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		if sessionID == "" || sessionID == filepath.Base(path) {
+			continue
+		}
+		var status string
+		s.rwmu.RLock()
+		_ = s.db.QueryRow(
+			`SELECT source_status FROM session_meta WHERE session_id = ?`,
+			sessionID).Scan(&status)
+		s.rwmu.RUnlock()
+		if status == "" || status == "live" {
+			gap++
+		}
+	}
+
+	var lastTagged string
+	s.rwmu.RLock()
+	_ = s.db.QueryRow(
+		`SELECT COALESCE(MAX(source_state_at), '') FROM session_meta
+		 WHERE source_status != '' AND source_status != 'live'`).Scan(&lastTagged)
+	s.rwmu.RUnlock()
+	return StreamDivergence{
+		Stream: "source_state", Known: true,
+		Gap: int64(gap), Unit: "sessions", LastReconciled: lastTagged,
+		Note: "sessions whose source has drifted (deleted/truncated) but whose source_status is still live — Law-2 state-convergence gap",
 	}
 }
 

@@ -58,6 +58,14 @@ func TestStreamDivergences(t *testing.T) {
 		t.Errorf("expected docs:targets gap=2 (10 on disk − 8 indexed), got %d", docs.Gap)
 	}
 
+	// source_state is instrumented (🎯T68.6 Law 2). On a fresh store
+	// with no source drift, gap = 0.
+	if ss, ok := byStream["source_state"]; !ok || !ss.Known {
+		t.Errorf("source_state should be known (T68.6), got %+v", ss)
+	} else if ss.Gap != 0 {
+		t.Errorf("expected source_state gap=0 on intact corpus, got %d", ss.Gap)
+	}
+
 	// Not-yet-instrumented streams must be honest, not fabricated zeros.
 	for _, name := range []string{"images", "vault"} {
 		d, ok := byStream[name]
