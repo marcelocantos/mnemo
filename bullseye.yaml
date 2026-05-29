@@ -2125,15 +2125,21 @@ targets:
     - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
     - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
     context: |-
-      Converging (2026-05-30). Design REFACTORED to the bitemporal two-law model (commit 6a18c6a): docs/design/convergence-source-tier-gc.md.
+      Converging (2026-05-30). The bitemporal two-law model is now proven end-to-end in code for the JSONL-source case.
 
-      Principle (per user, 2026-05-30): deleted source content is NEVER removed from the index; it is TAGGED. Two distinct convergence laws — (1) content (monotone append-only) and (2) state (per-row source_status tag converges to current source state) — both strictly convergent, both reported on the T68.4 divergence surface. This is bitemporal: transaction time vs valid time. Removes the dangerous \"delete because source is gone\" path entirely; replaces it with source_status tagging.
+      Shipped on the t68.6-durable-tier branch:
+      - 5b7ab0a — Store.SourceDrift() + mnemo_source_drift (read-only detection of pruned/truncated indexed sources).
+      - 6a18c6a — Design refactored to the bitemporal two-law model (docs/design/convergence-source-tier-gc.md). Source-deletion is replaced by source_status tagging; mnemo gc scope narrows to policy-orphans only.
+      - aede4e2 — Schema foundation: session_meta source_status / source_state_at (additive, defaulted).
+      - e6b184e — Store.ReconcileSourceState (Law-2 reconciler): tags session_meta with deleted_at/truncated_at as source state drifts, idempotent within a status class, UPSERTs so sessions without prior metadata get tagged. Wired into the per-minute mirror-reconciler worker (one unified state-convergence sweep). Test asserts content rows are retained for source-deleted sessions (Law-1 invariant). Path → session_id via the Claude Code .jsonl convention.
 
-      Shipped: Store.SourceDrift() + mnemo_source_drift (commit 5b7ab0a) — detection half of gate 1.
+      Remaining (mostly independent, ordered by leverage):
+      - Divergence stream for source-state staleness (T68.4 surface) — small.
+      - Fingerprint cursor on ingest_state for same-size in-place rewrite detection (touches the ingest writer in 3 sites) — riskier; defer to a focused reviewed pass.
+      - Mirror-row tagging (git_commits / github_prs / ci_runs) — needs per-repo state detection (gh-side staleness signal).
+      - Vault GC: vault_outputs manifest written by the exporter (coupled to T64; rest of the GC machinery — schema, set-difference detection, dry-run mnemo gc — can be built independently and land with T64).
 
-      Remaining (now mostly independent of T64): (a) source_status / source_state_at columns on entries/messages/mirror tables (additive, nullable, default 'live'); (b) state-reconciler drift sweep that propagates source state to rows; (c) divergence stream for state-staleness (rows whose tag is stale); (d) fingerprint cursor on ingest_state for same-size in-place rewrite detection (touches the ingest writer — gate 1 second half); (e) vault_outputs manifest schema + orphan-detection queries + dry-run mnemo gc for POLICY orphans only (narrower than the original scope); (f) tests for the two-law model including \"source-deleted entity must NOT be a GC candidate, only tagged.\"
-
-      T64 coordination narrows to the exporter-side manifest-write call (few lines inside the exporter) — everything else can land independently. T68.7 (capstone) now has a symmetric two-cursor shape to generalise (content_cursor + state_predicate), instead of the lopsided single-cursor framing.
+      T68.7 (capstone) now has the symmetric two-cursor shape to generalise (content_cursor + state_predicate) instead of the lopsided single-cursor framing.
     depends_on:
     - T68.4
     origin: manual
