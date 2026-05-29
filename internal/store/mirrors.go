@@ -37,6 +37,13 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 			listRepos: s.ciRepos,
 			reconcile: s.pollCIForRepo,
 		},
+		{
+			stream:    "github",
+			interval:  15 * time.Minute,
+			needsGh:   true,
+			listRepos: s.ciRepos,
+			reconcile: s.pollGitHubForRepo,
+		},
 	}
 }
 

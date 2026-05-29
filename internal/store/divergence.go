@@ -181,6 +181,6 @@ func (s *Store) githubMirrorsDivergence() StreamDivergence {
 	return StreamDivergence{
 		Stream: "github_mirrors", Known: true,
 		Gap: int64(gap), Unit: "repo-streams", LastReconciled: last,
-		Note: "repos with a stale/missing mirror reconcile cursor (ci converted; github/commits pending 🎯T68.5)",
+		Note: "repos with a stale/missing mirror reconcile cursor (ci+github converted; commits pending 🎯T68.5)",
 	}
 }

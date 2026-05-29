@@ -2713,9 +2713,11 @@ func (s *Store) IngestAll() error {
 	// Index git commit history from all known repos.
 	backfillGitCommits(s)
 
-	// Index GitHub PRs and issues from all known repos.
-	// Runs in a goroutine so it doesn't block startup (API calls are slow).
-	go backfillGitHubActivity(s)
+	// GitHub PRs/issues are no longer backfilled at boot: the "github"
+	// mirror stream is divergence-driven (🎯T68.5). On a fresh start
+	// every repo's github cursor is missing → reconciled on the first
+	// mirror-reconcile tick, equivalent to the old boot backfill but
+	// self-healing afterwards.
 
 	// FTS5 optimize (segment merging) is skipped intentionally.
 	// On a fresh 577k-message database it takes 10+ minutes of solid
@@ -6661,30 +6663,6 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 		}
 	}
 	return nil
-}
-
-// backfillGitHubActivity polls PRs and issues for all known repos at startup.
-// Designed to run in a goroutine — does not block ingest.
-func backfillGitHubActivity(s *Store) {
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		slog.Info("gh not found; skipping GitHub activity backfill")
-		return
-	}
-
-	repos, err := s.ciRepos()
-	if err != nil {
-		slog.Warn("backfillGitHubActivity: ciRepos failed", "err", err)
-		return
-	}
-
-	slog.Info("backfilling GitHub activity", "repos", len(repos))
-	for _, repo := range repos {
-		if err := s.pollGitHubForRepo(ghPath, repo); err != nil {
-			slog.Warn("GitHub backfill failed", "repo", repo, "err", err)
-		}
-	}
-	slog.Info("GitHub activity backfill complete", "repos", len(repos))
 }
 
 // backfillDecisions runs detectDecisions for all ingested sessions
