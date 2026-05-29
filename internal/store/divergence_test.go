@@ -59,7 +59,7 @@ func TestStreamDivergences(t *testing.T) {
 	}
 
 	// Not-yet-instrumented streams must be honest, not fabricated zeros.
-	for _, name := range []string{"images", "vault", "github_mirrors"} {
+	for _, name := range []string{"images", "vault"} {
 		d, ok := byStream[name]
 		if !ok {
 			t.Errorf("expected %s stream to be reported", name)
@@ -68,5 +68,13 @@ func TestStreamDivergences(t *testing.T) {
 		if d.Known {
 			t.Errorf("%s should report known=false until instrumented, got %+v", name, d)
 		}
+	}
+
+	// github_mirrors is instrumented as of 🎯T68.5 (reconcile-cursor
+	// backlog). With no repos in this fresh store the gap is 0.
+	if gm, ok := byStream["github_mirrors"]; !ok || !gm.Known {
+		t.Errorf("github_mirrors should be known (T68.5), got %+v", gm)
+	} else if gm.Gap != 0 {
+		t.Errorf("expected github_mirrors gap=0 in an empty store, got %d", gm.Gap)
 	}
 }

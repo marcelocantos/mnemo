@@ -172,13 +172,15 @@ func (s *Store) vaultDivergence() StreamDivergence {
 	}
 }
 
-// githubMirrorsDivergence is not yet instrumented: the git-commit /
-// PR-issue / CI mirrors do not record a reconcile cursor or staleness
-// signal today. 🎯T68.5 makes them divergence-driven and will register
-// a real gap here.
+// githubMirrorsDivergence reports the count of repo×stream pairs whose
+// mirror reconcile cursor is missing or stale (🎯T68.5). Covers the
+// converted streams (ci today); github/commits join the gap as they
+// convert.
 func (s *Store) githubMirrorsDivergence() StreamDivergence {
+	gap, last := s.MirrorBacklog(time.Now())
 	return StreamDivergence{
-		Stream: "github_mirrors", Known: false,
-		Note: "git/PR/CI mirrors are boot/poll-driven; 🎯T68.5 adds a reconcile cursor + gap",
+		Stream: "github_mirrors", Known: true,
+		Gap: int64(gap), Unit: "repo-streams", LastReconciled: last,
+		Note: "repos with a stale/missing mirror reconcile cursor (ci converted; github/commits pending 🎯T68.5)",
 	}
 }

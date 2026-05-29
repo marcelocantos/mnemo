@@ -278,6 +278,18 @@ CREATE TABLE ingest_status (
 			files_on_disk INTEGER NOT NULL
 		);
 
+-- Per-repo reconcile cursor for the external mirror streams
+-- (ci/github/commits) — 🎯T68.5. A (repo, stream) row records when
+-- that repo's stream last reconciled, so the mirror reconciler can be
+-- divergence-driven (reconcile a repo whose row is missing or stale)
+-- rather than boot-once or fixed-poll. Additive, append-only.
+CREATE TABLE mirror_status (
+			repo TEXT NOT NULL,
+			stream TEXT NOT NULL,
+			last_reconciled_at TEXT NOT NULL,
+			PRIMARY KEY (repo, stream)
+		);
+
 CREATE TABLE memories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project TEXT NOT NULL,

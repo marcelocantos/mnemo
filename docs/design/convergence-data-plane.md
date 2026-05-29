@@ -248,19 +248,24 @@ uniform reconciler is exactly such a facility.
 stream a complete, self-healing reconciler — a coherent shippable
 increment of T68 (analogous to an MVP boundary). Slices 2–5 below are
 independent follow-ups, each its own subsystem and PR.
-2. **Divergence-detection surface** (future sub-target). Generalise
-   `BackfillStatuses` into a per-stream actual-vs-desired gap report.
-   Precondition for trusting any reconciler.
-3. **External-mirror reconcilers** (future). Git/PR/CI driven by a
-   staleness predicate + cursor instead of boot/poll.
-4. **Source-loss + orphan GC** (future). Formalise the index as a
-   durable tier; specify GC of orphaned derived rows and vault notes;
-   reconcile pruned/rewritten sources.
-5. **Unified reconciler abstraction** (future, capstone). Collapse
-   the three trigger paradigms into one
-   `(inputs, transform, predicate, cursor)` scheduler. Earlier slices
-   inform its shape; do not design it speculatively first.
+2. **🎯T68.4 — divergence-detection surface.** **Achieved 2026-05-29.**
+   `Store.StreamDivergences()` + the `mnemo_divergence` tool: a uniform
+   per-stream actual-vs-desired gap report via a gatherer registry.
+   Compaction / transcript-index / doc streams report real gaps;
+   not-yet-instrumented streams report `unknown` honestly.
+3. **🎯T68.5 — external-mirror reconcilers.** *Converging.* Mirror
+   streams move from boot/poll to a per-repo reconcile cursor
+   (`mirror_status`) + staleness predicate. **CI converted** (the
+   5-min `PollCI` ticker → a divergence-driven reconcile worker; gap
+   surfaced via `github_mirrors`). GitHub PRs/issues and git commits
+   convert in follow-up increments (same `mirrorReconcilers` registry).
+4. **🎯T68.6 — source-loss + orphan GC** (future; needs its own design
+   note). Formalise the index as a durable tier; GC orphaned derived
+   rows and vault notes; reconcile pruned/rewritten sources.
+5. **🎯T68.7 — unified reconciler abstraction** (capstone). Collapse
+   the trigger paradigms into one `(inputs, transform, predicate,
+   cursor)` scheduler. Extracted from T68.4–T68.6 once their shapes are
+   known, not designed up front.
 
 Each slice is independently shippable and reversible. The capstone
-(5) is deliberately last — the abstraction should be extracted from
-2–4 once their shapes are known, not imposed up front.
+(T68.7) is deliberately last.

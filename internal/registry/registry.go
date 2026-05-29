@@ -307,15 +307,22 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		reviewer.Run(r.baseCtx, rev)
 	}()
 
-	// CI polling.
+	// External mirror reconciler (🎯T68.5): divergence-driven reconcile
+	// of the mirror streams (CI today; GitHub/commits as they convert).
+	// Ticks every minute but reconciles a repo's stream only when its
+	// mirror_status cursor is missing or older than the stream's
+	// interval, so a newly-seen repo is picked up promptly while fresh
+	// repos are skipped. Replaces the fixed 5-minute PollCI loop.
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
-			if err := e.store.PollCI(); err != nil {
-				logger.Warn("CI poll failed", "err", err)
+			if n, err := e.store.ReconcileStaleMirrors(time.Now()); err != nil {
+				logger.Warn("mirror reconcile failed", "err", err)
+			} else if n > 0 {
+				logger.Info("mirror: reconciled stale streams", "count", n)
 			}
 			select {
 			case <-r.baseCtx.Done():
