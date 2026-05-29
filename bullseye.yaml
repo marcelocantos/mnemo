@@ -2115,7 +2115,7 @@ targets:
     achieved: 2026-05-29
   T68.6:
     name: The index is a formalised durable tier; orphaned derived state and lost/rewritten sources reconcile
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2124,7 +2124,10 @@ targets:
     - Orphaned derived rows (a source that vanished) and orphaned vault notes (an entity that was deleted) are GC'd by an idempotent, opt-in/scheduled pass — not left to accumulate.
     - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
     - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
-    context: Slice 4 of the T68 roadmap — the thorniest. The append-grow ingest cursor handles only growth; it ignores pruned/rewritten sources, and nothing GCs orphaned derived rows or vault notes. Worse, because Claude Code prunes transcripts, the index is already authoritative for vanished data — a fact that must be formalised (index-as-durable-tier + backups as reconcile-from-cold) before a convergence model is honest. Large; likely needs its own design note. Depends on T68.4.
+    context: |-
+      Converging (2026-05-29). DESIGN DRAFTED — docs/design/convergence-source-tier-gc.md (commit 8307e5c on the t68.6-durable-tier branch, stacked). The note names the source(lossy)→index(durable)→derived(regenerable) tiers, establishes the index as the authoritative durable tier (Claude Code prunes source JSONL; T61 backups are the reconcile-from-cold path), and specifies: (a) a size+mtime/fingerprint ingest cursor to detect pruned/rewritten sources instead of the offset-only skip; (b) orphan detection for regenerable derived streams; (c) a verify-before-delete `mnemo gc` (dry-run default, confirm+scope, idempotent, observable via the T68.4 divergence surface) that deletes only derived orphans, never index rows, never below-fence vault annotations.
+
+      IMPLEMENTATION PENDING (deliberately gated on review — this slice deletes data): the 6 acceptance gates in the design note. Recommended sequencing: implement after the T68.1–T68.5 stack lands (this is destructive product code that benefits from a clean base + review of the safety argument). T68.7 (capstone) is blocked on this slice's removal semantics existing in code.
     depends_on:
     - T68.4
     origin: manual
