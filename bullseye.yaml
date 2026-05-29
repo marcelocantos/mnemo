@@ -2092,7 +2092,7 @@ targets:
     achieved: 2026-05-29
   T68.5:
     name: Git/PR/CI mirrors reconcile on divergence, not on boot or fixed poll
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2102,15 +2102,17 @@ targets:
     - Existing PR/CI/commit search behaviour is unchanged from the consumer side; only the freshness mechanism changes.
     - 'Egress posture is preserved: GitHub calls remain gated on the local gh auth and per-repo scope (no org fan-out), per the project''s external-egress rules.'
     context: |-
-      Converging (2026-05-29, commit f558dd3 on the t68.5-mirrors branch, stacked; not pushed). Spans multiple increments by design.
+      Achieved 2026-05-29 (commits f558dd3 + aed1c51 + 3f64788 on the t68.5-mirrors branch, stacked; not yet pushed). All three external mirror streams are divergence-driven via the mirrorReconcilers registry (internal/store/mirrors.go) + mirror_status(repo, stream, last_reconciled_at) cursor:
+      - ci (5m): ciRepos + pollCIForRepo — replaces the fixed 5-min PollCI ticker.
+      - github (15m): ciRepos + pollGitHubForRepo — replaces the boot-only backfillGitHubActivity (previously no periodic refresh at all).
+      - commits (30m): knownRepoRoots (name→root resolved once per pass) + ingestGitCommits — replaces the boot-only backfillGitCommits.
 
-      DONE — CI stream converted: new mirror_status(repo, stream, last_reconciled_at) table + a mirrorReconcilers registry (internal/store/mirrors.go). ReconcileStaleMirrors reconciles a repo's stream only when its cursor is missing/older than the stream interval (CI: 5m); the fixed 5-min PollCI ticker in registry is replaced by a 1-min mirror-reconcile worker reusing pollCIForRepo. github_mirrors divergence row (T68.4) is now Known (gap = stale/missing cursors). Tests: TestMirrorStaleness, TestReconcileStaleMirrorsEmpty.
-
-      REMAINING for achieved: (1) convert the GitHub PR/issue stream — register {stream:\"github\", listRepos: ciRepos, reconcile: pollGitHubForRepo} and drop the boot-only backfillGitHubActivity trigger; (2) convert the git-commit stream — register {stream:\"commits\", listRepos from knownRepoRoots (needs the repo ROOT path, not just name, so the registry entry or reconcile signature must carry the root), reconcile via ingestGitCommits} and drop the boot-only backfillGitCommits; (3) once all three are on the cursor, retire the now-dead PollCI/PollGitHubActivity all-repos entry points; (4) extend tests to cover the multi-stream backlog. Then T68.5 acceptance (all three mirrors divergence-driven) is met.
+      One 1-minute mirror-reconcile worker (registry) drives all three; a repo's stream reconciles only when its cursor is missing or older than the stream interval, so a newly-seen repo is picked up promptly and fresh repos are skipped (idempotent, cheap). Drift is now repaired without a daemon restart — the core acceptance. Consumer-side search behaviour unchanged (per-repo primitives reused verbatim). Egress posture preserved (local gh, per-repo, no fan-out). The github_mirrors divergence row (T68.4) reports the gap = stale/missing cursors across all three streams. Dead all-repos wrappers PollCI/PollGitHubActivity retired; backfillGitCommits/backfillGitHubActivity removed. Tests: TestMirrorStaleness, TestReconcileStaleMirrorsEmpty, TestMirrorReconcilersRegistered; full suite + vet green. Delivery: rides its branch to master.
     depends_on:
     - T68.4
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-29
   T68.6:
     name: The index is a formalised durable tier; orphaned derived state and lost/rewritten sources reconcile
     status: identified
