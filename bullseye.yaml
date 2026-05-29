@@ -2125,9 +2125,14 @@ targets:
     - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
     - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
     context: |-
-      Converging (2026-05-29). Design: docs/design/convergence-source-tier-gc.md (commit 8307e5c). Partial non-destructive implementation landed on the t68.6-durable-tier branch (commit 5b7ab0a): Store.SourceDrift() + mnemo_source_drift MCP tool detect indexed sources pruned ("deleted") or truncated below the ingest offset, read-only from the existing cursor — no ingest-pipeline surgery. Establishes the durable-tier observability (gate 2 detection / part of gate 3).
+      Converging (2026-05-29). Design: docs/design/convergence-source-tier-gc.md (commits 8307e5c, 6fd1aab). Shipped on the t68.6-durable-tier branch (5b7ab0a): Store.SourceDrift() + mnemo_source_drift — read-only detection of pruned/truncated indexed sources, no ingest-pipeline surgery.
 
-      STILL PENDING (the destructive + semantics-heavy core, deliberately gated on PR review per the design note): (1) same-size in-place rewrite detection (needs a stored content fingerprint on ingest_state — touches the ingest writer in batch + watch paths); (2) orphan detection for regenerable derived state (vault notes w/o backing entity, dangling rows) with the false-positive-avoidance the design calls for; (3) the verify-before-delete `mnemo gc` tool (dry-run default, confirm+scope, idempotent, never deletes index rows or below-fence vault annotations) — gates 4,5. These are reversible-as-code on the branch and reviewed at PR time before they can run. T68.7 (capstone) remains blocked until the removal semantics (the GC) exist in code.
+      Remaining work and its REAL gates (discovered during implementation, not preference):
+      1. Vault-note orphan GC (the core): detection must be a forward exporter-written `vault_outputs` manifest (entity→note_path+content_hash), NOT lossy slug reverse-mapping (a false orphan in a delete path destroys a live note). The manifest is written by the vault EXPORTER — which is exactly what 🎯T64 (Navnita) is actively redesigning (v2 _mnemo/ layout). Building it against the v1 exporter would collide with her in-flight work and bake in a soon-to-change path scheme. => the vault GC must land WITH/AFTER T64; it is effectively blocked on T64 coordination, not just review.
+      2. Same-size in-place rewrite detection: needs a content fingerprint on ingest_state, touching the core ingest writer (batch + watch paths). Risky core-path surgery; defer to a focused reviewed pass.
+      3. The destructive `mnemo gc` delete (dry-run default, confirm, verify-before-delete, never index rows / below-fence annotations): gated on (1)'s manifest + PR review.
+
+      Net: T68.6's non-coupled part (source-drift detection) is done; its core (vault GC) is blocked on T64's exporter redesign + needs review. T68.7 (capstone) remains blocked on T68.6's removal semantics existing in code.
     depends_on:
     - T68.4
     origin: manual
