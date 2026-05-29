@@ -261,9 +261,14 @@ independent follow-ups, each its own subsystem and PR.
    are replaced by one divergence-driven reconcile worker; the dead
    `PollCI`/`PollGitHubActivity` wrappers are retired. Gap surfaced via
    the `github_mirrors` divergence row.
-4. **🎯T68.6 — source-loss + orphan GC** (future; needs its own design
-   note). Formalise the index as a durable tier; GC orphaned derived
-   rows and vault notes; reconcile pruned/rewritten sources.
+4. **🎯T68.6 — source-loss + orphan GC.** *Design drafted* in the
+   subordinate note `docs/design/convergence-source-tier-gc.md`:
+   names the source/index/derived tiers, makes the index the
+   authoritative durable tier (backups = reconcile-from-cold), detects
+   pruned/rewritten sources via a size+mtime cursor, and adds a
+   verify-before-delete `mnemo gc` that removes only regenerable
+   derived orphans (never index rows, never below-fence annotations).
+   Implementation pending review.
 5. **🎯T68.7 — unified reconciler abstraction** (capstone). Collapse
    the trigger paradigms into one `(inputs, transform, predicate,
    cursor)` scheduler. Extracted from T68.4–T68.6 once their shapes are
