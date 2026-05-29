@@ -2071,18 +2071,25 @@ targets:
     achieved: 2026-05-29
   T68.4:
     name: 'Per-stream divergence is queryable: a uniform actual-vs-desired gap report across all derived streams'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
-    - There is a single uniform surface (MCP tool and/or mnemo_status extension) that reports, per derived stream, the gap between desired and actual state — i.e. how far each stream is from its fixed point.
-    - 'Streams covered at minimum: transcript→index (un-ingested bytes/files), compactions (owed-but-uncompacted backlog — already exposed by T68.1, now surfaced here uniformly), vault export (entities whose recorded entity_ts is stale vs source), git/PR/CI mirrors (staleness/last-reconcile), image descriptions (images lacking a description).'
-    - 'Each stream reports a small, consistent shape: name, desired-count or cursor, actual-count or cursor, gap, last-reconciled-at.'
-    - The report is cheap enough to call on demand (no full-corpus recompute that blocks the daemon) and degrades gracefully when a stream has no cheap gap metric (reports "unknown" rather than lying).
-    - 'Generalises rather than special-cases: adding a new derived stream means registering its gap function, not editing a monolithic switch.'
-    context: 'Slice 2 of the T68 convergence-data-plane roadmap (docs/design/convergence-data-plane.md). The \"queryable divergence\" property of T68''s acceptance, and the precondition for trusting every other reconciler: you cannot reconcile a gap you cannot observe. Generalises the existing Store.BackfillStatuses() (store.go:1103) from backfill-progress into a uniform per-stream gap report. Highest-leverage next step after the compaction arc (small–medium). Blocks T68.5 and T68.6 (reconcilers should report their gap through this surface).'
+    - A single uniform surface (the mnemo_divergence MCP tool, backed by Store.StreamDivergences) reports, per derived stream, the gap between desired and actual state — how far each stream is from its fixed point.
+    - 'Each stream reports a consistent shape: stream, known, gap, unit, last_reconciled, note.'
+    - 'Streams with a cheap metric are covered with real gaps: compactions (owed backlog), transcript_index (un-ingested bytes), and the repo-level doc streams (docs:* ingest_status drift).'
+    - Streams without a cheap metric (images, vault, github_mirrors) report known=false — honest 'unknown', never a fabricated number — with a note pointing at the slice that will instrument them.
+    - 'The surface is extensible by registration, not a monolithic switch: a later slice instruments a now-unknown stream by adding one gatherer (github_mirrors via T68.5; images/vault are future registrations tracked in docs/design/convergence-data-plane.md).'
+    - The report is cheap enough to call on demand (the transcript_index project-dir walk is the only O(files) cost and does not hold a DB lock).
+    context: |-
+      Achieved 2026-05-29 (commit d5c979a on the t68.4-divergence branch, stacked on the T68 compaction-arc branch; not yet pushed/PR'd — opens after #107 merges, per one-PR-at-a-time).
+
+      ACCEPTANCE REFRAMED during execution (per CLAUDE.md \"if a target is misframed, update it\"): the original acceptance conflated \"build the divergence surface\" with \"instrument every stream with a real metric.\" Those are different scopes — the surface + extensibility + the cheaply-available streams is the T68.4 deliverable; each stream's deep metric rides its own reconciler slice. github_mirrors is instrumented by T68.5; images (pending-description count) and vault (per-entity staleness high-water mark) are future registrations noted in the design doc. Splitting keeps T68.4 a clean, shippable unit and avoids a target that can't close until unrelated subsystems exist.
+
+      Implemented: Store.StreamDivergences() with a per-stream gatherer registry + the mnemo_divergence MCP tool. Added to the store.Backend interface. Test: TestStreamDivergences. Unblocks T68.5 and T68.6 (reconcilers report their gap here). Delivery: rides its branch to master.
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-29
   T68.5:
     name: Git/PR/CI mirrors reconcile on divergence, not on boot or fixed poll
     status: identified
