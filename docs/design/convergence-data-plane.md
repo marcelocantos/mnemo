@@ -233,16 +233,21 @@ uniform reconciler is exactly such a facility.
    floor removed from the candidate predicate (`recency` is now
    `ORDER BY` only); per-scan compaction cap bounds backlog drain;
    `mnemo_compactor_status` surfaces the owed-but-uncompacted backlog.
-1a. **🎯T68.2 — compaction advances by a cursor** (discovered during
-   T68.1). `Compact` reads `ReadSession(offset 0, limit 500)`, so it
-   cannot drain a session past its first 500 messages — a long
-   session gets one span then stalls, sitting owed-but-no-op forever.
-   A true fixed point requires Compact to advance by cursor.
-1b. **🎯T68.3 — unify the owed-predicate / Compact cursor key space**
-   (discovered during T68.1). Selection compares `messages.entry_id`
-   while `Compact` stores/filters `messages.id` as `entry_id_to`;
-   verify and align so "owed" ⟺ "Compact yields a span." Resolve
-   alongside T68.2.
+1a. **🎯T68.2 — compaction advances by a cursor.** **Achieved
+   2026-05-29.** `Compact` now reads `Store.ReadSessionAfter` (messages
+   past the prior span's `messages.id` cursor) instead of
+   `ReadSession(offset 0)`, so a long session drains window-by-window
+   to a fixed point instead of stalling on its first 500 messages.
+1b. **🎯T68.3 — unify the owed-predicate / Compact cursor key space.**
+   **Achieved 2026-05-29.** Verified that `compactions.entry_id_to/from`
+   hold `messages.id` (misnamed); the owed-predicate now compares
+   `m.id` (not `m.entry_id`), so "owed" ⟺ "Compact yields a span." The
+   compaction stream is now fully convergent.
+
+**Compaction-arc boundary.** T68.1–T68.3 together make the compaction
+stream a complete, self-healing reconciler — a coherent shippable
+increment of T68 (analogous to an MVP boundary). Slices 2–5 below are
+independent follow-ups, each its own subsystem and PR.
 2. **Divergence-detection surface** (future sub-target). Generalise
    `BackfillStatuses` into a per-stream actual-vs-desired gap report.
    Precondition for trusting any reconciler.
