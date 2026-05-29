@@ -375,7 +375,17 @@ CREATE TABLE session_meta (
 			cwd TEXT NOT NULL DEFAULT '',
 			git_branch TEXT NOT NULL DEFAULT '',
 			work_type TEXT NOT NULL DEFAULT '',
-			topic TEXT NOT NULL DEFAULT ''
+			topic TEXT NOT NULL DEFAULT '',
+			-- 🎯T68.6 source-state convergence (Law 2): valid-time tag
+			-- per session. The index retains content durably; this column
+			-- tracks the *current* state of the session's source JSONL
+			-- ("live" / "truncated_at=…" / "deleted_at=…"). The state
+			-- reconciler — a drift sweep over SourceDrift — converges
+			-- this tag toward reality without ever removing rows.
+			-- Additive, defaulted: old sessions read as "live" until a
+			-- drift event tags them.
+			source_status TEXT NOT NULL DEFAULT 'live',
+			source_state_at TEXT NOT NULL DEFAULT ''
 		);
 
 CREATE TABLE session_nonces (
