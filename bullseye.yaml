@@ -2069,6 +2069,69 @@ targets:
     origin: manual
     discovered: 2026-05-29
     achieved: 2026-05-29
+  T68.4:
+    name: 'Per-stream divergence is queryable: a uniform actual-vs-desired gap report across all derived streams'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - There is a single uniform surface (MCP tool and/or mnemo_status extension) that reports, per derived stream, the gap between desired and actual state — i.e. how far each stream is from its fixed point.
+    - 'Streams covered at minimum: transcript→index (un-ingested bytes/files), compactions (owed-but-uncompacted backlog — already exposed by T68.1, now surfaced here uniformly), vault export (entities whose recorded entity_ts is stale vs source), git/PR/CI mirrors (staleness/last-reconcile), image descriptions (images lacking a description).'
+    - 'Each stream reports a small, consistent shape: name, desired-count or cursor, actual-count or cursor, gap, last-reconciled-at.'
+    - The report is cheap enough to call on demand (no full-corpus recompute that blocks the daemon) and degrades gracefully when a stream has no cheap gap metric (reports "unknown" rather than lying).
+    - 'Generalises rather than special-cases: adding a new derived stream means registering its gap function, not editing a monolithic switch.'
+    context: 'Slice 2 of the T68 convergence-data-plane roadmap (docs/design/convergence-data-plane.md). The \"queryable divergence\" property of T68''s acceptance, and the precondition for trusting every other reconciler: you cannot reconcile a gap you cannot observe. Generalises the existing Store.BackfillStatuses() (store.go:1103) from backfill-progress into a uniform per-stream gap report. Highest-leverage next step after the compaction arc (small–medium). Blocks T68.5 and T68.6 (reconcilers should report their gap through this surface).'
+    origin: manual
+    discovered: 2026-05-29
+  T68.5:
+    name: Git/PR/CI mirrors reconcile on divergence, not on boot or fixed poll
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The git-commit, GitHub PR/issue, and CI mirror streams are each driven by a per-repo cursor + freshness predicate (reconcile when stale) rather than a one-shot boot backfill (backfillGitCommits/backfillGitHubActivity at store.go ~2714) or a fixed-interval poll (CI 5-min poll in registry.go).
+    - A repo whose upstream state drifted is repaired without a daemon restart, bounded by a staleness predicate, not by restart cadence.
+    - Reconcile work is idempotent (upsert-by-id preserved) and reports its gap/last-reconcile through the T68.4 divergence surface.
+    - Existing PR/CI/commit search behaviour is unchanged from the consumer side; only the freshness mechanism changes.
+    - 'Egress posture is preserved: GitHub calls remain gated on the local gh auth and per-repo scope (no org fan-out), per the project''s external-egress rules.'
+    context: Slice 3 of the T68 roadmap. Today these mirrors are boot-driven (commits/PRs backfill once at startup) or fixed-poll (CI every 5 min) — temporal triggers, not gap-driven, so between triggers nothing notices or repairs drift. Reframe each as a reconciler with a cursor + staleness predicate. Medium–large (three streams). Depends on T68.4 (reports its gap there).
+    depends_on:
+    - T68.4
+    origin: manual
+    discovered: 2026-05-29
+  T68.6:
+    name: The index is a formalised durable tier; orphaned derived state and lost/rewritten sources reconcile
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The index's role as a durable, lossy-source-tolerant tier is documented and designed (Claude Code prunes source JSONL; backups per T61 are the reconcile-from-cold path) rather than implicit.
+    - 'Pruned/rewritten source JSONL is handled: the ingest cursor no longer silently skips a file whose content changed below the recorded offset or shrank (today `offset >= size` at store.go ~2643 skips it).'
+    - Orphaned derived rows (a source that vanished) and orphaned vault notes (an entity that was deleted) are GC'd by an idempotent, opt-in/scheduled pass — not left to accumulate.
+    - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
+    - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
+    context: Slice 4 of the T68 roadmap — the thorniest. The append-grow ingest cursor handles only growth; it ignores pruned/rewritten sources, and nothing GCs orphaned derived rows or vault notes. Worse, because Claude Code prunes transcripts, the index is already authoritative for vanished data — a fact that must be formalised (index-as-durable-tier + backups as reconcile-from-cold) before a convergence model is honest. Large; likely needs its own design note. Depends on T68.4.
+    depends_on:
+    - T68.4
+    origin: manual
+    discovered: 2026-05-29
+  T68.7:
+    name: All derived streams run under one reconciler abstraction driven by a single scheduler
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A single reconciler abstraction exists: each derived stream declares (inputs, transform, freshness predicate, cursor) and a single scheduler drives them all toward their fixed point.'
+    - The three current trigger paradigms (event-driven fsnotify ingest, poll-driven compactor/CI/sweeper/backup, boot-driven git/PR backfill) are unified under it — no stream reinvents its own cadence + catch-up logic.
+    - Cost/recency limits are expressed as scheduling priority, never as filters that permanently exclude work from the desired set (the T68.1 lesson, generalised).
+    - '"Backfill" is no longer a distinct concept: a cold cursor and steady-state catch-up are the same code path.'
+    - The abstraction is extracted from the shapes proven by T68.4–T68.6, not designed speculatively up front; migrating each existing stream onto it preserves current behaviour (covered by the existing per-stream tests).
+    context: Slice 5 of the T68 roadmap — the capstone, deliberately last. Collapses the event/poll/boot trigger zoo into one (inputs, transform, predicate, cursor) reconciler + scheduler. Large and architectural. Must be extracted from the concrete reconcilers built in T68.4–T68.6 once their shapes are known; designing it before then would be speculative. Achieving this retires the T68 parent.
+    depends_on:
+    - T68.5
+    - T68.6
+    origin: manual
+    discovered: 2026-05-29
   T7:
     name: Agent-defined query templates
     status: achieved
