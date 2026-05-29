@@ -2125,14 +2125,15 @@ targets:
     - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
     - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
     context: |-
-      Converging (2026-05-29). Design: docs/design/convergence-source-tier-gc.md (commits 8307e5c, 6fd1aab). Shipped on the t68.6-durable-tier branch (5b7ab0a): Store.SourceDrift() + mnemo_source_drift — read-only detection of pruned/truncated indexed sources, no ingest-pipeline surgery.
+      Converging (2026-05-30). Design REFACTORED to the bitemporal two-law model (commit 6a18c6a): docs/design/convergence-source-tier-gc.md.
 
-      Remaining work and its REAL gates (discovered during implementation, not preference):
-      1. Vault-note orphan GC (the core): detection must be a forward exporter-written `vault_outputs` manifest (entity→note_path+content_hash), NOT lossy slug reverse-mapping (a false orphan in a delete path destroys a live note). The manifest is written by the vault EXPORTER — which is exactly what 🎯T64 (Navnita) is actively redesigning (v2 _mnemo/ layout). Building it against the v1 exporter would collide with her in-flight work and bake in a soon-to-change path scheme. => the vault GC must land WITH/AFTER T64; it is effectively blocked on T64 coordination, not just review.
-      2. Same-size in-place rewrite detection: needs a content fingerprint on ingest_state, touching the core ingest writer (batch + watch paths). Risky core-path surgery; defer to a focused reviewed pass.
-      3. The destructive `mnemo gc` delete (dry-run default, confirm, verify-before-delete, never index rows / below-fence annotations): gated on (1)'s manifest + PR review.
+      Principle (per user, 2026-05-30): deleted source content is NEVER removed from the index; it is TAGGED. Two distinct convergence laws — (1) content (monotone append-only) and (2) state (per-row source_status tag converges to current source state) — both strictly convergent, both reported on the T68.4 divergence surface. This is bitemporal: transaction time vs valid time. Removes the dangerous \"delete because source is gone\" path entirely; replaces it with source_status tagging.
 
-      Net: T68.6's non-coupled part (source-drift detection) is done; its core (vault GC) is blocked on T64's exporter redesign + needs review. T68.7 (capstone) remains blocked on T68.6's removal semantics existing in code.
+      Shipped: Store.SourceDrift() + mnemo_source_drift (commit 5b7ab0a) — detection half of gate 1.
+
+      Remaining (now mostly independent of T64): (a) source_status / source_state_at columns on entries/messages/mirror tables (additive, nullable, default 'live'); (b) state-reconciler drift sweep that propagates source state to rows; (c) divergence stream for state-staleness (rows whose tag is stale); (d) fingerprint cursor on ingest_state for same-size in-place rewrite detection (touches the ingest writer — gate 1 second half); (e) vault_outputs manifest schema + orphan-detection queries + dry-run mnemo gc for POLICY orphans only (narrower than the original scope); (f) tests for the two-law model including \"source-deleted entity must NOT be a GC candidate, only tagged.\"
+
+      T64 coordination narrows to the exporter-side manifest-write call (few lines inside the exporter) — everything else can land independently. T68.7 (capstone) now has a symmetric two-cursor shape to generalise (content_cursor + state_predicate), instead of the lopsided single-cursor framing.
     depends_on:
     - T68.4
     origin: manual
