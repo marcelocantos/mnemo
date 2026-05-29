@@ -48,18 +48,19 @@ type CompactorHealthReporter interface {
 // compact.HealthSnapshot field-for-field; duplicated here to keep
 // the tools→compact import direction clean.
 type CompactorHealth struct {
-	LastScanAt       time.Time
-	LastScanCount    int
-	LastTickAt       time.Time
-	LastTickOutcome  string
-	InFlightSession  string
-	Counts           map[string]int64
-	ScanInterval     time.Duration
-	IdleTimeout      time.Duration
-	RecencyWindow    time.Duration
-	TickTimeout      time.Duration
-	MinDeltaMessages int
-	MaxTokenRatio    float64
+	LastScanAt            time.Time
+	LastScanCount         int
+	Backlog               int
+	LastTickAt            time.Time
+	LastTickOutcome       string
+	InFlightSession       string
+	Counts                map[string]int64
+	ScanInterval          time.Duration
+	IdleTimeout           time.Duration
+	TickTimeout           time.Duration
+	MinDeltaMessages      int
+	MaxCompactionsPerScan int
+	MaxTokenRatio         float64
 }
 
 // ConfigReport mirrors registry.ReloadReport without importing the
@@ -2320,6 +2321,7 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 
 	fmt.Fprintf(&b, "  last_scan_at:        %s\n", formatAge(hs.LastScanAt))
 	fmt.Fprintf(&b, "  last_scan_count:     %d\n", hs.LastScanCount)
+	fmt.Fprintf(&b, "  backlog:             %d (owed-but-uncompacted sessions)\n", hs.Backlog)
 	fmt.Fprintf(&b, "  last_tick_at:        %s\n", formatAge(hs.LastTickAt))
 	if hs.LastTickOutcome != "" {
 		fmt.Fprintf(&b, "  last_tick_outcome:   %s\n", hs.LastTickOutcome)
@@ -2337,12 +2339,12 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	}
 
 	b.WriteString("\nConfiguration:\n")
-	fmt.Fprintf(&b, "  scan_interval:       %s\n", hs.ScanInterval)
-	fmt.Fprintf(&b, "  idle_timeout:        %s\n", hs.IdleTimeout)
-	fmt.Fprintf(&b, "  recency_window:      %s\n", hs.RecencyWindow)
-	fmt.Fprintf(&b, "  tick_timeout:        %s\n", hs.TickTimeout)
-	fmt.Fprintf(&b, "  min_delta_messages:  %d\n", hs.MinDeltaMessages)
-	fmt.Fprintf(&b, "  max_token_ratio:     %.2f\n", hs.MaxTokenRatio)
+	fmt.Fprintf(&b, "  scan_interval:           %s\n", hs.ScanInterval)
+	fmt.Fprintf(&b, "  idle_timeout:            %s\n", hs.IdleTimeout)
+	fmt.Fprintf(&b, "  tick_timeout:            %s\n", hs.TickTimeout)
+	fmt.Fprintf(&b, "  min_delta_messages:      %d\n", hs.MinDeltaMessages)
+	fmt.Fprintf(&b, "  max_compactions_per_scan: %d\n", hs.MaxCompactionsPerScan)
+	fmt.Fprintf(&b, "  max_token_ratio:         %.2f\n", hs.MaxTokenRatio)
 
 	// Health heuristic: if the watcher hasn't scanned in more than
 	// 2x its configured interval, something is wrong. Surface it.

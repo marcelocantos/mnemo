@@ -94,8 +94,8 @@ func TestSelectCompactionCandidatesUnboundSession(t *testing.T) {
 		t.Fatalf("IngestAll: %v", err)
 	}
 
-	cands, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
+	cands, _, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -137,8 +137,8 @@ func TestSelectCompactionCandidatesBoundSession(t *testing.T) {
 	// Simulate a live MCP binding for this session.
 	s.RecordConnectionSessionAt("conn-xyz", "sess-bound", now)
 
-	cands, err := s.SelectCompactionCandidates(
-		2, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
+	cands, _, err := s.SelectCompactionCandidates(
+		2, now.Add(-15*time.Minute), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -157,24 +157,30 @@ func TestSelectCompactionCandidatesBoundSession(t *testing.T) {
 	}
 }
 
-// TestSelectCompactionCandidatesFilters verifies the threshold +
-// recency filters reject ineligible sessions.
+// TestSelectCompactionCandidatesFilters verifies the convergence
+// predicate (🎯T68.1): the delta/idle triggers still reject a session
+// that is not yet owed, but there is NO recency floor — a stale,
+// never-compacted session is owed and selected, not abandoned.
 func TestSelectCompactionCandidatesFilters(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 
-	// "tiny" — recent but below minMsgs.
+	// "tiny" — recent and below minMsgs, so not owed yet (neither
+	// trigger fires: delta < min, and last_msg is newer than the idle
+	// cutoff).
 	writeJSONL(t, dir, "p", "sess-tiny", []map[string]any{
 		msg("user", "lonely", now.Add(-1*time.Minute).Format(time.RFC3339)),
 	})
-	// "stale" — enough msgs but last_msg way outside recency window.
+	// "stale" — last_msg a full day ago. Under the old recency window
+	// this was dropped; under the convergence predicate it is idle and
+	// has new substantive content, so it is OWED and must be selected.
 	staleStart := now.Add(-24 * time.Hour)
 	writeJSONL(t, dir, "p", "sess-stale", []map[string]any{
 		msg("user", "x1", staleStart.Format(time.RFC3339)),
 		msg("assistant", "x2", staleStart.Add(time.Minute).Format(time.RFC3339)),
 		msg("user", "x3", staleStart.Add(2*time.Minute).Format(time.RFC3339)),
 	})
-	// "good" — meets both criteria.
+	// "good" — recent and over the delta threshold.
 	writeJSONL(t, dir, "p", "sess-good", []map[string]any{
 		msg("user", "y1", now.Add(-5*time.Minute).Format(time.RFC3339)),
 		msg("assistant", "y2", now.Add(-4*time.Minute).Format(time.RFC3339)),
@@ -186,8 +192,8 @@ func TestSelectCompactionCandidatesFilters(t *testing.T) {
 		t.Fatalf("IngestAll: %v", err)
 	}
 
-	cands, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
+	cands, _, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -199,10 +205,52 @@ func TestSelectCompactionCandidatesFilters(t *testing.T) {
 		t.Errorf("expected sess-good in candidates")
 	}
 	if ids["sess-tiny"] {
-		t.Errorf("sess-tiny should be filtered (below minMsgs)")
+		t.Errorf("sess-tiny should not be owed yet (below minMsgs and not idle)")
 	}
-	if ids["sess-stale"] {
-		t.Errorf("sess-stale should be filtered (outside recency)")
+	if !ids["sess-stale"] {
+		t.Errorf("sess-stale should be owed via the idle trigger — there is no recency floor")
+	}
+}
+
+// TestSelectCompactionCandidatesHistoricalBacklog covers the core
+// 🎯T68.1 convergence guarantee: a never-compacted session whose
+// last message is far outside any former recency window is still
+// owed a compaction and selected, and the returned backlog counts it.
+func TestSelectCompactionCandidatesHistoricalBacklog(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	// A month-old session, never compacted — the kind the old 24h
+	// recency floor abandoned permanently.
+	old := now.Add(-30 * 24 * time.Hour)
+	writeJSONL(t, dir, "p", "sess-historical", []map[string]any{
+		msg("user", "h1", old.Format(time.RFC3339)),
+		msg("assistant", "h2", old.Add(time.Minute).Format(time.RFC3339)),
+		msg("user", "h3", old.Add(2*time.Minute).Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	cands, backlog, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), 0.10, 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidates: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.SessionID == "sess-historical" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("month-old never-compacted session should be owed; got %+v", cands)
+	}
+	if backlog < 1 {
+		t.Errorf("backlog should count the owed session, got %d", backlog)
 	}
 }
 
@@ -256,8 +304,8 @@ func TestSelectCompactionCandidatesDeltaTrigger(t *testing.T) {
 		t.Fatalf("PutCompaction: %v", err)
 	}
 
-	cands, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.10, 100)
+	cands, _, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -289,10 +337,9 @@ func TestSelectCompactionCandidatesIdleTrigger(t *testing.T) {
 		t.Fatalf("IngestAll: %v", err)
 	}
 
-	cands, err := s.SelectCompactionCandidates(
+	cands, _, err := s.SelectCompactionCandidates(
 		10,                       // minDeltaMsgs — well above the 2 we have
 		now.Add(-15*time.Minute), // idleCutoff: last_msg must be older than this
-		now.Add(-2*time.Hour),    // recencyCutoff: last_msg must be newer than this
 		0.10,
 		100,
 	)
@@ -366,8 +413,8 @@ func TestSelectCompactionCandidatesBudgetFilter(t *testing.T) {
 	}
 
 	// 50% budget — already exceeded.
-	cands, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 0.50, 100)
+	cands, _, err := s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), 0.50, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -378,8 +425,8 @@ func TestSelectCompactionCandidatesBudgetFilter(t *testing.T) {
 	}
 
 	// Raising the budget to 200% lets it through (now well under).
-	cands, err = s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), now.Add(-1*time.Hour), 2.0, 100)
+	cands, _, err = s.SelectCompactionCandidates(
+		3, now.Add(-15*time.Minute), 2.0, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}

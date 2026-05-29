@@ -28,15 +28,17 @@ type fakeStoreSource struct {
 func (f *fakeStoreSource) SelectCompactionCandidates(
 	minDeltaMsgs int,
 	idleCutoff time.Time,
-	recencyCutoff time.Time,
 	maxBudgetRatio float64,
 	limit int,
-) ([]store.CompactionCandidate, error) {
+) ([]store.CompactionCandidate, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]store.CompactionCandidate, len(f.candidates))
 	copy(out, f.candidates)
-	return out, nil
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, len(f.candidates), nil
 }
 
 func (f *fakeStoreSource) SessionCWD(sessionID string) string {
@@ -149,6 +151,46 @@ func TestWatcherScansAndCompactsSession(t *testing.T) {
 	}
 	if got := w.LastScanCount(); got != 2 {
 		t.Fatalf("expected LastScanCount=2, got %d", got)
+	}
+}
+
+// TestWatcherPerScanCap verifies 🎯T68.1's throughput bound: a single
+// scan performs at most MaxCompactionsPerScan real compactions even
+// when more sessions are owed, and the backlog is surfaced via
+// Health(). The remainder is left for subsequent scans (here the scan
+// interval is long enough that only the first scan fires during the
+// test), so a large historical backlog never floods the LLM in one
+// pass.
+func TestWatcherPerScanCap(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(
+		store.CompactionCandidate{SessionID: "s1", CWD: "/work/a"},
+		store.CompactionCandidate{SessionID: "s2", CWD: "/work/b"},
+		store.CompactionCandidate{SessionID: "s3", CWD: "/work/c"},
+		store.CompactionCandidate{SessionID: "s4", CWD: "/work/d"},
+		store.CompactionCandidate{SessionID: "s5", CWD: "/work/e"},
+	)
+
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	// Long scan interval: only the immediate first scan runs in-test.
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval:          10 * time.Second,
+		MaxCompactionsPerScan: 2,
+	}, "")
+
+	runUntil(t, w, func() bool { return llm.calls.Load() >= 2 })
+
+	if got := llm.calls.Load(); got != 2 {
+		t.Fatalf("expected exactly 2 compactions (per-scan cap), got %d", got)
+	}
+	hs := w.Health()
+	if hs.Backlog != 5 {
+		t.Errorf("expected Backlog=5 (all owed sessions), got %d", hs.Backlog)
+	}
+	if hs.MaxCompactionsPerScan != 2 {
+		t.Errorf("expected MaxCompactionsPerScan=2 in health, got %d", hs.MaxCompactionsPerScan)
 	}
 }
 
