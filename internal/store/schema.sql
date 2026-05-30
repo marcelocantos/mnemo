@@ -290,6 +290,22 @@ CREATE TABLE mirror_status (
 			PRIMARY KEY (repo, stream)
 		);
 
+-- Forward output manifest for the vault exporter (🎯T68.6). Each note
+-- the exporter writes UPSERTs a row keyed by note_path; orphan
+-- detection is then exact set-difference (manifest rows whose file is
+-- gone; *.md files under the vault root with no manifest row) instead
+-- of lossy slug reverse-mapping. content_hash lets the GC verify the
+-- on-disk note is still the artifact we wrote before removing it.
+-- Vault-relative paths.
+CREATE TABLE vault_outputs (
+			note_path TEXT PRIMARY KEY,
+			entity_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			written_at TEXT NOT NULL
+		);
+CREATE INDEX idx_vault_outputs_entity ON vault_outputs(entity_kind, entity_id);
+
 CREATE TABLE memories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project TEXT NOT NULL,
