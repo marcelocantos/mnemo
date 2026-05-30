@@ -261,18 +261,42 @@ independent follow-ups, each its own subsystem and PR.
    are replaced by one divergence-driven reconcile worker; the dead
    `PollCI`/`PollGitHubActivity` wrappers are retired. Gap surfaced via
    the `github_mirrors` divergence row.
-4. **🎯T68.6 — source-loss + orphan GC.** *Design drafted* in the
-   subordinate note `docs/design/convergence-source-tier-gc.md`:
-   names the source/index/derived tiers, makes the index the
-   authoritative durable tier (backups = reconcile-from-cold), detects
-   pruned/rewritten sources via a size+mtime cursor, and adds a
-   verify-before-delete `mnemo gc` that removes only regenerable
-   derived orphans (never index rows, never below-fence annotations).
-   Implementation pending review.
-5. **🎯T68.7 — unified reconciler abstraction** (capstone). Collapse
-   the trigger paradigms into one `(inputs, transform, predicate,
-   cursor)` scheduler. Extracted from T68.4–T68.6 once their shapes are
-   known, not designed up front.
+4. **🎯T68.6 — source-loss + orphan GC.** **Achieved 2026-05-30.**
+   Per the subordinate note `convergence-source-tier-gc.md`, refactored
+   to the **bitemporal two-law model** (content append-only + state
+   tagged, never deleted): `SourceDrift` detection (incl. fingerprint
+   cursor for same-size rewrites), `ReconcileSourceState` tagging
+   sessions `live`/`deleted_at=…`/`truncated_at=…`/`rewritten_at=…`,
+   `vault_outputs` manifest written by every `syncX`, `mnemo_vault_gc`
+   tool (dry-run default; cleans manifest_path_missing only, never
+   touches the filesystem), `source_state` + `vault` divergence streams.
+   Tests pin: source-deleted entity is tagged, not removed; user
+   content on disk survives every GC pass; below-fence annotations
+   are sacred.
+5. **🎯T68.7 — unified reconciler abstraction.** **Achieved 2026-05-30.**
+   `StreamReconciler` interface — `Name()`, `Interval()`,
+   `Reconcile(ctx, now) (changed int, err error)` — extracted from the
+   periodic streams shipped in T68.5 (mirrors) and T68.6 (source-state).
+   `Store.StreamReconcilers()` returns the registered slice; the
+   registry's per-minute worker iterates uniformly. Adding a new
+   periodic stream is one slice entry; the worker stays the same.
+   Event-driven streams (fsnotify ingest) and on-demand tools (vault
+   GC) fit the same shape as the abstraction grows.
 
 Each slice is independently shippable and reversible. The capstone
-(T68.7) is deliberately last.
+(T68.7) extracted the shape from its predecessors rather than designing
+it up front.
+
+---
+
+## T68 closed
+
+**Achieved 2026-05-30** — all 7 sub-targets (T68.1–T68.7) shipped on
+the `t68-…` branch stack. The data plane now satisfies T68's umbrella
+acceptance: every covered derived stream declares its inputs +
+freshness predicate + cursor; one `StreamReconciler` abstraction drives
+the periodic ones; gaps are queryable via `mnemo_divergence`; the
+index is the canonical durable tier with a bitemporal source-state tag
+(content monotone, state convergent); GC is verify-before-delete and
+never touches index rows or below-fence annotations. Pending stack
+merge.
