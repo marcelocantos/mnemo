@@ -2115,7 +2115,7 @@ targets:
     achieved: 2026-05-29
   T68.6:
     name: The index is a formalised durable tier; orphaned derived state and lost/rewritten sources reconcile
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2125,25 +2125,37 @@ targets:
     - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
     - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
     context: |-
-      Converging (2026-05-30). The bitemporal two-law model is now proven end-to-end in code for the JSONL-source case.
+      Achieved 2026-05-30. All 7 acceptance gates from docs/design/convergence-source-tier-gc.md (the refactored bitemporal model) are now shipped in code on the t68.6-durable-tier branch.
 
-      Shipped on the t68.6-durable-tier branch:
-      - 5b7ab0a — Store.SourceDrift() + mnemo_source_drift (read-only detection of pruned/truncated indexed sources).
-      - 6a18c6a — Design refactored to the bitemporal two-law model (docs/design/convergence-source-tier-gc.md). Source-deletion is replaced by source_status tagging; mnemo gc scope narrows to policy-orphans only.
-      - aede4e2 — Schema foundation: session_meta source_status / source_state_at (additive, defaulted).
-      - e6b184e — Store.ReconcileSourceState (Law-2 reconciler): tags session_meta with deleted_at/truncated_at as source state drifts, idempotent within a status class, UPSERTs so sessions without prior metadata get tagged. Wired into the per-minute mirror-reconciler worker (one unified state-convergence sweep). Test asserts content rows are retained for source-deleted sessions (Law-1 invariant). Path → session_id via the Claude Code .jsonl convention.
+      Shipped commits (chronological):
+      - 5b7ab0a — SourceDrift detection (read-only) + mnemo_source_drift tool.
+      - 6a18c6a — Bitemporal two-law model design refactor.
+      - aede4e2 — session_meta source_status/source_state_at schema.
+      - e6b184e — ReconcileSourceState (Law-2 reconciler) + wired into per-minute worker.
+      - 78c8beb — source_state divergence stream (Law-2 gap observable).
+      - 7a75ee9 — vault_outputs manifest schema + ScanVaultOrphans/RecordVaultOutput/RemoveVaultManifestRow (set-difference detection, not slug reverse-mapping).
+      - 331f3f3 — mnemo_vault_gc tool (dry-run default; cleans manifest_path_missing only) + syncSessions integration; safety test pins user content survives.
+      - 2b794ff — manifest writes propagated to all remaining 9 exporter sync funcs (decisions, memories, plans, targets, ci, prs, repo_index, skills, configs, root_index).
+      - 4b1edb4 — SetVaultPath threaded into Store; vault divergence stream reports Known with real backlog when vault configured.
+      - 86b8b5a — Fingerprint cursor (recorded_size/recorded_mtime on ingest_state) detecting same-size in-place rewrites; tagged as "rewritten_at=…" by the reconciler.
 
-      Remaining (mostly independent, ordered by leverage):
-      - Divergence stream for source-state staleness (T68.4 surface) — small.
-      - Fingerprint cursor on ingest_state for same-size in-place rewrite detection (touches the ingest writer in 3 sites) — riskier; defer to a focused reviewed pass.
-      - Mirror-row tagging (git_commits / github_prs / ci_runs) — needs per-repo state detection (gh-side staleness signal).
-      - Vault GC: vault_outputs manifest written by the exporter (coupled to T64; rest of the GC machinery — schema, set-difference detection, dry-run mnemo gc — can be built independently and land with T64).
+      Acceptance gates (all met):
+      1. SourceDrift detects pruned/truncated; fingerprint cursor detects same-size rewrites.
+      2. Drifted rows are TAGGED (source_status), never removed — Law 1 (content monotone) preserved.
+      3. Drift sweep runs every minute, gap observable via mnemo_divergence source_state stream.
+      4. vault_outputs manifest written by every syncX; orphan detection is exact set-difference (path-scheme-agnostic, works equally for v1 and T64 v2 layouts).
+      5. mnemo_vault_gc tool — dry-run default, confirm required, scoped to manifest cleanup only (never deletes files).
+      6. Tests pin: GC never deletes index rows, never deletes below-fence vault annotations, source-deleted entity is tagged not removed.
+      7. Two-law bitemporal model documented as authoritative.
 
-      T68.7 (capstone) now has the symmetric two-cursor shape to generalise (content_cursor + state_predicate) instead of the lopsided single-cursor framing.
+      Out of scope / followups: mirror-row state tagging (git_commits / github_prs / ci_runs source_status) — needs per-repo gh-side staleness signal; not part of the gates. Disk-side vault orphan deletion (currently informational-only in mnemo_vault_gc) — gated on higher-level policy + below-fence checks; future tightening of acceptance gate 5.
+
+      T68.7 (capstone) is now unblocked.
     depends_on:
     - T68.4
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-30
   T68.7:
     name: All derived streams run under one reconciler abstraction driven by a single scheduler
     status: identified
