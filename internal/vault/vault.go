@@ -205,9 +205,21 @@ func (e *Exporter) syncSessions(ctx context.Context) (map[string]string, error) 
 			continue
 		}
 
-		if err := writeNote(absPath, renderSession(s, msgs), s.LastMsg); err != nil {
+		content := renderSession(s, msgs)
+		if err := writeNote(absPath, content, s.LastMsg); err != nil {
 			slog.Warn("vault: write session note failed", "path", absPath, "err", err)
 			continue
+		}
+		// 🎯T68.6 vault GC manifest: record the (entity, path, hash)
+		// tuple so orphan detection is exact set-difference, not lossy
+		// slug reverse-mapping. Failures here are logged but do not
+		// fail the sync — the manifest is auxiliary state.
+		if err := e.backend.RecordVaultOutput(
+			filepath.ToSlash(relPath), "session", s.SessionID,
+			store.HashVaultContent(content), time.Now().UTC(),
+		); err != nil {
+			slog.Warn("vault: record session output failed",
+				"session", shortID(s.SessionID), "err", err)
 		}
 		written++
 	}

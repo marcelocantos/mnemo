@@ -162,14 +162,16 @@ func (s *Store) imagesDivergence() StreamDivergence {
 	}
 }
 
-// vaultDivergence is not yet instrumented: per-entity staleness (source
-// timestamp newer than the rendered note's recorded entity_ts) is not
-// summarised anywhere cheap. A future slice can have the vault sync
-// record a high-water mark to make this Known.
+// vaultDivergence is not yet wired into the divergence surface: the
+// vault GC machinery exists (🎯T68.6, vault_gc.go) but the vault path
+// lives in the registry/config, not the store. The orphan backlog is
+// accessible via the mnemo_vault_gc tool which takes the path
+// explicitly; a future increment threads vault_path into the store so
+// this gatherer can report Known with a real gap.
 func (s *Store) vaultDivergence() StreamDivergence {
 	return StreamDivergence{
 		Stream: "vault", Known: false,
-		Note: "per-entity staleness not summarised; needs a vault-sync high-water mark",
+		Note: "GC machinery shipped (mnemo_vault_gc); divergence wiring needs vault_path in store — small follow-up",
 	}
 }
 

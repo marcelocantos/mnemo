@@ -87,6 +87,85 @@ func TestVaultOrphansSetDifference(t *testing.T) {
 	}
 }
 
+// TestVaultGCCleanupRemovesOnlyManifestRows verifies the destructive
+// half of the GC: cleanup acts on manifest_path_missing rows (DB only)
+// and never touches the filesystem, including on-disk orphans.
+func TestVaultGCCleanupRemovesOnlyManifestRows(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	vault := t.TempDir()
+	now := time.Now().UTC()
+
+	// One on-disk file with a matching manifest entry (no orphan).
+	intact := filepath.Join(vault, "sessions/proj/intact.md")
+	if err := os.MkdirAll(filepath.Dir(intact), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(intact, []byte("intact"), 0o644); err != nil {
+		t.Fatalf("write intact: %v", err)
+	}
+	if err := s.RecordVaultOutput(
+		"sessions/proj/intact.md", "session", "sess-intact",
+		HashVaultContent("intact"), now); err != nil {
+		t.Fatalf("RecordVaultOutput intact: %v", err)
+	}
+
+	// One manifest row whose file is gone.
+	if err := s.RecordVaultOutput(
+		"sessions/proj/missing.md", "session", "sess-missing",
+		HashVaultContent("missing"), now); err != nil {
+		t.Fatalf("RecordVaultOutput missing: %v", err)
+	}
+
+	// One on-disk user note with no manifest entry.
+	userNote := filepath.Join(vault, "user-content.md")
+	if err := os.WriteFile(userNote, []byte("my own note"), 0o644); err != nil {
+		t.Fatalf("write user: %v", err)
+	}
+
+	rep, err := s.ScanVaultOrphans(vault)
+	if err != nil {
+		t.Fatalf("ScanVaultOrphans: %v", err)
+	}
+	if len(rep.ManifestPathMissing) != 1 || rep.ManifestPathMissing[0].EntityID != "sess-missing" {
+		t.Fatalf("setup: expected one manifest-missing orphan, got %+v", rep.ManifestPathMissing)
+	}
+	if len(rep.DiskNotInManifest) != 1 || rep.DiskNotInManifest[0] != "user-content.md" {
+		t.Fatalf("setup: expected one disk orphan (user-content.md), got %+v", rep.DiskNotInManifest)
+	}
+
+	// Simulate the confirm-true cleanup: remove the manifest row.
+	for _, m := range rep.ManifestPathMissing {
+		if err := s.RemoveVaultManifestRow(m.NotePath); err != nil {
+			t.Fatalf("RemoveVaultManifestRow: %v", err)
+		}
+	}
+
+	// The user note must still exist on disk (never deleted by GC).
+	if _, err := os.Stat(userNote); err != nil {
+		t.Errorf("user content must survive the GC pass; stat: %v", err)
+	}
+	// And the intact note's content is unchanged.
+	body, err := os.ReadFile(intact)
+	if err != nil {
+		t.Fatalf("read intact: %v", err)
+	}
+	if string(body) != "intact" {
+		t.Errorf("intact note tampered with: %q", string(body))
+	}
+
+	// Manifest side has converged: zero manifest_path_missing.
+	rep, err = s.ScanVaultOrphans(vault)
+	if err != nil {
+		t.Fatalf("ScanVaultOrphans post-cleanup: %v", err)
+	}
+	if len(rep.ManifestPathMissing) != 0 {
+		t.Errorf("manifest side must be converged, got %+v", rep.ManifestPathMissing)
+	}
+	if len(rep.DiskNotInManifest) != 1 {
+		t.Errorf("disk side must be unchanged (user content preserved), got %+v", rep.DiskNotInManifest)
+	}
+}
+
 // TestVaultOrphansEmptyPath verifies that ScanVaultOrphans is a no-op
 // when no vault is configured.
 func TestVaultOrphansEmptyPath(t *testing.T) {

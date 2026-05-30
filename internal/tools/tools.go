@@ -633,6 +633,17 @@ Use this to see what derived state is stale and by how much — the single surfa
 
 Returns counts of "deleted" (the source .jsonl no longer exists) and "truncated" (its current size is below the ingested offset — pruned or rewritten shorter), plus example paths. Under mnemo's durable-tier model this is NOT an error: Claude Code prunes transcripts, and the index is the authoritative durable copy of that content. This surface exists so you can see how much indexed content no longer has a live source — informational, not a reconcile gap.`),
 		),
+		mcp.NewTool("mnemo_vault_gc",
+			mcp.WithDescription(`Inspect (and optionally clean up) vault GC orphans (🎯T68.6).
+
+Two orphan classes are reported, both via exact set-difference over the vault_outputs manifest:
+  - manifest_path_missing: manifest rows whose note_path is not on disk anymore (the user or another process removed the file). With confirm=true, the GC removes these manifest rows (no filesystem action).
+  - disk_not_in_manifest: *.md files under the vault with no manifest entry. INFORMATIONAL ONLY in this version — the tool reports them but never deletes them (user content lives here; deletion needs higher-level policy + below-fence checks).
+
+Dry-run by default. Setting confirm=true is required to act on manifest_path_missing.`),
+			mcp.WithString("vault_path", mcp.Required(), mcp.Description("Absolute path to the vault root.")),
+			mcp.WithBoolean("confirm", mcp.Description("If true, remove manifest rows for manifest_path_missing orphans. Default false (dry-run; reports candidates only).")),
+		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
 
@@ -768,6 +779,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.divergence()
 	case "mnemo_source_drift":
 		return ch.sourceDrift()
+	case "mnemo_vault_gc":
+		return ch.vaultGC(args)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2436,6 +2449,71 @@ func (h *callHandler) sourceDrift() (string, bool, error) {
 			fmt.Fprintf(&b, "  %-10s offset=%d size=%d  %s\n", e.Kind+":", e.Offset, e.Size, e.Path)
 		}
 	}
+	return b.String(), false, nil
+}
+
+// vaultGC implements mnemo_vault_gc (🎯T68.6): inspect orphans and
+// optionally clean up manifest rows whose file is gone. Never deletes
+// files on disk — that path needs higher-level policy and is not in
+// this version.
+func (h *callHandler) vaultGC(args map[string]any) (string, bool, error) {
+	vaultPath, _ := args["vault_path"].(string)
+	if vaultPath == "" {
+		return "", false, fmt.Errorf("vault_path is required")
+	}
+	confirm, _ := args["confirm"].(bool)
+
+	rep, err := h.mem.ScanVaultOrphans(vaultPath)
+	if err != nil {
+		return "", false, err
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Vault GC scan (%s):\n\n", vaultPath)
+	fmt.Fprintf(&b, "  manifest_path_missing: %d (manifest rows whose file is gone)\n",
+		len(rep.ManifestPathMissing))
+	fmt.Fprintf(&b, "  disk_not_in_manifest:  %d (*.md files with no manifest entry — informational only)\n",
+		len(rep.DiskNotInManifest))
+
+	if len(rep.ManifestPathMissing) > 0 {
+		b.WriteString("\nManifest rows pointing at missing files:\n")
+		for i, m := range rep.ManifestPathMissing {
+			if i >= 20 {
+				fmt.Fprintf(&b, "  … and %d more\n", len(rep.ManifestPathMissing)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  %s [%s/%s]\n", m.NotePath, m.EntityKind, m.EntityID)
+		}
+	}
+	if len(rep.DiskNotInManifest) > 0 {
+		b.WriteString("\nDisk files with no manifest entry (informational — never auto-deleted):\n")
+		for i, p := range rep.DiskNotInManifest {
+			if i >= 20 {
+				fmt.Fprintf(&b, "  … and %d more\n", len(rep.DiskNotInManifest)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  %s\n", p)
+		}
+	}
+
+	if !confirm {
+		if len(rep.ManifestPathMissing) > 0 {
+			b.WriteString("\n[dry-run] Re-run with confirm=true to remove the manifest rows above.\n")
+		} else {
+			b.WriteString("\nNothing to clean up.\n")
+		}
+		return b.String(), false, nil
+	}
+
+	removed := 0
+	for _, m := range rep.ManifestPathMissing {
+		if err := h.mem.RemoveVaultManifestRow(m.NotePath); err != nil {
+			fmt.Fprintf(&b, "\n⚠ failed to remove manifest row for %s: %v", m.NotePath, err)
+			continue
+		}
+		removed++
+	}
+	fmt.Fprintf(&b, "\nRemoved %d manifest row(s). Disk side untouched.\n", removed)
 	return b.String(), false, nil
 }
 

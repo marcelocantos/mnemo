@@ -61,5 +61,8 @@ type Backend interface {
 	ReworkHistory(targetID string, repo string, limit int) ([]ReworkAttempt, error)
 	StreamDivergences() []StreamDivergence
 	SourceDrift() SourceDriftReport
+	RecordVaultOutput(notePath, entityKind, entityID, contentHash string, writtenAt time.Time) error
+	ScanVaultOrphans(vaultPath string) (VaultOrphans, error)
+	RemoveVaultManifestRow(notePath string) error
 	DBPath() string
 }
