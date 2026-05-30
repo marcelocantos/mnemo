@@ -1997,7 +1997,7 @@ targets:
     achieved: 2026-05-26
   T68:
     name: mnemo's derived data plane is uniformly convergence-driven
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2008,17 +2008,20 @@ targets:
     - The index's role as an authoritative, lossy-source-tolerant tier is explicit (Claude Code prunes source JSONL), with backups (T61) as the reconcile-from-cold path, and orphan/deletion handling (GC of derived rows and vault notes whose source is gone) is specified rather than absent.
     - All sub-targets (T68.1+) achieve their individual acceptance.
     context: |-
-      Architectural reframe (2026-05-29 design discussion). Seen as a dataflow engine, mnemo SHOULD be fundamentally driven by a convergence/reconciliation model: derived artifacts are pure functions of sources, a reconciler drives actual→desired idempotently regardless of how the gap arose, the engine is quiescent at the fixed point, and backfill is just the reconciler meeting a cold cursor.
+      Achieved 2026-05-30. All 7 sub-targets (T68.1–T68.7) achieved; the umbrella acceptance is met by the union of their deliverables. Spans the t68-… stack: t68-compaction-convergence (PR #107) → t68.4-divergence → t68.5-mirrors → t68.6-durable-tier (head). Pending stack merge.
 
-      Today mnemo is ~half convergent. Convergence-shaped already: transcript→index ingest (persisted per-file byte cursor s.offsets, reconcile-on-boot, per-table backfill passes in IngestAll at store.go:2612), schema migration (sqlift AllowNone — the purest case), and the vault exporter's needsUpdate staleness reconcile. NOT convergent: the expensive/external + LLM-derived streams, where convergence was traded for cost control by FILTERING the work set rather than PRIORITISING a reconciler over the full desired set.
+      Umbrella acceptance evidence:
+      - Every covered derived data stream declares inputs + freshness predicate + cursor: compaction (T68.1–3), divergence (T68.4), mirrors (T68.5), source-state + vault GC (T68.6); StreamReconciler abstraction (T68.7).
+      - Single reconciler abstraction drives the periodic streams; cost/recency limits act as scheduling priority not desired-state filters (T68.1's ORDER BY, T68.5's per-stream cadence, T68.7's StreamReconciler.Interval).
+      - Backfill is not a distinct concept: ingest IngestAll first pass = cold-cursor reconciliation; mirror first tick = same code path.
+      - Divergence is observable: mnemo_divergence reports per-stream gap (compactions, transcript_index, source_state, vault, docs:*, github_mirrors).
+      - Index is canonical durable tier under the bitemporal model: content append-only (Law 1), state tagged via source_status (Law 2); never deleted on source-loss. T61 backups remain the reconcile-from-cold path.
+      - All sub-targets T68.1–T68.7 achieved with tests pinning safety invariants (content survives source deletion, user/below-fence content survives GC, intact notes byte-identical post-GC).
 
-      Five gaps (full analysis in docs/design/convergence-data-plane.md): (1) compaction is recency-windowed polling, not a desired-state predicate — historical sessions permanently divergent [T68.1]; (2) git/PR/CI mirrors reconcile on boot or fixed poll, not on divergence; (3) no general divergence-detection surface (BackfillStatuses is a partial step); (4) asymmetric source handling — append-grow only, no reconcile of pruned/rewritten JSONL, no GC of orphaned rows or vault notes, and the index-as-authority inversion is implicit not designed; (5) three trigger paradigms (event/poll/boot) instead of one reconciler abstraction = (inputs, transform, freshness predicate, cursor).
-
-      Meta-irony driving this target: the project's DEVELOPMENT is already fully convergence-driven (bullseye targets → frontier gap → reconcile via /cv), but mnemo's runtime DATA PLANE only partially is. This target turns that philosophy inward. Aligns with the project design philosophy (general facilities + feedback loops): a uniform reconciler is exactly such a general facility.
-
-      Decompose leaf-first; T68.1 (compaction reconciler) is the highest-leverage, independently shippable slice and was the concrete probe that surfaced this.
+      The bitemporal refactor in T68.6 came directly from the user's pushback ("I don't want deleted content removed from the index — tag it instead"), which sharpened the model from "actual = f(current source)" (lopsided) into two laws (content + state). The capstone abstraction (T68.7) then has the symmetric shape its predecessors lacked.
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-30
   T68.1:
     name: Compaction is predicate-driven reconciliation, not recency-windowed polling
     status: achieved
