@@ -268,7 +268,15 @@ CREATE TABLE images (
 
 CREATE TABLE ingest_state (
 			path TEXT PRIMARY KEY,
-			offset INTEGER NOT NULL
+			offset INTEGER NOT NULL,
+			-- 🎯T68.6 fingerprint cursor: the file's size+mtime at the
+			-- moment the offset was recorded. SourceDrift compares these
+			-- against current stat to detect same-size in-place rewrites
+			-- (offset>=size but mtime moved). Nullable so old rows fall
+			-- back to size-only detection until next ingest re-stamps
+			-- them.
+			recorded_size INTEGER,
+			recorded_mtime TEXT
 		);
 
 CREATE TABLE ingest_status (

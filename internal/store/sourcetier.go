@@ -4,6 +4,7 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,9 +16,22 @@ import (
 // from what was ingested.
 type SourceDriftEntry struct {
 	Path   string `json:"path"`
-	Kind   string `json:"kind"` // "deleted" | "truncated"
+	Kind   string `json:"kind"` // "deleted" | "truncated" | "rewritten"
 	Offset int64  `json:"offset"`
 	Size   int64  `json:"size"` // -1 when the file is gone
+}
+
+// statFingerprint stat()s a file and returns (size, mtime) suitable
+// for ingest_state.recorded_size/recorded_mtime — the 🎯T68.6
+// fingerprint that lets SourceDrift detect same-size in-place
+// rewrites (size unchanged, mtime moved). Returns (0, "") when the
+// file can't be stat'd, which the writer stores as NULL.
+func statFingerprint(path string) (int64, string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, ""
+	}
+	return info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano)
 }
 
 // SourceDriftReport summarises lost-source state across the indexed
@@ -25,60 +39,92 @@ type SourceDriftEntry struct {
 type SourceDriftReport struct {
 	Deleted   int                `json:"deleted"`
 	Truncated int                `json:"truncated"`
+	Rewritten int                `json:"rewritten"`
 	Examples  []SourceDriftEntry `json:"examples"`
 }
 
-// SourceDrift detects indexed transcript sources that have been pruned
-// or truncated out from under the index (🎯T68.6). It is read-only and
-// touches no ingest state — detection uses the already-recorded ingest
-// offset as a high-water mark:
+// ingestCursor is one row from ingest_state with the optional
+// fingerprint columns (🎯T68.6).
+type ingestCursor struct {
+	offset        int64
+	recordedSize  sql.NullInt64
+	recordedMtime sql.NullString
+}
+
+// readIngestCursors snapshots ingest_state into an in-memory map for
+// drift detection. Cheap — one query, one pass.
+func (s *Store) readIngestCursors() map[string]ingestCursor {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	rows, err := s.db.Query(
+		`SELECT path, offset, recorded_size, recorded_mtime FROM ingest_state`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]ingestCursor{}
+	for rows.Next() {
+		var p string
+		var c ingestCursor
+		if err := rows.Scan(&p, &c.offset, &c.recordedSize, &c.recordedMtime); err != nil {
+			continue
+		}
+		out[p] = c
+	}
+	return out
+}
+
+// SourceDrift detects indexed transcript sources that have drifted
+// out from under the index (🎯T68.6). Read-only; never modifies state.
 //
-//   - the file no longer exists            → "deleted"
-//   - the file's current size < the offset → "truncated" (pruned, or
-//     rewritten to something shorter)
+//   - file gone                           → "deleted"
+//   - current size < the ingested offset  → "truncated"
+//   - same size, mtime newer than recorded → "rewritten" (an in-place
+//     edit at the same byte count; only detectable when the fingerprint
+//     was recorded by ingest)
 //
 // Under the durable-tier model this is NOT an error: Claude Code prunes
-// transcripts, and the index is the authoritative durable copy of that
-// content (backups per 🎯T61 are the reconcile-from-cold path). The
-// report exists so operators — and the orphan GC — can see how much
-// indexed content no longer has a live source, NOT so the rows get
-// deleted. A same-size in-place rewrite is not detected here; that
-// needs a stored content fingerprint and is deferred (see
-// docs/design/convergence-source-tier-gc.md).
+// transcripts, the index is the authoritative durable copy, and the
+// state-reconciler (ReconcileSourceState) propagates the condition
+// onto session_meta as a tag rather than removing rows.
 func (s *Store) SourceDrift() SourceDriftReport {
-	s.mu.Lock()
-	offsets := make(map[string]int64, len(s.offsets))
-	for p, o := range s.offsets {
-		offsets[p] = o
+	cursors := s.readIngestCursors()
+	paths := make([]string, 0, len(cursors))
+	for p := range cursors {
+		paths = append(paths, p)
 	}
-	s.mu.Unlock()
-
-	keys := make([]string, 0, len(offsets))
-	for p := range offsets {
-		keys = append(keys, p)
-	}
-	sort.Strings(keys)
+	sort.Strings(paths)
 
 	const maxExamples = 20
 	var rep SourceDriftReport
-	for _, p := range keys {
-		off := offsets[p]
+	for _, p := range paths {
+		c := cursors[p]
 		info, err := os.Stat(p)
 		if err != nil {
 			if os.IsNotExist(err) {
 				rep.Deleted++
 				if len(rep.Examples) < maxExamples {
 					rep.Examples = append(rep.Examples,
-						SourceDriftEntry{Path: p, Kind: "deleted", Offset: off, Size: -1})
+						SourceDriftEntry{Path: p, Kind: "deleted", Offset: c.offset, Size: -1})
 				}
 			}
 			continue
 		}
-		if info.Size() < off {
+		if info.Size() < c.offset {
 			rep.Truncated++
 			if len(rep.Examples) < maxExamples {
 				rep.Examples = append(rep.Examples,
-					SourceDriftEntry{Path: p, Kind: "truncated", Offset: off, Size: info.Size()})
+					SourceDriftEntry{Path: p, Kind: "truncated", Offset: c.offset, Size: info.Size()})
+			}
+			continue
+		}
+		if c.recordedSize.Valid && c.recordedMtime.Valid &&
+			info.Size() == c.recordedSize.Int64 &&
+			info.ModTime().UTC().Format(time.RFC3339Nano) > c.recordedMtime.String {
+			rep.Rewritten++
+			if len(rep.Examples) < maxExamples {
+				rep.Examples = append(rep.Examples,
+					SourceDriftEntry{Path: p, Kind: "rewritten", Offset: c.offset, Size: info.Size()})
 			}
 		}
 	}
@@ -109,12 +155,7 @@ func (s *Store) SourceDrift() SourceDriftReport {
 // Returns the number of sessions whose tag was newly written or
 // transitioned class.
 func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
-	s.mu.Lock()
-	offsets := make(map[string]int64, len(s.offsets))
-	for p, o := range s.offsets {
-		offsets[p] = o
-	}
-	s.mu.Unlock()
+	cursors := s.readIngestCursors()
 
 	nowStr := now.UTC().Format(time.RFC3339)
 	type tagUpdate struct {
@@ -122,7 +163,7 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 		status    string
 	}
 	var candidates []tagUpdate
-	for path, off := range offsets {
+	for path, c := range cursors {
 		var newStatus string
 		info, err := os.Stat(path)
 		switch {
@@ -130,8 +171,12 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 			newStatus = "deleted_at=" + nowStr
 		case err != nil:
 			continue
-		case info.Size() < off:
+		case info.Size() < c.offset:
 			newStatus = "truncated_at=" + nowStr
+		case c.recordedSize.Valid && c.recordedMtime.Valid &&
+			info.Size() == c.recordedSize.Int64 &&
+			info.ModTime().UTC().Format(time.RFC3339Nano) > c.recordedMtime.String:
+			newStatus = "rewritten_at=" + nowStr
 		default:
 			continue // live; no tag change
 		}

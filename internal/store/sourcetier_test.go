@@ -73,6 +73,70 @@ func TestSourceDrift(t *testing.T) {
 	}
 }
 
+// TestSourceDriftRewrite verifies the fingerprint cursor (🎯T68.6
+// gate 1 second half): a source overwritten in place at the same byte
+// count is detected as "rewritten" once the mtime moves past the
+// recorded value.
+func TestSourceDriftRewrite(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-rew", []map[string]any{
+		msg("user", "original content here yes", now.Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+	if rep := s.SourceDrift(); rep.Rewritten != 0 {
+		t.Fatalf("expected no drift right after ingest, got %+v", rep)
+	}
+
+	// Locate the file the ingester wrote.
+	projDir := filepath.Join(dir, "p")
+	entries, _ := os.ReadDir(projDir)
+	var path string
+	for _, e := range entries {
+		p := filepath.Join(projDir, e.Name())
+		if strings.Contains(p, "sess-rew") {
+			path = p
+			break
+		}
+	}
+	if path == "" {
+		t.Fatalf("could not locate ingested file in %s", projDir)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	size := info.Size()
+
+	// Overwrite with same-size different content, then push mtime
+	// forward so the comparison against recorded_mtime sees movement
+	// even on coarse-resolution filesystems.
+	repl := make([]byte, size)
+	for i := range repl {
+		repl[i] = 'x'
+	}
+	if err := os.WriteFile(path, repl, 0o644); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	future := time.Now().Add(2 * time.Second).UTC()
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	rep := s.SourceDrift()
+	if rep.Deleted != 0 || rep.Truncated != 0 {
+		t.Errorf("expected only rewritten drift, got %+v", rep)
+	}
+	if rep.Rewritten != 1 {
+		t.Errorf("expected rewritten=1, got %d (%+v)", rep.Rewritten, rep)
+	}
+}
+
 // TestReconcileSourceState verifies the Law-2 reconciler tags
 // session_meta with the current source state without removing rows,
 // and is idempotent within a status class.

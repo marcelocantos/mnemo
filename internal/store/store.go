@@ -2858,8 +2858,13 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic)
 		}
 
-		// Update ingest offset.
-		ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", pf.path, pf.newOffset)
+		// Update ingest offset + fingerprint (🎯T68.6 same-size
+		// rewrite detection). recordedSize/Mtime is nullable; an
+		// os.Stat error just records NULL — detection falls back to
+		// offset-vs-size on the next pass.
+		recSize, recMtime := statFingerprint(pf.path)
+		ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+			VALUES (?, ?, ?, ?)`, pf.path, pf.newOffset, recSize, recMtime)
 		s.mu.Lock()
 		s.offsets[pf.path] = pf.newOffset
 		s.mu.Unlock()
@@ -5713,7 +5718,9 @@ func (s *Store) ingestFile(path string) error {
 			if time.Since(lockAcquired) >= yieldInterval {
 				// Commit current transaction with offset update.
 				curOffset, _ := f.Seek(0, 1)
-				ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, curOffset)
+				recSize, recMtime := statFingerprint(path)
+				ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+					VALUES (?, ?, ?, ?)`, path, curOffset, recSize, recMtime)
 
 				ws.Close()
 				if err := ws.tx.Commit(); err != nil {
@@ -5754,7 +5761,9 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	newOffset, _ := f.Seek(0, 1)
-	ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, newOffset)
+	recSize, recMtime := statFingerprint(path)
+	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+		VALUES (?, ?, ?, ?)`, path, newOffset, recSize, recMtime)
 
 	ws.Close()
 	if err := ws.tx.Commit(); err != nil {

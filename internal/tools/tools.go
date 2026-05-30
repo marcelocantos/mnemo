@@ -2438,7 +2438,8 @@ func (h *callHandler) sourceDrift() (string, bool, error) {
 	b.WriteString("Source drift (indexed transcripts whose source is gone or shrank):\n\n")
 	fmt.Fprintf(&b, "  deleted:    %d (source .jsonl no longer exists)\n", rep.Deleted)
 	fmt.Fprintf(&b, "  truncated:  %d (current size below ingested offset)\n", rep.Truncated)
-	if rep.Deleted == 0 && rep.Truncated == 0 {
+	fmt.Fprintf(&b, "  rewritten:  %d (same size, mtime moved — in-place edit)\n", rep.Rewritten)
+	if rep.Deleted == 0 && rep.Truncated == 0 && rep.Rewritten == 0 {
 		b.WriteString("\nNo drift — every indexed source is still present and intact.\n")
 		return b.String(), false, nil
 	}
