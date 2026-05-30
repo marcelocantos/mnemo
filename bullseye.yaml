@@ -2190,6 +2190,22 @@ targets:
     origin: manual
     discovered: 2026-05-29
     achieved: 2026-05-30
+  T69:
+    name: mnemo depends on a current claudia release
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo's go.mod pins github.com/marcelocantos/claudia at the latest released version (currently v0.12.0).
+    - mnemo builds cleanly and `go test ./...` passes after the upgrade.
+    - Any breaking API changes between the previously-pinned version and the new one have been absorbed in mnemo's call sites (notably the compactor's claudia.Task / claudia.Agent usage in internal/compact/claudia.go).
+    context: 'mnemo''s go.mod pins github.com/marcelocantos/claudia at v0.7.0 while claudia is at v0.12.0 (2026-05-19). Five minor versions of drift on the only direct consumer of claudia.Task / claudia.Agent in this repo — the compactor''s subprocess driver. Filed 2026-05-23 during cross-repo audit of claudia consumers ahead of claudia''s 🎯T1.6 (1-month shakeout for v1.0). Keeping mnemo current on claudia exercises that shakeout against a real consumer; staying at v0.7.0 lets API drift accumulate silently. Known breaking change in window: v0.12.0 added a modalities parameter to grok.Client.SendText — mnemo does not appear to use grok directly, so absorption may be limited to the claudia.Task surface, but verify on upgrade.'
+    tags:
+    - deps
+    - compactor
+    - claudia
+    origin: manual
+    discovered: 2026-05-30
   T7:
     name: Agent-defined query templates
     status: achieved
@@ -2206,6 +2222,72 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-13
+  T70:
+    name: Compactor candidate-selection completes in &lt;500ms and long reads never block writes
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - SelectCompactionCandidates returns in <500ms against a 7K+ session DB with 950K+ messages
+    - A long-running read on the daemon's Store does not delay a concurrent writer
+    - The compactor scan emits a structured log line with candidate count, backlog, and elapsed time on every tick
+    - Sub-targets T70.1–T70.4 are achieved
+    context: An ad-hoc test on 2026-05-30 measured SelectCompactionCandidates at ~30 minutes against a 7641-session / 594K-assistant-entry DB. The query plan was scanning idx_entries_type (594K rows) per session, doing ~4.5B row reads per scan. The scan also holds rwmu.RLock; every writer in store/ acquires rwmu.Lock, so transcript ingest, memory/skill/plan/target ingest, etc. were all structurally blocked for the duration of every scan. The daemon symptom was 99% CPU and a growing compactor backlog (7,529 entries observed). An ad-hoc partial covering index brought the scan to 142ms (38,000× speedup). This target captures both the immediate fix and the structural cleanup that prevents the failure mode from recurring.
+    origin: manual
+    discovered: 2026-05-31
+  T70.1:
+    name: Partial covering index on entries(session_id, input_tokens, output_tokens) WHERE type='assistant'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A sqlift migration adds CREATE INDEX idx_entries_assistant_tokens ON entries(session_id, input_tokens, output_tokens) WHERE type = 'assistant'
+    - EXPLAIN QUERY PLAN for the assistant-tokens subquery shows SEARCH ... USING INDEX idx_entries_assistant_tokens (session_id=?)
+    - SelectCompactionCandidates completes in <500ms against a 7K+ session DB
+    context: 'The SUM(input_tokens + output_tokens) FROM entries WHERE session_id = ? AND type = ''assistant'' subquery in SelectCompactionCandidates previously used idx_entries_type, scanning ~594K rows per call. A partial covering index reduces it to an indexed range scan with the summed columns inline (594K leaf rows, one fence-band per session). Ad-hoc validation on 2026-05-30: full candidate query went from ~30 min to 142ms after adding this index. Schema-policy compliant (additive index).'
+    origin: manual
+    discovered: 2026-05-31
+  T70.2:
+    name: Store uses separate read and single-writer SQLite pools; rwmu no longer serialises DB access
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Store has two *sql.DB handles: readDB (default multi-connection pool) and writeDB with SetMaxOpenConns(1)'
+    - Both pools open with _journal_mode=WAL, _busy_timeout=5000, _synchronous=NORMAL
+    - rwmu is removed from every DB-touching code path; writers go through writeDB.ExecContext / BeginTx, readers through readDB.QueryContext
+    - A test demonstrates a long-running readDB query does not delay a concurrent writeDB.ExecContext (e.g., write completes while the read is still in progress)
+    context: The current Go-level rwmu was acting as an application-level DB serialiser, but SQLite WAL handles read/write concurrency natively, and SetMaxOpenConns(1) on a dedicated writer pool serialises writers efficiently via the database/sql connection-request queue (no SQLITE_BUSY in normal operation). The current design forces writers to wait behind unrelated long reads — exactly the failure mode the index regression exposed. busy_timeout=5000 is a defensive backstop for the rare cross-process case (e.g., sqlite3 CLI or backup tools).
+    origin: manual
+    discovered: 2026-05-31
+  T70.3:
+    name: In-memory Store state is protected by per-concern mutexes scoped to their data
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - workspaceRoots, extraProjectDirs, synthesisRoots are protected by a mutex named for what it protects (e.g., rootsMu)
+    - The live-sessions cache (liveCache, liveCacheTime) is protected by its own mutex
+    - Each mutex's doc comment names the data it protects, not 'protects DB access'
+    - No mutex held by Store code wraps a *sql.DB call
+    context: After T70.2 moves DB serialisation to the connection pool, what remains of rwmu's responsibilities is small in-memory state — config-like slices and the live-sessions cache. Naming each mutex for the data it protects prevents the same accretion that conflated a DB serialiser with workspace-roots access. RWMutex is appropriate here (hot read paths from ingest/query workers, infrequent writes from Set* and hot-reload).
+    depends_on:
+    - T70.2
+    origin: manual
+    discovered: 2026-05-31
+  T70.4:
+    name: Every compactor scan tick emits a structured log line with elapsed time
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Watcher.tick wraps SelectCompactionCandidates in time.Since measurement
+    - 'slog.Info(''compact: scan'', ''candidates'', N, ''backlog'', B, ''elapsed'', D) fires after every scan, including empty scans'
+    - The log line appears at INFO level so a slow scan is visible without a log-level change
+    - A scan exceeding (say) 5s also emits a WARN with the same fields
+    context: 'The scan that ran for ~30 minutes per tick was invisible to logs — only per-compaction outcomes (compact: tick outcome=compacted ...) were logged. A scan-level elapsed measurement would have flagged the regression the day it appeared. Independent of T70.1/T70.2/T70.3 — a cheap observability hardening that should ship regardless of whether the structural fixes happen on the same timeline.'
+    origin: manual
+    discovered: 2026-05-31
   T8:
     name: sqldeep integration
     status: achieved
