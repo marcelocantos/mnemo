@@ -161,6 +161,22 @@ func (s *Store) listVaultManifest() ([]VaultOutput, error) {
 	return out, rows.Err()
 }
 
+// SetVaultPath records the configured vault root so the vault
+// divergence gatherer can find it (🎯T68.6). Safe to call concurrently;
+// pass "" to clear when vault is unconfigured.
+func (s *Store) SetVaultPath(path string) {
+	s.mu.Lock()
+	s.vaultPath = path
+	s.mu.Unlock()
+}
+
+// getVaultPath returns the currently-configured vault root or "".
+func (s *Store) getVaultPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vaultPath
+}
+
 // RemoveVaultManifestRow drops a manifest row by note_path. Called by
 // the GC pass for "manifest path missing" orphans (the file is gone;
 // the manifest entry has nothing to point at). Never touches the

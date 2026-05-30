@@ -162,16 +162,24 @@ func (s *Store) imagesDivergence() StreamDivergence {
 	}
 }
 
-// vaultDivergence is not yet wired into the divergence surface: the
-// vault GC machinery exists (🎯T68.6, vault_gc.go) but the vault path
-// lives in the registry/config, not the store. The orphan backlog is
-// accessible via the mnemo_vault_gc tool which takes the path
-// explicitly; a future increment threads vault_path into the store so
-// this gatherer can report Known with a real gap.
+// vaultDivergence reports the vault-orphan backlog (🎯T68.6 vault GC):
+// the count of manifest rows whose file is gone plus on-disk notes
+// with no manifest entry. The path is mirrored from registry/config
+// via SetVaultPath; vault-unconfigured installs report Known=false
+// with no fabricated gap.
 func (s *Store) vaultDivergence() StreamDivergence {
+	vp := s.getVaultPath()
+	if vp == "" {
+		return StreamDivergence{
+			Stream: "vault", Known: false,
+			Note: "vault not configured; no orphan backlog to compute",
+		}
+	}
+	gap := s.VaultOrphanBacklog(vp)
 	return StreamDivergence{
-		Stream: "vault", Known: false,
-		Note: "GC machinery shipped (mnemo_vault_gc); divergence wiring needs vault_path in store — small follow-up",
+		Stream: "vault", Known: true,
+		Gap: int64(gap), Unit: "orphans",
+		Note: "manifest rows whose note is gone + *.md files under the vault with no manifest entry",
 	}
 }
 

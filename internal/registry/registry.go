@@ -164,6 +164,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 		// content re-ingested on every Sync, growing the docs index
 		// without bound.
 		s.RegisterExcludedPath(vaultPath, "vault_path")
+		s.SetVaultPath(vaultPath) // 🎯T68.6: vault divergence + GC machinery needs the path
 		exp, err := vault.New(s, vaultPath)
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
@@ -800,6 +801,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 	}
 
 	if newPath == "" {
+		e.store.SetVaultPath("") // 🎯T68.6 clear so the vault divergence gatherer reports unknown
 		logger.Info("vault: disabled by reload (vault_path cleared)")
 		return nil
 	}
@@ -809,6 +811,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 		logger.Warn("vault: exporter creation failed on reload", "path", newPath, "err", err)
 		return fmt.Errorf("vault.New(%q): %w", newPath, err)
 	}
+	e.store.SetVaultPath(newPath) // 🎯T68.6 mirror new vault path for divergence + GC
 	r.mu.Lock()
 	e.vault = exp
 	vctx := r.startVaultWorkers(username, e)

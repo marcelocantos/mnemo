@@ -48,6 +48,12 @@ type Store struct {
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
 
+	// vaultPath is the configured vault root, mirrored from
+	// registry/config (🎯T68.6) so the vault divergence gatherer and
+	// the vault GC can find it without re-reading config. "" when the
+	// user has not configured a vault. Guarded by mu.
+	vaultPath string
+
 	rwmu sync.RWMutex // protects db access: writers (ingest), readers (queries)
 
 	// workspaceRoots is the set of filesystem roots under which repo-level
