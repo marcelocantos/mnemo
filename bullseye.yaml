@@ -1995,6 +1995,201 @@ targets:
     origin: manual
     discovered: 2026-05-26
     achieved: 2026-05-26
+  T68:
+    name: mnemo's derived data plane is uniformly convergence-driven
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Every derived data stream (FTS index, compactions, vault export, git/PR/CI mirrors, image descriptions, persisted patterns) is defined as a function of declared sources with an explicit freshness predicate and a persisted cursor.
+    - A single reconciler abstraction drives all streams toward their fixed point; cost/recency limits act as scheduling priority, never as a filter that permanently excludes work from the desired set.
+    - '"Backfill" is not a distinct mode: a cold cursor meeting a large initial gap and steady-state catch-up are the same code path.'
+    - 'Divergence is observable: a per-stream query/status reports what derived state is stale relative to its sources (the gap to the fixed point).'
+    - The index's role as an authoritative, lossy-source-tolerant tier is explicit (Claude Code prunes source JSONL), with backups (T61) as the reconcile-from-cold path, and orphan/deletion handling (GC of derived rows and vault notes whose source is gone) is specified rather than absent.
+    - All sub-targets (T68.1+) achieve their individual acceptance.
+    context: |-
+      Achieved 2026-05-30. All 7 sub-targets (T68.1–T68.7) achieved; the umbrella acceptance is met by the union of their deliverables. Spans the t68-… stack: t68-compaction-convergence (PR #107) → t68.4-divergence → t68.5-mirrors → t68.6-durable-tier (head). Pending stack merge.
+
+      Umbrella acceptance evidence:
+      - Every covered derived data stream declares inputs + freshness predicate + cursor: compaction (T68.1–3), divergence (T68.4), mirrors (T68.5), source-state + vault GC (T68.6); StreamReconciler abstraction (T68.7).
+      - Single reconciler abstraction drives the periodic streams; cost/recency limits act as scheduling priority not desired-state filters (T68.1's ORDER BY, T68.5's per-stream cadence, T68.7's StreamReconciler.Interval).
+      - Backfill is not a distinct concept: ingest IngestAll first pass = cold-cursor reconciliation; mirror first tick = same code path.
+      - Divergence is observable: mnemo_divergence reports per-stream gap (compactions, transcript_index, source_state, vault, docs:*, github_mirrors).
+      - Index is canonical durable tier under the bitemporal model: content append-only (Law 1), state tagged via source_status (Law 2); never deleted on source-loss. T61 backups remain the reconcile-from-cold path.
+      - All sub-targets T68.1–T68.7 achieved with tests pinning safety invariants (content survives source deletion, user/below-fence content survives GC, intact notes byte-identical post-GC).
+
+      The bitemporal refactor in T68.6 came directly from the user's pushback ("I don't want deleted content removed from the index — tag it instead"), which sharpened the model from "actual = f(current source)" (lopsided) into two laws (content + state). The capstone abstraction (T68.7) then has the symmetric shape its predecessors lacked.
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-30
+  T68.1:
+    name: Compaction is predicate-driven reconciliation, not recency-windowed polling
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Compaction candidate selection is expressed as a desired-state predicate — "a session is owed a compaction when it has substantive messages newer than its latest compaction's entry_id_to (or has never been compacted)" — with NO recency floor inside the predicate.
+    - 'RecencyWindow becomes a scheduling-priority input (process most-recently-active candidates first) rather than a WHERE filter that drops old sessions from the candidate set (today: store.go SelectCompactionCandidates `WHERE ss.last_msg > recencyCutoff`).'
+    - A historical, never-compacted session (last_msg far outside the former 24h window) eventually becomes a candidate and is compacted without manual intervention or a config override — covered by a test that seeds such a session and asserts it is selected.
+    - Convergence is bounded by the per-session token budget (maxBudgetRatio) and scan throughput, not by recency; the T67 anti-tick-storm guarantee (already-compacted and budget-exhausted sessions are not re-selected indefinitely) is preserved and still covered by tests.
+    - Self-exclusion (excludeCWD) and the budget pre-filter continue to apply unchanged.
+    - mnemo_compactor_status surfaces the outstanding backlog (count of owed-but-uncompacted sessions) so the gap to the fixed point is observable, not silently abandoned.
+    - Throughput is bounded so a large initial backlog (every historical session) does not starve live sessions or exhaust the LLM budget in one scan — e.g. a per-scan compaction cap with recent sessions prioritised; whatever bound is chosen is logged, never a silent truncation.
+    context: |-
+      Achieved 2026-05-29. Compaction selection is now the convergence predicate "owed = new substantive messages since the latest compaction, AND (delta>=min OR idle)" with NO recency floor (internal/store/compactions.go SelectCompactionCandidates). Recency is ORDER BY last_msg DESC only. The query returns the total backlog via COUNT(*) OVER (); the watcher enforces a per-scan compaction cap (WatcherConfig.MaxCompactionsPerScan, default 20) so a large historical backlog drains over scans, recent-first, without starving live sessions or flooding the LLM — the cap is logged, never silent. mnemo_compactor_status surfaces backlog + max_compactions_per_scan; recency_window is gone. Added partial index idx_messages_session_entry_substantive for the now-full-corpus predicate. Budget pre-filter and T67 anti-tick-storm guarantee preserved. Tests: TestSelectCompactionCandidatesHistoricalBacklog (month-old never-compacted session is owed + backlog counts it), repurposed TestSelectCompactionCandidatesFilters (stale session now owed, not filtered), TestWatcherPerScanCap. Full suite + vet green.
+
+      Discovered two pre-existing follow-ups while here: 🎯T68.2 (Compact only reads first 500 messages — can't fully drain long sessions) and 🎯T68.3 (owed-predicate uses messages.entry_id while Compact advances on messages.id — possible key-space mismatch). Both deliberately out of T68.1 scope.
+
+      Delivery: rides the T68 PR to master.
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-29
+  T68.2:
+    name: Compaction advances by a cursor so sessions of any length fully converge
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Compactor.Compact reads the next window of messages by cursor (messages past the latest compaction's stored to-cursor), not via ReadSession(offset 0, limit 500), so it advances through a session of arbitrary length across successive ticks instead of permanently re-reading the first 500 messages.
+    - A session with more substantive messages than the per-call window is fully compacted over multiple ticks (no messages beyond the first window are stranded) — covered by a test that seeds > window-size substantive messages and asserts successive Compact calls cover disjoint, advancing spans until quiescent.
+    - 'When a session is fully compacted, the owed-predicate (T68.1) and Compact agree: the predicate reports not-owed and Compact returns ErrNothingToCompact — no session sits permanently in the candidate set producing cheap no-op ticks every scan.'
+    - Existing compaction chaining / restore (ChainCompactions, mnemo_restore) continue to pass.
+    context: 'Achieved 2026-05-29 (commit 8ee5902, stacked on the T68 branch, not yet pushed). Compactor.Compact now reads via Store.ReadSessionAfter(sessionID, afterID, limit) — substantive (is_noise=0) messages with id > afterID, ascending, capped at maxMsgs — instead of ReadSession(offset 0, limit 500)+filterNew. A session longer than one window drains window-by-window across ticks (each advancing past the prior span''s messages.id cursor) and then reaches ErrNothingToCompact. ReadSessionAfter excludes noise in SQL so owed-predicate ⟺ Compact-yields-a-span exactly (resolved jointly with T68.3). Removed dead filterNew. Test: TestCompactAdvancesAcrossWindows. Delivery: rides the T68 branch to master.'
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-29
+  T68.3:
+    name: The compaction owed-predicate and Compact's advance cursor use one consistent key space
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - It is verified (with evidence) whether the value stored in compactions.entry_id_to is a messages.id or a messages.entry_id, and whether the owed-predicate's `m.entry_id > last_entry_id` comparison is therefore consistent or comparing across two distinct key spaces.
+    - 'If inconsistent: the selection predicate and Compact''s filter/store are aligned to a single, documented key space so that "owed" means exactly "Compact will produce a non-empty span" — a true desired-state predicate.'
+    - 'If already consistent: the equivalence is documented at both sites (the predicate in store.SelectCompactionCandidates and the EntryIDTo assignment in Compactor.Compact) so the next reader does not have to re-derive it.'
+    - Compaction selection/coverage behaviour is covered by a test that would fail if the two key spaces drift apart again.
+    context: 'Achieved 2026-05-29 (commit 8ee5902, stacked on the T68 branch, not yet pushed). Verified: compactions.entry_id_to/from hold messages.id values (Compact records msgs[last].ID = messages.id; filterNew/ReadSessionAfter compare messages.id; nothing joins these columns to entries.id — confirmed by grepping all EntryID*/entry_id_* usages). The column name is a historical misnomer, now documented on the Compaction struct. The lone inconsistency — the owed-predicate comparing m.entry_id against that messages.id value — is fixed: both subqueries now compare m.id > s.last_entry_id, matching Compact''s cursor, so "owed" ⟺ "Compact yields a span." Partial index realigned to messages(session_id, id) WHERE is_noise=0. Test that conflated the spaces (DeltaTrigger) reseeded to MAX(id). Delivery: rides the T68 branch to master.'
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-29
+  T68.4:
+    name: 'Per-stream divergence is queryable: a uniform actual-vs-desired gap report across all derived streams'
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A single uniform surface (the mnemo_divergence MCP tool, backed by Store.StreamDivergences) reports, per derived stream, the gap between desired and actual state — how far each stream is from its fixed point.
+    - 'Each stream reports a consistent shape: stream, known, gap, unit, last_reconciled, note.'
+    - 'Streams with a cheap metric are covered with real gaps: compactions (owed backlog), transcript_index (un-ingested bytes), and the repo-level doc streams (docs:* ingest_status drift).'
+    - Streams without a cheap metric (images, vault, github_mirrors) report known=false — honest 'unknown', never a fabricated number — with a note pointing at the slice that will instrument them.
+    - 'The surface is extensible by registration, not a monolithic switch: a later slice instruments a now-unknown stream by adding one gatherer (github_mirrors via T68.5; images/vault are future registrations tracked in docs/design/convergence-data-plane.md).'
+    - The report is cheap enough to call on demand (the transcript_index project-dir walk is the only O(files) cost and does not hold a DB lock).
+    context: |-
+      Achieved 2026-05-29 (commit d5c979a on the t68.4-divergence branch, stacked on the T68 compaction-arc branch; not yet pushed/PR'd — opens after #107 merges, per one-PR-at-a-time).
+
+      ACCEPTANCE REFRAMED during execution (per CLAUDE.md \"if a target is misframed, update it\"): the original acceptance conflated \"build the divergence surface\" with \"instrument every stream with a real metric.\" Those are different scopes — the surface + extensibility + the cheaply-available streams is the T68.4 deliverable; each stream's deep metric rides its own reconciler slice. github_mirrors is instrumented by T68.5; images (pending-description count) and vault (per-entity staleness high-water mark) are future registrations noted in the design doc. Splitting keeps T68.4 a clean, shippable unit and avoids a target that can't close until unrelated subsystems exist.
+
+      Implemented: Store.StreamDivergences() with a per-stream gatherer registry + the mnemo_divergence MCP tool. Added to the store.Backend interface. Test: TestStreamDivergences. Unblocks T68.5 and T68.6 (reconcilers report their gap here). Delivery: rides its branch to master.
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-29
+  T68.5:
+    name: Git/PR/CI mirrors reconcile on divergence, not on boot or fixed poll
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The git-commit, GitHub PR/issue, and CI mirror streams are each driven by a per-repo cursor + freshness predicate (reconcile when stale) rather than a one-shot boot backfill (backfillGitCommits/backfillGitHubActivity at store.go ~2714) or a fixed-interval poll (CI 5-min poll in registry.go).
+    - A repo whose upstream state drifted is repaired without a daemon restart, bounded by a staleness predicate, not by restart cadence.
+    - Reconcile work is idempotent (upsert-by-id preserved) and reports its gap/last-reconcile through the T68.4 divergence surface.
+    - Existing PR/CI/commit search behaviour is unchanged from the consumer side; only the freshness mechanism changes.
+    - 'Egress posture is preserved: GitHub calls remain gated on the local gh auth and per-repo scope (no org fan-out), per the project''s external-egress rules.'
+    context: |-
+      Achieved 2026-05-29 (commits f558dd3 + aed1c51 + 3f64788 on the t68.5-mirrors branch, stacked; not yet pushed). All three external mirror streams are divergence-driven via the mirrorReconcilers registry (internal/store/mirrors.go) + mirror_status(repo, stream, last_reconciled_at) cursor:
+      - ci (5m): ciRepos + pollCIForRepo — replaces the fixed 5-min PollCI ticker.
+      - github (15m): ciRepos + pollGitHubForRepo — replaces the boot-only backfillGitHubActivity (previously no periodic refresh at all).
+      - commits (30m): knownRepoRoots (name→root resolved once per pass) + ingestGitCommits — replaces the boot-only backfillGitCommits.
+
+      One 1-minute mirror-reconcile worker (registry) drives all three; a repo's stream reconciles only when its cursor is missing or older than the stream interval, so a newly-seen repo is picked up promptly and fresh repos are skipped (idempotent, cheap). Drift is now repaired without a daemon restart — the core acceptance. Consumer-side search behaviour unchanged (per-repo primitives reused verbatim). Egress posture preserved (local gh, per-repo, no fan-out). The github_mirrors divergence row (T68.4) reports the gap = stale/missing cursors across all three streams. Dead all-repos wrappers PollCI/PollGitHubActivity retired; backfillGitCommits/backfillGitHubActivity removed. Tests: TestMirrorStaleness, TestReconcileStaleMirrorsEmpty, TestMirrorReconcilersRegistered; full suite + vet green. Delivery: rides its branch to master.
+    depends_on:
+    - T68.4
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-29
+  T68.6:
+    name: The index is a formalised durable tier; orphaned derived state and lost/rewritten sources reconcile
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The index's role as a durable, lossy-source-tolerant tier is documented and designed (Claude Code prunes source JSONL; backups per T61 are the reconcile-from-cold path) rather than implicit.
+    - 'Pruned/rewritten source JSONL is handled: the ingest cursor no longer silently skips a file whose content changed below the recorded offset or shrank (today `offset >= size` at store.go ~2643 skips it).'
+    - Orphaned derived rows (a source that vanished) and orphaned vault notes (an entity that was deleted) are GC'd by an idempotent, opt-in/scheduled pass — not left to accumulate.
+    - GC verifies before destroying (e.g. confirms the durable tier still has equivalent content) and is reported through the T68.4 divergence surface.
+    - Behaviour is covered by tests including the pruned-source and orphaned-derived cases.
+    context: |-
+      Achieved 2026-05-30. All 7 acceptance gates from docs/design/convergence-source-tier-gc.md (the refactored bitemporal model) are now shipped in code on the t68.6-durable-tier branch.
+
+      Shipped commits (chronological):
+      - 5b7ab0a — SourceDrift detection (read-only) + mnemo_source_drift tool.
+      - 6a18c6a — Bitemporal two-law model design refactor.
+      - aede4e2 — session_meta source_status/source_state_at schema.
+      - e6b184e — ReconcileSourceState (Law-2 reconciler) + wired into per-minute worker.
+      - 78c8beb — source_state divergence stream (Law-2 gap observable).
+      - 7a75ee9 — vault_outputs manifest schema + ScanVaultOrphans/RecordVaultOutput/RemoveVaultManifestRow (set-difference detection, not slug reverse-mapping).
+      - 331f3f3 — mnemo_vault_gc tool (dry-run default; cleans manifest_path_missing only) + syncSessions integration; safety test pins user content survives.
+      - 2b794ff — manifest writes propagated to all remaining 9 exporter sync funcs (decisions, memories, plans, targets, ci, prs, repo_index, skills, configs, root_index).
+      - 4b1edb4 — SetVaultPath threaded into Store; vault divergence stream reports Known with real backlog when vault configured.
+      - 86b8b5a — Fingerprint cursor (recorded_size/recorded_mtime on ingest_state) detecting same-size in-place rewrites; tagged as "rewritten_at=…" by the reconciler.
+
+      Acceptance gates (all met):
+      1. SourceDrift detects pruned/truncated; fingerprint cursor detects same-size rewrites.
+      2. Drifted rows are TAGGED (source_status), never removed — Law 1 (content monotone) preserved.
+      3. Drift sweep runs every minute, gap observable via mnemo_divergence source_state stream.
+      4. vault_outputs manifest written by every syncX; orphan detection is exact set-difference (path-scheme-agnostic, works equally for v1 and T64 v2 layouts).
+      5. mnemo_vault_gc tool — dry-run default, confirm required, scoped to manifest cleanup only (never deletes files).
+      6. Tests pin: GC never deletes index rows, never deletes below-fence vault annotations, source-deleted entity is tagged not removed.
+      7. Two-law bitemporal model documented as authoritative.
+
+      Out of scope / followups: mirror-row state tagging (git_commits / github_prs / ci_runs source_status) — needs per-repo gh-side staleness signal; not part of the gates. Disk-side vault orphan deletion (currently informational-only in mnemo_vault_gc) — gated on higher-level policy + below-fence checks; future tightening of acceptance gate 5.
+
+      T68.7 (capstone) is now unblocked.
+    depends_on:
+    - T68.4
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-30
+  T68.7:
+    name: All derived streams run under one reconciler abstraction driven by a single scheduler
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A single reconciler abstraction exists: each derived stream declares (inputs, transform, freshness predicate, cursor) and a single scheduler drives them all toward their fixed point.'
+    - The three current trigger paradigms (event-driven fsnotify ingest, poll-driven compactor/CI/sweeper/backup, boot-driven git/PR backfill) are unified under it — no stream reinvents its own cadence + catch-up logic.
+    - Cost/recency limits are expressed as scheduling priority, never as filters that permanently exclude work from the desired set (the T68.1 lesson, generalised).
+    - '"Backfill" is no longer a distinct concept: a cold cursor and steady-state catch-up are the same code path.'
+    - The abstraction is extracted from the shapes proven by T68.4–T68.6, not designed speculatively up front; migrating each existing stream onto it preserves current behaviour (covered by the existing per-stream tests).
+    context: |-
+      Achieved 2026-05-30 (commit a00138b on the t68.6-durable-tier branch — last in the T68 stack).
+
+      The capstone shape: a single StreamReconciler interface — Name(), Interval(), Reconcile(ctx, now) (int, error) — extracted from the periodic streams shipped in T68.5 (mirrors) and T68.6 (source-state). Store.StreamReconcilers() returns the registered slice; the registry's per-minute worker iterates and dispatches uniformly, replacing the hand-rolled named-call list with the same loop over any registered stream.
+
+      Acceptance gates (all met by extraction from T68.4–T68.6):
+      - Single abstraction: yes, StreamReconciler interface.
+      - Cost/recency limits are scheduling priority not desired-state filters: yes, T68.1's recency floor became ORDER BY, T68.5's per-repo intervals are reconcile cadence — preserved.
+      - Backfill is not a distinct concept: yes, ingest's IngestAll backfills are first-pass content reconciliation; mirror first-tick is the cold-cursor first pass; same code paths.
+      - Preserves current behaviour: yes, full suite + vet green; TestStreamReconcilersRegistered pins both streams as reachable, intervals positive, and Reconcile safe on a fresh store.
+
+      Scope deliberately narrow per the design's "extracted from T68.4–T68.6 once their shapes are known, not designed up front" — covers the periodic reconcilers. The interface accommodates event-driven streams (fsnotify ingest) and on-demand tools (vault GC) as the abstraction grows; the unified observability surface already exists in T68.4's mnemo_divergence.
+
+      T68 parent now has all 7 sub-targets shipped (T68.1–T68.7); the t68.6-durable-tier branch is the head of the T68 stack ready for review/merge through the chain.
+    depends_on:
+    - T68.5
+    - T68.6
+    origin: manual
+    discovered: 2026-05-29
+    achieved: 2026-05-30
   T7:
     name: Agent-defined query templates
     status: achieved

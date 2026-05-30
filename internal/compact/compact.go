@@ -111,7 +111,7 @@ Rules:
 // storeBackend is the narrow slice of *store.Store the compactor uses.
 // Kept as an interface so tests can inject a fake.
 type storeBackend interface {
-	ReadSession(sessionID string, role string, offset int, limit int) ([]store.SessionMessage, error)
+	ReadSessionAfter(sessionID string, afterID int64, limit int) ([]store.SessionMessage, error)
 	PutCompaction(c store.Compaction) (int64, error)
 	LatestCompaction(sessionID string) (*store.Compaction, error)
 	SessionTokens(sessionID string) (int64, int64, error)
@@ -234,11 +234,14 @@ func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string,
 		fromID = latest.EntryIDTo
 	}
 
-	msgs, err := c.store.ReadSession(sessionID, "", 0, c.maxMsgs)
+	// Read the next window of substantive messages strictly after the
+	// prior span's cursor (🎯T68.2). ReadSessionAfter filters noise and
+	// bounds the window to maxMsgs, so a long session advances one
+	// window per tick rather than re-reading its first 500 messages.
+	msgs, err := c.store.ReadSessionAfter(sessionID, fromID, c.maxMsgs)
 	if err != nil {
 		return nil, fmt.Errorf("read session: %w", err)
 	}
-	msgs = filterNew(msgs, fromID)
 	if len(msgs) == 0 {
 		return nil, ErrNothingToCompact
 	}
@@ -274,21 +277,6 @@ func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string,
 	}
 	comp.ID = id
 	return &comp, nil
-}
-
-// filterNew keeps messages with ID > fromID and drops noise markers.
-func filterNew(msgs []store.SessionMessage, fromID int64) []store.SessionMessage {
-	out := msgs[:0]
-	for _, m := range msgs {
-		if int64(m.ID) <= fromID {
-			continue
-		}
-		if m.IsNoise {
-			continue
-		}
-		out = append(out, m)
-	}
-	return out
 }
 
 // buildUserPrompt assembles the compaction user message: an optional

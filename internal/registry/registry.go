@@ -164,6 +164,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 		// content re-ingested on every Sync, growing the docs index
 		// without bound.
 		s.RegisterExcludedPath(vaultPath, "vault_path")
+		s.SetVaultPath(vaultPath) // 🎯T68.6: vault divergence + GC machinery needs the path
 		exp, err := vault.New(s, vaultPath)
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
@@ -307,15 +308,29 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		reviewer.Run(r.baseCtx, rev)
 	}()
 
-	// CI polling.
+	// External mirror reconciler (🎯T68.5): divergence-driven reconcile
+	// of the mirror streams (CI today; GitHub/commits as they convert).
+	// Ticks every minute but reconciles a repo's stream only when its
+	// mirror_status cursor is missing or older than the stream's
+	// interval, so a newly-seen repo is picked up promptly while fresh
+	// repos are skipped. Replaces the fixed 5-minute PollCI loop.
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
-			if err := e.store.PollCI(); err != nil {
-				logger.Warn("CI poll failed", "err", err)
+			now := time.Now()
+			// 🎯T68.7 capstone: drive every registered periodic stream
+			// through the StreamReconciler abstraction. Adding a new
+			// stream is one entry in Store.StreamReconcilers(); this
+			// loop stays the same.
+			for _, sr := range e.store.StreamReconcilers() {
+				if n, err := sr.Reconcile(r.baseCtx, now); err != nil {
+					logger.Warn("reconcile failed", "stream", sr.Name(), "err", err)
+				} else if n > 0 {
+					logger.Info("reconciled", "stream", sr.Name(), "count", n)
+				}
 			}
 			select {
 			case <-r.baseCtx.Done():
@@ -784,6 +799,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 	}
 
 	if newPath == "" {
+		e.store.SetVaultPath("") // 🎯T68.6 clear so the vault divergence gatherer reports unknown
 		logger.Info("vault: disabled by reload (vault_path cleared)")
 		return nil
 	}
@@ -793,6 +809,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 		logger.Warn("vault: exporter creation failed on reload", "path", newPath, "err", err)
 		return fmt.Errorf("vault.New(%q): %w", newPath, err)
 	}
+	e.store.SetVaultPath(newPath) // 🎯T68.6 mirror new vault path for divergence + GC
 	r.mu.Lock()
 	e.vault = exp
 	vctx := r.startVaultWorkers(username, e)

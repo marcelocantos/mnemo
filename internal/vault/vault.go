@@ -41,6 +41,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -205,9 +206,21 @@ func (e *Exporter) syncSessions(ctx context.Context) (map[string]string, error) 
 			continue
 		}
 
-		if err := writeNote(absPath, renderSession(s, msgs), s.LastMsg); err != nil {
+		content := renderSession(s, msgs)
+		if err := writeNote(absPath, content, s.LastMsg); err != nil {
 			slog.Warn("vault: write session note failed", "path", absPath, "err", err)
 			continue
+		}
+		// 🎯T68.6 vault GC manifest: record the (entity, path, hash)
+		// tuple so orphan detection is exact set-difference, not lossy
+		// slug reverse-mapping. Failures here are logged but do not
+		// fail the sync — the manifest is auxiliary state.
+		if err := e.backend.RecordVaultOutput(
+			filepath.ToSlash(relPath), "session", s.SessionID,
+			store.HashVaultContent(content), time.Now().UTC(),
+		); err != nil {
+			slog.Warn("vault: record session output failed",
+				"session", shortID(s.SessionID), "err", err)
 		}
 		written++
 	}
@@ -229,15 +242,18 @@ func (e *Exporter) syncDecisions(ctx context.Context, sessionPaths map[string]st
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, decisionPath(d))
+		relPath := decisionPath(d)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, d.Timestamp) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderDecision(d, sessionPaths[d.SessionID]), d.Timestamp); err != nil {
+		content := renderDecision(d, sessionPaths[d.SessionID])
+		if err := writeNote(absPath, content, d.Timestamp); err != nil {
 			slog.Warn("vault: write decision note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, "decision", d.SessionID+":"+d.Timestamp, content)
 		written++
 	}
 
@@ -257,15 +273,18 @@ func (e *Exporter) syncMemories(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, memoryPath(m))
+		relPath := memoryPath(m)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, m.UpdatedAt) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderMemory(m), m.UpdatedAt); err != nil {
+		content := renderMemory(m)
+		if err := writeNote(absPath, content, m.UpdatedAt); err != nil {
 			slog.Warn("vault: write memory note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, "memory", m.Project+":"+m.Name, content)
 		written++
 	}
 
@@ -285,15 +304,18 @@ func (e *Exporter) syncPlans(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, planPath(p))
+		relPath := planPath(p)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, p.UpdatedAt) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderPlan(p), p.UpdatedAt); err != nil {
+		content := renderPlan(p)
+		if err := writeNote(absPath, content, p.UpdatedAt); err != nil {
 			slog.Warn("vault: write plan note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, "plan", p.FilePath, content)
 		written++
 	}
 
@@ -313,7 +335,8 @@ func (e *Exporter) syncTargets(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, targetPath(t))
+		relPath := targetPath(t)
+		absPath := filepath.Join(e.path, relPath)
 		// Targets carry no reliable last-modified timestamp. Notes are
 		// written once and not refreshed until the file is deleted.
 		// targetPath encodes the target ID, not the status, so a status
@@ -322,10 +345,12 @@ func (e *Exporter) syncTargets(ctx context.Context) error {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderTarget(t), ""); err != nil {
+		content := renderTarget(t)
+		if err := writeNote(absPath, content, ""); err != nil {
 			slog.Warn("vault: write target note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, "target", t.Repo+":"+t.TargetID, content)
 		written++
 	}
 
@@ -345,15 +370,18 @@ func (e *Exporter) syncCI(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, ciRunPath(r))
+		relPath := ciRunPath(r)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, r.CompletedAt) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderCIRun(r), r.CompletedAt); err != nil {
+		content := renderCIRun(r)
+		if err := writeNote(absPath, content, r.CompletedAt); err != nil {
 			slog.Warn("vault: write CI run note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, "ci_run", r.Repo+":"+strconv.FormatInt(r.RunID, 10), content)
 		written++
 	}
 
@@ -373,15 +401,18 @@ func (e *Exporter) syncPRs(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, prPath(r))
+		relPath := prPath(r)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, r.UpdatedAt) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderPR(r), r.UpdatedAt); err != nil {
+		content := renderPR(r)
+		if err := writeNote(absPath, content, r.UpdatedAt); err != nil {
 			slog.Warn("vault: write PR note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, r.Type, r.Repo+":"+strconv.Itoa(r.Number), content)
 		written++
 	}
 
@@ -404,10 +435,13 @@ func (e *Exporter) syncRepoIndices(ctx context.Context, repos []store.RepoInfo, 
 			slog.Warn("vault: search decisions for repo index failed", "repo", repo.Repo, "err", err)
 		}
 		content := renderRepoIndex(repo, sessions, decisions, sessionPaths)
-		absPath := filepath.Join(e.path, repoIndexPath(repo.Repo))
+		relPath := repoIndexPath(repo.Repo)
+		absPath := filepath.Join(e.path, relPath)
 		if err := writeNote(absPath, content, ""); err != nil {
 			slog.Warn("vault: write repo index failed", "repo", repo.Repo, "err", err)
+			continue
 		}
+		e.recordOutput(relPath, "repo_index", repo.Repo, content)
 	}
 	return nil
 }
@@ -424,15 +458,18 @@ func (e *Exporter) syncSkills(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, skillPath(s))
+		relPath := skillPath(s)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, s.UpdatedAt) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderSkill(s), s.UpdatedAt); err != nil {
+		content := renderSkill(s)
+		if err := writeNote(absPath, content, s.UpdatedAt); err != nil {
 			slog.Warn("vault: write skill note failed", "path", absPath, "err", err)
 			continue
 		}
+		e.recordOutput(relPath, "skill", s.Name, content)
 		written++
 	}
 
@@ -452,15 +489,22 @@ func (e *Exporter) syncConfigs(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		absPath := filepath.Join(e.path, configPath(c))
+		relPath := configPath(c)
+		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, c.UpdatedAt) {
 			skipped++
 			continue
 		}
-		if err := writeNote(absPath, renderConfig(c), c.UpdatedAt); err != nil {
+		content := renderConfig(c)
+		if err := writeNote(absPath, content, c.UpdatedAt); err != nil {
 			slog.Warn("vault: write config note failed", "path", absPath, "err", err)
 			continue
 		}
+		repoID := c.Repo
+		if repoID == "" {
+			repoID = "global"
+		}
+		e.recordOutput(relPath, "claude_config", repoID, content)
 		written++
 	}
 
@@ -471,7 +515,25 @@ func (e *Exporter) syncConfigs(ctx context.Context) error {
 // syncRootIndex writes the vault root index.md.
 func (e *Exporter) syncRootIndex(repos []store.RepoInfo) error {
 	stats, _ := e.backend.Stats()
-	return writeNote(filepath.Join(e.path, "index.md"), renderRootIndex(repos, stats), "")
+	content := renderRootIndex(repos, stats)
+	if err := writeNote(filepath.Join(e.path, "index.md"), content, ""); err != nil {
+		return err
+	}
+	e.recordOutput("index.md", "root_index", "root", content)
+	return nil
+}
+
+// recordOutput UPSERTs a vault_outputs manifest row for the note that
+// was just written (🎯T68.6). The manifest is auxiliary state — a
+// failure to record is logged but never fails the sync.
+func (e *Exporter) recordOutput(relPath, kind, id, content string) {
+	if err := e.backend.RecordVaultOutput(
+		filepath.ToSlash(relPath), kind, id,
+		store.HashVaultContent(content), time.Now().UTC(),
+	); err != nil {
+		slog.Warn("vault: record output failed",
+			"path", relPath, "kind", kind, "id", id, "err", err)
+	}
 }
 
 // entityTSComment is the HTML comment prefix written just before the

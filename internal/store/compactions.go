@@ -22,10 +22,17 @@ type Compaction struct {
 	PromptTokens int
 	OutputTokens int
 	CostUSD      float64
-	EntryIDFrom  int64
-	EntryIDTo    int64
-	PayloadJSON  string
-	Summary      string
+	// EntryIDFrom / EntryIDTo bound the compacted span. Despite the
+	// "entry_id" name, these hold messages.id values (the autoincrement
+	// PK), NOT entries.id: Compactor.Compact records the last compacted
+	// message's messages.id, and ReadSessionAfter / the owed-predicate
+	// in SelectCompactionCandidates advance and test against messages.id
+	// to match (🎯T68.3). The column name is a historical misnomer; do
+	// not join these to entries.id.
+	EntryIDFrom int64
+	EntryIDTo   int64
+	PayloadJSON string
+	Summary     string
 }
 
 // PutCompaction inserts a compaction row and returns the assigned ID.
@@ -201,45 +208,54 @@ type CompactionCandidate struct {
 	ConnectionID string
 }
 
-// SelectCompactionCandidates returns sessions worth a compaction tick
-// under 🎯T67's dual-trigger model (replaces the pre-T67 lifetime-
-// substantive AND-gated filter that left already-compacted sessions
-// spinning forever and starved small sessions of compaction
-// entirely).
+// SelectCompactionCandidates returns sessions that are *owed* a
+// compaction — the desired-state predicate of the convergence model
+// (🎯T68.1, replacing the recency-windowed polling of 🎯T67/🎯T59).
 //
-// A session qualifies when its last_msg falls within recencyCutoff
-// (an absolute "don't pointlessly resurrect old sessions" floor) AND
-// it has new substantive messages since the most recent compaction's
-// entry_id_to (or since first_msg if none) — measured against the
-// messages table directly, not the lifetime substantive_msgs counter.
-// Among new-content sessions, EITHER of two triggers fires:
+// A session is owed when it has new substantive messages since the
+// most recent compaction's entry_id_to (or since the start of the
+// transcript if none) — measured against the messages table
+// directly, not the lifetime substantive_msgs counter — AND EITHER
+// of two triggers fires:
 //
-//  1. delta_substantive_msgs >= minDeltaMsgs (the original T59
-//     spirit, but counted as a delta from latest entry_id_to rather
-//     than from session start).
-//  2. delta_substantive_msgs >= 1 AND last_msg <= idleCutoff —
-//     captures small but settled sessions that never reach
-//     minDeltaMsgs but have gone quiet long enough to be worth
-//     summarising for restore.
+//  1. delta_substantive_msgs >= minDeltaMsgs (compact an
+//     actively-growing session once it has accumulated enough new
+//     content), or
+//  2. delta_substantive_msgs >= 1 AND last_msg <= idleCutoff (a
+//     settled session — including every historical session, which is
+//     idle by definition — is owed a span capturing its tail).
+//
+// There is deliberately NO recency floor in the predicate. Recency
+// is a *scheduling priority* (ORDER BY last_msg DESC — recent
+// sessions reconcile first), not a filter that permanently abandons
+// old sessions. A never-compacted session from months ago is just a
+// candidate with a far-back cursor; the watcher drains the backlog
+// over successive scans under its per-scan compaction cap, so a large
+// initial backlog never starves live sessions. This is what makes
+// compaction converge to the fixed point "every owed session has a
+// current span" rather than only servicing the last 24h.
 //
 // Sessions whose cumulative compaction-token cost already meets or
 // exceeds maxBudgetRatio of the session's assistant token cost are
-// filtered out at the candidate level, not just inside
-// Compactor.Compact's checkBudget path. This eliminates the
-// budget_exceeded tick storm where the same exhausted session was
-// re-selected every scan until recencyCutoff aged it out.
+// filtered out at the candidate level (not just inside
+// Compactor.Compact's checkBudget path): convergence is bounded by
+// the token budget, not by recency. This also preserves the 🎯T67
+// guarantee that a budget-exhausted session is not re-selected on
+// every scan.
 //
-// Ordered most-recently-active first; capped at limit rows.
-// ConnectionID is best-effort attribution: the most recently
-// observed connection bound to this session, or empty when no
-// binding exists (additive-only schema, NULL-tolerated).
+// Returns the candidate slice (capped at limit, recent-first) plus
+// the total backlog — the count of owed sessions before the limit is
+// applied — so the gap to the fixed point is observable via
+// mnemo_compactor_status rather than silently truncated. ConnectionID
+// is best-effort attribution: the most recently observed connection
+// bound to the session, or empty when none (additive-only schema,
+// NULL-tolerated).
 func (s *Store) SelectCompactionCandidates(
 	minDeltaMsgs int,
 	idleCutoff time.Time,
-	recencyCutoff time.Time,
 	maxBudgetRatio float64,
 	limit int,
-) ([]CompactionCandidate, error) {
+) ([]CompactionCandidate, int, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 	if limit <= 0 {
@@ -249,7 +265,6 @@ func (s *Store) SelectCompactionCandidates(
 		maxBudgetRatio = 0.10
 	}
 	idleCutoffStr := idleCutoff.UTC().Format(time.RFC3339Nano)
-	recencyCutoffStr := recencyCutoff.UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.Query(`
 		WITH session_state AS (
 		  SELECT
@@ -276,9 +291,8 @@ func (s *Store) SelectCompactionCandidates(
 		    ), 0)                                                                                   AS sess_tokens
 		  FROM session_summary ss
 		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
-		  WHERE ss.last_msg > ?
 		)
-		SELECT s.session_id, s.cwd, s.connection_id
+		SELECT s.session_id, s.cwd, s.connection_id, COUNT(*) OVER () AS backlog
 		FROM session_state s
 		WHERE
 		  -- Budget filter: skip sessions whose summariser cost has
@@ -289,41 +303,46 @@ func (s *Store) SelectCompactionCandidates(
 		  AND (
 		    -- Trigger A: enough new substantive messages since the
 		    -- session's latest compaction (or since the start of the
-		    -- transcript if none exists).
+		    -- transcript if none exists). last_entry_id is a messages.id
+		    -- (compactions.entry_id_to is a misnamed messages.id, 🎯T68.3),
+		    -- so the cursor comparison is m.id — matching ReadSessionAfter
+		    -- and Compact, so owed ⟺ Compact yields a span.
 		    (SELECT COUNT(*) FROM messages m
 		     WHERE m.session_id = s.session_id
-		       AND m.entry_id > s.last_entry_id
+		       AND m.id > s.last_entry_id
 		       AND m.is_noise = 0
 		    ) >= ?
 		    OR
 		    -- Trigger B: at least one new substantive message AND
 		    -- the session has been idle long enough. Captures small
-		    -- one-shot sessions that never reach the message
-		    -- threshold but are worth summarising once they settle.
+		    -- one-shot sessions and every historical session (idle by
+		    -- definition) — there is no recency floor; old sessions
+		    -- are owed, not abandoned.
 		    (s.last_msg <= ?
 		     AND EXISTS (
 		       SELECT 1 FROM messages m
 		       WHERE m.session_id = s.session_id
-		         AND m.entry_id > s.last_entry_id
+		         AND m.id > s.last_entry_id
 		         AND m.is_noise = 0
 		     ))
 		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, recencyCutoffStr, maxBudgetRatio, minDeltaMsgs, idleCutoffStr, limit)
+	`, maxBudgetRatio, minDeltaMsgs, idleCutoffStr, limit)
 	if err != nil {
-		return nil, fmt.Errorf("select compaction candidates: %w", err)
+		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}
 	defer rows.Close()
 	var out []CompactionCandidate
+	backlog := 0
 	for rows.Next() {
 		var c CompactionCandidate
-		if err := rows.Scan(&c.SessionID, &c.CWD, &c.ConnectionID); err != nil {
-			return nil, fmt.Errorf("scan candidate: %w", err)
+		if err := rows.Scan(&c.SessionID, &c.CWD, &c.ConnectionID, &backlog); err != nil {
+			return nil, 0, fmt.Errorf("scan candidate: %w", err)
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	return out, backlog, rows.Err()
 }
 
 // SessionTokens returns the total input + output tokens consumed by

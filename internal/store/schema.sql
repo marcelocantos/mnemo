@@ -268,7 +268,15 @@ CREATE TABLE images (
 
 CREATE TABLE ingest_state (
 			path TEXT PRIMARY KEY,
-			offset INTEGER NOT NULL
+			offset INTEGER NOT NULL,
+			-- 🎯T68.6 fingerprint cursor: the file's size+mtime at the
+			-- moment the offset was recorded. SourceDrift compares these
+			-- against current stat to detect same-size in-place rewrites
+			-- (offset>=size but mtime moved). Nullable so old rows fall
+			-- back to size-only detection until next ingest re-stamps
+			-- them.
+			recorded_size INTEGER,
+			recorded_mtime TEXT
 		);
 
 CREATE TABLE ingest_status (
@@ -277,6 +285,34 @@ CREATE TABLE ingest_status (
 			files_indexed INTEGER NOT NULL,
 			files_on_disk INTEGER NOT NULL
 		);
+
+-- Per-repo reconcile cursor for the external mirror streams
+-- (ci/github/commits) — 🎯T68.5. A (repo, stream) row records when
+-- that repo's stream last reconciled, so the mirror reconciler can be
+-- divergence-driven (reconcile a repo whose row is missing or stale)
+-- rather than boot-once or fixed-poll. Additive, append-only.
+CREATE TABLE mirror_status (
+			repo TEXT NOT NULL,
+			stream TEXT NOT NULL,
+			last_reconciled_at TEXT NOT NULL,
+			PRIMARY KEY (repo, stream)
+		);
+
+-- Forward output manifest for the vault exporter (🎯T68.6). Each note
+-- the exporter writes UPSERTs a row keyed by note_path; orphan
+-- detection is then exact set-difference (manifest rows whose file is
+-- gone; *.md files under the vault root with no manifest row) instead
+-- of lossy slug reverse-mapping. content_hash lets the GC verify the
+-- on-disk note is still the artifact we wrote before removing it.
+-- Vault-relative paths.
+CREATE TABLE vault_outputs (
+			note_path TEXT PRIMARY KEY,
+			entity_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			written_at TEXT NOT NULL
+		);
+CREATE INDEX idx_vault_outputs_entity ON vault_outputs(entity_kind, entity_id);
 
 CREATE TABLE memories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -363,7 +399,17 @@ CREATE TABLE session_meta (
 			cwd TEXT NOT NULL DEFAULT '',
 			git_branch TEXT NOT NULL DEFAULT '',
 			work_type TEXT NOT NULL DEFAULT '',
-			topic TEXT NOT NULL DEFAULT ''
+			topic TEXT NOT NULL DEFAULT '',
+			-- 🎯T68.6 source-state convergence (Law 2): valid-time tag
+			-- per session. The index retains content durably; this column
+			-- tracks the *current* state of the session's source JSONL
+			-- ("live" / "truncated_at=…" / "deleted_at=…"). The state
+			-- reconciler — a drift sweep over SourceDrift — converges
+			-- this tag toward reality without ever removing rows.
+			-- Additive, defaulted: old sessions read as "live" until a
+			-- drift event tags them.
+			source_status TEXT NOT NULL DEFAULT 'live',
+			source_state_at TEXT NOT NULL DEFAULT ''
 		);
 
 CREATE TABLE session_nonces (
@@ -530,6 +576,13 @@ CREATE INDEX idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
 CREATE INDEX idx_messages_project ON messages(project);
 
 CREATE INDEX idx_messages_session ON messages(session_id);
+
+-- Supports the compaction owed-predicate (🎯T68.1/🎯T68.3) and
+-- ReadSessionAfter (🎯T68.2), which count / page substantive messages
+-- per session past a messages.id cursor. Since the predicate now scans
+-- every session each scan (no recency floor), this partial composite
+-- turns the per-session range scan into an index lookup.
+CREATE INDEX idx_messages_session_id_substantive ON messages(session_id, id) WHERE is_noise = 0;
 
 CREATE INDEX idx_messages_tool_command ON messages(tool_command) WHERE tool_command IS NOT NULL;
 

@@ -36,7 +36,7 @@ func (c *ClaudiaCaller) Call(ctx context.Context, systemPrompt, userPrompt strin
 		Model:   c.model,
 	})
 
-	ch, err := task.RunTask(ctx, combined)
+	ch, err := task.Run(ctx, combined)
 	if err != nil {
 		return LLMResult{}, fmt.Errorf("claudia: run task: %w", err)
 	}

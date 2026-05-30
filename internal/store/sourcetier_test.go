@@ -1,0 +1,226 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"database/sql"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestSourceDrift covers 🎯T68.6 detection: a deleted source .jsonl is
+// reported as "deleted" and a truncated one as "truncated", while
+// intact sources produce no drift.
+func TestSourceDrift(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	writeJSONL(t, dir, "proj", "sess-del", []map[string]any{
+		msg("user", "to be deleted", now.Format(time.RFC3339)),
+	})
+	writeJSONL(t, dir, "proj", "sess-trunc", []map[string]any{
+		msg("user", "to be truncated one", now.Format(time.RFC3339)),
+		msg("assistant", "to be truncated two", now.Add(time.Second).Format(time.RFC3339)),
+	})
+	writeJSONL(t, dir, "proj", "sess-keep", []map[string]any{
+		msg("user", "intact", now.Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Intact corpus → no drift.
+	if rep := s.SourceDrift(); rep.Deleted != 0 || rep.Truncated != 0 {
+		t.Fatalf("expected no drift on intact corpus, got %+v", rep)
+	}
+
+	// Locate the two files under the project dir and mutate them.
+	var delPath, truncPath string
+	projDir := filepath.Join(dir, "proj")
+	entries, _ := os.ReadDir(projDir)
+	for _, e := range entries {
+		p := filepath.Join(projDir, e.Name())
+		switch {
+		case strings.Contains(p, "sess-del"):
+			delPath = p
+		case strings.Contains(p, "sess-trunc"):
+			truncPath = p
+		}
+	}
+	if delPath == "" || truncPath == "" {
+		t.Fatalf("could not locate ingested files in %s: %v", projDir, entries)
+	}
+
+	if err := os.Remove(delPath); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.Truncate(truncPath, 1); err != nil { // shrink below the ingested offset
+		t.Fatalf("truncate: %v", err)
+	}
+
+	rep := s.SourceDrift()
+	if rep.Deleted != 1 {
+		t.Errorf("expected 1 deleted, got %d (%+v)", rep.Deleted, rep)
+	}
+	if rep.Truncated != 1 {
+		t.Errorf("expected 1 truncated, got %d (%+v)", rep.Truncated, rep)
+	}
+}
+
+// TestSourceDriftRewrite verifies the fingerprint cursor (🎯T68.6
+// gate 1 second half): a source overwritten in place at the same byte
+// count is detected as "rewritten" once the mtime moves past the
+// recorded value.
+func TestSourceDriftRewrite(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-rew", []map[string]any{
+		msg("user", "original content here yes", now.Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+	if rep := s.SourceDrift(); rep.Rewritten != 0 {
+		t.Fatalf("expected no drift right after ingest, got %+v", rep)
+	}
+
+	// Locate the file the ingester wrote.
+	projDir := filepath.Join(dir, "p")
+	entries, _ := os.ReadDir(projDir)
+	var path string
+	for _, e := range entries {
+		p := filepath.Join(projDir, e.Name())
+		if strings.Contains(p, "sess-rew") {
+			path = p
+			break
+		}
+	}
+	if path == "" {
+		t.Fatalf("could not locate ingested file in %s", projDir)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	size := info.Size()
+
+	// Overwrite with same-size different content, then push mtime
+	// forward so the comparison against recorded_mtime sees movement
+	// even on coarse-resolution filesystems.
+	repl := make([]byte, size)
+	for i := range repl {
+		repl[i] = 'x'
+	}
+	if err := os.WriteFile(path, repl, 0o644); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	future := time.Now().Add(2 * time.Second).UTC()
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	rep := s.SourceDrift()
+	if rep.Deleted != 0 || rep.Truncated != 0 {
+		t.Errorf("expected only rewritten drift, got %+v", rep)
+	}
+	if rep.Rewritten != 1 {
+		t.Errorf("expected rewritten=1, got %d (%+v)", rep.Rewritten, rep)
+	}
+}
+
+// TestReconcileSourceState verifies the Law-2 reconciler tags
+// session_meta with the current source state without removing rows,
+// and is idempotent within a status class.
+func TestReconcileSourceState(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	writeJSONL(t, dir, "proj", "sess-del", []map[string]any{
+		msg("user", "to be deleted", now.Format(time.RFC3339)),
+	})
+	writeJSONL(t, dir, "proj", "sess-trunc", []map[string]any{
+		msg("user", "to be truncated one", now.Format(time.RFC3339)),
+		msg("assistant", "to be truncated two", now.Add(time.Second).Format(time.RFC3339)),
+	})
+	writeJSONL(t, dir, "proj", "sess-keep", []map[string]any{
+		msg("user", "intact", now.Format(time.RFC3339)),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Find and mutate the source files.
+	projDir := filepath.Join(dir, "proj")
+	entries, _ := os.ReadDir(projDir)
+	for _, e := range entries {
+		p := filepath.Join(projDir, e.Name())
+		switch {
+		case strings.Contains(p, "sess-del"):
+			if err := os.Remove(p); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+		case strings.Contains(p, "sess-trunc"):
+			if err := os.Truncate(p, 1); err != nil {
+				t.Fatalf("truncate: %v", err)
+			}
+		}
+	}
+
+	tagged, err := s.ReconcileSourceState(now)
+	if err != nil {
+		t.Fatalf("ReconcileSourceState: %v", err)
+	}
+	if tagged != 2 {
+		t.Errorf("expected 2 sessions tagged (deleted + truncated), got %d", tagged)
+	}
+
+	check := func(sessionID, wantClass string) {
+		var status string
+		err := s.db.QueryRow(
+			`SELECT source_status FROM session_meta WHERE session_id = ?`,
+			sessionID).Scan(&status)
+		if err == sql.ErrNoRows {
+			status = "live" // no row → ingest never wrote metadata; effectively live
+		} else if err != nil {
+			t.Fatalf("read session_meta for %s: %v", sessionID, err)
+		}
+		if sourceStatusClass(status) != wantClass {
+			t.Errorf("session %s: status class %q, want %q (full status=%q)",
+				sessionID, sourceStatusClass(status), wantClass, status)
+		}
+	}
+	check("sess-del", "deleted_at")
+	check("sess-trunc", "truncated_at")
+	check("sess-keep", "live")
+
+	// Idempotent within class: a second pass with the same state must
+	// tag zero sessions (no re-write of timestamps).
+	if tagged2, err := s.ReconcileSourceState(now.Add(time.Minute)); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	} else if tagged2 != 0 {
+		t.Errorf("expected idempotent second pass (0 updates), got %d", tagged2)
+	}
+
+	// Content rows survive: the deleted session's entries/messages are
+	// retained under the durable-tier model. Spot-check the messages
+	// table is non-empty for the deleted session.
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE session_id = ?`, "sess-del").Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count == 0 {
+		t.Errorf("deleted session's content rows must be retained (Law 1: content is durable)")
+	}
+}

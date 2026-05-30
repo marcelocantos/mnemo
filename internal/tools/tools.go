@@ -48,18 +48,19 @@ type CompactorHealthReporter interface {
 // compact.HealthSnapshot field-for-field; duplicated here to keep
 // the tools→compact import direction clean.
 type CompactorHealth struct {
-	LastScanAt       time.Time
-	LastScanCount    int
-	LastTickAt       time.Time
-	LastTickOutcome  string
-	InFlightSession  string
-	Counts           map[string]int64
-	ScanInterval     time.Duration
-	IdleTimeout      time.Duration
-	RecencyWindow    time.Duration
-	TickTimeout      time.Duration
-	MinDeltaMessages int
-	MaxTokenRatio    float64
+	LastScanAt            time.Time
+	LastScanCount         int
+	Backlog               int
+	LastTickAt            time.Time
+	LastTickOutcome       string
+	InFlightSession       string
+	Counts                map[string]int64
+	ScanInterval          time.Duration
+	IdleTimeout           time.Duration
+	TickTimeout           time.Duration
+	MinDeltaMessages      int
+	MaxCompactionsPerScan int
+	MaxTokenRatio         float64
 }
 
 // ConfigReport mirrors registry.ReloadReport without importing the
@@ -610,13 +611,38 @@ Vault must be configured via vault_path in ~/.mnemo/config.json.`),
     nothing_to_compact, budget_exceeded, failed, timeout, skipped_self).
   - In-flight session ID, if a tick is currently running.
   - Lifetime counts of each tick outcome since the daemon started.
-  - Configuration in effect: scan interval, idle timeout, recency
-    window, per-tick timeout, minimum delta-messages trigger, and
-    the configured max token-budget ratio.
+  - Configuration in effect: scan interval, idle timeout, per-tick
+    timeout, minimum delta-messages trigger, per-scan compaction cap,
+    and the configured max token-budget ratio.
+  - Backlog: the count of owed-but-uncompacted sessions (the gap to
+    the compactor's fixed point).
 
 Use this to answer "is the compactor working?" without grepping the
 daemon log. A LastScanAt that is older than ScanInterval × 2 is the
 clearest "watcher is wedged" signal.`),
+		),
+		mcp.NewTool("mnemo_divergence",
+			mcp.WithDescription(`Report, per derived data stream, the gap between desired and actual state — how far each stream is from its convergence fixed point (🎯T68.4).
+
+For each stream returns: whether a gap metric is known, the gap (in the stream's unit; 0 = converged), when it last reconciled, and a note. Streams with a cheap metric today: compactions (owed-but-uncompacted sessions), transcript_index (un-ingested transcript bytes), and the repo-level document streams (docs:* — files on disk not yet indexed). Streams not yet instrumented (images, vault, github_mirrors) report known=false rather than a fabricated number; each becomes known as its reconciler slice lands.
+
+Use this to see what derived state is stale and by how much — the single surface for "is anything behind?" across the data plane.`),
+		),
+		mcp.NewTool("mnemo_source_drift",
+			mcp.WithDescription(`Report indexed transcript sources that have been pruned or truncated out from under the index (🎯T68.6).
+
+Returns counts of "deleted" (the source .jsonl no longer exists) and "truncated" (its current size is below the ingested offset — pruned or rewritten shorter), plus example paths. Under mnemo's durable-tier model this is NOT an error: Claude Code prunes transcripts, and the index is the authoritative durable copy of that content. This surface exists so you can see how much indexed content no longer has a live source — informational, not a reconcile gap.`),
+		),
+		mcp.NewTool("mnemo_vault_gc",
+			mcp.WithDescription(`Inspect (and optionally clean up) vault GC orphans (🎯T68.6).
+
+Two orphan classes are reported, both via exact set-difference over the vault_outputs manifest:
+  - manifest_path_missing: manifest rows whose note_path is not on disk anymore (the user or another process removed the file). With confirm=true, the GC removes these manifest rows (no filesystem action).
+  - disk_not_in_manifest: *.md files under the vault with no manifest entry. INFORMATIONAL ONLY in this version — the tool reports them but never deletes them (user content lives here; deletion needs higher-level policy + below-fence checks).
+
+Dry-run by default. Setting confirm=true is required to act on manifest_path_missing.`),
+			mcp.WithString("vault_path", mcp.Required(), mcp.Description("Absolute path to the vault root.")),
+			mcp.WithBoolean("confirm", mcp.Description("If true, remove manifest rows for manifest_path_missing orphans. Default false (dry-run; reports candidates only).")),
 		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
@@ -749,6 +775,12 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultStatus(h.cfgCtl)
 	case "mnemo_compactor_status":
 		return ch.compactorStatus(h.resolveCompactor)
+	case "mnemo_divergence":
+		return ch.divergence()
+	case "mnemo_source_drift":
+		return ch.sourceDrift()
+	case "mnemo_vault_gc":
+		return ch.vaultGC(args)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	default:
@@ -2320,6 +2352,7 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 
 	fmt.Fprintf(&b, "  last_scan_at:        %s\n", formatAge(hs.LastScanAt))
 	fmt.Fprintf(&b, "  last_scan_count:     %d\n", hs.LastScanCount)
+	fmt.Fprintf(&b, "  backlog:             %d (owed-but-uncompacted sessions)\n", hs.Backlog)
 	fmt.Fprintf(&b, "  last_tick_at:        %s\n", formatAge(hs.LastTickAt))
 	if hs.LastTickOutcome != "" {
 		fmt.Fprintf(&b, "  last_tick_outcome:   %s\n", hs.LastTickOutcome)
@@ -2337,12 +2370,12 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	}
 
 	b.WriteString("\nConfiguration:\n")
-	fmt.Fprintf(&b, "  scan_interval:       %s\n", hs.ScanInterval)
-	fmt.Fprintf(&b, "  idle_timeout:        %s\n", hs.IdleTimeout)
-	fmt.Fprintf(&b, "  recency_window:      %s\n", hs.RecencyWindow)
-	fmt.Fprintf(&b, "  tick_timeout:        %s\n", hs.TickTimeout)
-	fmt.Fprintf(&b, "  min_delta_messages:  %d\n", hs.MinDeltaMessages)
-	fmt.Fprintf(&b, "  max_token_ratio:     %.2f\n", hs.MaxTokenRatio)
+	fmt.Fprintf(&b, "  scan_interval:           %s\n", hs.ScanInterval)
+	fmt.Fprintf(&b, "  idle_timeout:            %s\n", hs.IdleTimeout)
+	fmt.Fprintf(&b, "  tick_timeout:            %s\n", hs.TickTimeout)
+	fmt.Fprintf(&b, "  min_delta_messages:      %d\n", hs.MinDeltaMessages)
+	fmt.Fprintf(&b, "  max_compactions_per_scan: %d\n", hs.MaxCompactionsPerScan)
+	fmt.Fprintf(&b, "  max_token_ratio:         %.2f\n", hs.MaxTokenRatio)
 
 	// Health heuristic: if the watcher hasn't scanned in more than
 	// 2x its configured interval, something is wrong. Surface it.
@@ -2354,6 +2387,134 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 		}
 	}
 
+	return b.String(), false, nil
+}
+
+// divergence implements mnemo_divergence (🎯T68.4): a uniform
+// per-stream actual-vs-desired gap report across the derived data
+// plane. Streams without a cheap gap metric are shown as "unknown"
+// rather than a fabricated number.
+func (h *callHandler) divergence() (string, bool, error) {
+	rows := h.mem.StreamDivergences()
+
+	var b strings.Builder
+	b.WriteString("Derived-stream divergence (gap to fixed point):\n\n")
+	if len(rows) == 0 {
+		b.WriteString("  (no streams reported)\n")
+		return b.String(), false, nil
+	}
+
+	converged := 0
+	for _, d := range rows {
+		if !d.Known {
+			fmt.Fprintf(&b, "  %-22s unknown — %s\n", d.Stream+":", d.Note)
+			continue
+		}
+		if d.Gap == 0 {
+			converged++
+		}
+		last := d.LastReconciled
+		if last == "" {
+			last = "never"
+		}
+		fmt.Fprintf(&b, "  %-22s gap=%d %s (last reconciled: %s)\n",
+			d.Stream+":", d.Gap, d.Unit, last)
+		if d.Note != "" {
+			fmt.Fprintf(&b, "  %-22s   %s\n", "", d.Note)
+		}
+	}
+	fmt.Fprintf(&b, "\n%d stream(s) reported; %d converged (gap=0).\n", len(rows), converged)
+	return b.String(), false, nil
+}
+
+// sourceDrift implements mnemo_source_drift (🎯T68.6): a read-only
+// report of indexed transcript sources pruned/truncated out from under
+// the index. Informational under the durable-tier model — the index
+// retains the content.
+func (h *callHandler) sourceDrift() (string, bool, error) {
+	rep := h.mem.SourceDrift()
+
+	var b strings.Builder
+	b.WriteString("Source drift (indexed transcripts whose source is gone or shrank):\n\n")
+	fmt.Fprintf(&b, "  deleted:    %d (source .jsonl no longer exists)\n", rep.Deleted)
+	fmt.Fprintf(&b, "  truncated:  %d (current size below ingested offset)\n", rep.Truncated)
+	fmt.Fprintf(&b, "  rewritten:  %d (same size, mtime moved — in-place edit)\n", rep.Rewritten)
+	if rep.Deleted == 0 && rep.Truncated == 0 && rep.Rewritten == 0 {
+		b.WriteString("\nNo drift — every indexed source is still present and intact.\n")
+		return b.String(), false, nil
+	}
+	b.WriteString("\nThe index retains this content (durable tier); this is informational, not a reconcile gap.\n")
+	if len(rep.Examples) > 0 {
+		b.WriteString("\nExamples:\n")
+		for _, e := range rep.Examples {
+			fmt.Fprintf(&b, "  %-10s offset=%d size=%d  %s\n", e.Kind+":", e.Offset, e.Size, e.Path)
+		}
+	}
+	return b.String(), false, nil
+}
+
+// vaultGC implements mnemo_vault_gc (🎯T68.6): inspect orphans and
+// optionally clean up manifest rows whose file is gone. Never deletes
+// files on disk — that path needs higher-level policy and is not in
+// this version.
+func (h *callHandler) vaultGC(args map[string]any) (string, bool, error) {
+	vaultPath, _ := args["vault_path"].(string)
+	if vaultPath == "" {
+		return "", false, fmt.Errorf("vault_path is required")
+	}
+	confirm, _ := args["confirm"].(bool)
+
+	rep, err := h.mem.ScanVaultOrphans(vaultPath)
+	if err != nil {
+		return "", false, err
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Vault GC scan (%s):\n\n", vaultPath)
+	fmt.Fprintf(&b, "  manifest_path_missing: %d (manifest rows whose file is gone)\n",
+		len(rep.ManifestPathMissing))
+	fmt.Fprintf(&b, "  disk_not_in_manifest:  %d (*.md files with no manifest entry — informational only)\n",
+		len(rep.DiskNotInManifest))
+
+	if len(rep.ManifestPathMissing) > 0 {
+		b.WriteString("\nManifest rows pointing at missing files:\n")
+		for i, m := range rep.ManifestPathMissing {
+			if i >= 20 {
+				fmt.Fprintf(&b, "  … and %d more\n", len(rep.ManifestPathMissing)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  %s [%s/%s]\n", m.NotePath, m.EntityKind, m.EntityID)
+		}
+	}
+	if len(rep.DiskNotInManifest) > 0 {
+		b.WriteString("\nDisk files with no manifest entry (informational — never auto-deleted):\n")
+		for i, p := range rep.DiskNotInManifest {
+			if i >= 20 {
+				fmt.Fprintf(&b, "  … and %d more\n", len(rep.DiskNotInManifest)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  %s\n", p)
+		}
+	}
+
+	if !confirm {
+		if len(rep.ManifestPathMissing) > 0 {
+			b.WriteString("\n[dry-run] Re-run with confirm=true to remove the manifest rows above.\n")
+		} else {
+			b.WriteString("\nNothing to clean up.\n")
+		}
+		return b.String(), false, nil
+	}
+
+	removed := 0
+	for _, m := range rep.ManifestPathMissing {
+		if err := h.mem.RemoveVaultManifestRow(m.NotePath); err != nil {
+			fmt.Fprintf(&b, "\n⚠ failed to remove manifest row for %s: %v", m.NotePath, err)
+			continue
+		}
+		removed++
+	}
+	fmt.Fprintf(&b, "\nRemoved %d manifest row(s). Disk side untouched.\n", removed)
 	return b.String(), false, nil
 }
 

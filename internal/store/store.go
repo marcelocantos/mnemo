@@ -48,6 +48,12 @@ type Store struct {
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
 
+	// vaultPath is the configured vault root, mirrored from
+	// registry/config (🎯T68.6) so the vault divergence gatherer and
+	// the vault GC can find it without re-reading config. "" when the
+	// user has not configured a vault. Guarded by mu.
+	vaultPath string
+
 	rwmu sync.RWMutex // protects db access: writers (ingest), readers (queries)
 
 	// workspaceRoots is the set of filesystem roots under which repo-level
@@ -2472,29 +2478,6 @@ type ghRunJSON struct {
 	URL          string `json:"url"`
 }
 
-// PollCI fetches recent CI runs from GitHub Actions for all repos seen in session_meta
-// and upserts them into ci_runs. Failed runs have their logs indexed.
-// Silently skips if gh is not installed.
-func (s *Store) PollCI() error {
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		// gh not installed — skip silently.
-		return nil
-	}
-
-	repos, err := s.ciRepos()
-	if err != nil {
-		return fmt.Errorf("ciRepos: %w", err)
-	}
-
-	for _, repo := range repos {
-		if err := s.pollCIForRepo(ghPath, repo); err != nil {
-			slog.Warn("CI poll failed", "repo", repo, "err", err)
-		}
-	}
-	return nil
-}
-
 // pollCIForRepo fetches and upserts CI runs for a single repo.
 //
 // 🎯T67: the gh subprocess calls (both `gh run list` and the per-
@@ -2710,12 +2693,11 @@ func (s *Store) IngestAll() error {
 	// happens separately in the background worker started by StartImageDescriber.
 	backfillImages(s)
 
-	// Index git commit history from all known repos.
-	backfillGitCommits(s)
-
-	// Index GitHub PRs and issues from all known repos.
-	// Runs in a goroutine so it doesn't block startup (API calls are slow).
-	go backfillGitHubActivity(s)
+	// Git commits and GitHub PRs/issues are no longer backfilled at
+	// boot: the "commits" and "github" mirror streams are
+	// divergence-driven (🎯T68.5). On a fresh start each repo's cursor
+	// is missing → reconciled on the first mirror-reconcile tick,
+	// equivalent to the old boot backfill but self-healing afterwards.
 
 	// FTS5 optimize (segment merging) is skipped intentionally.
 	// On a fresh 577k-message database it takes 10+ minutes of solid
@@ -2876,8 +2858,13 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic)
 		}
 
-		// Update ingest offset.
-		ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", pf.path, pf.newOffset)
+		// Update ingest offset + fingerprint (🎯T68.6 same-size
+		// rewrite detection). recordedSize/Mtime is nullable; an
+		// os.Stat error just records NULL — detection falls back to
+		// offset-vs-size on the next pass.
+		recSize, recMtime := statFingerprint(pf.path)
+		ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+			VALUES (?, ?, ?, ?)`, pf.path, pf.newOffset, recSize, recMtime)
 		s.mu.Lock()
 		s.offsets[pf.path] = pf.newOffset
 		s.mu.Unlock()
@@ -5051,6 +5038,55 @@ func (s *Store) ReadSession(sessionID string, role string, offset int, limit int
 	return results, nil
 }
 
+// ReadSessionAfter returns substantive (non-noise) messages for a
+// session whose messages.id is strictly greater than afterID, ordered
+// ascending and capped at limit (default 500). It is the cursor-based
+// read the compactor uses to advance through a session window by
+// window (🎯T68.2): unlike ReadSession's positional offset, passing
+// the previous compaction's to-cursor as afterID yields the *next*
+// span, so a session longer than one window fully converges across
+// successive ticks instead of stalling on its first 500 messages.
+//
+// afterID is a messages.id (the value stored in compactions.entry_id_to
+// — see the Compaction type for the key-space note). is_noise rows are
+// excluded in SQL so the result matches the owed-predicate in
+// SelectCompactionCandidates exactly: owed ⟺ this returns ≥1 row.
+func (s *Store) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]SessionMessage, error) {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+
+	if limit <= 0 {
+		limit = 500
+	}
+
+	resolvedID, err := s.resolveSessionID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, role, text, timestamp, is_noise FROM messages
+		WHERE session_id = ? AND id > ? AND is_noise = 0
+		ORDER BY id ASC
+		LIMIT ?`, resolvedID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SessionMessage
+	for rows.Next() {
+		var m SessionMessage
+		var noise int
+		if err := rows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp, &noise); err != nil {
+			continue
+		}
+		m.IsNoise = noise != 0
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
 // resolveSessionID resolves a full or prefix session ID to an exact session ID.
 func (s *Store) resolveSessionID(id string) (string, error) {
 	// Try exact match first (session_summary has one row per session).
@@ -5682,7 +5718,9 @@ func (s *Store) ingestFile(path string) error {
 			if time.Since(lockAcquired) >= yieldInterval {
 				// Commit current transaction with offset update.
 				curOffset, _ := f.Seek(0, 1)
-				ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, curOffset)
+				recSize, recMtime := statFingerprint(path)
+				ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+					VALUES (?, ?, ?, ?)`, path, curOffset, recSize, recMtime)
 
 				ws.Close()
 				if err := ws.tx.Commit(); err != nil {
@@ -5723,7 +5761,9 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	newOffset, _ := f.Seek(0, 1)
-	ws.tx.Exec("INSERT OR REPLACE INTO ingest_state (path, offset) VALUES (?, ?)", path, newOffset)
+	recSize, recMtime := statFingerprint(path)
+	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+		VALUES (?, ?, ?, ?)`, path, newOffset, recSize, recMtime)
 
 	ws.Close()
 	if err := ws.tx.Commit(); err != nil {
@@ -6466,27 +6506,6 @@ func (s *Store) SearchGitHubActivity(query string, repo string, state string, au
 	return results, nil
 }
 
-// PollGitHubActivity fetches recent PRs and issues for all known repos.
-// Silently skips if gh is not installed.
-func (s *Store) PollGitHubActivity() error {
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		return nil // gh not installed
-	}
-
-	repos, err := s.ciRepos()
-	if err != nil {
-		return fmt.Errorf("ciRepos: %w", err)
-	}
-
-	for _, repo := range repos {
-		if err := s.pollGitHubForRepo(ghPath, repo); err != nil {
-			slog.Warn("GitHub activity poll failed", "repo", repo, "err", err)
-		}
-	}
-	return nil
-}
-
 // pollGitHubForRepo fetches and upserts PRs and issues for a single repo.
 func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
 	// Find the most recent updated_at for incremental fetches.
@@ -6612,30 +6631,6 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 		}
 	}
 	return nil
-}
-
-// backfillGitHubActivity polls PRs and issues for all known repos at startup.
-// Designed to run in a goroutine — does not block ingest.
-func backfillGitHubActivity(s *Store) {
-	ghPath, err := exec.LookPath("gh")
-	if err != nil {
-		slog.Info("gh not found; skipping GitHub activity backfill")
-		return
-	}
-
-	repos, err := s.ciRepos()
-	if err != nil {
-		slog.Warn("backfillGitHubActivity: ciRepos failed", "err", err)
-		return
-	}
-
-	slog.Info("backfilling GitHub activity", "repos", len(repos))
-	for _, repo := range repos {
-		if err := s.pollGitHubForRepo(ghPath, repo); err != nil {
-			slog.Warn("GitHub backfill failed", "repo", repo, "err", err)
-		}
-	}
-	slog.Info("GitHub activity backfill complete", "repos", len(repos))
 }
 
 // backfillDecisions runs detectDecisions for all ingested sessions
@@ -6839,35 +6834,6 @@ func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) i
 		return 0
 	}
 	return count
-}
-
-// backfillGitCommits indexes git commit history for all known repos.
-// For repos already partially indexed, it does an incremental fetch.
-// For new repos, it fetches the last 365 days.
-func backfillGitCommits(s *Store) {
-	roots := s.knownRepoRoots()
-	if len(roots) == 0 {
-		return
-	}
-
-	totalNew := 0
-	for _, rr := range roots {
-		// Look up the most recent commit already indexed for this repo.
-		var lastDate string
-		s.db.QueryRow(
-			`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`,
-			rr.repo,
-		).Scan(&lastDate) //nolint:errcheck
-
-		// For incremental runs, pass the last indexed date.
-		// For initial backfill, pass empty (ingestGitCommits will use 365 days ago).
-		n := ingestGitCommits(s.db, rr.root, rr.repo, lastDate)
-		totalNew += n
-	}
-
-	if totalNew > 0 {
-		slog.Info("backfilled git commits", "new_commits", totalNew)
-	}
 }
 
 // --- Image indexing ---

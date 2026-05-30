@@ -183,7 +183,16 @@ func (f *fakeBackend) ReworkHistory(targetID string, repo string, limit int) ([]
 	panic("unexpected ReworkHistory call")
 }
 
-func (f *fakeBackend) DBPath() string { return "" }
+func (f *fakeBackend) DBPath() string                              { return "" }
+func (f *fakeBackend) StreamDivergences() []store.StreamDivergence { return nil }
+func (f *fakeBackend) SourceDrift() store.SourceDriftReport        { return store.SourceDriftReport{} }
+func (f *fakeBackend) RecordVaultOutput(notePath, entityKind, entityID, contentHash string, writtenAt time.Time) error {
+	return nil
+}
+func (f *fakeBackend) ScanVaultOrphans(vaultPath string) (store.VaultOrphans, error) {
+	return store.VaultOrphans{}, nil
+}
+func (f *fakeBackend) RemoveVaultManifestRow(notePath string) error { return nil }
 
 // newTestHandler returns a Handler and ServeMux wired up with a fakeBackend.
 func newTestHandler(fb *fakeBackend) (*Handler, *http.ServeMux) {

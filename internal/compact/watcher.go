@@ -41,15 +41,6 @@ type WatcherConfig struct {
 	// minutes.
 	IdleTimeout time.Duration
 
-	// RecencyWindow caps how stale a session's last_msg may be and
-	// still be considered at all. Sessions whose latest message is
-	// older than (now - RecencyWindow) are dropped, regardless of
-	// trigger. Default: 24 hours — wide enough that an "idle for a
-	// few hours" session still gets compacted via trigger B, but
-	// narrow enough that long-dead sessions don't keep flowing
-	// through the SQL.
-	RecencyWindow time.Duration
-
 	// TickTimeout caps wall-clock time for a single compactor.Compact
 	// call. A stuck claudia subprocess, runaway query, or lock
 	// contention that exceeds the timeout cancels the tick and the
@@ -61,6 +52,17 @@ type WatcherConfig struct {
 	// MaxCandidates caps the number of sessions returned by one
 	// scan, sorted most-recently-active first. Default: 100.
 	MaxCandidates int
+
+	// MaxCompactionsPerScan bounds how many *successful* compactions
+	// (real LLM calls) one scan performs before stopping early and
+	// leaving the rest of the backlog for the next scan (🎯T68.1).
+	// Cheap no-op ticks (nothing-to-compact, budget-exceeded,
+	// skipped-self) do not count against it. Because candidates are
+	// ordered most-recently-active first, live sessions are always
+	// serviced before the cap is hit, so draining a large historical
+	// backlog never starves current work or blows the LLM budget in a
+	// single scan. Default: 20.
+	MaxCompactionsPerScan int
 }
 
 func (c *WatcherConfig) scanInterval() time.Duration {
@@ -84,11 +86,11 @@ func (c *WatcherConfig) idleTimeout() time.Duration {
 	return 15 * time.Minute
 }
 
-func (c *WatcherConfig) recencyWindow() time.Duration {
-	if c.RecencyWindow > 0 {
-		return c.RecencyWindow
+func (c *WatcherConfig) maxCompactionsPerScan() int {
+	if c.MaxCompactionsPerScan > 0 {
+		return c.MaxCompactionsPerScan
 	}
-	return 24 * time.Hour
+	return 20
 }
 
 func (c *WatcherConfig) tickTimeout() time.Duration {
@@ -113,20 +115,21 @@ func (c *WatcherConfig) maxCandidates() int {
 // attribution and is exposed via the CompactionCandidate already
 // filled by the store.
 type storeSource interface {
-	// SelectCompactionCandidates returns sessions worth a tick under
-	// the 🎯T67 dual-trigger model. See store.SelectCompactionCandidates
-	// for the full semantics; in summary, a session qualifies when
-	// last_msg is within recencyCutoff AND it has new substantive
-	// messages since the latest compaction AND either delta >=
-	// minDeltaMsgs OR last_msg <= idleCutoff. maxBudgetRatio
-	// pre-filters budget-exhausted sessions.
+	// SelectCompactionCandidates returns the sessions owed a
+	// compaction under the convergence predicate (🎯T68.1) plus the
+	// total backlog (owed count before the limit). See
+	// store.SelectCompactionCandidates for the full semantics; in
+	// summary, a session is owed when it has new substantive messages
+	// since the latest compaction AND either delta >= minDeltaMsgs OR
+	// last_msg <= idleCutoff. There is no recency floor — recency is
+	// the ORDER BY priority only. maxBudgetRatio pre-filters
+	// budget-exhausted sessions.
 	SelectCompactionCandidates(
 		minDeltaMsgs int,
 		idleCutoff time.Time,
-		recencyCutoff time.Time,
 		maxBudgetRatio float64,
 		limit int,
-	) ([]store.CompactionCandidate, error)
+	) ([]store.CompactionCandidate, int, error)
 	// SessionCWD returns the cwd recorded for a session, used by
 	// loadTargetContext to find a bullseye.yaml alongside the
 	// session's working tree. Empty if unknown.
@@ -154,6 +157,7 @@ type Watcher struct {
 
 	mu              sync.Mutex
 	lastN           int       // candidates returned by the last scan
+	lastBacklog     int       // owed sessions before the per-scan limit (gap to fixed point)
 	lastScanAt      time.Time // wall clock of the last scan return
 	lastTickAt      time.Time // wall clock of the last tick completion
 	lastTickOutcome tickOutcome
@@ -182,18 +186,19 @@ func NewWatcher(src storeSource, c *Compactor, cfg WatcherConfig, excludeCWD str
 // outcome, what is it doing right now?" without grepping the daemon
 // log.
 type HealthSnapshot struct {
-	LastScanAt       time.Time
-	LastScanCount    int
-	LastTickAt       time.Time
-	LastTickOutcome  string
-	InFlightSession  string
-	Counts           map[string]int64
-	ScanInterval     time.Duration
-	IdleTimeout      time.Duration
-	RecencyWindow    time.Duration
-	TickTimeout      time.Duration
-	MinDeltaMessages int
-	MaxTokenRatio    float64
+	LastScanAt            time.Time
+	LastScanCount         int
+	Backlog               int // owed-but-uncompacted sessions at last scan (gap to fixed point)
+	LastTickAt            time.Time
+	LastTickOutcome       string
+	InFlightSession       string
+	Counts                map[string]int64
+	ScanInterval          time.Duration
+	IdleTimeout           time.Duration
+	TickTimeout           time.Duration
+	MinDeltaMessages      int
+	MaxCompactionsPerScan int
+	MaxTokenRatio         float64
 }
 
 // Health returns a snapshot of the watcher's runtime state.
@@ -205,18 +210,19 @@ func (w *Watcher) Health() HealthSnapshot {
 		counts[string(k)] = v
 	}
 	return HealthSnapshot{
-		LastScanAt:       w.lastScanAt,
-		LastScanCount:    w.lastN,
-		LastTickAt:       w.lastTickAt,
-		LastTickOutcome:  string(w.lastTickOutcome),
-		InFlightSession:  w.inFlightSession,
-		Counts:           counts,
-		ScanInterval:     w.cfg.scanInterval(),
-		IdleTimeout:      w.cfg.idleTimeout(),
-		RecencyWindow:    w.cfg.recencyWindow(),
-		TickTimeout:      w.cfg.tickTimeout(),
-		MinDeltaMessages: w.cfg.minDeltaMessages(),
-		MaxTokenRatio:    w.compactor.MaxTokenRatio(),
+		LastScanAt:            w.lastScanAt,
+		LastScanCount:         w.lastN,
+		Backlog:               w.lastBacklog,
+		LastTickAt:            w.lastTickAt,
+		LastTickOutcome:       string(w.lastTickOutcome),
+		InFlightSession:       w.inFlightSession,
+		Counts:                counts,
+		ScanInterval:          w.cfg.scanInterval(),
+		IdleTimeout:           w.cfg.idleTimeout(),
+		TickTimeout:           w.cfg.tickTimeout(),
+		MinDeltaMessages:      w.cfg.minDeltaMessages(),
+		MaxCompactionsPerScan: w.cfg.maxCompactionsPerScan(),
+		MaxTokenRatio:         w.compactor.MaxTokenRatio(),
 	}
 }
 
@@ -248,11 +254,9 @@ func (w *Watcher) LastScanCount() int {
 func (w *Watcher) scan(ctx context.Context) {
 	now := time.Now()
 	idleCutoff := now.Add(-w.cfg.idleTimeout())
-	recencyCutoff := now.Add(-w.cfg.recencyWindow())
-	cands, err := w.src.SelectCompactionCandidates(
+	cands, backlog, err := w.src.SelectCompactionCandidates(
 		w.cfg.minDeltaMessages(),
 		idleCutoff,
-		recencyCutoff,
 		w.compactor.MaxTokenRatio(),
 		w.cfg.maxCandidates(),
 	)
@@ -262,9 +266,18 @@ func (w *Watcher) scan(ctx context.Context) {
 	}
 	w.mu.Lock()
 	w.lastN = len(cands)
+	w.lastBacklog = backlog
 	w.lastScanAt = time.Now()
 	w.mu.Unlock()
 
+	// Per-scan compaction cap (🎯T68.1): bound the number of real
+	// compactions one scan performs so draining a large historical
+	// backlog never starves live sessions (which sort first) or
+	// exhausts the LLM budget in a single pass. Cheap no-op outcomes
+	// (nothing/budget/skipped) do not count. The remainder is left for
+	// the next scan; the cap is logged, never a silent truncation.
+	perScanCap := w.cfg.maxCompactionsPerScan()
+	compacted := 0
 	for _, c := range cands {
 		if ctx.Err() != nil {
 			return
@@ -276,7 +289,16 @@ func (w *Watcher) scan(ctx context.Context) {
 				"outcome", string(outcomeSkippedSelf))
 			continue
 		}
-		w.tick(ctx, c)
+		if w.tick(ctx, c) == outcomeCompacted {
+			compacted++
+			if compacted >= perScanCap {
+				slog.Info("compact: per-scan cap reached; deferring backlog to next scan",
+					"compacted", compacted,
+					"backlog", backlog,
+					"max_per_scan", perScanCap)
+				return
+			}
+		}
 	}
 }
 
@@ -324,8 +346,9 @@ func (w *Watcher) markInFlight(sessionID string) {
 // graph from cwd to anchor the summariser prompt. A tick that
 // exceeds w.cfg.TickTimeout is cancelled and recorded as
 // outcomeTimeout — the watcher proceeds to the next candidate rather
-// than wedging on a single stuck call.
-func (w *Watcher) tick(ctx context.Context, c store.CompactionCandidate) {
+// than wedging on a single stuck call. Returns the outcome so the
+// scan loop can count successful compactions against the per-scan cap.
+func (w *Watcher) tick(ctx context.Context, c store.CompactionCandidate) tickOutcome {
 	w.markInFlight(c.SessionID)
 
 	tickCtx, cancel := context.WithTimeout(ctx, w.cfg.tickTimeout())
@@ -362,6 +385,7 @@ func (w *Watcher) tick(ctx context.Context, c store.CompactionCandidate) {
 	}
 	args = append(args, extra...)
 	slog.Log(ctx, level, "compact: tick", args...)
+	return outcome
 }
 
 func (w *Watcher) runTick(ctx context.Context, c store.CompactionCandidate, tc *TargetContext) (tickOutcome, []any) {

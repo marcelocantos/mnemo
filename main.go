@@ -66,7 +66,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.44.0"
+	version              = "0.45.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 )
@@ -716,18 +716,19 @@ type compactorAdapter struct {
 func (a compactorAdapter) Health() tools.CompactorHealth {
 	hs := a.w.Health()
 	return tools.CompactorHealth{
-		LastScanAt:       hs.LastScanAt,
-		LastScanCount:    hs.LastScanCount,
-		LastTickAt:       hs.LastTickAt,
-		LastTickOutcome:  hs.LastTickOutcome,
-		InFlightSession:  hs.InFlightSession,
-		Counts:           hs.Counts,
-		ScanInterval:     hs.ScanInterval,
-		IdleTimeout:      hs.IdleTimeout,
-		RecencyWindow:    hs.RecencyWindow,
-		TickTimeout:      hs.TickTimeout,
-		MinDeltaMessages: hs.MinDeltaMessages,
-		MaxTokenRatio:    hs.MaxTokenRatio,
+		LastScanAt:            hs.LastScanAt,
+		LastScanCount:         hs.LastScanCount,
+		Backlog:               hs.Backlog,
+		LastTickAt:            hs.LastTickAt,
+		LastTickOutcome:       hs.LastTickOutcome,
+		InFlightSession:       hs.InFlightSession,
+		Counts:                hs.Counts,
+		ScanInterval:          hs.ScanInterval,
+		IdleTimeout:           hs.IdleTimeout,
+		TickTimeout:           hs.TickTimeout,
+		MinDeltaMessages:      hs.MinDeltaMessages,
+		MaxCompactionsPerScan: hs.MaxCompactionsPerScan,
+		MaxTokenRatio:         hs.MaxTokenRatio,
 	}
 }
 
