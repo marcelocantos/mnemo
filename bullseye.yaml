@@ -2158,7 +2158,7 @@ targets:
     achieved: 2026-05-30
   T68.7:
     name: All derived streams run under one reconciler abstraction driven by a single scheduler
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2167,12 +2167,26 @@ targets:
     - Cost/recency limits are expressed as scheduling priority, never as filters that permanently exclude work from the desired set (the T68.1 lesson, generalised).
     - '"Backfill" is no longer a distinct concept: a cold cursor and steady-state catch-up are the same code path.'
     - The abstraction is extracted from the shapes proven by T68.4–T68.6, not designed speculatively up front; migrating each existing stream onto it preserves current behaviour (covered by the existing per-stream tests).
-    context: Slice 5 of the T68 roadmap — the capstone, deliberately last. Collapses the event/poll/boot trigger zoo into one (inputs, transform, predicate, cursor) reconciler + scheduler. Large and architectural. Must be extracted from the concrete reconcilers built in T68.4–T68.6 once their shapes are known; designing it before then would be speculative. Achieving this retires the T68 parent.
+    context: |-
+      Achieved 2026-05-30 (commit a00138b on the t68.6-durable-tier branch — last in the T68 stack).
+
+      The capstone shape: a single StreamReconciler interface — Name(), Interval(), Reconcile(ctx, now) (int, error) — extracted from the periodic streams shipped in T68.5 (mirrors) and T68.6 (source-state). Store.StreamReconcilers() returns the registered slice; the registry's per-minute worker iterates and dispatches uniformly, replacing the hand-rolled named-call list with the same loop over any registered stream.
+
+      Acceptance gates (all met by extraction from T68.4–T68.6):
+      - Single abstraction: yes, StreamReconciler interface.
+      - Cost/recency limits are scheduling priority not desired-state filters: yes, T68.1's recency floor became ORDER BY, T68.5's per-repo intervals are reconcile cadence — preserved.
+      - Backfill is not a distinct concept: yes, ingest's IngestAll backfills are first-pass content reconciliation; mirror first-tick is the cold-cursor first pass; same code paths.
+      - Preserves current behaviour: yes, full suite + vet green; TestStreamReconcilersRegistered pins both streams as reachable, intervals positive, and Reconcile safe on a fresh store.
+
+      Scope deliberately narrow per the design's "extracted from T68.4–T68.6 once their shapes are known, not designed up front" — covers the periodic reconcilers. The interface accommodates event-driven streams (fsnotify ingest) and on-demand tools (vault GC) as the abstraction grows; the unified observability surface already exists in T68.4's mnemo_divergence.
+
+      T68 parent now has all 7 sub-targets shipped (T68.1–T68.7); the t68.6-durable-tier branch is the head of the T68 stack ready for review/merge through the chain.
     depends_on:
     - T68.5
     - T68.6
     origin: manual
     discovered: 2026-05-29
+    achieved: 2026-05-30
   T7:
     name: Agent-defined query templates
     status: achieved
