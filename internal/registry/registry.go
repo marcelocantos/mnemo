@@ -321,18 +321,16 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		defer ticker.Stop()
 		for {
 			now := time.Now()
-			if n, err := e.store.ReconcileStaleMirrors(now); err != nil {
-				logger.Warn("mirror reconcile failed", "err", err)
-			} else if n > 0 {
-				logger.Info("mirror: reconciled stale streams", "count", n)
-			}
-			// 🎯T68.6 Law 2: state-convergence sweep. Tags
-			// session_meta.source_status for sessions whose source has
-			// drifted (deleted / truncated). Never removes rows.
-			if n, err := e.store.ReconcileSourceState(now); err != nil {
-				logger.Warn("source-state reconcile failed", "err", err)
-			} else if n > 0 {
-				logger.Info("source-state: tagged sessions", "count", n)
+			// 🎯T68.7 capstone: drive every registered periodic stream
+			// through the StreamReconciler abstraction. Adding a new
+			// stream is one entry in Store.StreamReconcilers(); this
+			// loop stays the same.
+			for _, sr := range e.store.StreamReconcilers() {
+				if n, err := sr.Reconcile(r.baseCtx, now); err != nil {
+					logger.Warn("reconcile failed", "stream", sr.Name(), "err", err)
+				} else if n > 0 {
+					logger.Info("reconciled", "stream", sr.Name(), "count", n)
+				}
 			}
 			select {
 			case <-r.baseCtx.Done():
