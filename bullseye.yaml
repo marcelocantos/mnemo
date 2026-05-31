@@ -2224,7 +2224,7 @@ targets:
     achieved: 2026-04-13
   T70:
     name: Compactor candidate-selection completes in &lt;500ms and long reads never block writes
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2235,9 +2235,10 @@ targets:
     context: An ad-hoc test on 2026-05-30 measured SelectCompactionCandidates at ~30 minutes against a 7641-session / 594K-assistant-entry DB. The query plan was scanning idx_entries_type (594K rows) per session, doing ~4.5B row reads per scan. The scan also holds rwmu.RLock; every writer in store/ acquires rwmu.Lock, so transcript ingest, memory/skill/plan/target ingest, etc. were all structurally blocked for the duration of every scan. The daemon symptom was 99% CPU and a growing compactor backlog (7,529 entries observed). An ad-hoc partial covering index brought the scan to 142ms (38,000× speedup). This target captures both the immediate fix and the structural cleanup that prevents the failure mode from recurring.
     origin: manual
     discovered: 2026-05-31
+    achieved: 2026-05-31
   T70.1:
     name: Partial covering index on entries(session_id, input_tokens, output_tokens) WHERE type='assistant'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2247,9 +2248,10 @@ targets:
     context: 'The SUM(input_tokens + output_tokens) FROM entries WHERE session_id = ? AND type = ''assistant'' subquery in SelectCompactionCandidates previously used idx_entries_type, scanning ~594K rows per call. A partial covering index reduces it to an indexed range scan with the summed columns inline (594K leaf rows, one fence-band per session). Ad-hoc validation on 2026-05-30: full candidate query went from ~30 min to 142ms after adding this index. Schema-policy compliant (additive index).'
     origin: manual
     discovered: 2026-05-31
+    achieved: 2026-05-31
   T70.2:
     name: Store uses separate read and single-writer SQLite pools; rwmu no longer serialises DB access
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2260,9 +2262,10 @@ targets:
     context: The current Go-level rwmu was acting as an application-level DB serialiser, but SQLite WAL handles read/write concurrency natively, and SetMaxOpenConns(1) on a dedicated writer pool serialises writers efficiently via the database/sql connection-request queue (no SQLITE_BUSY in normal operation). The current design forces writers to wait behind unrelated long reads — exactly the failure mode the index regression exposed. busy_timeout=5000 is a defensive backstop for the rare cross-process case (e.g., sqlite3 CLI or backup tools).
     origin: manual
     discovered: 2026-05-31
+    achieved: 2026-05-31
   T70.3:
     name: In-memory Store state is protected by per-concern mutexes scoped to their data
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2275,9 +2278,10 @@ targets:
     - T70.2
     origin: manual
     discovered: 2026-05-31
+    achieved: 2026-05-31
   T70.4:
     name: Every compactor scan tick emits a structured log line with elapsed time
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2288,6 +2292,7 @@ targets:
     context: 'The scan that ran for ~30 minutes per tick was invisible to logs — only per-compaction outcomes (compact: tick outcome=compacted ...) were logged. A scan-level elapsed measurement would have flagged the regression the day it appeared. Independent of T70.1/T70.2/T70.3 — a cheap observability hardening that should ship regardless of whether the structural fixes happen on the same timeline.'
     origin: manual
     discovered: 2026-05-31
+    achieved: 2026-05-31
   T8:
     name: sqldeep integration
     status: achieved
