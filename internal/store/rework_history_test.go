@@ -153,7 +153,7 @@ func TestReworkHistoryRepoFilter(t *testing.T) {
 	// Insert session_meta rows so the repo filter has data to match.
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := s.db.Exec(q, args...); err != nil {
+		if _, err := s.writeDB.Exec(q, args...); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}

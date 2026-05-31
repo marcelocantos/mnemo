@@ -130,8 +130,6 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 		mi = &MnemoIgnore{}
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	vaultRepo := filepath.Base(vaultPath)
 	indexed, skipped, removed := 0, 0, 0
@@ -143,7 +141,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 	// pruned — they're handed over to delete(stale, path) via the
 	// inWalkedTree check below.
 	stale := map[string]bool{}
-	if rows, err := s.db.Query(
+	if rows, err := s.readDB.Query(
 		"SELECT file_path FROM docs WHERE kind = 'vault'",
 	); err == nil {
 		for rows.Next() {
@@ -196,7 +194,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 
 			if human == "" {
 				// No human content: remove any previously indexed row.
-				if res, err := s.db.Exec(
+				if res, err := s.writeDB.Exec(
 					"DELETE FROM docs WHERE file_path = ? AND kind = 'vault'", path,
 				); err == nil {
 					if n, _ := res.RowsAffected(); n > 0 {
@@ -210,7 +208,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 			// (e.g. a synthesis doc indexed via IngestDocs), leave it alone —
 			// vault must never clobber a more authoritative doc kind.
 			var existingKind, existingHash string
-			_ = s.db.QueryRow(
+			_ = s.readDB.QueryRow(
 				"SELECT kind, content_hash FROM docs WHERE file_path = ?", path,
 			).Scan(&existingKind, &existingHash)
 			if existingKind != "" && existingKind != "vault" {
@@ -230,7 +228,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 			}
 			now := time.Now().Format(time.RFC3339)
 
-			_, err = s.db.Exec(`
+			_, err = s.writeDB.Exec(`
 				INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
 					size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
 				VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '')
@@ -282,7 +280,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 			// File still on disk; out-of-scope rows kept as-is.
 			continue
 		}
-		if _, err := s.db.Exec(
+		if _, err := s.writeDB.Exec(
 			"DELETE FROM docs WHERE file_path = ? AND kind = 'vault'", p,
 		); err == nil {
 			removed++

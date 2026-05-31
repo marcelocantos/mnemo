@@ -51,9 +51,7 @@ func HashVaultContent(content string) string {
 // just wrote. Idempotent: rewriting the same path updates
 // content_hash and written_at.
 func (s *Store) RecordVaultOutput(notePath, entityKind, entityID, contentHash string, writtenAt time.Time) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO vault_outputs (note_path, entity_kind, entity_id, content_hash, written_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(note_path) DO UPDATE SET
@@ -142,9 +140,7 @@ func (s *Store) VaultOrphanBacklog(vaultPath string) int {
 }
 
 func (s *Store) listVaultManifest() ([]VaultOutput, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(
+	rows, err := s.readDB.Query(
 		`SELECT note_path, entity_kind, entity_id, content_hash, written_at FROM vault_outputs`)
 	if err != nil {
 		return nil, fmt.Errorf("query vault_outputs: %w", err)
@@ -182,8 +178,6 @@ func (s *Store) getVaultPath() string {
 // the manifest entry has nothing to point at). Never touches the
 // filesystem — that's the caller's responsibility for disk orphans.
 func (s *Store) RemoveVaultManifestRow(notePath string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM vault_outputs WHERE note_path = ?`, notePath)
+	_, err := s.writeDB.Exec(`DELETE FROM vault_outputs WHERE note_path = ?`, notePath)
 	return err
 }

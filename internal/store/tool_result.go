@@ -17,9 +17,6 @@ type ToolResultPayload struct {
 // by session_id and tool_use_id. Supports session_id prefix matching.
 // truncateLen <= 0 means no truncation. offset skips the first N bytes.
 func (s *Store) ToolResult(sessionID, toolUseID string, offset, truncateLen int) (*ToolResultPayload, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
 	resolvedID, err := s.resolveSessionID(sessionID)
 	if err != nil {
 		return nil, err
@@ -27,7 +24,7 @@ func (s *Store) ToolResult(sessionID, toolUseID string, offset, truncateLen int)
 
 	var text string
 	var isError int
-	err = s.db.QueryRow(
+	err = s.readDB.QueryRow(
 		`SELECT text, is_error FROM messages
 		 WHERE session_id = ? AND content_type = 'tool_result' AND tool_use_id = ?
 		 LIMIT 1`,

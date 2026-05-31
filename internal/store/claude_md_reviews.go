@@ -93,9 +93,7 @@ type ClaudeMDReview struct {
 // nil if none exists. Used both by the trigger worker (to compute
 // entries-since-review) and by mnemo_repos to surface the verdict.
 func (s *Store) LatestReview(repo string) (*ClaudeMDReview, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	row := s.db.QueryRow(`
+	row := s.readDB.QueryRow(`
 		SELECT id, repo, reviewed_at, commit_id, summary,
 		       verdict, proposed_summary, proposed_claude_md
 		FROM claude_md_reviews
@@ -127,9 +125,6 @@ func (s *Store) LatestReview(repo string) (*ClaudeMDReview, error) {
 //
 // Empty since (zero time) counts ALL entries — the first-review case.
 func (s *Store) EntriesSinceForRepo(repo string, since time.Time) (int, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
 	pattern := "%" + repo + "%"
 	args := []any{pattern, pattern}
 	timeFilter := ""
@@ -149,7 +144,7 @@ func (s *Store) EntriesSinceForRepo(repo string, since time.Time) (int, error) {
 	`, timeFilter)
 
 	var n int
-	if err := s.db.QueryRow(q, args...).Scan(&n); err != nil {
+	if err := s.readDB.QueryRow(q, args...).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -160,9 +155,7 @@ func (s *Store) EntriesSinceForRepo(repo string, since time.Time) (int, error) {
 // reviewed_at) UNIQUE constraint prevents a clock-collision retry
 // from creating a duplicate row.
 func (s *Store) RecordReview(r ClaudeMDReview) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO claude_md_reviews
 			(repo, reviewed_at, commit_id, summary, verdict,
 			 proposed_summary, proposed_claude_md)
@@ -186,9 +179,7 @@ func nullableString(s string) any {
 // scripted setup) can prime the index without going through the
 // workspace scanner.
 func (s *Store) RecordClaudeConfig(repo, filePath, content string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO claude_configs (repo, file_path, content, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET

@@ -88,7 +88,7 @@ func (s *Store) StartImageOCR() {
 		return
 	}
 	slog.Info("starting OCR backfill", "backend", backend)
-	go processPendingOCR(s.db, backend)
+	go processPendingOCR(s.writeDB, backend)
 }
 
 // ocrOneImage runs OCR on a single newly-ingested image. Idempotent via

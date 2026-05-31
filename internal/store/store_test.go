@@ -451,7 +451,7 @@ func TestQuery(t *testing.T) {
 
 	// After a Query, subsequent writes via the normal store path
 	// must still work — query_only must not leak into the shared pool.
-	if _, err := s.db.Exec("CREATE TEMP TABLE _t (x INT)"); err != nil {
+	if _, err := s.writeDB.Exec("CREATE TEMP TABLE _t (x INT)"); err != nil {
 		t.Errorf("query_only leaked into shared connection: %v", err)
 	}
 }
@@ -1356,15 +1356,12 @@ security issues, and documentation gaps.`
 
 	s := newTestStore(t, projectDir)
 
-	// Directly ingest from the temp skills dir using ingestSkillFileLocked.
-	s.rwmu.Lock()
+	// Directly ingest from the temp skills dir using ingestSkillFile.
 	for _, name := range []string{"release.md", "audit-codebase.md"} {
-		if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, name)); err != nil {
-			s.rwmu.Unlock()
+		if err := s.ingestSkillFile(filepath.Join(skillsDir, name)); err != nil {
 			t.Fatalf("ingest skill %s: %v", name, err)
 		}
 	}
-	s.rwmu.Unlock()
 
 	// Search for "release" should find the release skill.
 	results, err := s.SearchSkills("release", 10)
@@ -1424,12 +1421,9 @@ Updated content.
 	if err := os.WriteFile(filepath.Join(skillsDir, "release.md"), []byte(updatedContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s.rwmu.Lock()
-	if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, "release.md")); err != nil {
-		s.rwmu.Unlock()
+	if err := s.ingestSkillFile(filepath.Join(skillsDir, "release.md")); err != nil {
 		t.Fatal(err)
 	}
-	s.rwmu.Unlock()
 
 	results, err = s.SearchSkills("signing", 10)
 	if err != nil {
@@ -1860,7 +1854,7 @@ func TestPlanIngest(t *testing.T) {
 	}
 
 	// Manually insert a session_meta row pointing at the repo.
-	if _, err := s.db.Exec(
+	if _, err := s.writeDB.Exec(
 		"INSERT OR IGNORE INTO session_meta (session_id, cwd) VALUES (?, ?)",
 		"sess-plan1", repoRoot,
 	); err != nil {
@@ -2083,8 +2077,8 @@ func TestIngestIdempotent(t *testing.T) {
 
 	// Count rows after first ingest.
 	var entriesAfterFirst, messagesAfterFirst int
-	s.db.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterFirst)
-	s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterFirst)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterFirst)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterFirst)
 
 	if entriesAfterFirst == 0 {
 		t.Fatal("expected entries after first ingest")
@@ -2098,7 +2092,7 @@ func TestIngestIdempotent(t *testing.T) {
 		delete(s.offsets, k)
 	}
 	s.mu.Unlock()
-	s.db.Exec("DELETE FROM ingest_state")
+	s.writeDB.Exec("DELETE FROM ingest_state")
 
 	// Second ingest of the same file.
 	if err := s.IngestAll(); err != nil {
@@ -2107,8 +2101,8 @@ func TestIngestIdempotent(t *testing.T) {
 
 	// Row counts must be identical — no duplicates introduced.
 	var entriesAfterSecond, messagesAfterSecond int
-	s.db.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterSecond)
-	s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterSecond)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterSecond)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterSecond)
 
 	if entriesAfterSecond != entriesAfterFirst {
 		t.Errorf("entries duplicated: first=%d second=%d", entriesAfterFirst, entriesAfterSecond)

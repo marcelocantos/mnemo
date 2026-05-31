@@ -54,9 +54,7 @@ type ingestCursor struct {
 // readIngestCursors snapshots ingest_state into an in-memory map for
 // drift detection. Cheap — one query, one pass.
 func (s *Store) readIngestCursors() map[string]ingestCursor {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(
+	rows, err := s.readDB.Query(
 		`SELECT path, offset, recorded_size, recorded_mtime FROM ingest_state`)
 	if err != nil {
 		return nil
@@ -190,12 +188,10 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 		return 0, nil
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	tagged := 0
 	for _, c := range candidates {
 		var current string
-		_ = s.db.QueryRow(
+		_ = s.readDB.QueryRow(
 			`SELECT source_status FROM session_meta WHERE session_id = ?`,
 			c.sessionID).Scan(&current)
 		if sourceStatusClass(current) == sourceStatusClass(c.status) {
@@ -206,7 +202,7 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 		// session. The row's other defaults ('' for repo/cwd/etc) are
 		// fine — they reflect "unknown" and are populated if ingest
 		// later sees the metadata.
-		if _, err := s.db.Exec(`
+		if _, err := s.writeDB.Exec(`
 			INSERT INTO session_meta (session_id, source_status, source_state_at)
 			VALUES (?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET

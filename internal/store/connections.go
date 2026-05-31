@@ -26,10 +26,8 @@ type DaemonConnection struct {
 // via INSERT OR IGNORE. Called lazily on the first tool call for a
 // given MCP session ID.
 func (s *Store) RecordConnectionOpen(connectionID string, pid int, acceptedAt time.Time) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	ts := acceptedAt.UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(`
+	if _, err := s.writeDB.Exec(`
 		INSERT OR IGNORE INTO daemon_connections
 			(connection_id, pid, accepted_at, last_seen_at)
 		VALUES (?, ?, ?, ?)
@@ -43,10 +41,8 @@ func (s *Store) RecordConnectionOpen(connectionID string, pid int, acceptedAt ti
 // callers are limited to daemon shutdown paths. The authoritative
 // reaper is the periodic sweeper in MarkStaleConnectionsClosed.
 func (s *Store) RecordConnectionClose(connectionID string, closedAt time.Time) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	ts := closedAt.UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(`
+	if _, err := s.writeDB.Exec(`
 		UPDATE daemon_connections
 		SET closed_at = ?, last_seen_at = ?
 		WHERE connection_id = ? AND closed_at IS NULL
@@ -64,11 +60,9 @@ func (s *Store) RecordConnectionClose(connectionID string, closedAt time.Time) {
 // bound the open-connection count against crashes, kill -9, and
 // network drops.
 func (s *Store) MarkStaleConnectionsClosed(threshold time.Duration, now time.Time) (int, error) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	cutoff := now.UTC().Add(-threshold).Format(time.RFC3339Nano)
 	nowTS := now.UTC().Format(time.RFC3339Nano)
-	res, err := s.db.Exec(`
+	res, err := s.writeDB.Exec(`
 		UPDATE daemon_connections
 		SET closed_at = ?
 		WHERE closed_at IS NULL AND last_seen_at < ?
@@ -95,10 +89,8 @@ func (s *Store) RecordConnectionSessionAt(connectionID, sessionID string, at tim
 	if connectionID == "" || sessionID == "" {
 		return
 	}
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	ts := at.UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(`
+	if _, err := s.writeDB.Exec(`
 		INSERT INTO connection_sessions
 			(connection_id, session_id, first_seen_at, last_seen_at)
 		VALUES (?, ?, ?, ?)
@@ -117,7 +109,7 @@ func (s *Store) RecordConnectionSessionAt(connectionID, sessionID string, at tim
 	// INSERT OR IGNORE makes this idempotent across repeat observations
 	// of the same binding.
 	var predecessorID, predLastSeen string
-	err := s.db.QueryRow(`
+	err := s.readDB.QueryRow(`
 		SELECT session_id, last_seen_at FROM connection_sessions
 		WHERE connection_id = ?
 		  AND session_id != ?
@@ -137,7 +129,7 @@ func (s *Store) RecordConnectionSessionAt(connectionID, sessionID string, at tim
 	if t, perr := time.Parse(time.RFC3339Nano, predLastSeen); perr == nil {
 		gapMs = at.UTC().Sub(t).Milliseconds()
 	}
-	if _, err := s.db.Exec(`
+	if _, err := s.writeDB.Exec(`
 		INSERT OR IGNORE INTO session_chains
 			(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
 		VALUES (?, ?, 'clear', ?, 'definitive', 'mcp_connection')
@@ -157,9 +149,7 @@ type ConnectionSession struct {
 // SessionsForConnection returns every session the connection has
 // observed, ordered by first_seen_at ascending (oldest first).
 func (s *Store) SessionsForConnection(connectionID string) ([]ConnectionSession, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT connection_id, session_id, first_seen_at, last_seen_at
 		FROM connection_sessions
 		WHERE connection_id = ?
@@ -201,14 +191,12 @@ func (s *Store) InferChainHeuristic(sessionID string, limit int) ([]ChainCandida
 	if limit <= 0 {
 		limit = 1
 	}
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	// First: does this session's first user message actually look
 	// like a /clear rollover? Non-rollover sessions have no inferred
 	// predecessor by design.
 	var firstText, firstTS string
-	err := s.db.QueryRow(`
+	err := s.readDB.QueryRow(`
 		SELECT m.text, m.timestamp
 		FROM messages m
 		WHERE m.session_id = ? AND m.role = 'user'
@@ -226,14 +214,14 @@ func (s *Store) InferChainHeuristic(sessionID string, limit int) ([]ChainCandida
 
 	// Scope to same cwd.
 	var cwd string
-	_ = s.db.QueryRow(`SELECT cwd FROM session_meta WHERE session_id = ?`, sessionID).Scan(&cwd)
+	_ = s.readDB.QueryRow(`SELECT cwd FROM session_meta WHERE session_id = ?`, sessionID).Scan(&cwd)
 	if cwd == "" {
 		return nil, nil
 	}
 
 	// Find most recent same-cwd sessions that ended before this one
 	// started. Ordered newest-first; the caller gets up to limit.
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT ss.session_id, ss.last_msg
 		FROM session_summary ss
 		JOIN session_meta sm ON sm.session_id = ss.session_id
@@ -286,10 +274,8 @@ func hasClearMarker(text string) bool {
 // client has opened an MCP session but not yet called a
 // session-resolving tool like mnemo_self).
 func (s *Store) CurrentSessionForConnection(connectionID string) (string, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	var sid string
-	err := s.db.QueryRow(`
+	err := s.readDB.QueryRow(`
 		SELECT session_id FROM connection_sessions
 		WHERE connection_id = ?
 		ORDER BY last_seen_at DESC, first_seen_at DESC
@@ -305,9 +291,7 @@ func (s *Store) CurrentSessionForConnection(connectionID string) (string, error)
 // observed the given session. Usually one, but ctrl-c + `claude
 // --continue` produces two rows (pre- and post-restart).
 func (s *Store) ConnectionsForSession(sessionID string) ([]ConnectionSession, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT connection_id, session_id, first_seen_at, last_seen_at
 		FROM connection_sessions
 		WHERE session_id = ?
@@ -342,9 +326,7 @@ func scanConnectionSessions(rows interface {
 // OpenConnections returns the MCP sessions the daemon currently
 // treats as live, ordered by acceptance time (oldest first).
 func (s *Store) OpenConnections() ([]DaemonConnection, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT connection_id, pid, accepted_at, last_seen_at, closed_at
 		FROM daemon_connections
 		WHERE closed_at IS NULL

@@ -49,7 +49,7 @@ func TestForwardPathOCR(t *testing.T) {
 	var text sql.NullString
 	var errCol sql.NullString
 	for time.Now().Before(deadline) {
-		err := s.db.QueryRow(`
+		err := s.writeDB.QueryRow(`
 			SELECT text, error FROM image_ocr
 			WHERE image_id = (SELECT id FROM images ORDER BY id DESC LIMIT 1)
 		`).Scan(&text, &errCol)

@@ -509,6 +509,8 @@ CREATE INDEX idx_docs_taxonomy ON docs(taxonomy) WHERE taxonomy != '';
 
 CREATE INDEX idx_entries_agent_id ON entries(agent_id) WHERE agent_id IS NOT NULL;
 
+CREATE INDEX idx_entries_assistant_tokens ON entries(session_id, input_tokens, output_tokens) WHERE type = 'assistant';
+
 CREATE INDEX idx_entries_data_hook_event ON entries(data_hook_event) WHERE data_hook_event IS NOT NULL;
 
 CREATE INDEX idx_entries_data_type ON entries(data_type) WHERE data_type IS NOT NULL;

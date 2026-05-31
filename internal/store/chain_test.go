@@ -37,7 +37,7 @@ func TestDefinitiveChainFromConnection(t *testing.T) {
 	}
 
 	var mechanism, confidence string
-	if err := s.db.QueryRow(
+	if err := s.writeDB.QueryRow(
 		"SELECT mechanism, confidence FROM session_chains WHERE successor_id = ?",
 		"sess-succ").Scan(&mechanism, &confidence); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestDefinitiveChainIdempotent(t *testing.T) {
 	s.RecordConnectionSessionAt("conn-A", "sess-succ", t0.Add(15*time.Minute))
 
 	var count int
-	if err := s.db.QueryRow(
+	if err := s.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM session_chains WHERE successor_id = ?",
 		"sess-succ").Scan(&count); err != nil {
 		t.Fatal(err)
@@ -175,7 +175,7 @@ func TestMultiConnectionSameSession(t *testing.T) {
 		t.Errorf("Predecessor(B): got %q, want A", pred)
 	}
 	var count int
-	s.db.QueryRow("SELECT COUNT(*) FROM session_chains WHERE successor_id = ?", "B").Scan(&count)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM session_chains WHERE successor_id = ?", "B").Scan(&count)
 	if count != 1 {
 		t.Errorf("expected 1 chain row for B, got %d", count)
 	}

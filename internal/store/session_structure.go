@@ -38,9 +38,6 @@ type SessionStructure struct {
 // by sessionID (exact or prefix). Counts are aggregated from the entries
 // and messages tables using SQLite JSON1 extraction.
 func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
 	resolvedID, err := s.resolveSessionID(sessionID)
 	if err != nil {
 		return nil, err
@@ -56,7 +53,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	}
 
 	// --- Entry type counts ---
-	entryRows, err := s.db.Query(`
+	entryRows, err := s.readDB.Query(`
 		SELECT type, COUNT(*) AS cnt
 		FROM entries
 		WHERE session_id = ?
@@ -81,7 +78,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	}
 
 	// --- Assistant stop_reason counts ---
-	stopRows, err := s.db.Query(`
+	stopRows, err := s.readDB.Query(`
 		SELECT COALESCE(stop_reason, '(null)') AS sr, COUNT(*) AS cnt
 		FROM entries
 		WHERE session_id = ? AND type = 'assistant'
@@ -106,7 +103,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 
 	// --- System subtype counts ---
 	// subtype is not a virtual column; extract directly from JSONB.
-	subtypeRows, err := s.db.Query(`
+	subtypeRows, err := s.readDB.Query(`
 		SELECT COALESCE(json_extract(raw, '$.subtype'), '(none)') AS st, COUNT(*) AS cnt
 		FROM entries
 		WHERE session_id = ? AND type = 'system'
@@ -130,7 +127,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	}
 
 	// --- Content-block kind counts (from messages table) ---
-	blockRows, err := s.db.Query(`
+	blockRows, err := s.readDB.Query(`
 		SELECT content_type, COUNT(*) AS cnt
 		FROM messages
 		WHERE session_id = ?
@@ -154,7 +151,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	}
 
 	// --- Tool name counts ---
-	toolRows, err := s.db.Query(`
+	toolRows, err := s.readDB.Query(`
 		SELECT tool_name, COUNT(*) AS cnt
 		FROM messages
 		WHERE session_id = ? AND content_type = 'tool_use' AND tool_name IS NOT NULL

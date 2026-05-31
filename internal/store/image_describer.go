@@ -98,7 +98,7 @@ func (s *Store) StartImageDescriber() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			drainDescriberQueue(s.db)
+			drainDescriberQueue(s.writeDB)
 		}()
 	}
 	go func() {

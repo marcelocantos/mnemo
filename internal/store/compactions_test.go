@@ -288,7 +288,7 @@ func TestSelectCompactionCandidatesDeltaTrigger(t *testing.T) {
 	// entry_id_to is a messages.id (🎯T68.3), so a span "covering
 	// everything" records MAX(id), not MAX(entry_id).
 	var maxMsgID int64
-	if err := s.db.QueryRow(`SELECT MAX(id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxMsgID); err != nil {
+	if err := s.writeDB.QueryRow(`SELECT MAX(id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxMsgID); err != nil {
 		t.Fatalf("max msg id: %v", err)
 	}
 	if _, err := s.PutCompaction(Compaction{
@@ -465,7 +465,7 @@ func TestChainCompactionsWalksChain(t *testing.T) {
 	// Manually wire a chain A -> B -> C (A oldest).
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := s.db.Exec(q, args...); err != nil {
+		if _, err := s.writeDB.Exec(q, args...); err != nil {
 			t.Fatal(err)
 		}
 	}

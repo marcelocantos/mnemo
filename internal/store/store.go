@@ -41,7 +41,8 @@ const NoncePrefix = "mnemo:self:"
 
 // Store is a searchable index of Claude Code transcripts.
 type Store struct {
-	db         *sql.DB
+	writeDB    *sql.DB // SetMaxOpenConns(1) — Go-pool serialises writers
+	readDB     *sql.DB // default pool — many concurrent readers
 	dbPath     string
 	projectDir string
 
@@ -54,11 +55,11 @@ type Store struct {
 	// user has not configured a vault. Guarded by mu.
 	vaultPath string
 
-	rwmu sync.RWMutex // protects db access: writers (ingest), readers (queries)
+	rootsMu sync.RWMutex // protects in-memory state: workspaceRoots, extraProjectDirs, synthesisRoots
 
 	// workspaceRoots is the set of filesystem roots under which repo-level
 	// streams discover repos. Mutated only via SetWorkspaceRoots, read
-	// under rwmu.RLock by the repoRoots walker.
+	// under rootsMu.RLock by the repoRoots walker.
 	workspaceRoots []string
 
 	// extraProjectDirs are additional Claude Code project directories
@@ -99,7 +100,7 @@ type Store struct {
 	// window before taking a snapshot. Tracked in-memory only — a
 	// daemon restart resets it to startup time, which is conservative
 	// (worker will wait the full quiescence period before its first
-	// backup attempt). Atomic so reads and writes don't need rwmu.
+	// backup attempt). Atomic so reads and writes don't need rootsMu.
 	lastWriteAt atomic.Int64
 }
 
@@ -133,8 +134,8 @@ func (s *Store) DBPath() string {
 // Store.New and before any Ingest* call. Tests inject a temp directory;
 // production loads from ~/.mnemo/config.json.
 func (s *Store) SetWorkspaceRoots(roots []string) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
 	// Copy to detach from caller slice.
 	if len(roots) == 0 {
 		s.workspaceRoots = nil
@@ -149,8 +150,8 @@ func (s *Store) SetWorkspaceRoots(roots []string) {
 // unavailable extras (e.g. an unmounted SMB share) are skipped with
 // a warn rather than failing. Call once after Store.New.
 func (s *Store) SetExtraProjectDirs(dirs []string) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
 	if len(dirs) == 0 {
 		s.extraProjectDirs = nil
 		return
@@ -164,8 +165,8 @@ func (s *Store) SetExtraProjectDirs(dirs []string) {
 // requirement, so they may point at non-repo planning spaces such as
 // ~/think. Call once after Store.New.
 func (s *Store) SetSynthesisRoots(roots []string) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
 	if len(roots) == 0 {
 		s.synthesisRoots = nil
 		return
@@ -177,8 +178,8 @@ func (s *Store) SetSynthesisRoots(roots []string) {
 // the primary projectDir followed by any extras configured via
 // SetExtraProjectDirs. The returned slice is a defensive copy.
 func (s *Store) projectDirs() []string {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
+	s.rootsMu.RLock()
+	defer s.rootsMu.RUnlock()
 	dirs := make([]string, 0, 1+len(s.extraProjectDirs))
 	dirs = append(dirs, s.projectDir)
 	dirs = append(dirs, s.extraProjectDirs...)
@@ -460,12 +461,14 @@ func relaxQuery(q string) string {
 	return strings.Join(words, " OR ")
 }
 
-func openDB(dbPath string) (*sql.DB, error) {
+func openDB(dbPath string, writer bool) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	if writer {
+		db.SetMaxOpenConns(1)
+	}
 	for _, pragma := range []string{
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA synchronous = NORMAL",
@@ -576,21 +579,27 @@ func New(dbPath, projectDir string) (*Store, error) {
 			"db", dbPath, "err", err)
 	}
 
-	db, err := openDB(dbPath)
+	writeDB, err := openDB(dbPath, true)
 	if err != nil {
+		return nil, err
+	}
+	readDB, err := openDB(dbPath, false)
+	if err != nil {
+		writeDB.Close()
 		return nil, err
 	}
 
 	// Backfill session_meta for sessions without metadata by
 	// re-reading the first entry of each JSONL file.
-	backfillSessionMeta(db, projectDir)
+	backfillSessionMeta(writeDB, projectDir)
 
 	n := runtime.NumCPU()
 	if n < 1 {
 		n = 1
 	}
 	s := &Store{
-		db:         db,
+		writeDB:    writeDB,
+		readDB:     readDB,
 		dbPath:     dbPath,
 		projectDir: projectDir,
 		offsets:    make(map[string]int64),
@@ -598,7 +607,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		exclusions: &exclusionRegistry{},
 	}
 
-	rows, err := db.Query("SELECT path, offset FROM ingest_state")
+	rows, err := readDB.Query("SELECT path, offset FROM ingest_state")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -614,7 +623,12 @@ func New(dbPath, projectDir string) (*Store, error) {
 
 // Close closes the store.
 func (s *Store) Close() error {
-	return s.db.Close()
+	rerr := s.readDB.Close()
+	werr := s.writeDB.Close()
+	if rerr != nil {
+		return rerr
+	}
+	return werr
 }
 
 // MemoryInfo holds a single memory record from the index.
@@ -631,8 +645,6 @@ type MemoryInfo struct {
 
 // IngestMemories scans all memory directories under projectDir and ingests them.
 func (s *Store) IngestMemories() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	memDirs, err := filepath.Glob(filepath.Join(s.projectDir, "*/memory"))
 	if err != nil {
@@ -647,7 +659,7 @@ func (s *Store) IngestMemories() error {
 		}
 		project := filepath.Base(filepath.Dir(dir))
 		for _, f := range files {
-			if err := s.ingestMemoryFileLocked(f, project); err != nil {
+			if err := s.ingestMemoryFileImpl(f, project); err != nil {
 				slog.Error("ingest memory failed", "file", f, "err", err)
 				continue
 			}
@@ -658,24 +670,22 @@ func (s *Store) IngestMemories() error {
 	return nil
 }
 
-// ingestMemoryFile ingests a single memory file (acquires write lock).
+// ingestMemoryFile ingests a single memory file.
 func (s *Store) ingestMemoryFile(path string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	// Derive project from path: .../projects/<project>/memory/<file>.md
 	dir := filepath.Dir(path)
 	project := filepath.Base(filepath.Dir(dir))
-	return s.ingestMemoryFileLocked(path, project)
+	return s.ingestMemoryFileImpl(path, project)
 }
 
-// ingestMemoryFileLocked ingests a single memory file (caller must hold rwmu write lock).
-func (s *Store) ingestMemoryFileLocked(path, project string) error {
+// ingestMemoryFileImpl ingests a single memory file by path and project name.
+func (s *Store) ingestMemoryFileImpl(path, project string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// File was deleted — remove from index.
-			s.db.Exec("DELETE FROM memories WHERE file_path = ?", path)
+			s.writeDB.Exec("DELETE FROM memories WHERE file_path = ?", path)
 			return nil
 		}
 		return err
@@ -691,7 +701,7 @@ func (s *Store) ingestMemoryFileLocked(path, project string) error {
 		body = content
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.writeDB.Exec(`
 		INSERT INTO memories (project, file_path, name, description, memory_type, content, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
@@ -736,17 +746,13 @@ func parseMemoryFrontmatter(content string) (name, description, memType, body st
 	return
 }
 
-// deleteMemoryFile removes a memory file from the index (acquires write lock).
+// deleteMemoryFile removes a memory file from the index.
 func (s *Store) deleteMemoryFile(path string) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	s.db.Exec("DELETE FROM memories WHERE file_path = ?", path)
+	s.writeDB.Exec("DELETE FROM memories WHERE file_path = ?", path)
 }
 
 // SearchMemories searches across all indexed memory files.
 func (s *Store) SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -809,7 +815,7 @@ func (s *Store) SearchMemories(query string, memType string, project string, lim
 }
 
 func (s *Store) queryMemories(q string, args ...any) ([]MemoryInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -833,8 +839,6 @@ func (s *Store) queryMemories(q string, args ...any) ([]MemoryInfo, error) {
 // of either the frontmatter name field or the file base name (without .md).
 // Returns nil without error when the project or memory is not found.
 func (s *Store) GetMemory(project, name string) (*MemoryInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if project == "" {
 		return nil, fmt.Errorf("project is required")
@@ -892,8 +896,6 @@ func (s *Store) IngestSkills() error {
 		return err
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	files, err := filepath.Glob(filepath.Join(dir, "*.md"))
 	if err != nil {
@@ -902,7 +904,7 @@ func (s *Store) IngestSkills() error {
 
 	count := 0
 	for _, f := range files {
-		if err := s.ingestSkillFileLocked(f); err != nil {
+		if err := s.ingestSkillFile(f); err != nil {
 			slog.Error("ingest skill failed", "file", f, "err", err)
 			continue
 		}
@@ -912,19 +914,12 @@ func (s *Store) IngestSkills() error {
 	return nil
 }
 
-// ingestSkillFile ingests a single skill file (acquires write lock).
+// ingestSkillFile ingests a single skill file.
 func (s *Store) ingestSkillFile(path string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	return s.ingestSkillFileLocked(path)
-}
-
-// ingestSkillFileLocked ingests a single skill file (caller must hold rwmu write lock).
-func (s *Store) ingestSkillFileLocked(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.db.Exec("DELETE FROM skills WHERE file_path = ?", path)
+			s.writeDB.Exec("DELETE FROM skills WHERE file_path = ?", path)
 			return nil
 		}
 		return err
@@ -953,7 +948,7 @@ func (s *Store) ingestSkillFileLocked(path string) error {
 	}
 
 	now := time.Now().Format(time.RFC3339)
-	_, err = s.db.Exec(`
+	_, err = s.writeDB.Exec(`
 		INSERT INTO skills (file_path, name, description, content, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
@@ -965,17 +960,13 @@ func (s *Store) ingestSkillFileLocked(path string) error {
 	return err
 }
 
-// deleteSkillFile removes a skill file from the index (acquires write lock).
+// deleteSkillFile removes a skill file from the index.
 func (s *Store) deleteSkillFile(path string) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	s.db.Exec("DELETE FROM skills WHERE file_path = ?", path)
+	s.writeDB.Exec("DELETE FROM skills WHERE file_path = ?", path)
 }
 
 // SearchSkills searches across all indexed skill files.
 func (s *Store) SearchSkills(query string, limit int) ([]SkillInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -995,7 +986,7 @@ func (s *Store) SearchSkills(query string, limit int) ([]SkillInfo, error) {
 }
 
 func (s *Store) querySkills(q string, args ...any) ([]SkillInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1025,8 +1016,6 @@ type ClaudeConfigInfo struct {
 // workspace roots (and session_meta) and ingests its CLAUDE.md file.
 // Also checks ~/.claude/CLAUDE.md and ~/CLAUDE.md.
 func (s *Store) IngestClaudeConfigs() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	roots := s.knownRepoRootsLocked()
 	indexed, onDisk := 0, 0
@@ -1036,7 +1025,7 @@ func (s *Store) IngestClaudeConfigs() error {
 			continue
 		}
 		onDisk++
-		if err := s.ingestClaudeConfigFileLocked(claudePath, rr.repo); err != nil && !os.IsNotExist(err) {
+		if err := s.ingestClaudeConfigFile(claudePath, rr.repo); err != nil && !os.IsNotExist(err) {
 			slog.Error("ingest claude config failed", "file", claudePath, "err", err)
 			continue
 		}
@@ -1053,7 +1042,7 @@ func (s *Store) IngestClaudeConfigs() error {
 				continue
 			}
 			onDisk++
-			if err := s.ingestClaudeConfigFileLocked(extra.path, extra.repo); err != nil && !os.IsNotExist(err) {
+			if err := s.ingestClaudeConfigFile(extra.path, extra.repo); err != nil && !os.IsNotExist(err) {
 				slog.Error("ingest claude config failed", "file", extra.path, "err", err)
 				continue
 			}
@@ -1061,7 +1050,7 @@ func (s *Store) IngestClaudeConfigs() error {
 		}
 	}
 
-	s.recordBackfillStatusLocked("claude_configs", indexed, onDisk)
+	s.recordBackfillStatus("claude_configs", indexed, onDisk)
 	slog.Info("ingested claude configs", "indexed", indexed, "on_disk", onDisk)
 	return nil
 }
@@ -1087,10 +1076,9 @@ type BackfillStatus struct {
 // Drift returns files_on_disk - files_indexed. Zero means full coverage.
 func (b BackfillStatus) Drift() int { return b.FilesOnDisk - b.FilesIndexed }
 
-// recordBackfillStatusLocked upserts a row into ingest_status. Caller
-// must hold s.rwmu.Lock.
-func (s *Store) recordBackfillStatusLocked(stream string, indexed, onDisk int) {
-	_, err := s.db.Exec(`
+// recordBackfillStatus upserts a row into ingest_status.
+func (s *Store) recordBackfillStatus(stream string, indexed, onDisk int) {
+	_, err := s.writeDB.Exec(`
 		INSERT INTO ingest_status (stream, last_backfill, files_indexed, files_on_disk)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(stream) DO UPDATE SET
@@ -1107,10 +1095,8 @@ func (s *Store) recordBackfillStatusLocked(stream string, indexed, onDisk int) {
 // repo-level stream, ordered by stream name. Streams that have never
 // run a backfill are omitted.
 func (s *Store) BackfillStatuses() []BackfillStatus {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT stream, last_backfill, files_indexed, files_on_disk
 		FROM ingest_status
 		ORDER BY stream
@@ -1142,14 +1128,13 @@ func (s *Store) BackfillStatuses() []BackfillStatus {
 // watchers) flows through here, so extending coverage cascades to
 // every stream at once.
 func (s *Store) knownRepoRoots() []repoRoot {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
+	s.rootsMu.RLock()
+	defer s.rootsMu.RUnlock()
 	return s.knownRepoRootsLocked()
 }
 
 // knownRepoRootsLocked is the shared implementation. Caller must hold
-// s.rwmu for read or write.
+// s.rootsMu for read or write.
 func (s *Store) knownRepoRootsLocked() []repoRoot {
 	seen := map[string]bool{}
 	var roots []repoRoot
@@ -1172,7 +1157,7 @@ func (s *Store) knownRepoRootsLocked() []repoRoot {
 
 	// 2. session_meta.cwd → findRepoRoot. Captures repos outside any
 	// configured workspace root (e.g., transient clones in /tmp).
-	rows, err := s.db.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
+	rows, err := s.readDB.Query("SELECT DISTINCT cwd FROM session_meta WHERE cwd != ''")
 	if err != nil {
 		return roots
 	}
@@ -1214,19 +1199,12 @@ func findRepoRoot(dir string) string {
 	return ""
 }
 
-// ingestClaudeConfigFile ingests a single CLAUDE.md file (acquires write lock).
+// ingestClaudeConfigFile ingests a single CLAUDE.md file.
 func (s *Store) ingestClaudeConfigFile(path, repo string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	return s.ingestClaudeConfigFileLocked(path, repo)
-}
-
-// ingestClaudeConfigFileLocked ingests a single CLAUDE.md file (caller must hold rwmu write lock).
-func (s *Store) ingestClaudeConfigFileLocked(path, repo string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.db.Exec("DELETE FROM claude_configs WHERE file_path = ?", path)
+			s.writeDB.Exec("DELETE FROM claude_configs WHERE file_path = ?", path)
 			return nil
 		}
 		return err
@@ -1235,7 +1213,7 @@ func (s *Store) ingestClaudeConfigFileLocked(path, repo string) error {
 	content := string(data)
 	now := time.Now().Format(time.RFC3339)
 
-	_, err = s.db.Exec(`
+	_, err = s.writeDB.Exec(`
 		INSERT INTO claude_configs (repo, file_path, content, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
@@ -1248,8 +1226,6 @@ func (s *Store) ingestClaudeConfigFileLocked(path, repo string) error {
 
 // SearchClaudeConfigs searches across all indexed CLAUDE.md files.
 func (s *Store) SearchClaudeConfigs(query string, repo string, limit int) ([]ClaudeConfigInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -1285,7 +1261,7 @@ func (s *Store) SearchClaudeConfigs(query string, repo string, limit int) ([]Cla
 }
 
 func (s *Store) queryClaudeConfigs(q string, args ...any) ([]ClaudeConfigInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1418,8 +1394,6 @@ func parseAuditLogEntries(content string) []AuditEntryInfo {
 // ingests any docs/audit-log.md files found. Audit logs change rarely so
 // startup-only ingest is sufficient; no file watcher is set up.
 func (s *Store) IngestAuditLogs() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	roots := s.knownRepoRootsLocked()
 	indexed, onDisk := 0, 0
@@ -1434,13 +1408,13 @@ func (s *Store) IngestAuditLogs() error {
 		// existing audit_entries schema uses "org/repo" rather than the
 		// bare basename that extractRepo returns.
 		repo := repoNameFromPath(rr.root)
-		if err := s.ingestAuditLogFileLocked(auditPath, repo); err != nil {
+		if err := s.ingestAuditLogFile(auditPath, repo); err != nil {
 			slog.Error("ingest audit log failed", "file", auditPath, "err", err)
 			continue
 		}
 		indexed++
 	}
-	s.recordBackfillStatusLocked("audit", indexed, onDisk)
+	s.recordBackfillStatus("audit", indexed, onDisk)
 	slog.Info("ingested audit logs", "indexed", indexed, "on_disk", onDisk)
 	return nil
 }
@@ -1465,19 +1439,12 @@ func repoNameFromPath(path string) string {
 	return path
 }
 
-// ingestAuditLogFile ingests a single audit log file (acquires write lock).
+// ingestAuditLogFile ingests a single audit log file.
 func (s *Store) ingestAuditLogFile(path, repo string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	return s.ingestAuditLogFileLocked(path, repo)
-}
-
-// ingestAuditLogFileLocked ingests a single audit log file (caller must hold rwmu write lock).
-func (s *Store) ingestAuditLogFileLocked(path, repo string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			_, _ = s.db.Exec("DELETE FROM audit_entries WHERE file_path = ?", path)
+			_, _ = s.writeDB.Exec("DELETE FROM audit_entries WHERE file_path = ?", path)
 			return nil
 		}
 		return err
@@ -1486,12 +1453,12 @@ func (s *Store) ingestAuditLogFileLocked(path, repo string) error {
 	entries := parseAuditLogEntries(string(data))
 
 	// Full replace: delete existing entries for this file, then insert fresh.
-	if _, err := s.db.Exec("DELETE FROM audit_entries WHERE file_path = ?", path); err != nil {
+	if _, err := s.writeDB.Exec("DELETE FROM audit_entries WHERE file_path = ?", path); err != nil {
 		return fmt.Errorf("delete old audit entries: %w", err)
 	}
 
 	for _, e := range entries {
-		_, err := s.db.Exec(`
+		_, err := s.writeDB.Exec(`
 			INSERT OR IGNORE INTO audit_entries (repo, file_path, date, skill, version, summary, raw_text)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
 		`, repo, path, e.Date, e.Skill, e.Version, e.Summary, e.RawText)
@@ -1504,8 +1471,6 @@ func (s *Store) ingestAuditLogFileLocked(path, repo string) error {
 
 // SearchAuditLogs searches across all indexed audit log entries.
 func (s *Store) SearchAuditLogs(query string, repo string, skill string, limit int) ([]AuditEntryInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -1549,7 +1514,7 @@ func (s *Store) SearchAuditLogs(query string, repo string, skill string, limit i
 }
 
 func (s *Store) queryAuditEntries(q string, args ...any) ([]AuditEntryInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1651,8 +1616,6 @@ func parseTargetsFile(repo, filePath string, data []byte) []TargetInfo {
 // roots (and session_meta) and ingests its docs/targets.md file. Runs
 // at startup; realtime updates flow through Watch().
 func (s *Store) IngestTargets() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	roots := s.knownRepoRootsLocked()
 	indexed, onDisk, targetCount := 0, 0, 0
@@ -1678,13 +1641,13 @@ func (s *Store) IngestTargets() error {
 		}
 
 		// Delete existing targets for this file and re-insert.
-		if _, err := s.db.Exec("DELETE FROM targets WHERE file_path = ?", targetsPath); err != nil {
+		if _, err := s.writeDB.Exec("DELETE FROM targets WHERE file_path = ?", targetsPath); err != nil {
 			slog.Warn("delete targets failed", "path", targetsPath, "err", err)
 			continue
 		}
 		inserted := false
 		for _, t := range parsed {
-			_, err := s.db.Exec(`
+			_, err := s.writeDB.Exec(`
 				INSERT INTO targets (repo, file_path, target_id, name, status, weight, description, raw_text)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(file_path, target_id) DO UPDATE SET
@@ -1706,7 +1669,7 @@ func (s *Store) IngestTargets() error {
 			indexed++
 		}
 	}
-	s.recordBackfillStatusLocked("targets", indexed, onDisk)
+	s.recordBackfillStatus("targets", indexed, onDisk)
 	slog.Info("ingested targets", "files", indexed, "on_disk", onDisk, "rows", targetCount)
 	return nil
 }
@@ -1716,9 +1679,7 @@ func (s *Store) ingestTargetFile(path, repo string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.rwmu.Lock()
-			defer s.rwmu.Unlock()
-			s.db.Exec("DELETE FROM targets WHERE file_path = ?", path)
+			s.writeDB.Exec("DELETE FROM targets WHERE file_path = ?", path)
 			return nil
 		}
 		return err
@@ -1726,14 +1687,12 @@ func (s *Store) ingestTargetFile(path, repo string) error {
 
 	parsed := parseTargetsFile(repo, path, data)
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
-	if _, err := s.db.Exec("DELETE FROM targets WHERE file_path = ?", path); err != nil {
+	if _, err := s.writeDB.Exec("DELETE FROM targets WHERE file_path = ?", path); err != nil {
 		return fmt.Errorf("delete targets: %w", err)
 	}
 	for _, t := range parsed {
-		if _, err := s.db.Exec(`
+		if _, err := s.writeDB.Exec(`
 			INSERT INTO targets (repo, file_path, target_id, name, status, weight, description, raw_text)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(file_path, target_id) DO UPDATE SET
@@ -1752,8 +1711,6 @@ func (s *Store) ingestTargetFile(path, repo string) error {
 
 // SearchTargets searches across indexed convergence targets.
 func (s *Store) SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -1798,7 +1755,7 @@ func (s *Store) SearchTargets(query string, repo string, status string, limit in
 }
 
 func (s *Store) queryTargets(q string, args ...any) ([]TargetInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1820,8 +1777,6 @@ func (s *Store) queryTargets(q string, args ...any) ([]TargetInfo, error) {
 // Plans change during active GSD work but are read-heavy, so startup-only
 // ingestion is sufficient — no realtime watch is registered.
 func (s *Store) IngestPlans() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	roots := s.knownRepoRootsLocked()
 	indexed, onDisk := 0, 0
@@ -1846,7 +1801,7 @@ func (s *Store) IngestPlans() error {
 				return nil
 			}
 			onDisk++
-			if err2 := s.ingestPlanFileLocked(path, repo, planningDir); err2 != nil {
+			if err2 := s.ingestPlanFile(path, repo, planningDir); err2 != nil {
 				slog.Error("ingest plan failed", "file", path, "err", err2)
 				return nil
 			}
@@ -1856,24 +1811,17 @@ func (s *Store) IngestPlans() error {
 			slog.Error("walk planning dir failed", "dir", planningDir, "err", err)
 		}
 	}
-	s.recordBackfillStatusLocked("plans", indexed, onDisk)
+	s.recordBackfillStatus("plans", indexed, onDisk)
 	slog.Info("ingested plans", "files", indexed, "on_disk", onDisk, "repos", reposWithPlans)
 	return nil
 }
 
-// ingestPlanFile ingests a single plan file (acquires write lock).
+// ingestPlanFile ingests a single plan file.
 func (s *Store) ingestPlanFile(path, repo, planningDir string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	return s.ingestPlanFileLocked(path, repo, planningDir)
-}
-
-// ingestPlanFileLocked ingests a single plan file (caller must hold rwmu write lock).
-func (s *Store) ingestPlanFileLocked(path, repo, planningDir string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.db.Exec("DELETE FROM plans WHERE file_path = ?", path)
+			s.writeDB.Exec("DELETE FROM plans WHERE file_path = ?", path)
 			return nil
 		}
 		return err
@@ -1890,7 +1838,7 @@ func (s *Store) ingestPlanFileLocked(path, repo, planningDir string) error {
 	phase := extractPlanPhase(rel)
 
 	now := time.Now().Format(time.RFC3339)
-	_, err = s.db.Exec(`
+	_, err = s.writeDB.Exec(`
 		INSERT INTO plans (repo, file_path, phase, content, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
@@ -1934,8 +1882,6 @@ func extractPlanPhase(rel string) string {
 
 // SearchPlans searches across all indexed plan files.
 func (s *Store) SearchPlans(query string, repo string, limit int) ([]PlanInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -1969,7 +1915,7 @@ func (s *Store) SearchPlans(query string, repo string, limit int) ([]PlanInfo, e
 }
 
 func (s *Store) queryPlans(q string, args ...any) ([]PlanInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1996,8 +1942,6 @@ type WhoRanResult struct {
 
 // WhoRan returns sessions and timestamps for Bash tool_use entries matching pattern.
 func (s *Store) WhoRan(pattern string, days int, repoFilter string, limit int) ([]WhoRanResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if days <= 0 {
 		days = 30
@@ -2022,7 +1966,7 @@ func (s *Store) WhoRan(pattern string, days int, repoFilter string, limit int) (
 	q += ` ORDER BY m.timestamp DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2079,8 +2023,6 @@ type DecisionInfo struct {
 
 // SearchDecisions searches the decisions table by keyword with optional repo and days filters.
 func (s *Store) SearchDecisions(query string, repo string, days int, limit int) ([]DecisionInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -2117,7 +2059,7 @@ func (s *Store) SearchDecisions(query string, repo string, days int, limit int) 
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2153,8 +2095,6 @@ type ReworkAttempt struct {
 // targets_active or targets_progressed. Optional repo filter is a substring
 // match against session_meta.repo.
 func (s *Store) ReworkHistory(targetID string, repo string, limit int) ([]ReworkAttempt, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -2178,7 +2118,7 @@ func (s *Store) ReworkHistory(targetID string, repo string, limit int) ([]Rework
 	q += ` ORDER BY c.generated_at DESC, c.id DESC LIMIT ?`
 	args = append(args, limit*5) // over-fetch to allow post-filter
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rework history query: %w", err)
 	}
@@ -2353,7 +2293,7 @@ func (s *Store) ciRepos() ([]string, error) {
 	var repos []string
 
 	// Workspace + session_meta union via the central choke point.
-	// knownRepoRoots acquires rwmu.RLock internally.
+	// knownRepoRoots acquires rootsMu.RLock to read workspaceRoots.
 	for _, rr := range s.knownRepoRoots() {
 		repo := extractRepo(rr.root)
 		if repo == "" || !strings.Contains(repo, "/") || seen[repo] {
@@ -2366,7 +2306,7 @@ func (s *Store) ciRepos() ([]string, error) {
 	// Fallback: session_meta.repo column may carry a normalised
 	// "org/repo" for repos outside any workspace root (e.g., clones in
 	// /tmp). Include anything we haven't already captured.
-	rows, err := s.db.Query(
+	rows, err := s.readDB.Query(
 		`SELECT DISTINCT repo FROM session_meta WHERE repo != '' AND repo LIKE '%/%'`,
 	)
 	if err != nil {
@@ -2388,8 +2328,6 @@ func (s *Store) ciRepos() ([]string, error) {
 
 // SearchCI searches CI runs with optional FTS query, repo filter, conclusion filter, and recency window.
 func (s *Store) SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -2447,7 +2385,7 @@ func (s *Store) SearchCI(query string, repo string, conclusion string, days int,
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2481,14 +2419,11 @@ type ghRunJSON struct {
 // pollCIForRepo fetches and upserts CI runs for a single repo.
 //
 // 🎯T67: the gh subprocess calls (both `gh run list` and the per-
-// failed-run `gh run view --log`) happen OUTSIDE the rwmu write lock.
-// Previously the function took the write lock before iterating runs
-// and called fetchRunLog inside the loop, so a poll cycle held the
-// write lock across many seconds of subprocess + HTTP latency per
-// repo. With ~11 'CI poll failed' messages per 5-min cycle, this
-// starved the compactor's RLock long enough to wedge its scan loop
-// for hours. Now logs are fetched first (no lock), then a short
-// upsert-only critical section completes per repo.
+// failed-run `gh run view --log`) happen before the DB upsert section.
+// Previously the function took a write lock before iterating runs
+// and called fetchRunLog inside the loop, holding the lock across
+// seconds of subprocess + HTTP latency per repo. Now logs are
+// fetched first, then a short upsert-only section completes per repo.
 func (s *Store) pollCIForRepo(ghPath, repo string) error {
 	out, err := exec.Command(ghPath, "run", "list",
 		"--repo", repo,
@@ -2515,11 +2450,9 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 		}
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	for i, run := range runs {
-		_, err := s.db.Exec(`
+		_, err := s.writeDB.Exec(`
 			INSERT INTO ci_runs (repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(run_id) DO UPDATE SET
@@ -2686,7 +2619,7 @@ func (s *Store) IngestAll() error {
 	// Detect decision pairs (proposal + confirmation) in sessions that
 	// haven't been scanned yet (e.g. sessions ingested before decisions
 	// table existed).
-	backfillDecisions(s.db)
+	backfillDecisions(s.writeDB)
 
 	// Extract and store images from all ingested entries and messages.
 	// Runs synchronously (fast — no API calls). Description generation
@@ -2751,14 +2684,12 @@ func (ws *writerState) Close() {
 
 // runWriter is the single-goroutine writer for the parallel ingest pipeline.
 // It consumes parsed files from the channel and inserts them in batched
-// transactions, yielding the write lock every 200ms for readers.
+// transactions with periodic commits.
 func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	const commitInterval = 200 * time.Millisecond
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
-	ws, err := newWriterState(s.db)
+	ws, err := newWriterState(s.writeDB)
 	if err != nil {
 		return err
 	}
@@ -2775,10 +2706,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 		if err := ws.tx.Commit(); err != nil {
 			return err
 		}
-		// Yield write lock for readers.
-		s.rwmu.Unlock()
-		s.rwmu.Lock()
-		ws, err = newWriterState(s.db)
+		ws, err = newWriterState(s.writeDB)
 		if err != nil {
 			return err
 		}
@@ -3183,8 +3111,6 @@ func (s *Store) Watch() error {
 // Search performs a full-text search and returns matching messages
 // with optional surrounding context messages.
 func (s *Store) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]SearchResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -3209,7 +3135,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	if fetchLimit < 200 {
 		fetchLimit = 200
 	}
-	ftsRows, err := s.db.Query(`
+	ftsRows, err := s.readDB.Query(`
 		SELECT rowid, rank FROM messages_fts
 		WHERE messages_fts MATCH ?
 		ORDER BY rank
@@ -3240,7 +3166,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 			break
 		}
 
-		row := s.db.QueryRow(`
+		row := s.readDB.QueryRow(`
 			SELECT m.id, m.session_id, m.project, m.role, m.text, m.timestamp
 			FROM messages m
 			WHERE m.id = ?
@@ -3255,7 +3181,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		// Apply session type filter.
 		if needSessionFilter {
 			var st string
-			err := s.db.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", r.SessionID).Scan(&st)
+			err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", r.SessionID).Scan(&st)
 			if err != nil || st != sessionType {
 				continue
 			}
@@ -3265,7 +3191,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		if needRepoFilter {
 			var count int
 			pattern := "%" + repoFilter + "%"
-			err := s.db.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", r.SessionID, pattern, pattern).Scan(&count)
+			err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", r.SessionID, pattern, pattern).Scan(&count)
 			if err != nil || count == 0 {
 				continue
 			}
@@ -3281,7 +3207,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	// Vault annotations live in the docs table (kind='vault') and are indexed
 	// alongside transcript messages so search surfaces both at once.
 	// repoFilter and sessionType are not applied — annotations are cross-repo.
-	vaultRows, vaultErr := s.db.Query(`
+	vaultRows, vaultErr := s.readDB.Query(`
 		SELECT d.id, d.file_path, d.content, f.rank
 		FROM docs d
 		JOIN docs_fts f ON f.rowid = d.id
@@ -3415,7 +3341,7 @@ func (s *Store) fetchContext(sessionID string, messageID int, count int, before,
 			WHERE session_id = ? AND id > ?` + filter + ` ORDER BY id ASC LIMIT ?`
 	}
 
-	rows, err := s.db.Query(q, sessionID, messageID, count)
+	rows, err := s.readDB.Query(q, sessionID, messageID, count)
 	if err != nil {
 		return nil
 	}
@@ -3444,8 +3370,6 @@ func (s *Store) fetchContext(sessionID string, messageID int, count int, before,
 
 // ListSessions returns session summaries, filtered and sorted.
 func (s *Store) ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]SessionInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if sessionType == "" {
 		sessionType = "interactive"
@@ -3486,7 +3410,7 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 		ORDER BY last_msg DESC
 		LIMIT ?`
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3507,10 +3431,8 @@ func (s *Store) ListSessions(sessionType string, minMessages int, limit int, pro
 
 // Stats returns detailed index statistics broken down by session type.
 func (s *Store) Stats() (*StatsResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT
 			session_type,
 			COUNT(*) AS sessions,
@@ -3538,8 +3460,8 @@ func (s *Store) Stats() (*StatsResult, error) {
 		result.ByType = append(result.ByType, ts)
 	}
 
-	// Per-stream backfill status — inlined while rwmu.RLock is held.
-	if strRows, strErr := s.db.Query(`
+	// Per-stream backfill status.
+	if strRows, strErr := s.readDB.Query(`
 		SELECT stream, last_backfill, files_indexed, files_on_disk
 		FROM ingest_status
 		ORDER BY stream
@@ -3560,8 +3482,6 @@ func (s *Store) Stats() (*StatsResult, error) {
 // The optional filter supports bare names ("mnemo"), org/repo paths
 // ("marcelocantos/mnemo"), and globs ("marcelocantos/sql*").
 func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	// Convert glob-style filter to SQL LIKE pattern.
 	var where string
@@ -3624,7 +3544,7 @@ func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
 		ORDER BY base.last_activity DESC
 	`
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3656,9 +3576,7 @@ func (s *Store) ListRepos(filter string) ([]RepoInfo, error) {
 	// LatestReview is a single indexed lookup. Failures here are
 	// non-fatal: a repo without a review just gets empty fields.
 	for i := range results {
-		s.rwmu.RUnlock()
 		rev, err := s.LatestReview(results[i].Repo)
-		s.rwmu.RLock()
 		if err != nil || rev == nil {
 			continue
 		}
@@ -3701,8 +3619,6 @@ func extractClaudeMDSummary(content string) string {
 // RecentActivity returns per-repo summaries of session activity within the
 // given recency window. Only interactive sessions are included.
 func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if days <= 0 {
 		days = 7
@@ -3737,7 +3653,7 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 		ORDER BY last_activity DESC
 	`
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3777,8 +3693,6 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 //
 // This produces billing-aligned blocks matching what /cost and ccusage report.
 func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	groupBy := p.GroupBy
 	if groupBy == "" {
@@ -3897,7 +3811,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		ORDER BY period DESC
 	`, periodExpr, reconcCostCol, joinClause, reconcJoin, strings.Join(where, " AND "), groupExpr)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4083,7 +3997,7 @@ func (s *Store) usageByBlock(
 		ORDER BY e.timestamp ASC
 	`, joinClause, strings.Join(where, " AND "))
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4207,9 +4121,7 @@ func parseTimestamp(s string) (time.Time, error) {
 // UpsertReconciledCost stores or updates an authoritative cost figure from the
 // Anthropic Admin API for a given UTC calendar date.
 func (s *Store) UpsertReconciledCost(date string, costUSD float64) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO reconciled_costs(date, cost_usd, fetched_at)
 		VALUES (?, ?, datetime('now'))
 		ON CONFLICT(date) DO UPDATE SET cost_usd=excluded.cost_usd, fetched_at=excluded.fetched_at
@@ -4251,7 +4163,7 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 		ORDER BY e.session_id, e.timestamp
 	`, joinClause, strings.Join(where, " AND "))
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -4327,7 +4239,7 @@ func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float6
 		ORDER BY e.session_id, e.timestamp
 	`, joinClause, strings.Join(where, " AND "))
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -4380,8 +4292,6 @@ type PermissionsResult struct {
 
 // Permissions analyzes tool_use patterns to suggest allowedTools rules for settings.json.
 func (s *Store) Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if days <= 0 {
 		days = 30
@@ -4421,7 +4331,7 @@ func (s *Store) Permissions(days int, repoFilter string, limit int) (*Permission
 	topArgs := append([]any{daysArg}, repoArgs...)
 	topArgs = append(topArgs, limit)
 
-	rows, err := s.db.Query(topQuery, topArgs...)
+	rows, err := s.readDB.Query(topQuery, topArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("top tools query: %w", err)
 	}
@@ -4470,7 +4380,7 @@ func (s *Store) Permissions(days int, repoFilter string, limit int) (*Permission
 	bashArgs := append([]any{daysArg}, repoArgs...)
 	bashArgs = append(bashArgs, limit)
 
-	bashRows, err := s.db.Query(bashQuery, bashArgs...)
+	bashRows, err := s.readDB.Query(bashQuery, bashArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("bash commands query: %w", err)
 	}
@@ -4509,8 +4419,6 @@ type PatternCandidate struct {
 // suggest missing mnemo features. It runs entirely at query time — no new
 // tables are required.
 func (s *Store) DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if days <= 0 {
 		days = 90
@@ -4551,7 +4459,7 @@ func (s *Store) DiscoverPatterns(days int, repoFilter string, minOccurrences int
 		`, repoJoin, repoWhere)
 
 		args := append([]any{daysArg}, repoBaseArgs...)
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err == nil {
 			sessions, evidence := discoverCollectRows(rows)
 			rows.Close()
@@ -4589,7 +4497,7 @@ func (s *Store) DiscoverPatterns(days int, repoFilter string, minOccurrences int
 		`, repoJoin, repoWhere)
 
 		args := append([]any{daysArg}, repoBaseArgs...)
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err == nil {
 			sessions, evidence := discoverCollectRows(rows)
 			rows.Close()
@@ -4621,7 +4529,7 @@ func (s *Store) DiscoverPatterns(days int, repoFilter string, minOccurrences int
 		`, repoJoin, repoWhere)
 
 		args := append([]any{daysArg}, repoBaseArgs...)
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err == nil {
 			type qrow struct {
 				sessionID string
@@ -4686,7 +4594,7 @@ func (s *Store) DiscoverPatterns(days int, repoFilter string, minOccurrences int
 		`, repoJoin, repoWhere)
 
 		args := append([]any{daysArg}, repoBaseArgs...)
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err == nil {
 			type srow struct {
 				sessionID string
@@ -4835,8 +4743,6 @@ func discoverNormalizeSearch(q string) string {
 
 // Status returns a rich status report: repos → sessions → truncated message excerpts.
 func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if days <= 0 {
 		days = 7
@@ -4877,7 +4783,7 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 		ORDER BY last_activity DESC
 	`
 
-	repoRows, err := s.db.Query(repoQ, repoArgs...)
+	repoRows, err := s.readDB.Query(repoQ, repoArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -4905,7 +4811,7 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 			ORDER BY ss.last_msg DESC
 			LIMIT ?
 		`
-		sessRows, err := s.db.Query(sessQ,
+		sessRows, err := s.readDB.Query(sessQ,
 			fmt.Sprintf("-%d days", days), repos[i].Repo, repos[i].Path, maxSessions)
 		if err != nil {
 			continue
@@ -4930,7 +4836,7 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 					AND role IN ('user', 'assistant')
 				ORDER BY id ASC
 			`
-			msgRows, err := s.db.Query(msgQ, sid)
+			msgRows, err := s.readDB.Query(msgQ, sid)
 			if err != nil {
 				continue
 			}
@@ -4960,10 +4866,9 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 		}
 	}
 
-	// Per-stream backfill status. Inlined rather than calling the
-	// public BackfillStatuses() because we already hold rwmu.RLock.
+	// Per-stream backfill status.
 	var streams []BackfillStatus
-	if strRows, strErr := s.db.Query(`
+	if strRows, strErr := s.readDB.Query(`
 		SELECT stream, last_backfill, files_indexed, files_on_disk
 		FROM ingest_status
 		ORDER BY stream
@@ -4991,8 +4896,6 @@ type SessionMessage struct {
 
 // ReadSession returns messages from a specific session, ordered by ID.
 func (s *Store) ReadSession(sessionID string, role string, offset int, limit int) ([]SessionMessage, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 50
@@ -5019,7 +4922,7 @@ func (s *Store) ReadSession(sessionID string, role string, offset int, limit int
 		ORDER BY id ASC
 		LIMIT ? OFFSET ?`
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -5052,8 +4955,6 @@ func (s *Store) ReadSession(sessionID string, role string, offset int, limit int
 // excluded in SQL so the result matches the owed-predicate in
 // SelectCompactionCandidates exactly: owed ⟺ this returns ≥1 row.
 func (s *Store) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]SessionMessage, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 500
@@ -5064,7 +4965,7 @@ func (s *Store) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]
 		return nil, err
 	}
 
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT id, role, text, timestamp, is_noise FROM messages
 		WHERE session_id = ? AND id > ? AND is_noise = 0
 		ORDER BY id ASC
@@ -5091,7 +4992,7 @@ func (s *Store) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]
 func (s *Store) resolveSessionID(id string) (string, error) {
 	// Try exact match first (session_summary has one row per session).
 	var exists int
-	err := s.db.QueryRow("SELECT 1 FROM session_summary WHERE session_id = ?", id).Scan(&exists)
+	err := s.readDB.QueryRow("SELECT 1 FROM session_summary WHERE session_id = ?", id).Scan(&exists)
 	if err == nil {
 		return id, nil
 	}
@@ -5100,7 +5001,7 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 	}
 
 	// Try prefix match.
-	rows, err := s.db.Query("SELECT session_id FROM session_summary WHERE session_id LIKE ? LIMIT 2", id+"%")
+	rows, err := s.readDB.Query("SELECT session_id FROM session_summary WHERE session_id LIKE ? LIMIT 2", id+"%")
 	if err != nil {
 		return "", err
 	}
@@ -5125,11 +5026,9 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 
 // ResolveNonce looks up the session ID associated with a self-identification nonce.
 func (s *Store) ResolveNonce(nonce string) (string, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	var sessionID string
-	err := s.db.QueryRow(
+	err := s.readDB.QueryRow(
 		"SELECT session_id FROM session_nonces WHERE nonce = ?", nonce,
 	).Scan(&sessionID)
 	if err != nil {
@@ -5162,10 +5061,8 @@ func (s *Store) LiveSessions() map[string]int {
 // session_meta, or "" if not known. Used by the compaction watcher for
 // self-exclusion (summariser sessions have the mnemo repo as their cwd).
 func (s *Store) SessionCWD(sessionID string) string {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	var cwd string
-	s.db.QueryRow("SELECT cwd FROM session_meta WHERE session_id = ? LIMIT 1", sessionID).Scan(&cwd)
+	s.readDB.QueryRow("SELECT cwd FROM session_meta WHERE session_id = ? LIMIT 1", sessionID).Scan(&cwd)
 	return cwd
 }
 
@@ -5220,11 +5117,9 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 		return nil, fmt.Errorf("sqldeep transpile: %w", err)
 	}
 
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	ctx := context.Background()
-	conn, err := s.db.Conn(ctx)
+	conn, err := s.readDB.Conn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -5615,20 +5510,17 @@ func (s *Store) ingestFile(path string) error {
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
 
-	const yieldInterval = 200 * time.Millisecond
+	const commitInterval = 200 * time.Millisecond
 	const lineCheckInterval = 50
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-
-	ws, err := newWriterState(s.db)
+	ws, err := newWriterState(s.writeDB)
 	if err != nil {
 		return err
 	}
 	defer func() { ws.tx.Rollback() }()
 	defer ws.Close()
 
-	lockAcquired := time.Now()
+	lastCommit := time.Now()
 	linesSinceLockCheck := 0
 
 	for scanner.Scan() {
@@ -5711,11 +5603,11 @@ func (s *Store) ingestFile(path string) error {
 		}
 
 	yieldCheck:
-		// Periodically yield the write lock so readers aren't starved.
+		// Periodically commit to avoid long-running transactions.
 		linesSinceLockCheck++
 		if linesSinceLockCheck >= lineCheckInterval {
 			linesSinceLockCheck = 0
-			if time.Since(lockAcquired) >= yieldInterval {
+			if time.Since(lastCommit) >= commitInterval {
 				// Commit current transaction with offset update.
 				curOffset, _ := f.Seek(0, 1)
 				recSize, recMtime := statFingerprint(path)
@@ -5731,16 +5623,12 @@ func (s *Store) ingestFile(path string) error {
 				s.offsets[path] = curOffset
 				s.mu.Unlock()
 
-				// Yield write lock to let readers through.
-				s.rwmu.Unlock()
-				s.rwmu.Lock()
-				lockAcquired = time.Now()
-
 				// Start a new transaction.
-				ws, err = newWriterState(s.db)
+				ws, err = newWriterState(s.writeDB)
 				if err != nil {
 					return err
 				}
+				lastCommit = time.Now()
 			}
 		}
 	}
@@ -5781,12 +5669,12 @@ func (s *Store) ingestFile(path string) error {
 
 	// Detect decision pairs (proposal + confirmation) in this session.
 	repo := extractRepo(metaCwd)
-	detectDecisions(s.db, sessionID, repo)
+	detectDecisions(s.writeDB, sessionID, repo)
 
 	// Extract and store any images from newly ingested entries.
 	// Uses a targeted query so only new entries need scanning.
 	go func() {
-		rows, err := s.db.Query(`
+		rows, err := s.readDB.Query(`
 			SELECT e.id, e.raw, COALESCE(e.timestamp, datetime('now'))
 			FROM entries e
 			WHERE e.session_id = ? AND e.raw LIKE '%"type":"image"%'
@@ -5811,10 +5699,8 @@ func (s *Store) ingestFile(path string) error {
 // Predecessor returns the predecessor session ID for the given session,
 // or "" if none exists.
 func (s *Store) Predecessor(sessionID string) (string, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	var predID string
-	err := s.db.QueryRow(
+	err := s.readDB.QueryRow(
 		"SELECT predecessor_id FROM session_chains WHERE successor_id = ?", sessionID,
 	).Scan(&predID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -5826,10 +5712,8 @@ func (s *Store) Predecessor(sessionID string) (string, error) {
 // Successor returns the successor session ID for the given session,
 // or "" if none exists.
 func (s *Store) Successor(sessionID string) (string, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	var succID string
-	err := s.db.QueryRow(
+	err := s.readDB.QueryRow(
 		"SELECT successor_id FROM session_chains WHERE predecessor_id = ?", sessionID,
 	).Scan(&succID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -5842,18 +5726,16 @@ func (s *Store) Successor(sessionID string) (string, error) {
 // given any session ID in the chain. If the session has no chain links,
 // returns a single-element slice with that session's info.
 func (s *Store) Chain(sessionID string) ([]ChainLink, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-	return s.chainLocked(sessionID)
+	return s.chain(sessionID)
 }
 
-func (s *Store) chainLocked(sessionID string) ([]ChainLink, error) {
+func (s *Store) chain(sessionID string) ([]ChainLink, error) {
 	// Walk backwards to find the head (oldest) of the chain.
 	head := sessionID
 	visited := map[string]bool{head: true}
 	for {
 		var pred string
-		err := s.db.QueryRow(
+		err := s.readDB.QueryRow(
 			"SELECT predecessor_id FROM session_chains WHERE successor_id = ?", head,
 		).Scan(&pred)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5883,7 +5765,7 @@ func (s *Store) chainLocked(sessionID string) ([]ChainLink, error) {
 		var succ string
 		var gapMs int64
 		var confidence string
-		err = s.db.QueryRow(
+		err = s.readDB.QueryRow(
 			"SELECT successor_id, gap_ms, confidence FROM session_chains WHERE predecessor_id = ?", cur,
 		).Scan(&succ, &gapMs, &confidence)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6061,7 +5943,7 @@ func (s *Store) Whatsup(postmortem bool) (*WhatsupResult, error) {
 		workType string
 	}
 	sessionMeta := make(map[string]metaRow, len(sessions))
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT session_id, COALESCE(repo, ''), COALESCE(topic, ''), COALESCE(work_type, '')
 		FROM session_meta
 		WHERE session_id IN (`+placeholders(len(pidList))+`)`,
@@ -6251,7 +6133,7 @@ func stringsToAny(ss []string) []any {
 func (s *Store) sessionChainLink(sessionID string) (ChainLink, error) {
 	var link ChainLink
 	link.SessionID = sessionID
-	s.db.QueryRow(`
+	s.readDB.QueryRow(`
 		SELECT ss.project, COALESCE(ss.first_msg, ''), COALESCE(ss.last_msg, ''),
 		       COALESCE(sm.topic, ''), COALESCE(sm.repo, '')
 		FROM session_summary ss
@@ -6271,10 +6153,8 @@ func (s *Store) DefineTemplate(name, description, queryText string, paramNames [
 		return fmt.Errorf("marshal param_names: %w", err)
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
-	_, err = s.db.Exec(`
+	_, err = s.writeDB.Exec(`
 		INSERT INTO query_templates (name, description, query_text, param_names, updated_at)
 		VALUES (?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(name) DO UPDATE SET
@@ -6288,12 +6168,10 @@ func (s *Store) DefineTemplate(name, description, queryText string, paramNames [
 
 // EvaluateTemplate looks up a template by name, substitutes parameters, and executes it.
 func (s *Store) EvaluateTemplate(name string, params map[string]string) ([]map[string]any, error) {
-	s.rwmu.RLock()
 	var paramNamesJSON, queryText string
-	err := s.db.QueryRow(
+	err := s.readDB.QueryRow(
 		`SELECT query_text, param_names FROM query_templates WHERE name = ?`, name,
 	).Scan(&queryText, &paramNamesJSON)
-	s.rwmu.RUnlock()
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("template %q not found", name)
@@ -6324,10 +6202,8 @@ func (s *Store) EvaluateTemplate(name string, params map[string]string) ([]map[s
 
 // ListTemplates returns all stored query templates.
 func (s *Store) ListTemplates() ([]QueryTemplate, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT id, name, COALESCE(description, ''), query_text, param_names, created_at, updated_at
 		FROM query_templates
 		ORDER BY name
@@ -6395,8 +6271,6 @@ type ghIssueJSON struct {
 
 // SearchGitHubActivity searches GitHub PRs and issues with optional filters.
 func (s *Store) SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]GitHubActivityResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -6453,7 +6327,7 @@ func (s *Store) SearchGitHubActivity(query string, repo string, state string, au
 		q += ` LIMIT ?`
 		args = append(args, limit)
 
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err != nil {
 			return err
 		}
@@ -6509,11 +6383,9 @@ func (s *Store) SearchGitHubActivity(query string, repo string, state string, au
 // pollGitHubForRepo fetches and upserts PRs and issues for a single repo.
 func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
 	// Find the most recent updated_at for incremental fetches.
-	s.rwmu.RLock()
 	var lastPR, lastIssue string
-	s.db.QueryRow(`SELECT MAX(updated_at) FROM github_prs WHERE repo = ?`, repo).Scan(&lastPR)
-	s.db.QueryRow(`SELECT MAX(updated_at) FROM github_issues WHERE repo = ?`, repo).Scan(&lastIssue)
-	s.rwmu.RUnlock()
+	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_prs WHERE repo = ?`, repo).Scan(&lastPR)
+	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_issues WHERE repo = ?`, repo).Scan(&lastIssue)
 
 	if err := s.fetchAndUpsertPRs(ghPath, repo, lastPR); err != nil {
 		slog.Warn("PR fetch failed", "repo", repo, "err", err)
@@ -6541,8 +6413,6 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 		return fmt.Errorf("parse gh pr output: %w", err)
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	for _, pr := range prs {
 		// Skip if not newer than our last known update (incremental).
@@ -6561,7 +6431,7 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 		if pr.MergedAt != "" {
 			mergedAt = &pr.MergedAt
 		}
-		_, err := s.db.Exec(`
+		_, err := s.writeDB.Exec(`
 			INSERT INTO github_prs (repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repo, pr_number) DO UPDATE SET
@@ -6596,8 +6466,6 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 		return fmt.Errorf("parse gh issue output: %w", err)
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	for _, issue := range issues {
 		// Skip if not newer than our last known update (incremental).
@@ -6615,7 +6483,7 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 		}
 		labelsJSON, _ := json.Marshal(labelNames)
 
-		_, err := s.db.Exec(`
+		_, err := s.writeDB.Exec(`
 			INSERT INTO github_issues (repo, issue_number, title, body, state, author, created_at, updated_at, url, labels)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repo, issue_number) DO UPDATE SET
@@ -6684,8 +6552,6 @@ type GitCommit struct {
 
 // SearchCommits searches indexed git commits by keyword with optional repo, author, and days filters.
 func (s *Store) SearchCommits(query string, repo string, author string, days int, limit int) ([]GitCommit, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -6730,7 +6596,7 @@ func (s *Store) SearchCommits(query string, repo string, author string, days int
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6878,8 +6744,6 @@ func (s *Store) SearchImages(query string, repo string, session string, days int
 
 // SearchImagesFiltered is SearchImages with an explicit searchFields parameter.
 func (s *Store) SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20
@@ -6946,7 +6810,7 @@ func (s *Store) SearchImagesFiltered(query string, repo string, session string, 
 		if session != "" {
 			args = append(args, session+"%")
 		}
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err != nil {
 			return err
 		}
@@ -6999,7 +6863,7 @@ func (s *Store) SearchImagesFiltered(query string, repo string, session string, 
 		}
 		q += " ORDER BY img.created_at DESC LIMIT ?"
 		args = append(args, limit)
-		rows, err := s.db.Query(q, args...)
+		rows, err := s.readDB.Query(q, args...)
 		if err != nil {
 			return nil, fmt.Errorf("list images: %w", err)
 		}
@@ -7028,7 +6892,7 @@ func (s *Store) SearchImagesFiltered(query string, repo string, session string, 
 		hit := hitMap[id]
 		var r ImageSearchResult
 		var origPath sql.NullString
-		if err := s.db.QueryRow(`
+		if err := s.readDB.QueryRow(`
 			SELECT img.id, img.content_hash, img.original_path, img.mime_type,
 			       img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
 			       COALESCE(d.name,''), COALESCE(d.description,''), COALESCE(o.text,'')
@@ -7066,7 +6930,7 @@ func (s *Store) SearchImagesFiltered(query string, repo string, session string, 
 	// Fetch up to 3 occurrences per image.
 	for i, r := range results {
 		id := int64(r.Image.ID)
-		occRows, err := s.db.Query(`
+		occRows, err := s.readDB.Query(`
 			SELECT io.session_id, io.source_type, io.occurred_at
 			FROM image_occurrences io
 			WHERE io.image_id = ?
@@ -7114,10 +6978,8 @@ func (s *Store) SearchImagesSimilar(similarTo int, repo string, session string, 
 		days = 90
 	}
 
-	s.rwmu.RLock()
 	var blob []byte
-	err := s.db.QueryRow(`SELECT vector FROM image_embeddings WHERE image_id = ? AND error IS NULL`, similarTo).Scan(&blob)
-	s.rwmu.RUnlock()
+	err := s.readDB.QueryRow(`SELECT vector FROM image_embeddings WHERE image_id = ? AND error IS NULL`, similarTo).Scan(&blob)
 	if err != nil {
 		return nil, fmt.Errorf("load embedding for image %d: %w", similarTo, err)
 	}
@@ -7157,10 +7019,8 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 		filterArgs = append(filterArgs, excludeID)
 	}
 
-	s.rwmu.RLock()
-	rows, err := s.db.Query(filterQ, filterArgs...)
+	rows, err := s.readDB.Query(filterQ, filterArgs...)
 	if err != nil {
-		s.rwmu.RUnlock()
 		return nil, fmt.Errorf("filter images for k-NN: %w", err)
 	}
 	var candidateIDs []int64
@@ -7174,10 +7034,9 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 
 	// Determine the model to use: pick the most common model in the embeddings table.
 	var model string
-	s.db.QueryRow(`SELECT model FROM image_embeddings WHERE error IS NULL GROUP BY model ORDER BY COUNT(*) DESC LIMIT 1`).Scan(&model) //nolint:errcheck
+	s.readDB.QueryRow(`SELECT model FROM image_embeddings WHERE error IS NULL GROUP BY model ORDER BY COUNT(*) DESC LIMIT 1`).Scan(&model) //nolint:errcheck
 
-	candidates, err := loadCandidateEmbeddings(s.db, model, candidateIDs)
-	s.rwmu.RUnlock()
+	candidates, err := loadCandidateEmbeddings(s.readDB, model, candidateIDs)
 	if err != nil {
 		return nil, fmt.Errorf("load embeddings: %w", err)
 	}
@@ -7196,14 +7055,12 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 	}
 
 	// Fetch full metadata for the top results.
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	var results []ImageSearchResult
 	for _, id := range topIDs {
 		var r ImageSearchResult
 		var origPath sql.NullString
-		if err := s.db.QueryRow(`
+		if err := s.readDB.QueryRow(`
 			SELECT img.id, img.content_hash, img.original_path, img.mime_type,
 			       img.width, img.height, img.pixel_format, img.byte_size, img.created_at,
 			       COALESCE(d.name,''), COALESCE(d.description,''), COALESCE(o.text,'')
@@ -7224,7 +7081,7 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 		r.Score = float64(scoreMap[id])
 
 		// Fetch up to 3 occurrences.
-		occRows, err := s.db.Query(`
+		occRows, err := s.readDB.Query(`
 			SELECT io.session_id, io.source_type, io.occurred_at
 			FROM image_occurrences io
 			WHERE io.image_id = ?

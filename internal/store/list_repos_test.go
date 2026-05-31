@@ -111,7 +111,7 @@ func TestListReposIncludesSummaryAndLastCommit(t *testing.T) {
 
 	// Inject a CLAUDE.md row + a couple of git commits keyed on that
 	// repo. ListRepos's sub-selects join purely on the repo column.
-	if _, err := s.db.Exec(`
+	if _, err := s.writeDB.Exec(`
 		INSERT INTO claude_configs (repo, file_path, content, updated_at) VALUES
 			(?, ?, ?, '2026-04-25T00:00:00Z'),
 			(?, ?, ?, '2026-04-25T00:00:00Z')
@@ -123,7 +123,7 @@ func TestListReposIncludesSummaryAndLastCommit(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert claude_configs: %v", err)
 	}
-	if _, err := s.db.Exec(`
+	if _, err := s.writeDB.Exec(`
 		INSERT INTO git_commits (repo, commit_hash, author_name, author_email, commit_date, subject) VALUES
 			(?, 'abc123', 'A', 'a@x', '2026-04-26T08:00:00Z', 'first'),
 			(?, 'def456', 'A', 'a@x', '2026-04-26T12:34:56Z', 'second')

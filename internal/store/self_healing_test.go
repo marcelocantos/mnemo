@@ -213,7 +213,7 @@ Reached via session_meta only.
 	s.SetWorkspaceRoots([]string{workspaceRoot})
 
 	// Seed session_meta with a cwd pointing at the outside repo.
-	if _, err := s.db.Exec(
+	if _, err := s.writeDB.Exec(
 		"INSERT INTO session_meta (session_id, cwd) VALUES (?, ?)",
 		"sess-outside", outsideRepo,
 	); err != nil {
@@ -554,7 +554,7 @@ func TestCIRepos_UnionOfWorkspaceAndSessionMeta(t *testing.T) {
 	// Session_meta-side: a separate org/repo that is NOT on disk
 	// anywhere under the workspace root. ciRepos must still surface
 	// it from the session_meta.repo column fallback.
-	if _, err := s.db.Exec(
+	if _, err := s.writeDB.Exec(
 		"INSERT INTO session_meta (session_id, repo) VALUES (?, ?)",
 		"sess-ci-fallback", "sessionorg/sessionrepo",
 	); err != nil {
@@ -584,7 +584,7 @@ func TestCIRepos_UnionOfWorkspaceAndSessionMeta(t *testing.T) {
 
 	// Non-GitHub paths (no slash) must be filtered out. Insert one
 	// and re-run to pin the behaviour.
-	if _, err := s.db.Exec(
+	if _, err := s.writeDB.Exec(
 		"INSERT INTO session_meta (session_id, repo) VALUES (?, ?)",
 		"sess-bare", "bare-name-no-slash",
 	); err != nil {

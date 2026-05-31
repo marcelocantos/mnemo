@@ -260,10 +260,25 @@ func (w *Watcher) scan(ctx context.Context) {
 		w.compactor.MaxTokenRatio(),
 		w.cfg.maxCandidates(),
 	)
+	elapsed := time.Since(now)
 	if err != nil {
-		slog.Warn("compact: scan candidates failed", "err", err)
+		slog.Warn("compact: scan candidates failed", "err", err, "elapsed", elapsed.Round(time.Millisecond))
 		return
 	}
+	// 🎯T70.4: log every scan so a slow candidate-selection query is
+	// visible without a debug-level flip. WARN once elapsed crosses the
+	// soak threshold so the regression we hit on 2026-05-30 (~30 min
+	// scans masked by silent ticks) is caught at INFO+1 next time.
+	const slowScanThreshold = 5 * time.Second
+	logFn := slog.Info
+	if elapsed >= slowScanThreshold {
+		logFn = slog.Warn
+	}
+	logFn("compact: scan",
+		"candidates", len(cands),
+		"backlog", backlog,
+		"elapsed", elapsed.Round(time.Millisecond),
+	)
 	w.mu.Lock()
 	w.lastN = len(cands)
 	w.lastBacklog = backlog
