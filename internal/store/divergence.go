@@ -103,7 +103,7 @@ func (s *Store) compactionDivergence() StreamDivergence {
 	}
 	var last string
 	s.rwmu.RLock()
-	_ = s.db.QueryRow(`SELECT COALESCE(MAX(generated_at), '') FROM compactions`).Scan(&last)
+	_ = s.readDB.QueryRow(`SELECT COALESCE(MAX(generated_at), '') FROM compactions`).Scan(&last)
 	s.rwmu.RUnlock()
 	return StreamDivergence{
 		Stream: "compactions", Known: true,
@@ -219,7 +219,7 @@ func (s *Store) sourceStateDivergence() StreamDivergence {
 		}
 		var status string
 		s.rwmu.RLock()
-		_ = s.db.QueryRow(
+		_ = s.readDB.QueryRow(
 			`SELECT source_status FROM session_meta WHERE session_id = ?`,
 			sessionID).Scan(&status)
 		s.rwmu.RUnlock()
@@ -230,7 +230,7 @@ func (s *Store) sourceStateDivergence() StreamDivergence {
 
 	var lastTagged string
 	s.rwmu.RLock()
-	_ = s.db.QueryRow(
+	_ = s.readDB.QueryRow(
 		`SELECT COALESCE(MAX(source_state_at), '') FROM session_meta
 		 WHERE source_status != '' AND source_status != 'live'`).Scan(&lastTagged)
 	s.rwmu.RUnlock()

@@ -52,7 +52,7 @@ func (s *Store) PutCompaction(c Compaction) (int64, error) {
 	if c.ConnectionID != "" {
 		connID = c.ConnectionID
 	}
-	res, err := s.db.Exec(`
+	res, err := s.writeDB.Exec(`
 		INSERT INTO compactions
 			(session_id, connection_id, generated_at, model, prompt_tokens, output_tokens,
 			 cost_usd, entry_id_from, entry_id_to, payload_json, summary)
@@ -71,7 +71,7 @@ func (s *Store) PutCompaction(c Compaction) (int64, error) {
 // LatestCompaction returns the most recent compaction for a session, or
 // (nil, nil) if none exist.
 func (s *Store) LatestCompaction(sessionID string) (*Compaction, error) {
-	row := s.db.QueryRow(`
+	row := s.readDB.QueryRow(`
 		SELECT id, session_id, COALESCE(connection_id, ''), generated_at, model, prompt_tokens, output_tokens,
 		       cost_usd, entry_id_from, entry_id_to, payload_json, summary
 		FROM compactions
@@ -96,7 +96,7 @@ func (s *Store) ListCompactions(sessionID string, limit int) ([]Compaction, erro
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list compactions: %w", err)
 	}
@@ -184,7 +184,7 @@ func scanCompactions(rows *sql.Rows) ([]Compaction, error) {
 func (s *Store) CompactionsForConnection(connectionID string) ([]Compaction, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT id, session_id, COALESCE(connection_id, ''), generated_at, model, prompt_tokens, output_tokens,
 		       cost_usd, entry_id_from, entry_id_to, payload_json, summary
 		FROM compactions
@@ -265,7 +265,7 @@ func (s *Store) SelectCompactionCandidates(
 		maxBudgetRatio = 0.10
 	}
 	idleCutoffStr := idleCutoff.UTC().Format(time.RFC3339Nano)
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		WITH session_state AS (
 		  SELECT
 		    ss.session_id,
@@ -352,7 +352,7 @@ func (s *Store) SelectCompactionCandidates(
 func (s *Store) SessionTokens(sessionID string) (input int64, output int64, err error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
-	row := s.db.QueryRow(`
+	row := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
 		FROM entries
 		WHERE session_id = ? AND type = 'assistant'
@@ -368,7 +368,7 @@ func (s *Store) SessionTokens(sessionID string) (input int64, output int64, err 
 func (s *Store) CompactionTokens(sessionID string) (prompt int64, output int64, err error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
-	row := s.db.QueryRow(`
+	row := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(output_tokens), 0)
 		FROM compactions
 		WHERE session_id = ?

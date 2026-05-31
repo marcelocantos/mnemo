@@ -17,7 +17,7 @@ func setupDocRepo(t *testing.T, s *Store, repoRoot string) {
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(
+	if _, err := s.writeDB.Exec(
 		"INSERT OR IGNORE INTO session_meta (session_id, cwd) VALUES (?, ?)",
 		"sess-docs-seed", repoRoot,
 	); err != nil {

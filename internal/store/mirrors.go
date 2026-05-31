@@ -72,10 +72,10 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 				}
 				var lastDate string
 				s.rwmu.RLock()
-				_ = s.db.QueryRow(
+				_ = s.readDB.QueryRow(
 					`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`, repo).Scan(&lastDate)
 				s.rwmu.RUnlock()
-				ingestGitCommits(s.db, root, repo, lastDate)
+				ingestGitCommits(s.writeDB, root, repo, lastDate)
 				return nil
 			},
 		},
@@ -130,7 +130,7 @@ func (s *Store) mirrorStale(repo, stream string, cutoff time.Time) bool {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
 	var last string
-	if err := s.db.QueryRow(
+	if err := s.readDB.QueryRow(
 		`SELECT last_reconciled_at FROM mirror_status WHERE repo = ? AND stream = ?`,
 		repo, stream).Scan(&last); err != nil {
 		return true // missing → never reconciled → stale
@@ -147,7 +147,7 @@ func (s *Store) mirrorStale(repo, stream string, cutoff time.Time) bool {
 func (s *Store) recordMirrorReconcile(repo, stream string, at time.Time) error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO mirror_status (repo, stream, last_reconciled_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(repo, stream) DO UPDATE SET
@@ -179,7 +179,7 @@ func (s *Store) MirrorBacklog(now time.Time) (gap int, lastReconciled string) {
 		}
 	}
 	s.rwmu.RLock()
-	_ = s.db.QueryRow(`SELECT COALESCE(MAX(last_reconciled_at), '') FROM mirror_status`).Scan(&lastReconciled)
+	_ = s.readDB.QueryRow(`SELECT COALESCE(MAX(last_reconciled_at), '') FROM mirror_status`).Scan(&lastReconciled)
 	s.rwmu.RUnlock()
 	return gap, lastReconciled
 }

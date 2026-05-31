@@ -95,7 +95,7 @@ type ClaudeMDReview struct {
 func (s *Store) LatestReview(repo string) (*ClaudeMDReview, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
-	row := s.db.QueryRow(`
+	row := s.readDB.QueryRow(`
 		SELECT id, repo, reviewed_at, commit_id, summary,
 		       verdict, proposed_summary, proposed_claude_md
 		FROM claude_md_reviews
@@ -149,7 +149,7 @@ func (s *Store) EntriesSinceForRepo(repo string, since time.Time) (int, error) {
 	`, timeFilter)
 
 	var n int
-	if err := s.db.QueryRow(q, args...).Scan(&n); err != nil {
+	if err := s.readDB.QueryRow(q, args...).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -162,7 +162,7 @@ func (s *Store) EntriesSinceForRepo(repo string, since time.Time) (int, error) {
 func (s *Store) RecordReview(r ClaudeMDReview) error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO claude_md_reviews
 			(repo, reviewed_at, commit_id, summary, verdict,
 			 proposed_summary, proposed_claude_md)
@@ -188,7 +188,7 @@ func nullableString(s string) any {
 func (s *Store) RecordClaudeConfig(repo, filePath, content string) error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO claude_configs (repo, file_path, content, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET

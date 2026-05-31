@@ -33,7 +33,7 @@ func (s *Store) UpsertTreeOfInterest(rootPath, label string) (int64, error) {
 // must hold s.rwmu write lock.
 func (s *Store) upsertTreeOfInterestLocked(rootPath, label string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT INTO trees_of_interest (root_path, label, created_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(root_path) DO UPDATE SET label = excluded.label
@@ -42,7 +42,7 @@ func (s *Store) upsertTreeOfInterestLocked(rootPath, label string) (int64, error
 		return 0, fmt.Errorf("upsert tree_of_interest: %w", err)
 	}
 	var id int64
-	if err := s.db.QueryRow(`SELECT id FROM trees_of_interest WHERE root_path = ?`, rootPath).Scan(&id); err != nil {
+	if err := s.readDB.QueryRow(`SELECT id FROM trees_of_interest WHERE root_path = ?`, rootPath).Scan(&id); err != nil {
 		return 0, fmt.Errorf("lookup tree_of_interest id: %w", err)
 	}
 	return id, nil
@@ -60,7 +60,7 @@ func (s *Store) LinkDocToTree(docID, treeID int64) error {
 // linkDocToTreeLocked is the lock-held implementation. Caller must
 // hold s.rwmu write lock.
 func (s *Store) linkDocToTreeLocked(docID, treeID int64) error {
-	_, err := s.db.Exec(`
+	_, err := s.writeDB.Exec(`
 		INSERT OR IGNORE INTO doc_tree_refs (doc_id, tree_id)
 		VALUES (?, ?)
 	`, docID, treeID)
@@ -76,7 +76,7 @@ func (s *Store) linkDocToTreeLocked(docID, treeID int64) error {
 func (s *Store) DocsInTree(rootPath string) ([]DocInfo, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT d.id, d.repo, d.file_path, d.kind, d.title, d.content,
 			d.content_hash, d.size, d.mtime, d.indexed_at
 		FROM docs d
@@ -107,7 +107,7 @@ func (s *Store) DocsInTree(rootPath string) ([]DocInfo, error) {
 func (s *Store) TreesForDoc(docID int64) ([]TreeOfInterest, error) {
 	s.rwmu.RLock()
 	defer s.rwmu.RUnlock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT t.id, t.root_path, t.label, t.created_at
 		FROM trees_of_interest t
 		JOIN doc_tree_refs r ON r.tree_id = t.id
@@ -137,7 +137,7 @@ func (s *Store) DeleteTreeOfInterest(rootPath string) error {
 	s.rwmu.Lock()
 	defer s.rwmu.Unlock()
 	var id int64
-	if err := s.db.QueryRow(`SELECT id FROM trees_of_interest WHERE root_path = ?`, rootPath).Scan(&id); err != nil {
+	if err := s.readDB.QueryRow(`SELECT id FROM trees_of_interest WHERE root_path = ?`, rootPath).Scan(&id); err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
@@ -145,10 +145,10 @@ func (s *Store) DeleteTreeOfInterest(rootPath string) error {
 	}
 	// PRAGMA foreign_keys is not enabled (see store.go init), so do the
 	// cascade explicitly rather than relying on ON DELETE CASCADE.
-	if _, err := s.db.Exec(`DELETE FROM doc_tree_refs WHERE tree_id = ?`, id); err != nil {
+	if _, err := s.writeDB.Exec(`DELETE FROM doc_tree_refs WHERE tree_id = ?`, id); err != nil {
 		return fmt.Errorf("delete doc_tree_refs: %w", err)
 	}
-	if _, err := s.db.Exec(`DELETE FROM trees_of_interest WHERE id = ?`, id); err != nil {
+	if _, err := s.writeDB.Exec(`DELETE FROM trees_of_interest WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("delete tree_of_interest: %w", err)
 	}
 	return nil

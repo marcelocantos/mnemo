@@ -82,16 +82,16 @@ func TestDescriberGoldenBatch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		id, err := storeImage(s.db, data, "image/png", path)
+		id, err := storeImage(s.writeDB, data, "image/png", path)
 		if err != nil {
 			t.Fatalf("storeImage %s: %v", fx.name, err)
 		}
-		recordOccurrence(s.db, id, 0, 0, "test-session", "path", time.Now().UTC().Format(time.RFC3339))
+		recordOccurrence(s.writeDB, id, 0, 0, "test-session", "path", time.Now().UTC().Format(time.RFC3339))
 		imageIDs = append(imageIDs, id)
 	}
 
 	// Claim and describe the batch (exercises the real claude -p path).
-	batch, err := claimPendingBatch(s.db, 10)
+	batch, err := claimPendingBatch(s.writeDB, 10)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestDescriberGoldenBatch(t *testing.T) {
 	}
 
 	start := time.Now()
-	describeBatchAndStore(s.db, batch)
+	describeBatchAndStore(s.writeDB, batch)
 	t.Logf("describeBatchAndStore elapsed: %v (%d images)", time.Since(start), len(batch))
 
 	// Verify each fixture got a non-error description containing at least
@@ -108,7 +108,7 @@ func TestDescriberGoldenBatch(t *testing.T) {
 	for i, fx := range cases {
 		id := imageIDs[i]
 		var name, description, errCol sql.NullString
-		err := s.db.QueryRow(
+		err := s.writeDB.QueryRow(
 			`SELECT name, description, error FROM image_descriptions WHERE image_id = ?`,
 			id,
 		).Scan(&name, &description, &errCol)

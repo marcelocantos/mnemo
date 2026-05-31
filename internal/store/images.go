@@ -153,13 +153,13 @@ func ingestImagesForEntry(s *Store, entryID int64, sessionID string, rawJSON []b
 			mimeType = "image/png"
 		}
 
-		imageID, err := storeImage(s.db, imgData, mimeType, "")
+		imageID, err := storeImage(s.writeDB, imgData, mimeType, "")
 		if err != nil {
 			slog.Warn("store image failed", "session", sessionID, "err", err)
 			continue
 		}
 
-		recordOccurrence(s.db, imageID, entryID, 0, sessionID, "inline", occurredAt)
+		recordOccurrence(s.writeDB, imageID, entryID, 0, sessionID, "inline", occurredAt)
 		s.triggerImageSidecars(imageID, imgData, mimeType)
 	}
 }
@@ -180,13 +180,13 @@ func ingestImageFromPath(s *Store, path string, entryID int64, messageID int64, 
 	}
 
 	mimeType := extToMime(ext)
-	imageID, err := storeImage(s.db, data, mimeType, path)
+	imageID, err := storeImage(s.writeDB, data, mimeType, path)
 	if err != nil {
 		slog.Warn("store image from path failed", "path", path, "err", err)
 		return
 	}
 
-	recordOccurrence(s.db, imageID, entryID, messageID, sessionID, "path", occurredAt)
+	recordOccurrence(s.writeDB, imageID, entryID, messageID, sessionID, "path", occurredAt)
 	s.triggerImageSidecars(imageID, data, mimeType)
 }
 
@@ -197,12 +197,12 @@ func ingestImageFromPath(s *Store, path string, entryID int64, messageID int64, 
 // pattern. Each helper is idempotent and a cheap no-op if its backend
 // is unavailable.
 func (s *Store) triggerImageSidecars(imageID int64, data []byte, mimeType string) {
-	if s == nil || s.db == nil || s.imageSem == nil {
+	if s == nil || s.writeDB == nil || s.imageSem == nil {
 		return
 	}
-	go s.runSidecar(func() { ocrOneImage(s.db, imageID, data) })
-	go s.runSidecar(func() { describeOneImage(s.db, imageID, data, mimeType) })
-	go s.runSidecar(func() { embedOneImage(s.db, imageID, data, mimeType) })
+	go s.runSidecar(func() { ocrOneImage(s.writeDB, imageID, data) })
+	go s.runSidecar(func() { describeOneImage(s.writeDB, imageID, data, mimeType) })
+	go s.runSidecar(func() { embedOneImage(s.writeDB, imageID, data, mimeType) })
 }
 
 // runSidecar acquires a slot on the shared image semaphore, runs fn,
@@ -238,7 +238,7 @@ func backfillImages(s *Store) {
 	start := time.Now()
 
 	// Pass 1: entries with inline image blocks.
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT e.id, e.session_id, e.raw, COALESCE(e.timestamp, datetime('now'))
 		FROM entries e
 		WHERE e.raw LIKE '%"type":"image"%'`)
@@ -269,7 +269,7 @@ func backfillImages(s *Store) {
 	}
 
 	// Pass 2: messages with image file paths.
-	msgRows, err := s.db.Query(`
+	msgRows, err := s.readDB.Query(`
 		SELECT m.id, m.entry_id, m.session_id, m.tool_file_path,
 		       COALESCE(m.timestamp, datetime('now'))
 		FROM messages m
@@ -311,8 +311,8 @@ func backfillImages(s *Store) {
 
 	// Report counts.
 	var totalImages, totalOccurrences int
-	s.db.QueryRow("SELECT COUNT(*) FROM images").Scan(&totalImages)                 //nolint:errcheck
-	s.db.QueryRow("SELECT COUNT(*) FROM image_occurrences").Scan(&totalOccurrences) //nolint:errcheck
+	s.readDB.QueryRow("SELECT COUNT(*) FROM images").Scan(&totalImages)                 //nolint:errcheck
+	s.readDB.QueryRow("SELECT COUNT(*) FROM image_occurrences").Scan(&totalOccurrences) //nolint:errcheck
 
 	if totalImages > 0 || inlineCount > 0 || pathCount > 0 {
 		slog.Info("backfilled images",

@@ -27,7 +27,7 @@ func (s *Store) ToolResult(sessionID, toolUseID string, offset, truncateLen int)
 
 	var text string
 	var isError int
-	err = s.db.QueryRow(
+	err = s.readDB.QueryRow(
 		`SELECT text, is_error FROM messages
 		 WHERE session_id = ? AND content_type = 'tool_result' AND tool_use_id = ?
 		 LIMIT 1`,

@@ -343,7 +343,7 @@ func (s *Store) ingestDocFileLocked(path, repo string, treeID int64) (indexed, s
 
 	// Check if already indexed with same hash.
 	var existingHash string
-	_ = s.db.QueryRow("SELECT content_hash FROM docs WHERE file_path = ?", path).Scan(&existingHash)
+	_ = s.readDB.QueryRow("SELECT content_hash FROM docs WHERE file_path = ?", path).Scan(&existingHash)
 	if existingHash == hash {
 		skipped = 1
 		s.linkDocByPathLocked(path, treeID)
@@ -369,7 +369,7 @@ func (s *Store) ingestDocFileLocked(path, repo string, treeID int64) (indexed, s
 		meta = parseInlineMetadata(content)
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.writeDB.Exec(`
 		INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
 			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -406,7 +406,7 @@ func (s *Store) linkDocByPathLocked(path string, treeID int64) {
 		return
 	}
 	var docID int64
-	if err := s.db.QueryRow(`SELECT id FROM docs WHERE file_path = ?`, path).Scan(&docID); err != nil {
+	if err := s.readDB.QueryRow(`SELECT id FROM docs WHERE file_path = ?`, path).Scan(&docID); err != nil {
 		return
 	}
 	if err := s.linkDocToTreeLocked(docID, treeID); err != nil {
@@ -463,7 +463,7 @@ func (s *Store) SearchDocs(query string, repo string, kind string, limit int) ([
 }
 
 func (s *Store) queryDocs(q string, args ...any) ([]DocInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}

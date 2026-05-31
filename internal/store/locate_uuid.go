@@ -124,7 +124,7 @@ WHERE jc.value->>'$.type' = 'tool_result'
 ORDER BY 1
 LIMIT 50
 `
-	rows, err := s.db.Query(q,
+	rows, err := s.readDB.Query(q,
 		likeArg, likeArg, likeArg, likeArg, likeArg, likeArg,
 	)
 	if err != nil {
@@ -196,7 +196,7 @@ LIMIT 50
 // so we can use fetchContext to pull surrounding messages.
 func (s *Store) firstMessageIDForEntry(entryID int, sessionID string) (int, error) {
 	var id int
-	err := s.db.QueryRow(
+	err := s.readDB.QueryRow(
 		`SELECT MIN(id) FROM messages WHERE entry_id = ? AND session_id = ?`,
 		entryID, sessionID,
 	).Scan(&id)

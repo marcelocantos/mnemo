@@ -16,7 +16,7 @@ import (
 func insertDocRow(t *testing.T, s *Store, repo, filePath string) int64 {
 	t.Helper()
 	now := time.Now().Format(time.RFC3339)
-	res, err := s.db.Exec(`
+	res, err := s.writeDB.Exec(`
 		INSERT INTO docs (repo, file_path, kind, title, content,
 			content_hash, size, mtime, indexed_at)
 		VALUES (?, ?, 'md', '', '', '', 0, ?, ?)`,

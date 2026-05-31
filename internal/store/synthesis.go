@@ -329,7 +329,7 @@ func (s *Store) SearchSynthesis(query, taxonomy, repo string, limit int) ([]DocI
 }
 
 func (s *Store) querySynthesis(q string, args ...any) ([]DocInfo, error) {
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}

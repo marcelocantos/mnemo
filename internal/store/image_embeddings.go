@@ -235,7 +235,7 @@ func embedOneImage(db *sql.DB, imageID int64, data []byte, mimeType string) {
 // processUnembeddedImages generates embeddings for all images without one.
 func processUnembeddedImages(s *Store) {
 	s.rwmu.RLock()
-	rows, err := s.db.Query(`
+	rows, err := s.readDB.Query(`
 		SELECT img.id, img.bytes, img.mime_type
 		FROM images img
 		WHERE NOT EXISTS (
@@ -274,10 +274,10 @@ func embedAndStore(s *Store, imageID int64, data []byte, mimeType string) {
 	model, dim, vector, err := runEmbedImage(data, mimeType)
 	if err != nil {
 		slog.Warn("image embedding failed", "image_id", imageID, "err", err)
-		storeEmbedding(s.db, imageID, "", 0, nil, err.Error())
+		storeEmbedding(s.writeDB, imageID, "", 0, nil, err.Error())
 		return
 	}
-	storeEmbedding(s.db, imageID, model, dim, vector, "")
+	storeEmbedding(s.writeDB, imageID, model, dim, vector, "")
 	slog.Debug("image embedded", "image_id", imageID, "model", model, "dim", dim)
 }
 

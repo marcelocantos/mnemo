@@ -187,7 +187,7 @@ func TestReconcileSourceState(t *testing.T) {
 
 	check := func(sessionID, wantClass string) {
 		var status string
-		err := s.db.QueryRow(
+		err := s.writeDB.QueryRow(
 			`SELECT source_status FROM session_meta WHERE session_id = ?`,
 			sessionID).Scan(&status)
 		if err == sql.ErrNoRows {
@@ -216,7 +216,7 @@ func TestReconcileSourceState(t *testing.T) {
 	// retained under the durable-tier model. Spot-check the messages
 	// table is non-empty for the deleted session.
 	var count int
-	if err := s.db.QueryRow(
+	if err := s.writeDB.QueryRow(
 		`SELECT COUNT(*) FROM messages WHERE session_id = ?`, "sess-del").Scan(&count); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
