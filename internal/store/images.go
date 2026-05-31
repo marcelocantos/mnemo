@@ -232,8 +232,6 @@ func extToMime(ext string) string {
 // Pass 2: messages with image-extension file paths.
 // This is idempotent — image_occurrences has UNIQUE constraints.
 func backfillImages(s *Store) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	start := time.Now()
 

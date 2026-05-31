@@ -28,9 +28,7 @@ func TestStreamDivergences(t *testing.T) {
 	}
 
 	// Seed an ingest_status row so a docs:* divergence shows drift.
-	s.rwmu.Lock()
-	s.recordBackfillStatusLocked("targets", 8, 10)
-	s.rwmu.Unlock()
+	s.recordBackfillStatus("targets", 8, 10)
 
 	byStream := map[string]StreamDivergence{}
 	for _, d := range s.StreamDivergences() {

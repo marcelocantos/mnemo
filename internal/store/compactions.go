@@ -37,9 +37,6 @@ type Compaction struct {
 
 // PutCompaction inserts a compaction row and returns the assigned ID.
 func (s *Store) PutCompaction(c Compaction) (int64, error) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-
 	generatedAt := c.GeneratedAt
 	if generatedAt.IsZero() {
 		generatedAt = time.Now().UTC()
@@ -182,8 +179,6 @@ func scanCompactions(rows *sql.Rows) ([]Compaction, error) {
 // first). Used by mnemo_restore to resolve "what did this connection
 // compact before the current /clear" via a single definitive query.
 func (s *Store) CompactionsForConnection(connectionID string) ([]Compaction, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	rows, err := s.readDB.Query(`
 		SELECT id, session_id, COALESCE(connection_id, ''), generated_at, model, prompt_tokens, output_tokens,
 		       cost_usd, entry_id_from, entry_id_to, payload_json, summary
@@ -256,8 +251,6 @@ func (s *Store) SelectCompactionCandidates(
 	maxBudgetRatio float64,
 	limit int,
 ) ([]CompactionCandidate, int, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	if limit <= 0 {
 		limit = 100
 	}
@@ -350,8 +343,6 @@ func (s *Store) SelectCompactionCandidates(
 // are not paid tokens in the same sense, and the AC for 🎯T10
 // measures summariser cost against "real" session cost.
 func (s *Store) SessionTokens(sessionID string) (input int64, output int64, err error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	row := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
 		FROM entries
@@ -366,8 +357,6 @@ func (s *Store) SessionTokens(sessionID string) (input int64, output int64, err 
 // CompactionTokens returns the cumulative prompt + output tokens
 // consumed by every compaction run for a session.
 func (s *Store) CompactionTokens(sessionID string) (prompt int64, output int64, err error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	row := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(output_tokens), 0)
 		FROM compactions

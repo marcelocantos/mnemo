@@ -59,9 +59,6 @@ type uuidCandidate struct {
 // contextBefore and contextAfter control how many surrounding messages are
 // fetched from the messages table (same semantics as Search).
 func (s *Store) LocateUUID(prefix string, contextBefore, contextAfter int) ([]UUIDMatch, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
 	if prefix == "" {
 		return nil, fmt.Errorf("uuid prefix is required")
 	}

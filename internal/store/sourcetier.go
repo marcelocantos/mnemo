@@ -54,8 +54,6 @@ type ingestCursor struct {
 // readIngestCursors snapshots ingest_state into an in-memory map for
 // drift detection. Cheap — one query, one pass.
 func (s *Store) readIngestCursors() map[string]ingestCursor {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	rows, err := s.readDB.Query(
 		`SELECT path, offset, recorded_size, recorded_mtime FROM ingest_state`)
 	if err != nil {
@@ -190,8 +188,6 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 		return 0, nil
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	tagged := 0
 	for _, c := range candidates {
 		var current string

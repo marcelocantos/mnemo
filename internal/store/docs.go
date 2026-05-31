@@ -184,34 +184,33 @@ func matchesGitignore(patterns []string, name, relPath string) bool {
 // IngestDocs scans documentation files in all known repos and indexes them.
 // Markdown > txt > pdf priority; dedup by stem. Incremental via content hash.
 func (s *Store) IngestDocs() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-
+	s.rootsMu.RLock()
 	roots := s.knownRepoRootsLocked()
+	s.rootsMu.RUnlock()
 	indexed, skipped, onDisk := 0, 0, 0
 	for _, rr := range roots {
-		treeID, err := s.upsertTreeOfInterestLocked(rr.root, rr.repo)
+		treeID, err := s.UpsertTreeOfInterest(rr.root, rr.repo)
 		if err != nil {
 			slog.Warn("upsert tree_of_interest failed", "root", rr.root, "err", err)
 			treeID = 0
 		}
-		n, sk, od := s.ingestDocsForRepoLocked(rr.root, rr.repo, treeID)
+		n, sk, od := s.ingestDocsForRepo(rr.root, rr.repo, treeID)
 		indexed += n
 		skipped += sk
 		onDisk += od
 	}
-	s.recordBackfillStatusLocked("docs", indexed, onDisk)
+	s.recordBackfillStatus("docs", indexed, onDisk)
 	slog.Info("ingested docs", "indexed", indexed, "skipped_unchanged", skipped, "on_disk", onDisk)
 	return nil
 }
 
-// ingestDocsForRepoLocked indexes doc files for a single repo. Walks the
+// ingestDocsForRepo indexes doc files for a single repo. Walks the
 // entire repo tree from repoRoot, picking up every .md/.txt/.pdf file
 // outside the junk-dir skip list and .gitignore matches. The same filter
 // applies uniformly at every depth, including the repo root itself. If
 // treeID is non-zero, each indexed doc is linked into that tree-of-interest.
 // Returns (indexed, skipped_unchanged, on_disk).
-func (s *Store) ingestDocsForRepoLocked(repoRoot, repo string, treeID int64) (indexed, skipped, onDisk int) {
+func (s *Store) ingestDocsForRepo(repoRoot, repo string, treeID int64) (indexed, skipped, onDisk int) {
 	gitignorePatterns := parseGitignorePatterns(filepath.Join(repoRoot, ".gitignore"))
 	seen := map[string]bool{} // avoid double-indexing a path
 
@@ -247,7 +246,7 @@ func (s *Store) ingestDocsForRepoLocked(repoRoot, repo string, treeID int64) (in
 			}
 			seen[selected] = true
 			onDisk++
-			n, sk := s.ingestDocFileLocked(selected, repo, treeID)
+			n, sk := s.ingestDocFile(selected, repo, treeID)
 			indexed += n
 			skipped += sk
 		}
@@ -297,12 +296,12 @@ func selectDoc(candidates []stemCandidate) string {
 	return best
 }
 
-// ingestDocFileLocked ingests a single doc file. Returns (1,0) if indexed,
+// ingestDocFile ingests a single doc file. Returns (1,0) if indexed,
 // (0,1) if skipped (unchanged), (0,0) on error. If treeID is non-zero, the
 // doc is also linked into that tree-of-interest via doc_tree_refs (even on
 // the skip path — the file's presence in this tree is still a reference).
-// Caller must hold rwmu write lock.
-func (s *Store) ingestDocFileLocked(path, repo string, treeID int64) (indexed, skipped int) {
+// Caller must hold rootsMu write lock.
+func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped int) {
 	ext := strings.ToLower(filepath.Ext(path))
 
 	var rawBytes []byte
@@ -346,7 +345,7 @@ func (s *Store) ingestDocFileLocked(path, repo string, treeID int64) (indexed, s
 	_ = s.readDB.QueryRow("SELECT content_hash FROM docs WHERE file_path = ?", path).Scan(&existingHash)
 	if existingHash == hash {
 		skipped = 1
-		s.linkDocByPathLocked(path, treeID)
+		s.linkDocByPath(path, treeID)
 		return
 	}
 
@@ -394,14 +393,14 @@ func (s *Store) ingestDocFileLocked(path, repo string, treeID int64) (indexed, s
 		return
 	}
 	indexed = 1
-	s.linkDocByPathLocked(path, treeID)
+	s.linkDocByPath(path, treeID)
 	return
 }
 
-// linkDocByPathLocked resolves a doc by file_path and links it to the
+// linkDocByPath resolves a doc by file_path and links it to the
 // given tree-of-interest. No-op when treeID == 0 (synthesis ingest /
-// caller opted out of tree linking). Caller must hold s.rwmu write lock.
-func (s *Store) linkDocByPathLocked(path string, treeID int64) {
+// caller opted out of tree linking). Caller must hold s.rootsMu write lock.
+func (s *Store) linkDocByPath(path string, treeID int64) {
 	if treeID == 0 {
 		return
 	}
@@ -409,15 +408,13 @@ func (s *Store) linkDocByPathLocked(path string, treeID int64) {
 	if err := s.readDB.QueryRow(`SELECT id FROM docs WHERE file_path = ?`, path).Scan(&docID); err != nil {
 		return
 	}
-	if err := s.linkDocToTreeLocked(docID, treeID); err != nil {
+	if err := s.LinkDocToTree(docID, treeID); err != nil {
 		slog.Warn("link doc to tree failed", "file", path, "tree", treeID, "err", err)
 	}
 }
 
 // SearchDocs searches across indexed documentation files.
 func (s *Store) SearchDocs(query string, repo string, kind string, limit int) ([]DocInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20

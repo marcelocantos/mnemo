@@ -38,9 +38,6 @@ type SessionStructure struct {
 // by sessionID (exact or prefix). Counts are aggregated from the entries
 // and messages tables using SQLite JSON1 extraction.
 func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
 	resolvedID, err := s.resolveSessionID(sessionID)
 	if err != nil {
 		return nil, err

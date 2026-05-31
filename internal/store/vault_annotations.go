@@ -130,8 +130,6 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 		mi = &MnemoIgnore{}
 	}
 
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 
 	vaultRepo := filepath.Base(vaultPath)
 	indexed, skipped, removed := 0, 0, 0

@@ -24,14 +24,6 @@ type TreeOfInterest struct {
 // rootPath. Returns the tree's id. Idempotent: repeated calls with the
 // same rootPath return the same id and update the label.
 func (s *Store) UpsertTreeOfInterest(rootPath, label string) (int64, error) {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	return s.upsertTreeOfInterestLocked(rootPath, label)
-}
-
-// upsertTreeOfInterestLocked is the lock-held implementation. Caller
-// must hold s.rwmu write lock.
-func (s *Store) upsertTreeOfInterestLocked(rootPath, label string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.writeDB.Exec(`
 		INSERT INTO trees_of_interest (root_path, label, created_at)
@@ -52,14 +44,6 @@ func (s *Store) upsertTreeOfInterestLocked(rootPath, label string) (int64, error
 // through the tree identified by treeID. Idempotent via primary-key
 // conflict.
 func (s *Store) LinkDocToTree(docID, treeID int64) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
-	return s.linkDocToTreeLocked(docID, treeID)
-}
-
-// linkDocToTreeLocked is the lock-held implementation. Caller must
-// hold s.rwmu write lock.
-func (s *Store) linkDocToTreeLocked(docID, treeID int64) error {
 	_, err := s.writeDB.Exec(`
 		INSERT OR IGNORE INTO doc_tree_refs (doc_id, tree_id)
 		VALUES (?, ?)
@@ -74,8 +58,6 @@ func (s *Store) linkDocToTreeLocked(docID, treeID int64) error {
 // matches the given path. Returns the same DocInfo shape as SearchDocs
 // for consistency with existing callers.
 func (s *Store) DocsInTree(rootPath string) ([]DocInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	rows, err := s.readDB.Query(`
 		SELECT d.id, d.repo, d.file_path, d.kind, d.title, d.content,
 			d.content_hash, d.size, d.mtime, d.indexed_at
@@ -105,8 +87,6 @@ func (s *Store) DocsInTree(rootPath string) ([]DocInfo, error) {
 // given doc. Used for the reverse lookup "which trees contain this
 // file?".
 func (s *Store) TreesForDoc(docID int64) ([]TreeOfInterest, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 	rows, err := s.readDB.Query(`
 		SELECT t.id, t.root_path, t.label, t.created_at
 		FROM trees_of_interest t
@@ -134,8 +114,6 @@ func (s *Store) TreesForDoc(docID int64) ([]TreeOfInterest, error) {
 // references, not content. Returns sql.ErrNoRows-style behaviour
 // (silent no-op) if rootPath is unknown.
 func (s *Store) DeleteTreeOfInterest(rootPath string) error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
 	var id int64
 	if err := s.readDB.QueryRow(`SELECT id FROM trees_of_interest WHERE root_path = ?`, rootPath).Scan(&id); err != nil {
 		if err == sql.ErrNoRows {

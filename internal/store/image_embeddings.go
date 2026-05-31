@@ -234,7 +234,6 @@ func embedOneImage(db *sql.DB, imageID int64, data []byte, mimeType string) {
 
 // processUnembeddedImages generates embeddings for all images without one.
 func processUnembeddedImages(s *Store) {
-	s.rwmu.RLock()
 	rows, err := s.readDB.Query(`
 		SELECT img.id, img.bytes, img.mime_type
 		FROM images img
@@ -244,7 +243,6 @@ func processUnembeddedImages(s *Store) {
 		ORDER BY img.created_at DESC
 		LIMIT 50`)
 	if err != nil {
-		s.rwmu.RUnlock()
 		slog.Warn("image embedder query failed", "err", err)
 		return
 	}
@@ -262,7 +260,6 @@ func processUnembeddedImages(s *Store) {
 		}
 	}
 	rows.Close()
-	s.rwmu.RUnlock()
 
 	for _, pi := range pending {
 		embedAndStore(s, pi.id, pi.data, pi.mimeType)

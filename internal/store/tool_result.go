@@ -17,9 +17,6 @@ type ToolResultPayload struct {
 // by session_id and tool_use_id. Supports session_id prefix matching.
 // truncateLen <= 0 means no truncation. offset skips the first N bytes.
 func (s *Store) ToolResult(sessionID, toolUseID string, offset, truncateLen int) (*ToolResultPayload, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
-
 	resolvedID, err := s.resolveSessionID(sessionID)
 	if err != nil {
 		return nil, err

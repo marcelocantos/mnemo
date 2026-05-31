@@ -193,29 +193,30 @@ func parseInlineMetadata(content string) inlineMetadata {
 //
 // Returns nil if no SynthesisRoots are configured.
 func (s *Store) IngestSynthesis() error {
-	s.rwmu.Lock()
-	defer s.rwmu.Unlock()
+	s.rootsMu.RLock()
+	synthRoots := append([]string(nil), s.synthesisRoots...)
+	s.rootsMu.RUnlock()
 
-	if len(s.synthesisRoots) == 0 {
+	if len(synthRoots) == 0 {
 		return nil
 	}
 
 	indexed, skipped, onDisk := 0, 0, 0
-	for _, root := range s.synthesisRoots {
-		n, sk, od := s.ingestSynthesisRootLocked(root)
+	for _, root := range synthRoots {
+		n, sk, od := s.ingestSynthesisRoot(root)
 		indexed += n
 		skipped += sk
 		onDisk += od
 	}
-	s.recordBackfillStatusLocked("synthesis", indexed, onDisk)
+	s.recordBackfillStatus("synthesis", indexed, onDisk)
 	slog.Info("ingested synthesis docs",
 		"indexed", indexed, "skipped_unchanged", skipped, "on_disk", onDisk)
 	return nil
 }
 
-// ingestSynthesisRootLocked walks one root and ingests taxonomy-matching
-// files. Caller must hold rwmu write lock.
-func (s *Store) ingestSynthesisRootLocked(root string) (indexed, skipped, onDisk int) {
+// ingestSynthesisRoot walks one root and ingests taxonomy-matching
+// files.
+func (s *Store) ingestSynthesisRoot(root string) (indexed, skipped, onDisk int) {
 	fi, err := os.Stat(root)
 	if err != nil || !fi.IsDir() {
 		slog.Warn("synthesis root unavailable", "root", root, "err", err)
@@ -239,7 +240,7 @@ func (s *Store) ingestSynthesisRootLocked(root string) (indexed, skipped, onDisk
 		}
 		onDisk++
 		repo := synthesisRepoLabel(root, path)
-		n, sk := s.ingestDocFileLocked(path, repo, 0)
+		n, sk := s.ingestDocFile(path, repo, 0)
 		indexed += n
 		skipped += sk
 		return nil
@@ -277,8 +278,6 @@ func synthesisRepoLabel(root, path string) string {
 //   - taxonomy: one of paper|design|analysis|plans|audit-log|convergence-report.
 //   - repo:     LIKE match on the repo column.
 func (s *Store) SearchSynthesis(query, taxonomy, repo string, limit int) ([]DocInfo, error) {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
 
 	if limit <= 0 {
 		limit = 20

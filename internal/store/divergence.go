@@ -102,9 +102,7 @@ func (s *Store) compactionDivergence() StreamDivergence {
 			Note: "backlog query failed: " + err.Error()}
 	}
 	var last string
-	s.rwmu.RLock()
 	_ = s.readDB.QueryRow(`SELECT COALESCE(MAX(generated_at), '') FROM compactions`).Scan(&last)
-	s.rwmu.RUnlock()
 	return StreamDivergence{
 		Stream: "compactions", Known: true,
 		Gap: int64(backlog), Unit: "sessions", LastReconciled: last,
@@ -114,7 +112,7 @@ func (s *Store) compactionDivergence() StreamDivergence {
 
 // transcriptIndexDivergence reports un-ingested transcript bytes: for
 // every .jsonl under the project dirs, max(0, size - ingested offset).
-// The offsets map is guarded by s.mu (not s.rwmu); we snapshot it under
+// The offsets map is guarded by s.mu; we snapshot it under
 // that lock and then walk the filesystem lock-free.
 func (s *Store) transcriptIndexDivergence() StreamDivergence {
 	s.mu.Lock()
@@ -218,22 +216,18 @@ func (s *Store) sourceStateDivergence() StreamDivergence {
 			continue
 		}
 		var status string
-		s.rwmu.RLock()
 		_ = s.readDB.QueryRow(
 			`SELECT source_status FROM session_meta WHERE session_id = ?`,
 			sessionID).Scan(&status)
-		s.rwmu.RUnlock()
 		if status == "" || status == "live" {
 			gap++
 		}
 	}
 
 	var lastTagged string
-	s.rwmu.RLock()
 	_ = s.readDB.QueryRow(
 		`SELECT COALESCE(MAX(source_state_at), '') FROM session_meta
 		 WHERE source_status != '' AND source_status != 'live'`).Scan(&lastTagged)
-	s.rwmu.RUnlock()
 	return StreamDivergence{
 		Stream: "source_state", Known: true,
 		Gap: int64(gap), Unit: "sessions", LastReconciled: lastTagged,

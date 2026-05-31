@@ -1356,15 +1356,12 @@ security issues, and documentation gaps.`
 
 	s := newTestStore(t, projectDir)
 
-	// Directly ingest from the temp skills dir using ingestSkillFileLocked.
-	s.rwmu.Lock()
+	// Directly ingest from the temp skills dir using ingestSkillFile.
 	for _, name := range []string{"release.md", "audit-codebase.md"} {
-		if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, name)); err != nil {
-			s.rwmu.Unlock()
+		if err := s.ingestSkillFile(filepath.Join(skillsDir, name)); err != nil {
 			t.Fatalf("ingest skill %s: %v", name, err)
 		}
 	}
-	s.rwmu.Unlock()
 
 	// Search for "release" should find the release skill.
 	results, err := s.SearchSkills("release", 10)
@@ -1424,12 +1421,9 @@ Updated content.
 	if err := os.WriteFile(filepath.Join(skillsDir, "release.md"), []byte(updatedContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s.rwmu.Lock()
-	if err := s.ingestSkillFileLocked(filepath.Join(skillsDir, "release.md")); err != nil {
-		s.rwmu.Unlock()
+	if err := s.ingestSkillFile(filepath.Join(skillsDir, "release.md")); err != nil {
 		t.Fatal(err)
 	}
-	s.rwmu.Unlock()
 
 	results, err = s.SearchSkills("signing", 10)
 	if err != nil {
