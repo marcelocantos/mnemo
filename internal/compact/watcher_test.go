@@ -444,7 +444,16 @@ func TestTickLogNothingToCompact(t *testing.T) {
 	if !strings.Contains(got, string(outcomeNothingToCompact)) {
 		t.Errorf("expected outcome=%s in log, got: %s", outcomeNothingToCompact, got)
 	}
-	if strings.Contains(got, "level=INFO") || strings.Contains(got, "level=WARN") {
-		t.Errorf("nothing_to_compact should be DEBUG, got: %s", got)
+	// The per-tick "nothing_to_compact" outcome must stay at DEBUG so
+	// idle ticks don't spam the log. The per-scan elapsed line (🎯T70.4)
+	// runs at INFO regardless of tick outcomes — only tick lines are
+	// scrutinised here.
+	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+		if !strings.Contains(line, `msg="compact: tick"`) {
+			continue
+		}
+		if strings.Contains(line, "level=INFO") || strings.Contains(line, "level=WARN") {
+			t.Errorf("nothing_to_compact tick should be DEBUG, got: %s", line)
+		}
 	}
 }
