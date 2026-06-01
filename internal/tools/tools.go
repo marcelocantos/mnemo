@@ -34,6 +34,26 @@ import (
 type VaultSyncer interface {
 	Sync(ctx context.Context) error
 	Path() string
+	// Layout returns the active vault_layout ("v1", "both", or
+	// "v2"). Surfaced by mnemo_vault_status. (🎯T64.2)
+	Layout() string
+	// SoakWarnAfter returns the configured soak window after which
+	// "both"-layout vaults get the weekly warning. (🎯T64.2)
+	SoakWarnAfter() time.Duration
+	// StatePath returns the absolute path to the daemon's state.json
+	// sidecar so the status tool can read vault_layout_first_seen.
+	// (🎯T64.2)
+	StatePath() (string, error)
+	// RegenerateMigrationDoc unconditionally writes
+	// _mnemo/MIGRATION.md, overwriting any existing file. Returns the
+	// content written. Used by mnemo_vault_migration_doc(write: true).
+	// (🎯T64.2)
+	RegenerateMigrationDoc() (string, error)
+	// MigrationDocSnapshot returns the MIGRATION.md content mnemo
+	// would write for this vault right now, without touching the
+	// filesystem. Used by mnemo_vault_migration_doc(write: false).
+	// (🎯T64.2)
+	MigrationDocSnapshot() string
 }
 
 // CompactorHealthReporter is satisfied by *compact.Watcher.
@@ -674,7 +694,19 @@ Human content added below the <!-- mnemo:generated --> fence in any vault note i
 Vault must be configured via vault_path in ~/.mnemo/config.json.`),
 		),
 		mcp.NewTool("mnemo_vault_status",
-			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, and a count of notes on disk by section."),
+			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, the active vault_layout (v1/both/v2) with days_in_both and a soak recommendation, and a count of notes on disk by section."),
+		),
+		mcp.NewTool("mnemo_vault_migration_doc",
+			mcp.WithDescription(`Return or regenerate _mnemo/MIGRATION.md for the configured vault (🎯T64.2).
+
+MIGRATION.md is written once when mnemo first detects a v1-shape vault and then never touched again — a user who deletes the file has acknowledged it. This tool is the only legitimate way to bring the doc back.
+
+Modes:
+  - write=false (default): return the snapshot content mnemo would write right now, without touching the filesystem. Useful for previewing the doc via MCP or reading it without grepping the vault.
+  - write=true: write the snapshot to <vault>/_mnemo/MIGRATION.md, overwriting any existing file. The vault_layout is irrelevant — the tool always writes when asked.
+
+Requires vault to be configured (vault_path set in ~/.mnemo/config.json).`),
+			mcp.WithBoolean("write", mcp.Description("If true, write the snapshot to _mnemo/MIGRATION.md, overwriting any existing file. Default false (preview only).")),
 		),
 		mcp.NewTool("mnemo_doctor",
 			mcp.WithDescription(`Run mnemo's self-diagnostics and report health (🎯T83). Returns a per-check report — name, severity (ok/warn/fail), tier (fast/full), detail, and a remediation hint — covering the summariser working directory, claude on PATH, configured roots, the compaction circuit-breaker (a tripped breaker means every compaction is failing systemically), whether the indexer has backfilled since startup, and database responsiveness. The single "is mnemo healthy, and what do I do about it" call; the same data backs the dashboard health page (http://localhost:19419/#health) and opt-out OS notifications.`),
@@ -913,6 +945,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultSync()
 	case "mnemo_vault_status":
 		return ch.vaultStatus(h.cfgCtl)
+	case "mnemo_vault_migration_doc":
+		return ch.vaultMigrationDoc(args)
 	case "mnemo_compactor_status":
 		return ch.compactorStatus(h.resolveCompactor)
 	case "mnemo_doctor":
@@ -2704,6 +2738,39 @@ func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 	}
 	fmt.Fprintf(&b, "  ignore_file: %s (%s)\n\n", ignoreFile, ignoreState)
 
+	// Vault layout block (🎯T64.2): active layout, soak elapsed under
+	// "both", and the recommendation state machine.
+	layout := h.vault.Layout()
+	soak := h.vault.SoakWarnAfter()
+	b.WriteString("Layout:\n")
+	fmt.Fprintf(&b, "  active:                  %s", layout)
+	if cfg.VaultLayout == "" {
+		b.WriteString("  (auto-default)")
+	}
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "  soak_warn_after_hours:   %d\n", int(soak.Hours()))
+	statePath, perr := h.vault.StatePath()
+	var hoursInBoth time.Duration
+	var firstSeenBoth time.Time
+	if perr == nil {
+		if st, err := store.LoadState(statePath); err == nil {
+			firstSeenBoth = st.LayoutFirstSeen(store.VaultLayoutBoth)
+			if !firstSeenBoth.IsZero() {
+				hoursInBoth = time.Since(firstSeenBoth)
+			}
+		}
+	}
+	if !firstSeenBoth.IsZero() {
+		days := int((hoursInBoth.Hours() / 24) + 0.5)
+		fmt.Fprintf(&b, "  first_seen_both:         %s\n", firstSeenBoth.UTC().Format(time.RFC3339))
+		fmt.Fprintf(&b, "  days_in_both:            %d\n", days)
+	}
+	rec := vaultLayoutRecommendation(layout, hoursInBoth, soak, store.HasV1Leftovers(vaultPath))
+	if rec != "" {
+		fmt.Fprintf(&b, "  recommendation:          %s\n", rec)
+	}
+	b.WriteString("\n")
+
 	b.WriteString("Notes on disk:\n")
 	total := 0
 	for _, sec := range sections {
@@ -2728,6 +2795,53 @@ func (h *callHandler) doctor(runner DiagRunner) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+// vaultLayoutRecommendation returns the recommendation string for the
+// vault_layout state machine (🎯T64.2):
+//
+//   - "both" + elapsed < soak           → "still within soak"
+//   - "both" + elapsed ≥ soak           → "opt into v2"
+//   - "v2"   + v1 root-level dirs exist → "run gc_legacy"
+//   - otherwise                         → ""  (no recommendation owed)
+//
+// The empty-string row covers vault_layout="v1" (no migration owed),
+// "v2" with the legacy dirs already cleaned up (migration complete),
+// and "both" with first_seen.both not yet stamped (transient first-
+// sync state — the next sync will populate the timestamp and flip
+// the recommendation to one of the warn rows).
+func vaultLayoutRecommendation(layout string, hoursInBoth, soak time.Duration, v1LeftoversPresent bool) string {
+	switch layout {
+	case store.VaultLayoutBoth:
+		if hoursInBoth == 0 {
+			return ""
+		}
+		if hoursInBoth < soak {
+			return "still within soak"
+		}
+		return "opt into v2"
+	case store.VaultLayoutV2:
+		if v1LeftoversPresent {
+			return "run gc_legacy"
+		}
+	}
+	return ""
+}
+
+func (h *callHandler) vaultMigrationDoc(args map[string]any) (string, bool, error) {
+	if h.vault == nil {
+		return vaultNotConfigured, false, nil
+	}
+	write, _ := args["write"].(bool)
+	if !write {
+		return h.vault.MigrationDocSnapshot(), false, nil
+	}
+	content, err := h.vault.RegenerateMigrationDoc()
+	if err != nil {
+		return fmt.Sprintf("regenerate MIGRATION.md failed: %v", err), true, nil
+	}
+	return fmt.Sprintf("wrote MIGRATION.md (%d bytes) to %s/_mnemo/MIGRATION.md\n\n%s",
+		len(content), h.vault.Path(), content), false, nil
 }
 
 // compactorStatus implements mnemo_compactor_status (🎯T67). It

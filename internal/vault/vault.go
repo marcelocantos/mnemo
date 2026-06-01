@@ -99,16 +99,55 @@ type Exporter struct {
 	path    string
 	syncMu  sync.Mutex
 	syncing bool
+
+	// layout is the active vault layout — "v1", "both", or "v2". Empty
+	// is treated as "v2". The wing writers (_mnemo/index.md etc.) run
+	// for "both" and "v2"; "v1" suppresses them. (🎯T64.2)
+	layout string
+
+	// soakWarn is the duration past which a "both"-layout vault gets
+	// the weekly "opt into v2" warning. Zero means use the default
+	// (720h). (🎯T64.2)
+	soakWarn time.Duration
+
+	// statePath is the absolute path to the daemon-managed
+	// state.json sidecar. Empty falls back to ~/.mnemo/state.json.
+	// Injectable for tests. (🎯T64.2)
+	statePath string
+}
+
+// Options carries optional Exporter wiring. Each zero-valued field
+// triggers a documented default. Passing Options{} is equivalent to
+// the pre-🎯T64.2 New(backend, path) shape.
+type Options struct {
+	// Layout selects the active vault_layout. Empty defaults to "v2".
+	// Use store.ResolvedVaultLayout to compute the right value from
+	// the current Config + on-disk vault shape.
+	Layout string
+
+	// SoakWarnAfter is the duration past which a "both"-layout vault
+	// gets the weekly soak warning. Zero defaults to 720h.
+	SoakWarnAfter time.Duration
+
+	// StatePath overrides the ~/.mnemo/state.json sidecar location.
+	// Tests pass a tempdir path; production wiring leaves this empty.
+	StatePath string
 }
 
 // New creates a new Exporter rooted at path. The directory is created if
 // it does not exist. path must already be ~ expanded (use
 // Config.ResolvedVaultPath).
-func New(backend store.Backend, path string) (*Exporter, error) {
+func New(backend store.Backend, path string, opts Options) (*Exporter, error) {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, fmt.Errorf("vault: create root %s: %w", path, err)
 	}
-	return &Exporter{backend: backend, path: path}, nil
+	return &Exporter{
+		backend:   backend,
+		path:      path,
+		layout:    opts.Layout,
+		soakWarn:  opts.SoakWarnAfter,
+		statePath: opts.StatePath,
+	}, nil
 }
 
 // Path returns the vault root directory.
@@ -168,6 +207,10 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	setErr(err)
 	setErr(e.syncRepoIndices(ctx, repos, sessionPaths))
 	setErr(e.syncRootIndex(repos))
+	// 🎯T64.2: library-wing (_mnemo/) writers + state.json bookkeeping
+	// + soak warning. Auxiliary to the v1 writers above; failures are
+	// logged inside and never block the rest of the sync.
+	e.syncMnemoWing(ctx, time.Now())
 
 	slog.Info("vault: sync complete",
 		"elapsed", time.Since(start).Round(time.Millisecond),

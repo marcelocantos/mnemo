@@ -177,7 +177,10 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 		// without bound.
 		s.RegisterExcludedPath(vaultPath, "vault_path")
 		s.SetVaultPath(vaultPath) // 🎯T68.6: vault divergence + GC machinery needs the path
-		exp, err := vault.New(s, vaultPath)
+		exp, err := vault.New(s, vaultPath, vault.Options{
+			Layout:        r.cfg.ResolvedVaultLayout(vaultPath),
+			SoakWarnAfter: r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+		})
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
 		} else {
@@ -959,7 +962,10 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 		return nil
 	}
 
-	exp, err := vault.New(e.store, newPath)
+	exp, err := vault.New(e.store, newPath, vault.Options{
+		Layout:        r.cfg.ResolvedVaultLayout(newPath),
+		SoakWarnAfter: r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+	})
 	if err != nil {
 		logger.Warn("vault: exporter creation failed on reload", "path", newPath, "err", err)
 		return fmt.Errorf("vault.New(%q): %w", newPath, err)
