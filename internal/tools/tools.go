@@ -2377,13 +2377,26 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	fmt.Fprintf(&b, "  max_compactions_per_scan: %d\n", hs.MaxCompactionsPerScan)
 	fmt.Fprintf(&b, "  max_token_ratio:         %.2f\n", hs.MaxTokenRatio)
 
-	// Health heuristic: if the watcher hasn't scanned in more than
-	// 2x its configured interval, something is wrong. Surface it.
+	// Health heuristic (🎯T71): the watcher is genuinely stuck only when
+	// neither the per-scan loop NOR the per-tick loop has progressed in
+	// a while. A single scan can return up to MaxCompactionsPerScan
+	// candidates and then spend many minutes ticking through them
+	// (TickTimeout per LLM call), so last_scan_at can legitimately sit
+	// well past 2× scan_interval on a busy daemon. Use last_tick_at as
+	// the proof-of-life signal alongside last_scan_at — if either is
+	// recent, we're working, not wedged.
 	if !hs.LastScanAt.IsZero() {
 		stale := 2 * hs.ScanInterval
-		if now.Sub(hs.LastScanAt) > stale {
-			fmt.Fprintf(&b, "\n⚠ Watcher appears stuck: last scan was %s ago (> 2× scan_interval).\n",
-				now.Sub(hs.LastScanAt).Round(time.Second))
+		scanStale := now.Sub(hs.LastScanAt) > stale
+		tickStale := hs.LastTickAt.IsZero() || now.Sub(hs.LastTickAt) > stale
+		if scanStale && tickStale {
+			tickAge := "never"
+			if !hs.LastTickAt.IsZero() {
+				tickAge = now.Sub(hs.LastTickAt).Round(time.Second).String() + " ago"
+			}
+			fmt.Fprintf(&b, "\n⚠ Watcher appears stuck: last scan was %s ago and last tick was %s (> 2× scan_interval).\n",
+				now.Sub(hs.LastScanAt).Round(time.Second),
+				tickAge)
 		}
 	}
 
