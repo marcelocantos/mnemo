@@ -2293,6 +2293,19 @@ targets:
     origin: manual
     discovered: 2026-05-31
     achieved: 2026-05-31
+  T71:
+    name: mnemo_compactor_status "watcher appears stuck" heuristic accounts for in-batch tick time
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The 'watcher appears stuck' warning does NOT fire when the watcher is actively ticking through a batch of candidates (last_tick_at recent, even if last_scan_at is older than 2 × scan_interval)
+    - The warning DOES still fire when the watcher is genuinely wedged (no recent scan AND no recent tick)
+    - Heuristic threshold derived from scan_interval + (tick_timeout × max_compactions_per_scan), or equivalent — observable via mnemo_compactor_status output not asserting 'stuck' on a healthy daemon mid-batch
+    context: 'Observed on 2026-05-31 after deploying T70: with backlog ~7,700 and the per-scan cap at 20, the watcher runs `SelectCompactionCandidates` once, gets 100 candidates, then spends ~10 minutes ticking 20 of them (LLM call per tick, ~30s each) before the next scan fires. The current threshold (`2 × scan_interval` = 2 min) trips false-positive ''watcher appears stuck'' warnings every cycle on a perfectly healthy daemon. Heuristic limitation, not a real bug — but the warning is noise that misleads anyone reading status output. The fix is to either (a) widen the threshold to account for in-batch tick time, or (b) suppress the warning when last_tick_at is recent.'
+    origin: manual
+    discovered: 2026-06-01
+    achieved: 2026-06-01
   T8:
     name: sqldeep integration
     status: achieved
