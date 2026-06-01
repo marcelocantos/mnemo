@@ -54,6 +54,28 @@ type Config struct {
 	// When absent or empty, vault export is completely disabled.
 	VaultPath string `json:"vault_path,omitempty"`
 
+	// VaultLayout selects which directory layout the vault exporter writes
+	// to (🎯T64.2). One of:
+	//   - "v2"   — write under <vault>/_mnemo/ only (the new wing).
+	//   - "both" — dual-write <vault>/_mnemo/ AND the v1 root-level dirs
+	//              (sessions/, decisions/, …) during the migration window.
+	//   - "v1"   — write to v1 root-level dirs only. Emergency escape
+	//              hatch; will be removed when the Slice 9 GC tool ships.
+	//
+	// Empty resolves via ResolvedVaultLayout at runtime: new vaults default
+	// to "v2"; pre-existing v1-populated vaults default to "both" to keep
+	// existing files coherent during migration. The detection is documented
+	// under "Configuration surface" → "Soak-time TTL" in
+	// docs/design/vault-library-wing.md.
+	VaultLayout string `json:"vault_layout,omitempty"`
+
+	// VaultLayoutSoakWarnAfter is the duration (Go time.ParseDuration
+	// format) that vault_layout="both" may sit before mnemo emits the
+	// weekly "opt into v2" structured warning. Empty defaults to "720h"
+	// (30 days). The warning never auto-narrows the layout — it only
+	// surfaces the state on mnemo_vault_status and the daemon log.
+	VaultLayoutSoakWarnAfter string `json:"vault_layout_soak_warn_after,omitempty"`
+
 	// VaultIndexingScope selects which subtree of the vault mnemo reads
 	// during IngestVaultAnnotations (🎯T64.1 — consent fix). One of:
 	//   - "_mnemo_only" — only <vault>/_mnemo/ is walked. Below-fence
@@ -414,8 +436,33 @@ func WriteConfig(cfg Config) error {
 	if err := cfg.validateVaultPath(home); err != nil {
 		return err
 	}
+	if err := cfg.validateVaultLayout(); err != nil {
+		return err
+	}
 	path := filepath.Join(home, ".mnemo", "config.json")
 	return writeConfigTo(path, cfg)
+}
+
+// validateVaultLayout rejects unknown vault_layout values so a typo
+// (e.g. "v3", "Both") never persists into config.json. Empty is
+// permitted — the resolver picks a default at runtime.
+func (c Config) validateVaultLayout() error {
+	switch c.VaultLayout {
+	case "", VaultLayoutV1, VaultLayoutBoth, VaultLayoutV2:
+		// nil check is on VaultLayoutSoakWarnAfter format.
+	default:
+		return fmt.Errorf("vault_layout %q is invalid; must be one of \"v1\", \"both\", \"v2\"", c.VaultLayout)
+	}
+	if c.VaultLayoutSoakWarnAfter != "" {
+		d, err := time.ParseDuration(c.VaultLayoutSoakWarnAfter)
+		if err != nil {
+			return fmt.Errorf("vault_layout_soak_warn_after: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("vault_layout_soak_warn_after must be positive, got %v", d)
+		}
+	}
+	return nil
 }
 
 // validateVaultPath mirrors the only fallible step of vault.New
@@ -622,6 +669,18 @@ const (
 	VaultIndexingScopeIncludes  = "includes"
 )
 
+// Vault layout constants (🎯T64.2). Use these instead of bare strings.
+const (
+	VaultLayoutV1   = "v1"
+	VaultLayoutBoth = "both"
+	VaultLayoutV2   = "v2"
+)
+
+// defaultVaultLayoutSoakWarnAfter is the soak window before the
+// "both"-layout warning fires. 30 days, hours-based per the design's
+// state-machine spec.
+const defaultVaultLayoutSoakWarnAfter = 720 * time.Hour
+
 // defaultVaultIgnoreFile is the conventional name of the gitignore-
 // syntax exclude file at the vault root.
 const defaultVaultIgnoreFile = ".mnemoignore"
@@ -633,6 +692,24 @@ const defaultVaultIgnoreFile = ".mnemoignore"
 var v1VaultMarkerDirs = []string{
 	"sessions", "decisions", "memories", "skills", "configs",
 	"plans", "targets", "ci", "prs", "repos",
+}
+
+// HasV1Leftovers reports whether the vault at resolvedVaultPath has
+// any v1 root-level marker directories (sessions/, decisions/, ...).
+// Returns false on empty path or any stat error. Used by the
+// "run gc_legacy" recommendation in mnemo_vault_status — a vault
+// running under vault_layout="v2" with v1 dirs still present is the
+// canonical "ready to clean up" state. (🎯T64.2)
+func HasV1Leftovers(resolvedVaultPath string) bool {
+	if resolvedVaultPath == "" {
+		return false
+	}
+	for _, d := range v1VaultMarkerDirs {
+		if fi, err := os.Stat(filepath.Join(resolvedVaultPath, d)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolvedVaultIndexingScope returns the effective indexing scope for
@@ -662,6 +739,50 @@ func (c Config) ResolvedVaultIndexingScope(resolvedVaultPath string) string {
 		}
 	}
 	return VaultIndexingScopeMnemoOnly
+}
+
+// ResolvedVaultLayout returns the effective vault layout for the vault
+// at resolvedVaultPath. When VaultLayout is set to a recognised value,
+// it wins. Otherwise the default is computed by inspecting the vault:
+//
+//   - <vault>/_mnemo/ exists                       → "v2"  (already on the wing)
+//   - any v1 marker dir exists (sessions/, ...)    → "both" (migrate from v1)
+//   - otherwise (empty or missing directory)       → "v2"
+//
+// An empty resolvedVaultPath returns "v2" — the call site is responsible
+// for not invoking the writer when vault is disabled.
+func (c Config) ResolvedVaultLayout(resolvedVaultPath string) string {
+	switch c.VaultLayout {
+	case VaultLayoutV1, VaultLayoutBoth, VaultLayoutV2:
+		return c.VaultLayout
+	}
+	if resolvedVaultPath == "" {
+		return VaultLayoutV2
+	}
+	if fi, err := os.Stat(filepath.Join(resolvedVaultPath, "_mnemo")); err == nil && fi.IsDir() {
+		return VaultLayoutV2
+	}
+	for _, d := range v1VaultMarkerDirs {
+		if fi, err := os.Stat(filepath.Join(resolvedVaultPath, d)); err == nil && fi.IsDir() {
+			return VaultLayoutBoth
+		}
+	}
+	return VaultLayoutV2
+}
+
+// ResolvedVaultLayoutSoakWarnAfter returns the configured soak duration
+// for the "both" → "opt into v2" recommendation, or 720h when unset.
+// An unparseable or non-positive value also falls back to the default
+// so a corrupted config never silently disables the warning.
+func (c Config) ResolvedVaultLayoutSoakWarnAfter() time.Duration {
+	if c.VaultLayoutSoakWarnAfter == "" {
+		return defaultVaultLayoutSoakWarnAfter
+	}
+	d, err := time.ParseDuration(c.VaultLayoutSoakWarnAfter)
+	if err != nil || d <= 0 {
+		return defaultVaultLayoutSoakWarnAfter
+	}
+	return d
 }
 
 // ResolvedVaultIndexingIgnoreFile returns the configured ignore-file
