@@ -2192,7 +2192,7 @@ targets:
     achieved: 2026-05-30
   T69:
     name: mnemo depends on a current claudia release
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2206,6 +2206,7 @@ targets:
     - claudia
     origin: manual
     discovered: 2026-05-30
+    achieved: 2026-06-01
   T7:
     name: Agent-defined query templates
     status: achieved
