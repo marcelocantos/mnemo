@@ -33,14 +33,14 @@ const StateVersion = 1
 // state from being truncated by an older daemon that does not
 // understand it.
 type State struct {
-	Version                int                       `json:"version"`
-	VaultPath              string                    `json:"vault_path,omitempty"`
-	VaultLayoutFirstSeen   LayoutFirstSeen           `json:"vault_layout_first_seen"`
-	IndexingScopeFirstSeen IndexingScopeFirstSeen    `json:"indexing_scope_first_seen"`
-	EmbeddingFingerprint   *EmbeddingFingerprint     `json:"embedding_fingerprint"`
-	LastClusterRunID       int64                     `json:"last_cluster_run_id,omitempty"`
-	BrokenTemplates        []BrokenTemplate          `json:"broken_templates"`
-	BridgeErrors           []BridgeError             `json:"bridge_errors"`
+	Version                int                    `json:"version"`
+	VaultPath              string                 `json:"vault_path,omitempty"`
+	VaultLayoutFirstSeen   LayoutFirstSeen        `json:"vault_layout_first_seen"`
+	IndexingScopeFirstSeen IndexingScopeFirstSeen `json:"indexing_scope_first_seen"`
+	EmbeddingFingerprint   *EmbeddingFingerprint  `json:"embedding_fingerprint"`
+	LastClusterRunID       int64                  `json:"last_cluster_run_id,omitempty"`
+	BrokenTemplates        []BrokenTemplate       `json:"broken_templates"`
+	BridgeErrors           []BridgeError          `json:"bridge_errors"`
 
 	// LastSoakWarnAt is the timestamp of the most recent soak-window
 	// warning emit. The exporter consults this to enforce a weekly
@@ -120,16 +120,16 @@ type BridgeError struct {
 // knownStateKeys is the set of JSON keys the current binary writes
 // itself. Anything else loaded from disk lands in Extras.
 var knownStateKeys = map[string]struct{}{
-	"version":                  {},
-	"vault_path":               {},
-	"vault_layout_first_seen":  {},
+	"version":                   {},
+	"vault_path":                {},
+	"vault_layout_first_seen":   {},
 	"indexing_scope_first_seen": {},
-	"embedding_fingerprint":    {},
-	"last_cluster_run_id":      {},
-	"broken_templates":         {},
-	"bridge_errors":            {},
-	"last_soak_warn_at":        {},
-	"migration_doc_written_at": {},
+	"embedding_fingerprint":     {},
+	"last_cluster_run_id":       {},
+	"broken_templates":          {},
+	"bridge_errors":             {},
+	"last_soak_warn_at":         {},
+	"migration_doc_written_at":  {},
 }
 
 // DefaultStatePath returns ~/.mnemo/state.json for the calling user's

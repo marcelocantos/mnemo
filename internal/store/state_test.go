@@ -90,11 +90,11 @@ func TestWritePreservesUnknownKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	// Seed a state.json with both known and unknown fields.
 	seeded := map[string]any{
-		"version":   StateVersion,
-		"vault_path": "/tmp/v",
-		"vault_layout_first_seen": map[string]any{"v1": nil, "both": nil, "v2": nil},
+		"version":                         StateVersion,
+		"vault_path":                      "/tmp/v",
+		"vault_layout_first_seen":         map[string]any{"v1": nil, "both": nil, "v2": nil},
 		"future_field_added_in_v2_daemon": "preserve-me",
-		"another_unknown": map[string]int{"k": 1},
+		"another_unknown":                 map[string]int{"k": 1},
 	}
 	raw, err := json.MarshalIndent(seeded, "", "  ")
 	if err != nil {
