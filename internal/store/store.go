@@ -593,6 +593,12 @@ func New(dbPath, projectDir string) (*Store, error) {
 	// re-reading the first entry of each JSONL file.
 	backfillSessionMeta(writeDB, projectDir)
 
+	// 🎯T72: populate compactions_fts for compaction rows that predate
+	// the FTS table (the compactions_ai trigger only fires on new
+	// inserts). Idempotent — a no-op once the index and table counts
+	// agree, so steady-state boots pay only two COUNT(*) queries.
+	healCompactionsFTS(writeDB)
+
 	n := runtime.NumCPU()
 	if n < 1 {
 		n = 1
@@ -5169,6 +5175,32 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+// healCompactionsFTS rebuilds the compactions_fts external-content
+// index when it has drifted from the compactions table — the one-time
+// case being existing compaction rows that predate the FTS table
+// (🎯T72). The compactions_ai trigger keeps the two in lockstep for
+// every subsequent insert, so the row counts match in steady state and
+// this returns after two cheap COUNT(*) reads without touching the
+// index. If applySchema was rejected (older binary vs newer DB) the
+// FTS table is absent and the count query errors — we return silently.
+func healCompactionsFTS(db *sql.DB) {
+	var nComp, nFTS int
+	if err := db.QueryRow("SELECT COUNT(*) FROM compactions").Scan(&nComp); err != nil {
+		return
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM compactions_fts").Scan(&nFTS); err != nil {
+		return
+	}
+	if nComp == nFTS {
+		return
+	}
+	if _, err := db.Exec("INSERT INTO compactions_fts(compactions_fts) VALUES('rebuild')"); err != nil {
+		slog.Warn("compactions_fts rebuild failed", "err", err)
+		return
+	}
+	slog.Info("compactions_fts backfilled", "compactions", nComp)
 }
 
 func backfillSessionMeta(db *sql.DB, projectDir string) {
