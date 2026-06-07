@@ -902,7 +902,6 @@ func (s *Store) IngestSkills() error {
 		return err
 	}
 
-
 	files, err := filepath.Glob(filepath.Join(dir, "*.md"))
 	if err != nil {
 		return err
@@ -1693,7 +1692,6 @@ func (s *Store) ingestTargetFile(path, repo string) error {
 
 	parsed := parseTargetsFile(repo, path, data)
 
-
 	if _, err := s.writeDB.Exec("DELETE FROM targets WHERE file_path = ?", path); err != nil {
 		return fmt.Errorf("delete targets: %w", err)
 	}
@@ -2456,7 +2454,6 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 		}
 	}
 
-
 	for i, run := range runs {
 		_, err := s.writeDB.Exec(`
 			INSERT INTO ci_runs (repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
@@ -2693,7 +2690,6 @@ func (ws *writerState) Close() {
 // transactions with periodic commits.
 func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	const commitInterval = 200 * time.Millisecond
-
 
 	ws, err := newWriterState(s.writeDB)
 	if err != nil {
@@ -5123,7 +5119,6 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 		return nil, fmt.Errorf("sqldeep transpile: %w", err)
 	}
 
-
 	ctx := context.Background()
 	conn, err := s.readDB.Conn(ctx)
 	if err != nil {
@@ -6185,7 +6180,6 @@ func (s *Store) DefineTemplate(name, description, queryText string, paramNames [
 		return fmt.Errorf("marshal param_names: %w", err)
 	}
 
-
 	_, err = s.writeDB.Exec(`
 		INSERT INTO query_templates (name, description, query_text, param_names, updated_at)
 		VALUES (?, ?, ?, ?, datetime('now'))
@@ -6445,7 +6439,6 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 		return fmt.Errorf("parse gh pr output: %w", err)
 	}
 
-
 	for _, pr := range prs {
 		// Skip if not newer than our last known update (incremental).
 		if lastUpdated != "" && pr.UpdatedAt <= lastUpdated {
@@ -6497,7 +6490,6 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 	if err := json.Unmarshal(out, &issues); err != nil {
 		return fmt.Errorf("parse gh issue output: %w", err)
 	}
-
 
 	for _, issue := range issues {
 		// Skip if not newer than our last known update (incremental).
