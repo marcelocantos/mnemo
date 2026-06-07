@@ -15,11 +15,14 @@ func TestStreamDivergences(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 
-	// An idle, never-compacted session → owed → compaction backlog ≥ 1.
+	// A never-compacted session above the addenda budget → owed →
+	// compaction backlog ≥ 1. compactionDivergence measures against
+	// DefaultAddendaBudgetTokens (50k), so the assistant turn must carry
+	// at least that much output volume.
 	writeJSONL(t, dir, "p", "sess-owed", []map[string]any{
-		msg("user", "q1", now.Add(-40*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "a1", now.Add(-39*time.Minute).Format(time.RFC3339)),
-		msg("user", "q2", now.Add(-38*time.Minute).Format(time.RFC3339)),
+		msg("user", "q1 a question with enough text", now.Add(-40*time.Minute).Format(time.RFC3339)),
+		asstTok("a1 a sizeable answer", now.Add(-39*time.Minute).Format(time.RFC3339), 60000, 0, 500),
+		msg("user", "q2 a follow-up question", now.Add(-38*time.Minute).Format(time.RFC3339)),
 	})
 
 	s := newTestStore(t, dir)

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -24,22 +23,17 @@ type WatcherConfig struct {
 	// for compaction candidates. Default: 1 minute.
 	ScanInterval time.Duration
 
-	// MinDeltaMessages is trigger A's threshold: a session qualifies
-	// if it has accumulated this many substantive messages since its
-	// latest compaction's entry_id_to (or since first_msg if no
-	// prior compaction exists). Pre-T67 this was measured against
-	// the session's lifetime substantive_msgs counter — the
-	// implementation drift that left already-compacted sessions
-	// stuck in the candidate set forever. Default: 50.
-	MinDeltaMessages int
-
-	// IdleTimeout is trigger B's idle threshold: a session with at
-	// least one new substantive message AND last_msg older than
-	// (now - IdleTimeout) qualifies. Captures small/one-shot
-	// sessions that never reach MinDeltaMessages but go quiet long
-	// enough to be worth summarising for restore. Default: 15
-	// minutes.
-	IdleTimeout time.Duration
+	// AddendaBudgetTokens is the token-volume threshold that doubles as
+	// the size floor and the re-compaction trigger (🎯T72). A session is
+	// owed a compaction once the addenda token volume past its latest
+	// cursor — SUM(output_tokens + cache_creation_tokens) over assistant
+	// entries after the compacted span, or the whole session when none
+	// has been compacted — reaches this value. A session whose whole
+	// volume is below it has nothing dense to compress and is never
+	// compacted: its raw entries are its retrieval form. Replaces the
+	// message-count (trigger A) and idle-timeout (trigger B) heuristics,
+	// which proxied content volume by message count. Default: 50k.
+	AddendaBudgetTokens int64
 
 	// TickTimeout caps wall-clock time for a single compactor.Compact
 	// call. A stuck claudia subprocess, runaway query, or lock
@@ -72,18 +66,11 @@ func (c *WatcherConfig) scanInterval() time.Duration {
 	return time.Minute
 }
 
-func (c *WatcherConfig) minDeltaMessages() int {
-	if c.MinDeltaMessages > 0 {
-		return c.MinDeltaMessages
+func (c *WatcherConfig) addendaBudgetTokens() int64 {
+	if c.AddendaBudgetTokens > 0 {
+		return c.AddendaBudgetTokens
 	}
-	return 50
-}
-
-func (c *WatcherConfig) idleTimeout() time.Duration {
-	if c.IdleTimeout > 0 {
-		return c.IdleTimeout
-	}
-	return 15 * time.Minute
+	return store.DefaultAddendaBudgetTokens
 }
 
 func (c *WatcherConfig) maxCompactionsPerScan() int {
@@ -108,25 +95,22 @@ func (c *WatcherConfig) maxCandidates() int {
 }
 
 // storeSource is the narrow slice of the store the Watcher needs.
-// Under the activity-driven model (🎯T59) — and the dual-trigger
-// candidate filter added in 🎯T67 — selection scans session_summary
-// directly with a delta-message and idle-time computation;
-// daemon_connections is consulted only for best-effort connection_id
-// attribution and is exposed via the CompactionCandidate already
-// filled by the store.
+// Selection scans session_summary directly, computing each session's
+// addenda token volume against the budget (🎯T72); daemon_connections
+// is consulted only for best-effort connection_id attribution, exposed
+// via the CompactionCandidate already filled by the store.
 type storeSource interface {
 	// SelectCompactionCandidates returns the sessions owed a
-	// compaction under the convergence predicate (🎯T68.1) plus the
+	// compaction under the token-volume predicate (🎯T72) plus the
 	// total backlog (owed count before the limit). See
 	// store.SelectCompactionCandidates for the full semantics; in
-	// summary, a session is owed when it has new substantive messages
-	// since the latest compaction AND either delta >= minDeltaMsgs OR
-	// last_msg <= idleCutoff. There is no recency floor — recency is
-	// the ORDER BY priority only. maxBudgetRatio pre-filters
-	// budget-exhausted sessions.
+	// summary, a session is owed when the addenda token volume past its
+	// latest cursor meets budgetTokens (the same metric over the whole
+	// session is the size floor) and it is not a compactor-internal
+	// session. There is no recency floor — recency is the ORDER BY
+	// priority only. maxBudgetRatio is a runaway backstop.
 	SelectCompactionCandidates(
-		minDeltaMsgs int,
-		idleCutoff time.Time,
+		budgetTokens int64,
 		maxBudgetRatio float64,
 		limit int,
 	) ([]store.CompactionCandidate, int, error)
@@ -150,10 +134,9 @@ type storeSource interface {
 // bounded. Serial scan also means a session is never re-entered
 // concurrently — the implicit concurrency guard.
 type Watcher struct {
-	src        storeSource
-	compactor  *Compactor
-	cfg        WatcherConfig
-	excludeCWD string
+	src       storeSource
+	compactor *Compactor
+	cfg       WatcherConfig
 
 	mu              sync.Mutex
 	lastN           int       // candidates returned by the last scan
@@ -165,18 +148,17 @@ type Watcher struct {
 	counts          map[tickOutcome]int64
 }
 
-// NewWatcher builds an activity-driven watcher. excludeCWD is the
-// path prefix that marks self-sessions (a mnemo summariser session
-// running against mnemo's own source tree); matching candidates are
-// skipped at scan time so the compactor never recursively summarises
-// itself.
-func NewWatcher(src storeSource, c *Compactor, cfg WatcherConfig, excludeCWD string) *Watcher {
+// NewWatcher builds an activity-driven watcher. Self-sessions (claudia
+// summariser runs) are no longer excluded here by cwd prefix; they are
+// flagged at ingest (session_meta.compactor_internal) and filtered out
+// inside SelectCompactionCandidates, so a genuine dev session sharing
+// the mnemo repo cwd stays eligible (🎯T72).
+func NewWatcher(src storeSource, c *Compactor, cfg WatcherConfig) *Watcher {
 	return &Watcher{
-		src:        src,
-		compactor:  c,
-		cfg:        cfg,
-		excludeCWD: excludeCWD,
-		counts:     map[tickOutcome]int64{},
+		src:       src,
+		compactor: c,
+		cfg:       cfg,
+		counts:    map[tickOutcome]int64{},
 	}
 }
 
@@ -194,9 +176,8 @@ type HealthSnapshot struct {
 	InFlightSession       string
 	Counts                map[string]int64
 	ScanInterval          time.Duration
-	IdleTimeout           time.Duration
 	TickTimeout           time.Duration
-	MinDeltaMessages      int
+	AddendaBudgetTokens   int64
 	MaxCompactionsPerScan int
 	MaxTokenRatio         float64
 }
@@ -218,9 +199,8 @@ func (w *Watcher) Health() HealthSnapshot {
 		InFlightSession:       w.inFlightSession,
 		Counts:                counts,
 		ScanInterval:          w.cfg.scanInterval(),
-		IdleTimeout:           w.cfg.idleTimeout(),
 		TickTimeout:           w.cfg.tickTimeout(),
-		MinDeltaMessages:      w.cfg.minDeltaMessages(),
+		AddendaBudgetTokens:   w.cfg.addendaBudgetTokens(),
 		MaxCompactionsPerScan: w.cfg.maxCompactionsPerScan(),
 		MaxTokenRatio:         w.compactor.MaxTokenRatio(),
 	}
@@ -253,10 +233,8 @@ func (w *Watcher) LastScanCount() int {
 
 func (w *Watcher) scan(ctx context.Context) {
 	now := time.Now()
-	idleCutoff := now.Add(-w.cfg.idleTimeout())
 	cands, backlog, err := w.src.SelectCompactionCandidates(
-		w.cfg.minDeltaMessages(),
-		idleCutoff,
+		w.cfg.addendaBudgetTokens(),
 		w.compactor.MaxTokenRatio(),
 		w.cfg.maxCandidates(),
 	)
@@ -289,20 +267,15 @@ func (w *Watcher) scan(ctx context.Context) {
 	// compactions one scan performs so draining a large historical
 	// backlog never starves live sessions (which sort first) or
 	// exhausts the LLM budget in a single pass. Cheap no-op outcomes
-	// (nothing/budget/skipped) do not count. The remainder is left for
-	// the next scan; the cap is logged, never a silent truncation.
+	// (nothing/budget) do not count. The remainder is left for the next
+	// scan; the cap is logged, never a silent truncation. Compactor-
+	// internal sessions are no longer skipped here — they are filtered
+	// out of the candidate set at selection time (🎯T72).
 	perScanCap := w.cfg.maxCompactionsPerScan()
 	compacted := 0
 	for _, c := range cands {
 		if ctx.Err() != nil {
 			return
-		}
-		if w.excludeCWD != "" && strings.HasPrefix(c.CWD, w.excludeCWD) {
-			w.recordOutcome(c.SessionID, outcomeSkippedSelf)
-			slog.Debug("compact: tick",
-				"session_id", c.SessionID,
-				"outcome", string(outcomeSkippedSelf))
-			continue
 		}
 		if w.tick(ctx, c) == outcomeCompacted {
 			compacted++
@@ -327,7 +300,6 @@ const (
 	outcomeBudgetExceeded   tickOutcome = "budget_exceeded"
 	outcomeFailed           tickOutcome = "failed"
 	outcomeTimeout          tickOutcome = "timeout"
-	outcomeSkippedSelf      tickOutcome = "skipped_self"
 )
 
 // recordOutcome bumps the lifetime counter for outcome and records
@@ -356,10 +328,9 @@ func (w *Watcher) markInFlight(sessionID string) {
 }
 
 // tick runs one compaction attempt for one candidate session under a
-// bounded timeout (🎯T67). The candidate's CWD has already been
-// checked against excludeCWD at scan time; we still load the target
-// graph from cwd to anchor the summariser prompt. A tick that
-// exceeds w.cfg.TickTimeout is cancelled and recorded as
+// bounded timeout (🎯T67). We load the target graph from the session's
+// cwd to anchor the summariser prompt. A tick that exceeds
+// w.cfg.TickTimeout is cancelled and recorded as
 // outcomeTimeout — the watcher proceeds to the next candidate rather
 // than wedging on a single stuck call. Returns the outcome so the
 // scan loop can count successful compactions against the per-scan cap.

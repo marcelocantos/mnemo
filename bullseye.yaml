@@ -2306,6 +2306,67 @@ targets:
     origin: manual
     discovered: 2026-06-01
     achieved: 2026-06-01
+  T72:
+    name: Compactor convergence model is redesigned around token-volume triggers, addenda-as-tail, and a precise recursion guard
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The "called by us" recursion guard is precise: claudia-spawned summariser sessions are excluded by a marker stamped at invocation (env var or prompt sentinel detected at ingest time and recorded on a `sessions` flag), not by CWD prefix. User dev sessions inside the mnemo repo are eligible for compaction; the over-broad `excludeCWD` prefix check in watcher.go:300 is gone.'
+    - Triggers are token-volume based, not message-count based. The metric is `SUM(output_tokens + cache_creation_tokens)` over the addenda range — entries with `id > MAX(compactions.entry_id_to)` for the session. (`output_tokens` is non-overlapping per turn; `cache_creation_tokens` captures uncached input the model had to process; neither double-counts the way `input_tokens` does.) Re-compaction is owed when the addenda sum exceeds a configurable budget (default tied to the compaction context window, e.g., 50k tokens).
+    - 'The size-floor predicate uses the same token-volume metric applied to the whole session: a session whose total `output_tokens + cache_creation_tokens` is below the addenda budget has no compaction — its raw entries ARE its retrieval form. The floor and the re-compaction trigger become the same measurement applied to different ranges.'
+    - 'The convergence target is redefined: from "every owed session has a current span" to "every session above the size floor has bounded addenda past its latest compaction cursor." `mnemo_compactor_status` backlog reflects this new fixed point — a session with a stale compaction but bounded-token addenda is NOT counted as owed.'
+    - Compactions are FTS5-indexed (new `compactions_fts` virtual table mirroring the summary text, additive schema change per the schema policy) and weighted above raw `messages_fts` hits in `mnemo_search` results. When a search query matches both a compaction and raw messages the compaction covers, the compaction wins; raw addenda hits flow through unmodified. Existing search callers see strictly denser results without touching their query shape.
+    - Retrieval API for "the compacted view of session X" returns `compaction.summary + tail(entries with id > cursor)` — i.e., compaction + addenda. Addenda are computed on the fly from `entries`, not stored separately. An optional `addenda_token_estimate` cached column on the latest compaction row makes the trigger query O(1) but is purely an optimization.
+    - 'The current 2.7:1 lifetime failure-vs-success ratio (`failed: 551` vs `compacted: 204` in `mnemo_compactor_status`) is investigated and brought to a healthy ratio. Concrete bar: over a rolling 7-day window after this redesign ships, failed:compacted ≤ 1:5. Re-compaction failures matter much more under the new model because compactions are rare and load-bearing — "we''ll get it next scan" is no longer adequate recovery.'
+    - The compactor backlog drops from current 8,633 sessions to a stable steady state under the new convergence definition. Backlog should be a small fraction of total sessions, corresponding only to sessions whose addenda actually exceed the budget. A large historical backfill is expected on the first run after the redesign ships and is acceptable; the steady-state number is what's gated.
+    - 'Schema changes are strictly additive per the schema policy. The `compactions` table shape (session_id, entry_id_from, entry_id_to, summary, tokens, ...) is unchanged. New: `compactions_fts` virtual table, optional `addenda_token_estimate` column on `compactions`, a `compactor_internal` boolean on `sessions` (or equivalent) for the recursion marker. No destructive migrations.'
+    - Trigger B (compactions.go:309-320) is corrected to apply the token-volume floor uniformly. The current shape — `delta_substantive_msgs >= 1 AND last_msg <= idleCutoff` admitting any settled session with even one new message — would, under the new model, mean an idle 2-message session qualifies for compaction even though it's below the size floor. The trigger must use total session tokens against the floor, not delta messages.
+    context: |-
+      ## The throughline
+
+      Compactions become the durable, dense layer; addenda are the cheap unprocessed tail past the latest compaction cursor; search and post-analysis sit on top.
+
+      Today's compactor is a continuously-reconciled summary — every 50 new messages re-triggers an expensive LLM call. The result: an 8,633-session backlog the watcher can't drain (made worse by an over-broad CWD-prefix recursion guard skipping 705,043 candidates lifetime against 204 actual compactions), and a fragile contract where the watcher's entire job is "keep up."
+
+      Under the redesign, compaction is deliberate, not continuous. Each session has at most one compaction at a time covering `[0, cursor]`; everything past the cursor is addenda — raw entries pinned by their position past `cursor`. Most sessions are converged most of the time. Re-compaction is rare and triggered by addenda token volume crossing a budget tied to a real constraint (downstream retrieval needs to fit `compaction + addenda` in a context window).
+
+      ## Why token-volume, not message-count
+
+      A 50-message session of one-line exchanges and a 50-message session with 10k tokens of pasted context per turn are wildly different in compaction effort and retrieval pressure. The LLM cost scales with tokens; retrieval budgets are tokens; the addenda-tail tractability question is "does this fit a context window." So message count was always a proxy; tokens are the actual quantity.
+
+      `output_tokens + cache_creation_tokens` is the cleanest content-volume measure. `input_tokens` double-counts prior conversation each turn (grows quadratically with length) — fine as a budget *ratio* (the existing `SessionTokens` use in store/compactions.go is correct as a ratio), wrong as a content measure.
+
+      ## Why "called by us" is the only legitimate exclusion
+
+      The recursion guard exists because claudia (the compaction caller) spawns a Claude Code session whose transcript ingest will pick up — and would summarise on the next scan, creating endless self-recursion. That's the ONLY thing that needs excluding. User dev sessions in the mnemo repo SHOULD be compacted — they are exactly the high-value content. The CWD-prefix check conflates the two and is why the backlog never drains.
+
+      Fix: stamp a marker at the claudia spawn site (env var like `CLAUDIA_INTERNAL=mnemo-compactor` or a sentinel prompt prefix), detect at ingest, set `sessions.compactor_internal = 1`, exclude by that flag. Surgically narrow, never false-positive.
+
+      ## What downstream lights up
+
+      Once compactions are durable, dense, and FTS5-indexed, every post-analysis pass becomes feasible at the corpus scale:
+
+      - **Consolidation across session chains.** A `/clear`-bounded chain of sessions on one task produces N high-overlap compactions; a higher-level "chain summary" pass collapses them. Compactions stay as the durable layer.
+      - **Incomplete-work mining.** Cheap heuristic or LLM-classification pass over compactions surfaces "TODO," "stuck on," "left off at" patterns — feeds a bullseye-target candidate list directly. Much cheaper than scanning raw transcripts.
+      - **Knowledge graph from compactions.** Compactions are dense, one-sentence-per-fact-ish. Entity/relation extraction works at LLM call counts that match corpus size, not message size. The graph is keyed by real-world concepts.
+      - **🎯T64's vault wing themes/patterns/lessons (T64.7–9) consume compactions as input.** The current design points at this implicitly; the addenda model makes it cheaper and higher-signal. The T64 design itself doesn't change — just the input layer it operates on.
+
+      ## The "tiny" rule, corrected
+
+      Earlier framing was "skip tiny deltas — no win." Wrong direction: a tiny delta can be high-signal ("oops, I changed my mind"). The correct rule is "skip tiny **sessions** — there's nothing dense to compress." Under the addenda model, "tiny session" means "total token volume below the addenda budget" — i.e., the entire session IS its own retrieval form, no compaction needed.
+
+      ## Open questions intentionally not pinned by acceptance
+
+      - **The exact budget number.** 50k tokens is a starting point; the right number is tied to downstream retrieval consumers' context budget and may evolve. Acceptance specifies the metric (`output + cache_creation`), not the threshold.
+      - **Re-compaction strategy: differential append, or full re-summary?** Differential (summarise just the addenda, append to summary) is cheaper but lossy across the boundary; full re-summary (re-run claudia over the full transcript) is cleaner but expensive. Probably differential by default with periodic full-re-summary refreshes. To be decided during implementation.
+      - **Chain-scoped vs session-scoped compaction.** Compactions stay session-scoped (no change to claudia). A chain-level consolidation pass (idea 2) stitches them. Keeps LLM-cost predictable; cleanest separation of concerns.
+
+      ## Sequence note
+
+      The recursion-guard fix is independently valuable — the compactor today is functionally broken because of it. The redesign can either ship as one PR or be sequenced as (a) recursion-guard hotfix, (b) full redesign — depending on patience. Decompose into sub-targets if/when execution reveals natural fault lines.
+    origin: manual
+    discovered: 2026-06-07
   T8:
     name: sqldeep integration
     status: achieved

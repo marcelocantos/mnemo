@@ -56,9 +56,8 @@ type CompactorHealth struct {
 	InFlightSession       string
 	Counts                map[string]int64
 	ScanInterval          time.Duration
-	IdleTimeout           time.Duration
 	TickTimeout           time.Duration
-	MinDeltaMessages      int
+	AddendaBudgetTokens   int64
 	MaxCompactionsPerScan int
 	MaxTokenRatio         float64
 }
@@ -2352,7 +2351,7 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 
 	fmt.Fprintf(&b, "  last_scan_at:        %s\n", formatAge(hs.LastScanAt))
 	fmt.Fprintf(&b, "  last_scan_count:     %d\n", hs.LastScanCount)
-	fmt.Fprintf(&b, "  backlog:             %d (owed-but-uncompacted sessions)\n", hs.Backlog)
+	fmt.Fprintf(&b, "  backlog:             %d (sessions whose addenda exceed the budget)\n", hs.Backlog)
 	fmt.Fprintf(&b, "  last_tick_at:        %s\n", formatAge(hs.LastTickAt))
 	if hs.LastTickOutcome != "" {
 		fmt.Fprintf(&b, "  last_tick_outcome:   %s\n", hs.LastTickOutcome)
@@ -2364,18 +2363,24 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	}
 
 	b.WriteString("\nLifetime tick counts:\n")
-	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "skipped_self"}
+	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "rate_limited"}
 	for _, o := range outcomes {
 		fmt.Fprintf(&b, "  %-20s %d\n", o+":", hs.Counts[o])
 	}
+	// 🎯T72: the failure ratio is the load-bearing health signal now that
+	// compactions are rare and durable. A healthy steady state keeps
+	// failed well below compacted (target ≤ 1:5).
+	if comp := hs.Counts["compacted"]; comp > 0 {
+		fmt.Fprintf(&b, "  %-20s %.2f (failed/compacted; healthy ≤ 0.20)\n",
+			"failure_ratio:", float64(hs.Counts["failed"])/float64(comp))
+	}
 
 	b.WriteString("\nConfiguration:\n")
-	fmt.Fprintf(&b, "  scan_interval:           %s\n", hs.ScanInterval)
-	fmt.Fprintf(&b, "  idle_timeout:            %s\n", hs.IdleTimeout)
-	fmt.Fprintf(&b, "  tick_timeout:            %s\n", hs.TickTimeout)
-	fmt.Fprintf(&b, "  min_delta_messages:      %d\n", hs.MinDeltaMessages)
+	fmt.Fprintf(&b, "  scan_interval:            %s\n", hs.ScanInterval)
+	fmt.Fprintf(&b, "  tick_timeout:             %s\n", hs.TickTimeout)
+	fmt.Fprintf(&b, "  addenda_budget_tokens:    %d\n", hs.AddendaBudgetTokens)
 	fmt.Fprintf(&b, "  max_compactions_per_scan: %d\n", hs.MaxCompactionsPerScan)
-	fmt.Fprintf(&b, "  max_token_ratio:         %.2f\n", hs.MaxTokenRatio)
+	fmt.Fprintf(&b, "  max_token_ratio:          %.2f\n", hs.MaxTokenRatio)
 
 	// Health heuristic (🎯T71): the watcher is genuinely stuck only when
 	// neither the per-scan loop NOR the per-tick loop has progressed in

@@ -724,9 +724,8 @@ func (a compactorAdapter) Health() tools.CompactorHealth {
 		InFlightSession:       hs.InFlightSession,
 		Counts:                hs.Counts,
 		ScanInterval:          hs.ScanInterval,
-		IdleTimeout:           hs.IdleTimeout,
 		TickTimeout:           hs.TickTimeout,
-		MinDeltaMessages:      hs.MinDeltaMessages,
+		AddendaBudgetTokens:   hs.AddendaBudgetTokens,
 		MaxCompactionsPerScan: hs.MaxCompactionsPerScan,
 		MaxTokenRatio:         hs.MaxTokenRatio,
 	}

@@ -194,76 +194,77 @@ func (s *Store) CompactionsForConnection(connectionID string) ([]Compaction, err
 }
 
 // CompactionCandidate is one session the activity-driven watcher
-// considers worth a compaction tick (🎯T59). ConnectionID is best-
-// effort attribution — the most recently observed connection bound
-// to this session, or empty if no binding exists.
+// considers worth a compaction tick. ConnectionID is best-effort
+// attribution — the most recently observed connection bound to this
+// session, or empty if no binding exists.
 type CompactionCandidate struct {
 	SessionID    string
-	CWD          string
 	ConnectionID string
 }
 
 // SelectCompactionCandidates returns sessions that are *owed* a
-// compaction — the desired-state predicate of the convergence model
-// (🎯T68.1, replacing the recency-windowed polling of 🎯T67/🎯T59).
+// compaction under the token-volume convergence model (🎯T72,
+// superseding the message-count + idle triggers of 🎯T68.1/🎯T67).
 //
-// A session is owed when it has new substantive messages since the
-// most recent compaction's entry_id_to (or since the start of the
-// transcript if none) — measured against the messages table
-// directly, not the lifetime substantive_msgs counter — AND EITHER
-// of two triggers fires:
+// A session is owed when its *addenda token volume* — the work done
+// past the latest compaction's cursor — meets or exceeds budgetTokens.
+// The metric is SUM(output_tokens + cache_creation_tokens) over the
+// session's assistant entries lying after the cursor:
 //
-//  1. delta_substantive_msgs >= minDeltaMsgs (compact an
-//     actively-growing session once it has accumulated enough new
-//     content), or
-//  2. delta_substantive_msgs >= 1 AND last_msg <= idleCutoff (a
-//     settled session — including every historical session, which is
-//     idle by definition — is owed a span capturing its tail).
+//   - output_tokens is non-overlapping per turn; cache_creation_tokens
+//     is the uncached input the model actually had to process. Neither
+//     double-counts the way input_tokens does (input_tokens re-counts
+//     the whole prior conversation every turn), so their sum is the
+//     cleanest measure of content volume.
+//   - The cursor is MAX(compactions.entry_id_to), a messages.id (the
+//     column is a historical misnomer, 🎯T68.3). It is mapped to the
+//     owning entries.id so the sum ranges over entries past the cursor;
+//     when no compaction exists the cursor is 0 and the sum covers the
+//     whole session — so the *size floor* (a tiny session has nothing
+//     dense to compress; its raw entries ARE its retrieval form) and
+//     the *re-compaction trigger* are the same measurement applied to
+//     different ranges, exactly as the redesign requires.
 //
-// There is deliberately NO recency floor in the predicate. Recency
-// is a *scheduling priority* (ORDER BY last_msg DESC — recent
-// sessions reconcile first), not a filter that permanently abandons
-// old sessions. A never-compacted session from months ago is just a
-// candidate with a far-back cursor; the watcher drains the backlog
-// over successive scans under its per-scan compaction cap, so a large
-// initial backlog never starves live sessions. This is what makes
-// compaction converge to the fixed point "every owed session has a
-// current span" rather than only servicing the last 24h.
+// Two filters precede the volume test:
 //
-// Sessions whose cumulative compaction-token cost already meets or
-// exceeds maxBudgetRatio of the session's assistant token cost are
-// filtered out at the candidate level (not just inside
-// Compactor.Compact's checkBudget path): convergence is bounded by
-// the token budget, not by recency. This also preserves the 🎯T67
-// guarantee that a budget-exhausted session is not re-selected on
-// every scan.
+//   - compactor_internal = 0 excludes claudia-spawned summariser
+//     sessions, flagged at ingest by the CompactorMarker prefix. This
+//     is the precise recursion guard that replaces the over-broad
+//     excludeCWD prefix check — a genuine dev session sharing the mnemo
+//     repo cwd is now eligible.
+//   - the ratio guard skips sessions whose cumulative summariser cost
+//     already meets maxBudgetRatio of the session's assistant token
+//     cost (a runaway backstop; rarely fires because sess_tokens is the
+//     large cumulative input+output sum, not the addenda metric).
 //
-// Returns the candidate slice (capped at limit, recent-first) plus
-// the total backlog — the count of owed sessions before the limit is
-// applied — so the gap to the fixed point is observable via
-// mnemo_compactor_status rather than silently truncated. ConnectionID
-// is best-effort attribution: the most recently observed connection
-// bound to the session, or empty when none (additive-only schema,
-// NULL-tolerated).
+// There is no recency floor: recency is the ORDER BY priority only
+// (recent sessions reconcile first), and the per-scan compaction cap
+// drains any historical backlog over successive scans without starving
+// live work. Returns the candidate slice (capped at limit, recent-first)
+// plus the total backlog — owed count before the limit — so the gap to
+// the fixed point "every session above the floor has bounded addenda"
+// is observable via mnemo_compactor_status rather than silently
+// truncated.
 func (s *Store) SelectCompactionCandidates(
-	minDeltaMsgs int,
-	idleCutoff time.Time,
+	budgetTokens int64,
 	maxBudgetRatio float64,
 	limit int,
 ) ([]CompactionCandidate, int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	if budgetTokens <= 0 {
+		budgetTokens = DefaultAddendaBudgetTokens
+	}
 	if maxBudgetRatio <= 0 {
 		maxBudgetRatio = 0.10
 	}
-	idleCutoffStr := idleCutoff.UTC().Format(time.RFC3339Nano)
 	rows, err := s.readDB.Query(`
 		WITH session_state AS (
 		  SELECT
 		    ss.session_id,
 		    ss.last_msg,
-		    COALESCE(sm.cwd, '')                                                                    AS cwd,
+		    COALESCE(sm.compactor_internal, 0)                                                      AS compactor_internal,
 		    COALESCE((
 		      SELECT cs.connection_id FROM connection_sessions cs
 		      WHERE cs.session_id = ss.session_id
@@ -273,7 +274,7 @@ func (s *Store) SelectCompactionCandidates(
 		    COALESCE((
 		      SELECT MAX(entry_id_to) FROM compactions
 		      WHERE session_id = ss.session_id
-		    ), 0)                                                                                   AS last_entry_id,
+		    ), 0)                                                                                   AS cursor_msg_id,
 		    COALESCE((
 		      SELECT SUM(prompt_tokens + output_tokens) FROM compactions
 		      WHERE session_id = ss.session_id
@@ -285,43 +286,33 @@ func (s *Store) SelectCompactionCandidates(
 		  FROM session_summary ss
 		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
 		)
-		SELECT s.session_id, s.cwd, s.connection_id, COUNT(*) OVER () AS backlog
+		SELECT s.session_id, s.connection_id, COUNT(*) OVER () AS backlog
 		FROM session_state s
 		WHERE
-		  -- Budget filter: skip sessions whose summariser cost has
+		  -- Recursion guard: claudia-spawned summariser sessions are
+		  -- excluded by the ingest-stamped flag, not by cwd prefix.
+		  s.compactor_internal = 0
+		  -- Runaway backstop: skip sessions whose summariser cost has
 		  -- already met the configured ratio. Unmeasurable sessions
-		  -- (zero session tokens) are allowed through; the first
-		  -- compaction has to run before there's anything to measure.
-		  (s.sess_tokens = 0 OR s.comp_tokens * 1.0 / s.sess_tokens < ?)
-		  AND (
-		    -- Trigger A: enough new substantive messages since the
-		    -- session's latest compaction (or since the start of the
-		    -- transcript if none exists). last_entry_id is a messages.id
-		    -- (compactions.entry_id_to is a misnamed messages.id, 🎯T68.3),
-		    -- so the cursor comparison is m.id — matching ReadSessionAfter
-		    -- and Compact, so owed ⟺ Compact yields a span.
-		    (SELECT COUNT(*) FROM messages m
-		     WHERE m.session_id = s.session_id
-		       AND m.id > s.last_entry_id
-		       AND m.is_noise = 0
-		    ) >= ?
-		    OR
-		    -- Trigger B: at least one new substantive message AND
-		    -- the session has been idle long enough. Captures small
-		    -- one-shot sessions and every historical session (idle by
-		    -- definition) — there is no recency floor; old sessions
-		    -- are owed, not abandoned.
-		    (s.last_msg <= ?
-		     AND EXISTS (
-		       SELECT 1 FROM messages m
-		       WHERE m.session_id = s.session_id
-		         AND m.id > s.last_entry_id
-		         AND m.is_noise = 0
-		     ))
-		  )
+		  -- (zero session tokens) are allowed through.
+		  AND (s.sess_tokens = 0 OR s.comp_tokens * 1.0 / s.sess_tokens < ?)
+		  -- Unified floor + re-compaction trigger: owed when the addenda
+		  -- token volume past the cursor meets the budget. The cursor
+		  -- (a messages.id) is mapped to its entries.id so the sum ranges
+		  -- over assistant entries strictly after the compacted span;
+		  -- cursor 0 (no compaction) makes this the whole-session volume.
+		  AND COALESCE((
+		    SELECT SUM(e.output_tokens + e.cache_creation_tokens)
+		    FROM entries e
+		    WHERE e.session_id = s.session_id
+		      AND e.type = 'assistant'
+		      AND e.id > COALESCE((
+		        SELECT m.entry_id FROM messages m WHERE m.id = s.cursor_msg_id
+		      ), 0)
+		  ), 0) >= ?
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, maxBudgetRatio, minDeltaMsgs, idleCutoffStr, limit)
+	`, maxBudgetRatio, budgetTokens, limit)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}
@@ -330,12 +321,42 @@ func (s *Store) SelectCompactionCandidates(
 	backlog := 0
 	for rows.Next() {
 		var c CompactionCandidate
-		if err := rows.Scan(&c.SessionID, &c.CWD, &c.ConnectionID, &backlog); err != nil {
+		if err := rows.Scan(&c.SessionID, &c.ConnectionID, &backlog); err != nil {
 			return nil, 0, fmt.Errorf("scan candidate: %w", err)
 		}
 		out = append(out, c)
 	}
 	return out, backlog, rows.Err()
+}
+
+// DefaultAddendaBudgetTokens is the default re-compaction / size-floor
+// threshold (🎯T72): a session is owed a compaction once the token
+// volume past its latest cursor reaches this many tokens, and a session
+// whose whole-session volume is below it is never compacted. Tied to the
+// compaction context window; tunable via WatcherConfig.AddendaBudgetTokens.
+const DefaultAddendaBudgetTokens int64 = 50_000
+
+// AddendaTokens returns the addenda token volume for a session past a
+// cursor — SUM(output_tokens + cache_creation_tokens) over assistant
+// entries whose entries.id lies after the entry owning cursorMsgID (a
+// messages.id, matching compactions.entry_id_to). A cursorMsgID of 0
+// (no compaction) yields the whole-session volume, so the same call
+// answers both "is this session above the size floor?" and "how much
+// has accrued since the last compaction?" (🎯T72). It is the Go-level
+// twin of the predicate inlined in SelectCompactionCandidates.
+func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error) {
+	var tokens int64
+	err := s.readDB.QueryRow(`
+		SELECT COALESCE(SUM(e.output_tokens + e.cache_creation_tokens), 0)
+		FROM entries e
+		WHERE e.session_id = ?
+		  AND e.type = 'assistant'
+		  AND e.id > COALESCE((SELECT m.entry_id FROM messages m WHERE m.id = ?), 0)
+	`, sessionID, cursorMsgID).Scan(&tokens)
+	if err != nil {
+		return 0, fmt.Errorf("addenda tokens: %w", err)
+	}
+	return tokens, nil
 }
 
 // SessionTokens returns the total input + output tokens consumed by

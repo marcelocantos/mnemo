@@ -71,129 +71,29 @@ func TestCompactionsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSelectCompactionCandidatesUnboundSession covers 🎯T59 #6:
-// an ingested session with enough substantive messages is returned
-// by SelectCompactionCandidates even though no connection_session
-// row has ever been recorded for it. Its ConnectionID comes back
-// empty so a subsequent PutCompaction stores NULL.
-func TestSelectCompactionCandidatesUnboundSession(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now().UTC()
-	// 5 substantive user/assistant messages, all recent.
-	entries := []map[string]any{
-		msg("user", "hello one", now.Add(-5*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "reply one", now.Add(-4*time.Minute).Format(time.RFC3339)),
-		msg("user", "hello two", now.Add(-3*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "reply two", now.Add(-2*time.Minute).Format(time.RFC3339)),
-		msg("user", "hello three", now.Add(-1*time.Minute).Format(time.RFC3339)),
-	}
-	writeJSONL(t, dir, "unbound-project", "sess-unbound", entries)
-
-	s := newTestStore(t, dir)
-	if err := s.IngestAll(); err != nil {
-		t.Fatalf("IngestAll: %v", err)
-	}
-
-	cands, _, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), 0.10, 100)
-	if err != nil {
-		t.Fatalf("SelectCompactionCandidates: %v", err)
-	}
-	var found *CompactionCandidate
-	for i, c := range cands {
-		if c.SessionID == "sess-unbound" {
-			found = &cands[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("expected sess-unbound in candidates, got %+v", cands)
-	}
-	if found.ConnectionID != "" {
-		t.Errorf("expected empty ConnectionID for unbound session, got %q", found.ConnectionID)
+// asstTok builds an assistant JSONL entry carrying the per-turn token
+// usage the token-volume model reads: output_tokens and
+// cache_creation_input_tokens feed the addenda metric; input_tokens
+// feeds the (cumulative) session cost the ratio guard divides against.
+func asstTok(text, ts string, outTokens, cacheCreation, inputTokens int) map[string]any {
+	return map[string]any{
+		"type":      "assistant",
+		"timestamp": ts,
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": text,
+			"usage": map[string]any{
+				"input_tokens":                inputTokens,
+				"output_tokens":               outTokens,
+				"cache_creation_input_tokens": cacheCreation,
+			},
+		},
 	}
 }
 
-// TestSelectCompactionCandidatesBoundSession covers 🎯T59 #7:
-// a session with a recorded connection binding is returned with
-// its best-effort ConnectionID populated, so the resulting
-// compaction can be tagged for backwards compatibility with the
-// pre-T59 connection-based restore path.
-func TestSelectCompactionCandidatesBoundSession(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now().UTC()
-	entries := []map[string]any{
-		msg("user", "bound one", now.Add(-3*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "bound reply", now.Add(-2*time.Minute).Format(time.RFC3339)),
-		msg("user", "bound two", now.Add(-1*time.Minute).Format(time.RFC3339)),
-	}
-	writeJSONL(t, dir, "bound-project", "sess-bound", entries)
-
-	s := newTestStore(t, dir)
-	if err := s.IngestAll(); err != nil {
-		t.Fatalf("IngestAll: %v", err)
-	}
-
-	// Simulate a live MCP binding for this session.
-	s.RecordConnectionSessionAt("conn-xyz", "sess-bound", now)
-
-	cands, _, err := s.SelectCompactionCandidates(
-		2, now.Add(-15*time.Minute), 0.10, 100)
-	if err != nil {
-		t.Fatalf("SelectCompactionCandidates: %v", err)
-	}
-	var found *CompactionCandidate
-	for i, c := range cands {
-		if c.SessionID == "sess-bound" {
-			found = &cands[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("expected sess-bound in candidates, got %+v", cands)
-	}
-	if found.ConnectionID != "conn-xyz" {
-		t.Errorf("expected ConnectionID=conn-xyz, got %q", found.ConnectionID)
-	}
-}
-
-// TestSelectCompactionCandidatesFilters verifies the convergence
-// predicate (🎯T68.1): the delta/idle triggers still reject a session
-// that is not yet owed, but there is NO recency floor — a stale,
-// never-compacted session is owed and selected, not abandoned.
-func TestSelectCompactionCandidatesFilters(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now().UTC()
-
-	// "tiny" — recent and below minMsgs, so not owed yet (neither
-	// trigger fires: delta < min, and last_msg is newer than the idle
-	// cutoff).
-	writeJSONL(t, dir, "p", "sess-tiny", []map[string]any{
-		msg("user", "lonely", now.Add(-1*time.Minute).Format(time.RFC3339)),
-	})
-	// "stale" — last_msg a full day ago. Under the old recency window
-	// this was dropped; under the convergence predicate it is idle and
-	// has new substantive content, so it is OWED and must be selected.
-	staleStart := now.Add(-24 * time.Hour)
-	writeJSONL(t, dir, "p", "sess-stale", []map[string]any{
-		msg("user", "x1", staleStart.Format(time.RFC3339)),
-		msg("assistant", "x2", staleStart.Add(time.Minute).Format(time.RFC3339)),
-		msg("user", "x3", staleStart.Add(2*time.Minute).Format(time.RFC3339)),
-	})
-	// "good" — recent and over the delta threshold.
-	writeJSONL(t, dir, "p", "sess-good", []map[string]any{
-		msg("user", "y1", now.Add(-5*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "y2", now.Add(-4*time.Minute).Format(time.RFC3339)),
-		msg("user", "y3", now.Add(-3*time.Minute).Format(time.RFC3339)),
-	})
-
-	s := newTestStore(t, dir)
-	if err := s.IngestAll(); err != nil {
-		t.Fatalf("IngestAll: %v", err)
-	}
-
-	cands, _, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), 0.10, 100)
+func candidateIDs(t *testing.T, s *Store, budget int64, ratio float64) map[string]bool {
+	t.Helper()
+	cands, _, err := s.SelectCompactionCandidates(budget, ratio, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -201,242 +101,250 @@ func TestSelectCompactionCandidatesFilters(t *testing.T) {
 	for _, c := range cands {
 		ids[c.SessionID] = true
 	}
-	if !ids["sess-good"] {
-		t.Errorf("expected sess-good in candidates")
+	return ids
+}
+
+// TestAddendaTokens checks the metric directly: with no cursor the sum
+// covers the whole session (output + cache_creation over assistant
+// entries); past a cursor it covers only entries after the cursor's
+// owning entry, and user-entry tokens never count.
+func TestAddendaTokens(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-at", []map[string]any{
+		asstTok("a1", now.Add(-5*time.Minute).Format(time.RFC3339), 100, 20, 500),
+		msg("user", "u1 long enough to be substantive", now.Add(-4*time.Minute).Format(time.RFC3339)),
+		asstTok("a2", now.Add(-3*time.Minute).Format(time.RFC3339), 200, 30, 600),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
 	}
-	if ids["sess-tiny"] {
-		t.Errorf("sess-tiny should not be owed yet (below minMsgs and not idle)")
+
+	// Whole session: (100+20) + (200+30) = 350.
+	if got, err := s.AddendaTokens("sess-at", 0); err != nil {
+		t.Fatalf("AddendaTokens: %v", err)
+	} else if got != 350 {
+		t.Errorf("whole-session addenda = %d, want 350", got)
 	}
-	if !ids["sess-stale"] {
-		t.Errorf("sess-stale should be owed via the idle trigger — there is no recency floor")
+
+	// Cursor at the first assistant message: only a2 counts = 230.
+	var firstAsstMsgID int64
+	if err := s.writeDB.QueryRow(
+		`SELECT MIN(id) FROM messages WHERE session_id='sess-at' AND role='assistant'`).Scan(&firstAsstMsgID); err != nil {
+		t.Fatalf("first asst msg id: %v", err)
+	}
+	if got, err := s.AddendaTokens("sess-at", firstAsstMsgID); err != nil {
+		t.Fatalf("AddendaTokens past cursor: %v", err)
+	} else if got != 230 {
+		t.Errorf("addenda past first assistant = %d, want 230", got)
 	}
 }
 
-// TestSelectCompactionCandidatesHistoricalBacklog covers the core
-// 🎯T68.1 convergence guarantee: a never-compacted session whose
-// last message is far outside any former recency window is still
-// owed a compaction and selected, and the returned backlog counts it.
-func TestSelectCompactionCandidatesHistoricalBacklog(t *testing.T) {
+// TestSelectCompactionCandidatesSizeFloor verifies the unified floor:
+// a session whose whole-session token volume is below the budget is
+// never owed (its raw entries are its retrieval form), while one above
+// the budget is owed. Connection attribution still flows through.
+func TestSelectCompactionCandidatesSizeFloor(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 
-	// A month-old session, never compacted — the kind the old 24h
-	// recency floor abandoned permanently.
-	old := now.Add(-30 * 24 * time.Hour)
-	writeJSONL(t, dir, "p", "sess-historical", []map[string]any{
-		msg("user", "h1", old.Format(time.RFC3339)),
-		msg("assistant", "h2", old.Add(time.Minute).Format(time.RFC3339)),
-		msg("user", "h3", old.Add(2*time.Minute).Format(time.RFC3339)),
+	// Below floor: 50 < budget 100.
+	writeJSONL(t, dir, "p", "sess-tiny", []map[string]any{
+		msg("user", "a small question here", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		asstTok("tiny reply", now.Add(-1*time.Minute).Format(time.RFC3339), 50, 0, 200),
+	})
+	// Above floor: 120 + 40 = 160 >= budget 100.
+	writeJSONL(t, dir, "p", "sess-big", []map[string]any{
+		msg("user", "a much bigger question", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		asstTok("big reply one", now.Add(-2*time.Minute).Format(time.RFC3339), 120, 0, 400),
+		asstTok("big reply two", now.Add(-1*time.Minute).Format(time.RFC3339), 0, 40, 400),
 	})
 
 	s := newTestStore(t, dir)
 	if err := s.IngestAll(); err != nil {
 		t.Fatalf("IngestAll: %v", err)
 	}
+	// Bind sess-big so we also confirm attribution survives.
+	s.RecordConnectionSessionAt("conn-big", "sess-big", now)
 
-	cands, backlog, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), 0.10, 100)
+	cands, backlog, err := s.SelectCompactionCandidates(100, 0.10, 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
-	found := false
-	for _, c := range cands {
-		if c.SessionID == "sess-historical" {
-			found = true
-			break
+	var big *CompactionCandidate
+	ids := map[string]bool{}
+	for i, c := range cands {
+		ids[c.SessionID] = true
+		if c.SessionID == "sess-big" {
+			big = &cands[i]
 		}
 	}
-	if !found {
-		t.Errorf("month-old never-compacted session should be owed; got %+v", cands)
+	if ids["sess-tiny"] {
+		t.Errorf("sess-tiny is below the floor and must not be owed")
+	}
+	if big == nil {
+		t.Fatalf("sess-big is above the floor and must be owed; got %+v", cands)
+	}
+	if big.ConnectionID != "conn-big" {
+		t.Errorf("expected ConnectionID=conn-big, got %q", big.ConnectionID)
 	}
 	if backlog < 1 {
-		t.Errorf("backlog should count the owed session, got %d", backlog)
+		t.Errorf("backlog should count sess-big, got %d", backlog)
 	}
 }
 
-// TestSelectCompactionCandidatesDeltaTrigger verifies 🎯T67's
-// trigger A: candidate qualifies when delta messages SINCE the
-// session's latest compaction.entry_id_to clear the threshold —
-// even if the lifetime substantive_msgs count is much higher
-// (i.e. the session has already been compacted past most of its
-// history).
-func TestSelectCompactionCandidatesDeltaTrigger(t *testing.T) {
+// TestSelectCompactionCandidatesCursor verifies the re-compaction
+// trigger and its convergence. The owed-predicate measures addenda past
+// MAX(entry_id_to): a compaction at the phase-one cursor still leaves
+// phase-two's tokens as addenda (owed); a compaction covering every
+// message drops addenda to zero (not owed). No recency floor — the
+// session is a month old throughout.
+func TestSelectCompactionCandidatesCursor(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Now().UTC()
-
-	// 6 substantive messages, all recent.
-	entries := []map[string]any{
-		msg("user", "m1", now.Add(-6*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "m2", now.Add(-5*time.Minute).Format(time.RFC3339)),
-		msg("user", "m3", now.Add(-4*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "m4", now.Add(-3*time.Minute).Format(time.RFC3339)),
-		msg("user", "m5", now.Add(-2*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "m6", now.Add(-1*time.Minute).Format(time.RFC3339)),
-	}
-	writeJSONL(t, dir, "p", "sess-delta", entries)
-
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	writeJSONL(t, dir, "p", "sess-cur", []map[string]any{
+		msg("user", "kickoff message text here", old.Format(time.RFC3339)),
+		asstTok("phase one", old.Add(time.Minute).Format(time.RFC3339), 200, 0, 500),
+		msg("user", "follow-up question text", old.Add(2*time.Minute).Format(time.RFC3339)),
+		asstTok("phase two", old.Add(3*time.Minute).Format(time.RFC3339), 150, 0, 800),
+	})
 	s := newTestStore(t, dir)
 	if err := s.IngestAll(); err != nil {
 		t.Fatalf("IngestAll: %v", err)
 	}
 
-	// Plant a compaction that covers ALL six messages so the delta
-	// drops to zero. Even though lifetime substantive_msgs is 6
-	// (which would qualify under the pre-T67 filter), the session
-	// must NOT be selected because there's nothing new since the
-	// compaction.
-	// entry_id_to is a messages.id (🎯T68.3), so a span "covering
-	// everything" records MAX(id), not MAX(entry_id).
-	var maxMsgID int64
-	if err := s.writeDB.QueryRow(`SELECT MAX(id) FROM messages WHERE session_id = 'sess-delta'`).Scan(&maxMsgID); err != nil {
+	// Never compacted, above the floor, old → owed (no recency floor).
+	if !candidateIDs(t, s, 100, 0.10)["sess-cur"] {
+		t.Fatalf("old above-floor session should be owed")
+	}
+
+	// Cursor at the first (phase-one) assistant message: phase two's 150
+	// tokens remain as addenda ≥ budget → still owed.
+	var phaseOneMsgID, maxMsgID int64
+	if err := s.writeDB.QueryRow(
+		`SELECT MIN(id) FROM messages WHERE session_id='sess-cur' AND role='assistant'`).Scan(&phaseOneMsgID); err != nil {
+		t.Fatalf("phase-one msg id: %v", err)
+	}
+	if err := s.writeDB.QueryRow(
+		`SELECT MAX(id) FROM messages WHERE session_id='sess-cur'`).Scan(&maxMsgID); err != nil {
 		t.Fatalf("max msg id: %v", err)
 	}
 	if _, err := s.PutCompaction(Compaction{
-		SessionID:    "sess-delta",
-		EntryIDFrom:  0,
-		EntryIDTo:    maxMsgID,
-		PromptTokens: 100,
-		OutputTokens: 20,
-		Summary:      "covers everything",
+		SessionID: "sess-cur", EntryIDFrom: 0, EntryIDTo: phaseOneMsgID,
+		PromptTokens: 80, OutputTokens: 20, Summary: "covers phase one",
 	}); err != nil {
-		t.Fatalf("PutCompaction: %v", err)
+		t.Fatalf("PutCompaction (phase one): %v", err)
+	}
+	if !candidateIDs(t, s, 100, 0.10)["sess-cur"] {
+		t.Errorf("addenda past the phase-one cursor (150) exceed the budget — should be owed")
 	}
 
-	cands, _, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), 0.10, 100)
-	if err != nil {
-		t.Fatalf("SelectCompactionCandidates: %v", err)
-	}
-	for _, c := range cands {
-		if c.SessionID == "sess-delta" {
-			t.Errorf("sess-delta should be filtered: prior compaction covers all messages")
-		}
-	}
-}
-
-// TestSelectCompactionCandidatesIdleTrigger verifies 🎯T67's
-// trigger B: a session with fewer than MinDeltaMessages new
-// substantive messages still qualifies when last_msg is older than
-// idleCutoff. Captures small one-shot sessions that would otherwise
-// never be compacted.
-func TestSelectCompactionCandidatesIdleTrigger(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now().UTC()
-
-	// 2 substantive messages, both posted ~30 min ago — below the
-	// MinDeltaMessages=10 threshold but past the idleCutoff=15min mark.
-	writeJSONL(t, dir, "p", "sess-idle", []map[string]any{
-		msg("user", "small q", now.Add(-30*time.Minute).Format(time.RFC3339)),
-		msg("assistant", "small a", now.Add(-29*time.Minute).Format(time.RFC3339)),
-	})
-
-	s := newTestStore(t, dir)
-	if err := s.IngestAll(); err != nil {
-		t.Fatalf("IngestAll: %v", err)
-	}
-
-	cands, _, err := s.SelectCompactionCandidates(
-		10,                       // minDeltaMsgs — well above the 2 we have
-		now.Add(-15*time.Minute), // idleCutoff: last_msg must be older than this
-		0.10,
-		100,
-	)
-	if err != nil {
-		t.Fatalf("SelectCompactionCandidates: %v", err)
-	}
-	found := false
-	for _, c := range cands {
-		if c.SessionID == "sess-idle" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("sess-idle should qualify via the idle trigger; got %+v", cands)
-	}
-}
-
-// TestSelectCompactionCandidatesBudgetFilter verifies 🎯T67's
-// candidate-level budget filter: a session whose cumulative
-// compaction tokens already meet maxBudgetRatio of its assistant
-// token cost is dropped from the candidate set, so the watcher
-// never wakes up just to log budget_exceeded.
-func TestSelectCompactionCandidatesBudgetFilter(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now().UTC()
-
-	// Build a session with assistant entries carrying real token
-	// counts so the budget ratio resolves to something meaningful.
-	asst := func(text string, ts time.Time, in, out int) map[string]any {
-		return map[string]any{
-			"type":      "assistant",
-			"timestamp": ts.Format(time.RFC3339),
-			"message": map[string]any{
-				"role":    "assistant",
-				"content": text,
-				"usage": map[string]any{
-					"input_tokens":  in,
-					"output_tokens": out,
-				},
-			},
-		}
-	}
-	writeJSONL(t, dir, "p", "sess-broke", []map[string]any{
-		asst("a1", now.Add(-10*time.Minute), 100, 50),
-		msg("user", "u1", now.Add(-9*time.Minute).Format(time.RFC3339)),
-		asst("a2", now.Add(-8*time.Minute), 100, 50),
-		msg("user", "u2", now.Add(-7*time.Minute).Format(time.RFC3339)),
-		asst("a3", now.Add(-6*time.Minute), 100, 50),
-		msg("user", "u3", now.Add(-5*time.Minute).Format(time.RFC3339)),
-		msg("user", "u4", now.Add(-4*time.Minute).Format(time.RFC3339)),
-		msg("user", "u5", now.Add(-3*time.Minute).Format(time.RFC3339)),
-	})
-
-	s := newTestStore(t, dir)
-	if err := s.IngestAll(); err != nil {
-		t.Fatalf("IngestAll: %v", err)
-	}
-
-	// Plant a compaction whose prompt+output already exceed 50% of
-	// the session's 450-token cost (3 × (100+50)).
+	// Advance the cursor to cover everything → addenda 0 → not owed.
 	if _, err := s.PutCompaction(Compaction{
-		SessionID:    "sess-broke",
-		EntryIDFrom:  0,
-		EntryIDTo:    1,
-		PromptTokens: 300,
-		OutputTokens: 100,
-		Summary:      "spent",
+		SessionID: "sess-cur", EntryIDFrom: phaseOneMsgID, EntryIDTo: maxMsgID,
+		PromptTokens: 80, OutputTokens: 20, Summary: "covers everything",
+	}); err != nil {
+		t.Fatalf("PutCompaction (all): %v", err)
+	}
+	if candidateIDs(t, s, 100, 0.10)["sess-cur"] {
+		t.Errorf("a fully-covered session has zero addenda and must not be owed")
+	}
+}
+
+// TestSelectCompactionCandidatesExcludesCompactorInternal is the
+// precise recursion guard: a claudia-spawned summariser session
+// (flagged via the marker on its first message) is excluded even when
+// above the floor, while a genuine dev session in the same project is
+// still selected. The legacy signature is detected too.
+func TestSelectCompactionCandidatesExcludesCompactorInternal(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	writeJSONL(t, dir, "p", "sess-internal", []map[string]any{
+		msg("user", CompactorMarker+" compact the following transcript span", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		asstTok("summary json here", now.Add(-2*time.Minute).Format(time.RFC3339), 300, 0, 500),
+	})
+	writeJSONL(t, dir, "p", "sess-legacy", []map[string]any{
+		msg("user", LegacyCompactorSignature+" Given transcript messages...", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		asstTok("legacy summary", now.Add(-2*time.Minute).Format(time.RFC3339), 300, 0, 500),
+	})
+	writeJSONL(t, dir, "p", "sess-dev", []map[string]any{
+		msg("user", "a real dev session in the mnemo repo", now.Add(-3*time.Minute).Format(time.RFC3339)),
+		asstTok("dev reply", now.Add(-2*time.Minute).Format(time.RFC3339), 300, 0, 500),
+	})
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	ids := candidateIDs(t, s, 100, 0.10)
+	if ids["sess-internal"] {
+		t.Errorf("marker-flagged compactor session must be excluded")
+	}
+	if ids["sess-legacy"] {
+		t.Errorf("legacy-signature compactor session must be excluded")
+	}
+	if !ids["sess-dev"] {
+		t.Errorf("genuine dev session must remain eligible (no cwd-prefix exclusion)")
+	}
+
+	// Confirm the flag actually landed on the right rows.
+	var internal, dev int
+	s.readDB.QueryRow(`SELECT compactor_internal FROM session_meta WHERE session_id='sess-internal'`).Scan(&internal)
+	s.readDB.QueryRow(`SELECT COALESCE((SELECT compactor_internal FROM session_meta WHERE session_id='sess-dev'),0)`).Scan(&dev)
+	if internal != 1 {
+		t.Errorf("sess-internal should be flagged compactor_internal=1, got %d", internal)
+	}
+	if dev != 0 {
+		t.Errorf("sess-dev should be compactor_internal=0, got %d", dev)
+	}
+}
+
+// TestSelectCompactionCandidatesBudgetRatioGuard verifies the runaway
+// backstop: a session whose cumulative summariser cost already meets
+// maxBudgetRatio of its (input+output) session cost is dropped even
+// though its addenda exceed the budget; raising the ratio lets it
+// through.
+func TestSelectCompactionCandidatesBudgetRatioGuard(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+
+	// Four assistant turns; cursor will sit at the first so addenda
+	// past it (turns 2–4) stay above the budget.
+	writeJSONL(t, dir, "p", "sess-broke", []map[string]any{
+		asstTok("a1", now.Add(-10*time.Minute).Format(time.RFC3339), 200, 0, 100),
+		asstTok("a2", now.Add(-8*time.Minute).Format(time.RFC3339), 200, 0, 100),
+		asstTok("a3", now.Add(-6*time.Minute).Format(time.RFC3339), 200, 0, 100),
+		asstTok("a4", now.Add(-4*time.Minute).Format(time.RFC3339), 200, 0, 100),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Cursor at the first assistant message; comp_tokens high relative
+	// to sess_tokens (sum of input+output = 4×300 = 1200).
+	var firstMsgID int64
+	if err := s.writeDB.QueryRow(
+		`SELECT MIN(id) FROM messages WHERE session_id='sess-broke'`).Scan(&firstMsgID); err != nil {
+		t.Fatalf("first msg id: %v", err)
+	}
+	if _, err := s.PutCompaction(Compaction{
+		SessionID: "sess-broke", EntryIDFrom: 0, EntryIDTo: firstMsgID,
+		PromptTokens: 400, OutputTokens: 100, Summary: "spent", // comp_tokens=500
 	}); err != nil {
 		t.Fatalf("PutCompaction: %v", err)
 	}
 
-	// 50% budget — already exceeded.
-	cands, _, err := s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), 0.50, 100)
-	if err != nil {
-		t.Fatalf("SelectCompactionCandidates: %v", err)
+	// ratio 500/1200 ≈ 0.42 ≥ 0.10 → filtered.
+	if candidateIDs(t, s, 100, 0.10)["sess-broke"] {
+		t.Errorf("sess-broke should be filtered by the ratio guard")
 	}
-	for _, c := range cands {
-		if c.SessionID == "sess-broke" {
-			t.Errorf("sess-broke should be filtered by the budget ratio; got %+v", cands)
-		}
-	}
-
-	// Raising the budget to 200% lets it through (now well under).
-	cands, _, err = s.SelectCompactionCandidates(
-		3, now.Add(-15*time.Minute), 2.0, 100)
-	if err != nil {
-		t.Fatalf("SelectCompactionCandidates: %v", err)
-	}
-	found := false
-	for _, c := range cands {
-		if c.SessionID == "sess-broke" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("sess-broke should pass when budget ratio raised; got %+v", cands)
+	// Raise the ratio cap above 0.42 → passes (addenda past cursor ≥ 100).
+	if !candidateIDs(t, s, 100, 2.0)["sess-broke"] {
+		t.Errorf("sess-broke should pass when the ratio cap is raised")
 	}
 }
 

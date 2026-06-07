@@ -17,17 +17,18 @@ import (
 )
 
 // fakeStoreSource implements storeSource for tests. Candidate lists
-// are explicit; cwd lookups are taken from the candidates' CWD
-// field (good enough for the watcher's loadTargetContext path —
-// the tests don't exercise target graph loading).
+// are explicit; the token-volume predicate and the compactor-internal
+// recursion guard live in store.SelectCompactionCandidates and are
+// tested there, so the fake just returns whatever candidates the test
+// planted. SessionCWD returns "" — these tests don't exercise the
+// target-graph loading path.
 type fakeStoreSource struct {
 	mu         sync.Mutex
 	candidates []store.CompactionCandidate
 }
 
 func (f *fakeStoreSource) SelectCompactionCandidates(
-	minDeltaMsgs int,
-	idleCutoff time.Time,
+	budgetTokens int64,
 	maxBudgetRatio float64,
 	limit int,
 ) ([]store.CompactionCandidate, int, error) {
@@ -41,16 +42,7 @@ func (f *fakeStoreSource) SelectCompactionCandidates(
 	return out, len(f.candidates), nil
 }
 
-func (f *fakeStoreSource) SessionCWD(sessionID string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, c := range f.candidates {
-		if c.SessionID == sessionID {
-			return c.CWD
-		}
-	}
-	return ""
-}
+func (f *fakeStoreSource) SessionCWD(sessionID string) string { return "" }
 
 func (f *fakeStoreSource) setCandidates(cs ...store.CompactionCandidate) {
 	f.mu.Lock()
@@ -136,8 +128,8 @@ func runUntil(t *testing.T, w *Watcher, until func() bool) {
 func TestWatcherScansAndCompactsSession(t *testing.T) {
 	src := &fakeStoreSource{}
 	src.setCandidates(
-		store.CompactionCandidate{SessionID: "sess-A", CWD: "/work/proj-a"},
-		store.CompactionCandidate{SessionID: "sess-B", CWD: "/work/proj-b"},
+		store.CompactionCandidate{SessionID: "sess-A"},
+		store.CompactionCandidate{SessionID: "sess-B"},
 	)
 
 	llm := &stubNopLLM{}
@@ -145,7 +137,7 @@ func TestWatcherScansAndCompactsSession(t *testing.T) {
 	compactor := New(cs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "/mnemo-repo")
+	})
 
 	runUntil(t, w, func() bool { return llm.calls.Load() >= 2 })
 
@@ -167,11 +159,11 @@ func TestWatcherScansAndCompactsSession(t *testing.T) {
 func TestWatcherPerScanCap(t *testing.T) {
 	src := &fakeStoreSource{}
 	src.setCandidates(
-		store.CompactionCandidate{SessionID: "s1", CWD: "/work/a"},
-		store.CompactionCandidate{SessionID: "s2", CWD: "/work/b"},
-		store.CompactionCandidate{SessionID: "s3", CWD: "/work/c"},
-		store.CompactionCandidate{SessionID: "s4", CWD: "/work/d"},
-		store.CompactionCandidate{SessionID: "s5", CWD: "/work/e"},
+		store.CompactionCandidate{SessionID: "s1"},
+		store.CompactionCandidate{SessionID: "s2"},
+		store.CompactionCandidate{SessionID: "s3"},
+		store.CompactionCandidate{SessionID: "s4"},
+		store.CompactionCandidate{SessionID: "s5"},
 	)
 
 	llm := &stubNopLLM{}
@@ -181,7 +173,7 @@ func TestWatcherPerScanCap(t *testing.T) {
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval:          10 * time.Second,
 		MaxCompactionsPerScan: 2,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return llm.calls.Load() >= 2 })
 
@@ -204,7 +196,7 @@ func TestWatcherPerScanCap(t *testing.T) {
 func TestWatcherUnboundSessionCompacts(t *testing.T) {
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{
-		SessionID: "sess-unbound", CWD: "/work/unbound", ConnectionID: "",
+		SessionID: "sess-unbound", ConnectionID: "",
 	})
 
 	llm := &stubNopLLM{}
@@ -212,7 +204,7 @@ func TestWatcherUnboundSessionCompacts(t *testing.T) {
 	compactor := New(cs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return llm.calls.Load() >= 1 })
 
@@ -233,7 +225,7 @@ func TestWatcherUnboundSessionCompacts(t *testing.T) {
 func TestWatcherBoundSessionTagsConnection(t *testing.T) {
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{
-		SessionID: "sess-bound", CWD: "/work/proj", ConnectionID: "conn-xyz",
+		SessionID: "sess-bound", ConnectionID: "conn-xyz",
 	})
 
 	llm := &stubNopLLM{}
@@ -241,7 +233,7 @@ func TestWatcherBoundSessionTagsConnection(t *testing.T) {
 	compactor := New(cs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return llm.calls.Load() >= 1 })
 
@@ -253,39 +245,6 @@ func TestWatcherBoundSessionTagsConnection(t *testing.T) {
 	}
 }
 
-// TestWatcherSkipsSelfSession verifies that a candidate whose CWD
-// starts with excludeCWD is skipped at scan time (the LLM is never
-// called for self-sessions).
-func TestWatcherSkipsSelfSession(t *testing.T) {
-	buf, restore := captureSlog()
-	defer restore()
-
-	src := &fakeStoreSource{}
-	src.setCandidates(
-		store.CompactionCandidate{SessionID: "sess-self", CWD: "/mnemo-repo/sub"},
-		store.CompactionCandidate{SessionID: "sess-user", CWD: "/work/proj"},
-	)
-
-	llm := &stubNopLLM{}
-	cs := newCountingStore()
-	compactor := New(cs, llm, Config{})
-	w := NewWatcher(src, compactor, WatcherConfig{
-		ScanInterval: 10 * time.Millisecond,
-	}, "/mnemo-repo")
-
-	runUntil(t, w, func() bool {
-		return llm.calls.Load() >= 1 && strings.Contains(buf.String(), string(outcomeSkippedSelf))
-	})
-
-	if llm.calls.Load() != 1 {
-		t.Errorf("expected exactly 1 LLM call (self skipped, user compacted), got %d", llm.calls.Load())
-	}
-	got := buf.String()
-	if !strings.Contains(got, string(outcomeSkippedSelf)) {
-		t.Errorf("expected outcome=%s in log for self-session, got: %s", outcomeSkippedSelf, got)
-	}
-}
-
 // TestTickLogCompacted verifies a successful compaction emits an
 // INFO line with outcome=compacted and the resolved IDs.
 func TestTickLogCompacted(t *testing.T) {
@@ -294,7 +253,7 @@ func TestTickLogCompacted(t *testing.T) {
 
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{
-		SessionID: "sess-ok", CWD: "/work/proj", ConnectionID: "conn-1",
+		SessionID: "sess-ok", ConnectionID: "conn-1",
 	})
 
 	llm := &stubNopLLM{}
@@ -302,7 +261,7 @@ func TestTickLogCompacted(t *testing.T) {
 	compactor := New(cs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return strings.Contains(buf.String(), string(outcomeCompacted)) })
 
@@ -347,13 +306,13 @@ func TestTickLogBudgetExceededIsDebug(t *testing.T) {
 	}
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{
-		SessionID: "sess-broke", CWD: "/work/proj",
+		SessionID: "sess-broke",
 	})
 	llm := &stubNopLLM{}
 	compactor := New(fs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return strings.Contains(buf.String(), string(outcomeBudgetExceeded)) })
 
@@ -380,14 +339,14 @@ func TestTickLogBudgetExceededIsDebug(t *testing.T) {
 func TestWatcherHealthSnapshot(t *testing.T) {
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{
-		SessionID: "sess-ok", CWD: "/work/proj",
+		SessionID: "sess-ok",
 	})
 	llm := &stubNopLLM{}
 	cs := newCountingStore()
 	compactor := New(cs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return llm.calls.Load() >= 1 })
 
@@ -407,8 +366,8 @@ func TestWatcherHealthSnapshot(t *testing.T) {
 	if hs.ScanInterval == 0 {
 		t.Errorf("expected ScanInterval to be reported")
 	}
-	if hs.MinDeltaMessages == 0 {
-		t.Errorf("expected MinDeltaMessages default to be reported")
+	if hs.AddendaBudgetTokens == 0 {
+		t.Errorf("expected AddendaBudgetTokens default to be reported")
 	}
 }
 
@@ -430,13 +389,13 @@ func TestTickLogNothingToCompact(t *testing.T) {
 	}
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{
-		SessionID: "sess-idle", CWD: "/some-project",
+		SessionID: "sess-idle",
 	})
 	llm := &stubNopLLM{}
 	compactor := New(fs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{
 		ScanInterval: 10 * time.Millisecond,
-	}, "")
+	})
 
 	runUntil(t, w, func() bool { return strings.Contains(buf.String(), string(outcomeNothingToCompact)) })
 

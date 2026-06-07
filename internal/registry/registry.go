@@ -291,7 +291,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		defer e.workers.Done()
 		caller := compact.NewClaudiaCaller(r.mnemoRepoDir, r.compactorModel)
 		compactor := compact.New(e.store, caller, compact.Config{})
-		watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{}, r.mnemoRepoDir)
+		watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{})
 		e.compactWatcher = watcher
 		logger.Info("compact: watcher starting")
 		watcher.Run(r.baseCtx)
