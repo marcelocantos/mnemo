@@ -138,14 +138,74 @@ type Watcher struct {
 	compactor *Compactor
 	cfg       WatcherConfig
 
-	mu              sync.Mutex
-	lastN           int       // candidates returned by the last scan
-	lastBacklog     int       // owed sessions before the per-scan limit (gap to fixed point)
-	lastScanAt      time.Time // wall clock of the last scan return
-	lastTickAt      time.Time // wall clock of the last tick completion
-	lastTickOutcome tickOutcome
-	inFlightSession string // session_id currently being ticked (or "")
-	counts          map[tickOutcome]int64
+	mu                  sync.Mutex
+	lastN               int       // candidates returned by the last scan
+	lastBacklog         int       // owed sessions before the per-scan limit (gap to fixed point)
+	lastScanAt          time.Time // wall clock of the last scan return
+	lastTickAt          time.Time // wall clock of the last tick completion
+	lastTickOutcome     tickOutcome
+	inFlightSession     string                     // session_id currently being ticked (or "")
+	counts              map[tickOutcome]int64      // lifetime tick-outcome tallies
+	failures            map[string]*sessionBackoff // per-session failure backoff (🎯T72)
+	globalCooldownUntil time.Time                  // watcher-wide pause after a rate limit (🎯T72)
+}
+
+// inGlobalCooldown reports whether the watcher is paused after a recent
+// rate limit, and until when.
+func (w *Watcher) inGlobalCooldown(now time.Time) (bool, time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return now.Before(w.globalCooldownUntil), w.globalCooldownUntil
+}
+
+func (w *Watcher) setGlobalCooldown(until time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if until.After(w.globalCooldownUntil) {
+		w.globalCooldownUntil = until
+	}
+}
+
+// sessionCoolingDown reports whether a session is still inside its
+// post-failure backoff window and should be skipped this scan.
+func (w *Watcher) sessionCoolingDown(sessionID string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	b := w.failures[sessionID]
+	return b != nil && now.Before(b.until)
+}
+
+// recordFailure bumps a session's consecutive-failure count and sets an
+// exponentially growing backoff (capped), so one persistently
+// un-summarisable session cannot generate a failure every scan.
+func (w *Watcher) recordFailure(sessionID string, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failures == nil {
+		w.failures = map[string]*sessionBackoff{}
+	}
+	b := w.failures[sessionID]
+	if b == nil {
+		b = &sessionBackoff{}
+		w.failures[sessionID] = b
+	}
+	b.consecutive++
+	shift := b.consecutive - 1
+	if shift > failureBackoffCap {
+		shift = failureBackoffCap
+	}
+	backoff := failureBackoffBase << uint(shift)
+	if backoff > failureBackoffMax {
+		backoff = failureBackoffMax
+	}
+	b.until = now.Add(backoff)
+}
+
+// clearFailure forgets a session's backoff after a non-failing tick.
+func (w *Watcher) clearFailure(sessionID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.failures, sessionID)
 }
 
 // NewWatcher builds an activity-driven watcher. Self-sessions (claudia
@@ -263,6 +323,15 @@ func (w *Watcher) scan(ctx context.Context) {
 	w.lastScanAt = time.Now()
 	w.mu.Unlock()
 
+	// A rate limit earlier put the whole watcher to sleep: skip ticking
+	// entirely until the cooldown elapses (🎯T72) so we don't march every
+	// owed session through the same wall and rack up failures.
+	if cooling, until := w.inGlobalCooldown(now); cooling {
+		slog.Info("compact: in global cooldown after a rate limit; skipping ticks",
+			"until", until.Format(time.RFC3339))
+		return
+	}
+
 	// Per-scan compaction cap (🎯T68.1): bound the number of real
 	// compactions one scan performs so draining a large historical
 	// backlog never starves live sessions (which sort first) or
@@ -277,7 +346,28 @@ func (w *Watcher) scan(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if w.tick(ctx, c) == outcomeCompacted {
+		// Skip sessions still inside their post-failure backoff so one
+		// un-summarisable session can't fail every scan (🎯T72).
+		if w.sessionCoolingDown(c.SessionID, now) {
+			continue
+		}
+		outcome := w.tick(ctx, c)
+		switch outcome {
+		case outcomeRateLimited:
+			// Account-wide condition: stop this scan and back the whole
+			// watcher off rather than failing every remaining candidate.
+			w.setGlobalCooldown(time.Now().Add(rateLimitCooldown))
+			slog.Warn("compact: summariser rate-limited; backing off",
+				"cooldown", rateLimitCooldown)
+			return
+		case outcomeFailed, outcomeTimeout:
+			w.recordFailure(c.SessionID, time.Now())
+		default:
+			// compacted / nothing_to_compact / budget_exceeded — the
+			// session is healthy; forget any prior backoff.
+			w.clearFailure(c.SessionID)
+		}
+		if outcome == outcomeCompacted {
 			compacted++
 			if compacted >= perScanCap {
 				slog.Info("compact: per-scan cap reached; deferring backlog to next scan",
@@ -300,7 +390,32 @@ const (
 	outcomeBudgetExceeded   tickOutcome = "budget_exceeded"
 	outcomeFailed           tickOutcome = "failed"
 	outcomeTimeout          tickOutcome = "timeout"
+	// outcomeRateLimited (🎯T72) marks a tick whose summariser hit a
+	// transient external wall (usage/rate limit, API outage). It is NOT
+	// a hard failure: it self-heals and triggers a global backoff rather
+	// than being retried session-by-session.
+	outcomeRateLimited tickOutcome = "rate_limited"
 )
+
+// Failure-recovery tuning (🎯T72). Under the rare-and-durable model a
+// compaction failure matters far more than under the old continuous
+// model, so the watcher does not blindly re-tick a failing session every
+// scan. A genuine per-session failure backs that session off with
+// exponential delay; a rate-limit backs the whole watcher off so it
+// doesn't march every owed session through the same wall.
+const (
+	failureBackoffBase = 2 * time.Minute
+	failureBackoffMax  = time.Hour
+	failureBackoffCap  = 5 // max doublings of the base delay
+	rateLimitCooldown  = 10 * time.Minute
+)
+
+// sessionBackoff tracks consecutive failures for one session and the
+// time before which it should not be re-ticked.
+type sessionBackoff struct {
+	consecutive int
+	until       time.Time
+}
 
 // recordOutcome bumps the lifetime counter for outcome and records
 // the most recent tick state. Safe to call concurrently.
@@ -360,7 +475,7 @@ func (w *Watcher) tick(ctx context.Context, c store.CompactionCandidate) tickOut
 	switch outcome {
 	case outcomeCompacted:
 		level = slog.LevelInfo
-	case outcomeFailed, outcomeTimeout:
+	case outcomeFailed, outcomeTimeout, outcomeRateLimited:
 		level = slog.LevelWarn
 	}
 
@@ -386,6 +501,8 @@ func (w *Watcher) runTick(ctx context.Context, c store.CompactionCandidate, tc *
 		return outcomeNothingToCompact, nil
 	case errors.Is(err, ErrBudgetExceeded):
 		return outcomeBudgetExceeded, nil
+	case errors.Is(err, ErrLLMUnavailable):
+		return outcomeRateLimited, []any{"reason", err.Error()}
 	case errors.Is(err, exec.ErrNotFound):
 		slog.Error("compact: claude subprocess spawn failed — executable not found in PATH",
 			"err", err,

@@ -371,6 +371,75 @@ func TestWatcherHealthSnapshot(t *testing.T) {
 	}
 }
 
+// rateLimitLLM always returns a usage-limit notice as prose, which the
+// compactor classifies as ErrLLMUnavailable (🎯T72).
+type rateLimitLLM struct {
+	calls atomic.Int64
+}
+
+func (r *rateLimitLLM) Call(ctx context.Context, sys, user string) (LLMResult, error) {
+	r.calls.Add(1)
+	return LLMResult{Text: "You've hit your session limit · resets 10:10pm"}, nil
+}
+
+// TestWatcherSessionFailureBackoff covers the per-session backoff
+// helpers (🎯T72): a failed session is skipped until its exponential
+// window elapses, and a clean tick forgets the backoff.
+func TestWatcherSessionFailureBackoff(t *testing.T) {
+	w := &Watcher{}
+	now := time.Now()
+	if w.sessionCoolingDown("s", now) {
+		t.Fatal("a fresh session must not be cooling down")
+	}
+	w.recordFailure("s", now)
+	if !w.sessionCoolingDown("s", now.Add(time.Second)) {
+		t.Error("a just-failed session must be cooling down")
+	}
+	if w.sessionCoolingDown("s", now.Add(failureBackoffMax+time.Minute)) {
+		t.Error("the backoff must elapse eventually")
+	}
+	w.recordFailure("s", now)
+	if got := w.failures["s"].consecutive; got != 2 {
+		t.Errorf("consecutive failures = %d, want 2", got)
+	}
+	w.clearFailure("s")
+	if w.failures["s"] != nil {
+		t.Error("a clean tick must clear the backoff")
+	}
+}
+
+// TestWatcherRateLimitGlobalCooldown verifies that a rate-limited tick
+// puts the whole watcher into a cooldown and stops the scan, so the
+// remaining owed sessions are not marched through the same wall (🎯T72).
+func TestWatcherRateLimitGlobalCooldown(t *testing.T) {
+	buf, restore := captureSlog()
+	defer restore()
+
+	src := &fakeStoreSource{}
+	src.setCandidates(
+		store.CompactionCandidate{SessionID: "s1"},
+		store.CompactionCandidate{SessionID: "s2"},
+	)
+	llm := &rateLimitLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval: 5 * time.Millisecond,
+	})
+
+	runUntil(t, w, func() bool { return strings.Contains(buf.String(), "backing off") })
+
+	if cooling, _ := w.inGlobalCooldown(time.Now()); !cooling {
+		t.Error("expected a global cooldown after the rate limit")
+	}
+	// The cooldown stopped the scan after the first candidate and blocks
+	// every later scan, so the LLM was hit exactly once despite many
+	// scan intervals elapsing.
+	if got := llm.calls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 LLM call before cooldown, got %d", got)
+	}
+}
+
 // TestTickLogNothingToCompact verifies that an idle tick (no new
 // messages past the latest compaction) emits DEBUG with
 // outcome=nothing_to_compact.

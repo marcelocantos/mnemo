@@ -180,6 +180,32 @@ var ErrNothingToCompact = errors.New("compact: nothing new to compact")
 // cost. The watcher swallows this like ErrNothingToCompact.
 var ErrBudgetExceeded = errors.New("compact: token budget exceeded for session")
 
+// ErrLLMUnavailable indicates the summariser returned a transient
+// external condition (usage/rate limit, API connectivity) as plain text
+// instead of a payload (🎯T72). It must not count as a hard failure: it
+// self-heals once the limit resets or the API recovers, and the watcher
+// backs off globally rather than hammering every owed session through
+// the same wall.
+var ErrLLMUnavailable = errors.New("compact: summariser temporarily unavailable")
+
+// transientLLMReason reports a short reason when text is a transient
+// external condition echoed as prose (a rate/usage limit notice or an
+// API-connectivity error) rather than a payload, or "" otherwise. It is
+// consulted ONLY after JSON parsing fails, so a genuine summary that
+// merely mentions "rate limit" in its prose is never misclassified.
+func transientLLMReason(text string) string {
+	t := strings.ToLower(text)
+	switch {
+	case strings.Contains(t, "session limit"),
+		strings.Contains(t, "usage limit"),
+		strings.Contains(t, "rate limit"):
+		return "usage/rate limit"
+	case strings.Contains(t, "api error") && strings.Contains(t, "unable to connect"):
+		return "api connectivity"
+	}
+	return ""
+}
+
 // checkBudget returns ErrBudgetExceeded when the cumulative compaction
 // token cost already meets or exceeds maxRatio of the session's own
 // token cost. Unmeasurable sessions (zero known session tokens) are
@@ -256,6 +282,12 @@ func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string,
 
 	payload, payloadJSON, err := parsePayload(res.Text)
 	if err != nil {
+		// Distinguish a transient external condition (rate limit, API
+		// outage) from a genuine bad payload so the watcher backs off
+		// instead of counting a hard failure (🎯T72).
+		if reason := transientLLMReason(res.Text); reason != "" {
+			return nil, fmt.Errorf("%w: %s", ErrLLMUnavailable, reason)
+		}
 		return nil, fmt.Errorf("parse payload: %w", err)
 	}
 
@@ -341,8 +373,26 @@ func parsePayload(raw string) (Payload, string, error) {
 	s = strings.TrimSpace(s)
 
 	var p Payload
-	if err := json.Unmarshal([]byte(s), &p); err != nil {
-		return Payload{}, "", fmt.Errorf("unmarshal: %w (raw=%q)", err, raw)
+	if err := json.Unmarshal([]byte(s), &p); err == nil {
+		return p, s, nil
 	}
-	return p, s, nil
+
+	// The model sometimes prepends commentary before the JSON object
+	// (e.g. echoing the task) despite "Output JSON only" — a frequent
+	// lifetime parse-failure (🎯T72). Recover by extracting the outermost
+	// {...} span and parsing that.
+	if start := strings.IndexByte(s, '{'); start >= 0 {
+		if end := strings.LastIndexByte(s, '}'); end > start {
+			obj := s[start : end+1]
+			if err := json.Unmarshal([]byte(obj), &p); err == nil {
+				return p, obj, nil
+			}
+		}
+	}
+
+	excerpt := raw
+	if len(excerpt) > 200 {
+		excerpt = excerpt[:200] + "…"
+	}
+	return Payload{}, "", fmt.Errorf("no JSON object in summariser output (raw=%q)", excerpt)
 }
