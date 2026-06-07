@@ -39,6 +39,31 @@ var schemaSQL string
 // NoncePrefix is the prefix for self-identification nonces.
 const NoncePrefix = "mnemo:self:"
 
+// CompactorMarker prefixes the prompt of every claudia-spawned
+// compaction run (🎯T72). It lands verbatim as the first user message
+// in the spawned session's transcript, so ingest can flag the session
+// (session_meta.compactor_internal = 1) and the candidate query excludes
+// it. This is the precise recursion guard: unlike the old excludeCWD
+// prefix check it never false-excludes a genuine dev session that
+// happens to share the mnemo repo cwd — only sessions whose first
+// message literally carries the marker are skipped.
+const CompactorMarker = "[mnemo:compactor:v1]"
+
+// LegacyCompactorSignature is the leading text of pre-🎯T72 compaction
+// prompts, which had no explicit marker (the summariser SystemPrompt
+// began with this sentence). Detecting it lets ingest flag the large
+// backlog of historical compactor sessions so they are not swept into
+// the candidate set the instant the excludeCWD prefix check is removed.
+const LegacyCompactorSignature = "You are a session compactor."
+
+// IsCompactorMarker reports whether a message's text marks it as the
+// opening prompt of a mnemo compaction run — either the current marker
+// or the legacy signature. Used at ingest to set compactor_internal.
+func IsCompactorMarker(text string) bool {
+	return strings.HasPrefix(text, CompactorMarker) ||
+		strings.HasPrefix(text, LegacyCompactorSignature)
+}
+
 // Store is a searchable index of Claude Code transcripts.
 type Store struct {
 	writeDB    *sql.DB // SetMaxOpenConns(1) — Go-pool serialises writers
@@ -2754,6 +2779,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 
 		// Insert content block messages linked to their entries.
 		// Skip messages whose entry was a duplicate (INSERT OR IGNORE, entryID == 0).
+		compactorInternal := 0
 		for _, m := range pf.messages {
 			entryID := entryIDs[m.entryIdx]
 			if entryID == 0 {
@@ -2771,21 +2797,28 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
 					strings.TrimSpace(m.text), pf.sessionID)
 			}
+
+			// 🎯T72 recursion guard: flag claudia-spawned compaction runs
+			// by the marker on their opening prompt.
+			if m.contentType == "text" && IsCompactorMarker(m.text) {
+				compactorInternal = 1
+			}
 		}
 
 		// Upsert session metadata.
-		if pf.cwd != "" || pf.branch != "" || pf.topic != "" {
+		if pf.cwd != "" || pf.branch != "" || pf.topic != "" || compactorInternal == 1 {
 			repo := extractRepo(pf.cwd)
 			workType := classifyWorkType(pf.branch)
-			ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
-				VALUES (?, ?, ?, ?, ?, ?)
+			ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(session_id) DO UPDATE SET
 					repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
 					cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
 					git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
 					work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
-					topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END`,
-				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic)
+					topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END,
+					compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal)`,
+				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal)
 		}
 
 		// Update ingest offset + fingerprint (🎯T68.6 same-size
@@ -5536,6 +5569,7 @@ func (s *Store) ingestFile(path string) error {
 
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
+	metaCompactorInternal := 0 // 🎯T72: set when a compactor-run marker is seen
 
 	const commitInterval = 200 * time.Millisecond
 	const lineCheckInterval = 50
@@ -5626,6 +5660,12 @@ func (s *Store) ingestFile(path string) error {
 					nonce := strings.TrimSpace(b.Text)
 					ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
 				}
+
+				// 🎯T72 recursion guard: flag claudia-spawned compaction
+				// runs by the marker on their opening prompt.
+				if b.ContentType == "text" && IsCompactorMarker(b.Text) {
+					metaCompactorInternal = 1
+				}
 			}
 		}
 
@@ -5661,18 +5701,19 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	// Upsert session metadata.
-	if metaCwd != "" || metaBranch != "" || metaTopic != "" {
+	if metaCwd != "" || metaBranch != "" || metaTopic != "" || metaCompactorInternal == 1 {
 		repo := extractRepo(metaCwd)
 		workType := classifyWorkType(metaBranch)
-		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
-			VALUES (?, ?, ?, ?, ?, ?)
+		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
 				cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
 				git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
 				work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
-				topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END`,
-			sessionID, repo, metaCwd, metaBranch, workType, metaTopic)
+				topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END,
+				compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal)`,
+			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
 	newOffset, _ := f.Seek(0, 1)
