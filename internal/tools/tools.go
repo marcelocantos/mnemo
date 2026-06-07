@@ -479,6 +479,13 @@ mode:
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix)")),
 			mcp.WithString("mode", mcp.Description(`"auto" (default), "strict", or "candidates".`)),
 		),
+		mcp.NewTool("mnemo_compacted_session",
+			mcp.WithDescription(`Return the compacted view of a session: its compaction summaries (the dense, durable layer) followed by the addenda tail — the substantive messages past the latest compaction cursor, computed live from the index.
+
+This is the token-volume retrieval form (🎯T72): a converged session is mostly summary plus a bounded tail; a session below the size floor has no summary and the addenda ARE the whole session (its raw entries are its retrieval form). Use this instead of mnemo_read_session when you want the distilled view rather than the raw transcript.`),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (exact or prefix, consistent with mnemo_read_session).")),
+			mcp.WithNumber("addenda_limit", mcp.Description("Max addenda messages past the cursor to include (default 200).")),
+		),
 		mcp.NewTool("mnemo_whatsup",
 			mcp.WithDescription(`Report which active Claude Code sessions are doing expensive work right now.
 
@@ -746,6 +753,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.restore(args)
 	case "mnemo_chain":
 		return ch.chain(args)
+	case "mnemo_compacted_session":
+		return ch.compactedSession(args)
 	case "mnemo_self":
 		return ch.self(args)
 	case "mnemo_whatsup":
@@ -1726,6 +1735,47 @@ func (h *callHandler) restore(args map[string]any) (string, bool, error) {
 		}
 	}
 
+	return b.String(), false, nil
+}
+
+// compactedSession implements mnemo_compacted_session (🎯T72): the
+// distilled retrieval form of a session — compaction summaries plus the
+// live addenda tail past the latest cursor.
+func (h *callHandler) compactedSession(args map[string]any) (string, bool, error) {
+	sessionID, _ := args["session_id"].(string)
+	if sessionID == "" {
+		return "session_id is required", true, nil
+	}
+	limit := 200
+	if l, ok := args["addenda_limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	v, err := h.mem.CompactedView(sessionID, limit)
+	if err != nil {
+		return fmt.Sprintf("compacted view failed: %v", err), true, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Compacted view of session %s\n\n", v.SessionID)
+	if len(v.Summaries) == 0 {
+		b.WriteString("(no compaction yet — below the size floor; the addenda below ARE the session's retrieval form)\n\n")
+	} else {
+		b.WriteString("== Compaction summaries (durable layer) ==\n")
+		for i, sm := range v.Summaries {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, sm)
+		}
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, "== Addenda: %d message(s), ~%d tokens past cursor msg:%d ==\n",
+		len(v.Addenda), v.AddendaTokens, v.Cursor)
+	for _, m := range v.Addenda {
+		text := m.Text
+		if len(text) > 500 {
+			text = text[:497] + "..."
+		}
+		fmt.Fprintf(&b, "[%s] %s\n", m.Role, text)
+	}
 	return b.String(), false, nil
 }
 

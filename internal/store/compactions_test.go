@@ -4,6 +4,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -408,6 +409,74 @@ func TestSearchWeightsCompactions(t *testing.T) {
 	}
 	if !tailFound {
 		t.Errorf("uncovered addenda hit (msg:%d) should flow through unmodified", tailID)
+	}
+}
+
+// TestCompactedView verifies the 🎯T72 retrieval form: with no
+// compaction the whole session is addenda and there are no summaries;
+// after compacting the opening span, the summary appears and the
+// addenda narrow to the tokens (and messages) past the cursor.
+func TestCompactedView(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-cv", []map[string]any{
+		msg("user", "phase one question text", now.Add(-5*time.Minute).Format(time.RFC3339)),
+		asstTok("phase one answer body", now.Add(-4*time.Minute).Format(time.RFC3339), 100, 0, 400),
+		msg("user", "phase two question text", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		asstTok("phase two answer body", now.Add(-1*time.Minute).Format(time.RFC3339), 80, 20, 500),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// No compaction yet: the whole session is the retrieval form.
+	v, err := s.CompactedView("sess-cv", 100)
+	if err != nil {
+		t.Fatalf("CompactedView: %v", err)
+	}
+	if len(v.Summaries) != 0 {
+		t.Errorf("expected no summaries before compaction, got %v", v.Summaries)
+	}
+	if v.Cursor != 0 {
+		t.Errorf("cursor should be 0 with no compaction, got %d", v.Cursor)
+	}
+	if v.AddendaTokens != 200 { // (100+0) + (80+20)
+		t.Errorf("whole-session addenda tokens = %d, want 200", v.AddendaTokens)
+	}
+	if len(v.Addenda) == 0 {
+		t.Errorf("addenda should be the whole session when uncompacted")
+	}
+
+	// Compact the opening (phase-one) span.
+	var p1MsgID int64
+	if err := s.writeDB.QueryRow(
+		`SELECT MIN(id) FROM messages WHERE session_id='sess-cv' AND role='assistant'`).Scan(&p1MsgID); err != nil {
+		t.Fatalf("phase-one msg id: %v", err)
+	}
+	if _, err := s.PutCompaction(Compaction{
+		SessionID: "sess-cv", EntryIDFrom: 0, EntryIDTo: p1MsgID, Summary: "covers phase one",
+	}); err != nil {
+		t.Fatalf("PutCompaction: %v", err)
+	}
+
+	v, err = s.CompactedView("sess-cv", 100)
+	if err != nil {
+		t.Fatalf("CompactedView (compacted): %v", err)
+	}
+	if len(v.Summaries) != 1 || v.Summaries[0] != "covers phase one" {
+		t.Errorf("summaries = %v, want [covers phase one]", v.Summaries)
+	}
+	if v.Cursor != p1MsgID {
+		t.Errorf("cursor = %d, want %d", v.Cursor, p1MsgID)
+	}
+	if v.AddendaTokens != 100 { // phase two only: 80 + 20
+		t.Errorf("addenda tokens past cursor = %d, want 100", v.AddendaTokens)
+	}
+	for _, m := range v.Addenda {
+		if strings.Contains(m.Text, "phase one") {
+			t.Errorf("addenda leaked a compacted (phase-one) message: %q", m.Text)
+		}
 	}
 }
 

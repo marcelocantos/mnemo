@@ -359,6 +359,53 @@ func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error
 	return tokens, nil
 }
 
+// SessionCompactedView is the retrieval form of a session under the
+// 🎯T72 model: the durable compaction summaries plus the live addenda
+// tail (substantive messages past the latest cursor, computed on the
+// fly from the index — never stored separately). When a session has
+// never been compacted, Summaries is empty and Addenda is the whole
+// session: the raw entries ARE the retrieval form.
+type SessionCompactedView struct {
+	SessionID     string
+	Summaries     []string         // compaction summaries, oldest span first
+	Cursor        int64            // MAX(entry_id_to); 0 when never compacted
+	Addenda       []SessionMessage // substantive messages with id > Cursor
+	AddendaTokens int64            // token volume of the addenda
+}
+
+// CompactedView assembles "the compacted view of session X" (🎯T72):
+// the compaction summaries followed by the addenda tail past the latest
+// cursor. The tail is computed live from the index, not stored.
+// addendaLimit caps the tail (<= 0 → ReadSessionAfter's default).
+func (s *Store) CompactedView(sessionID string, addendaLimit int) (*SessionCompactedView, error) {
+	resolved, err := s.resolveSessionID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = resolved
+
+	comps, err := s.ListCompactions(sessionID, 0)
+	if err != nil {
+		return nil, err
+	}
+	view := &SessionCompactedView{SessionID: sessionID}
+	for _, c := range comps {
+		if c.Summary != "" {
+			view.Summaries = append(view.Summaries, c.Summary)
+		}
+		if c.EntryIDTo > view.Cursor {
+			view.Cursor = c.EntryIDTo
+		}
+	}
+	if view.Addenda, err = s.ReadSessionAfter(sessionID, view.Cursor, addendaLimit); err != nil {
+		return nil, err
+	}
+	if view.AddendaTokens, err = s.AddendaTokens(sessionID, view.Cursor); err != nil {
+		return nil, err
+	}
+	return view, nil
+}
+
 // SessionTokens returns the total input + output tokens consumed by
 // assistant messages in a session. Cache tokens are excluded — they
 // are not paid tokens in the same sense, and the AC for 🎯T10

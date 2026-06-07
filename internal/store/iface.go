@@ -50,6 +50,7 @@ type Backend interface {
 	ChainCompactions(sessionID string) ([]Compaction, error)
 	CompactionsForConnection(connectionID string) ([]Compaction, error)
 	ListCompactions(sessionID string, limit int) ([]Compaction, error)
+	CompactedView(sessionID string, addendaLimit int) (*SessionCompactedView, error)
 	SessionTokens(sessionID string) (int64, int64, error)
 	CompactionTokens(sessionID string) (int64, int64, error)
 	RecordConnectionOpen(connectionID string, pid int, acceptedAt time.Time)
