@@ -348,6 +348,69 @@ func TestSelectCompactionCandidatesBudgetRatioGuard(t *testing.T) {
 	}
 }
 
+// TestSearchWeightsCompactions verifies the 🎯T72 search integration:
+// a matching compaction summary ranks above raw message hits, raw hits
+// the compaction covers are suppressed (the summary stands in for them),
+// and an uncovered addenda hit past the cursor still flows through.
+func TestSearchWeightsCompactions(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-search", []map[string]any{
+		msg("user", "early zorptastic discussion point", now.Add(-5*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "more zorptastic content in the middle", now.Add(-4*time.Minute).Format(time.RFC3339)),
+		msg("user", "a later zorptastic tail message", now.Add(-1*time.Minute).Format(time.RFC3339)),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Cursor at the second message: messages 1–2 are covered, 3 is addenda.
+	var coverTo, tailID int64
+	if err := s.writeDB.QueryRow(
+		`SELECT id FROM messages WHERE session_id='sess-search' AND text LIKE '%middle%'`).Scan(&coverTo); err != nil {
+		t.Fatalf("cover-to id: %v", err)
+	}
+	if err := s.writeDB.QueryRow(
+		`SELECT id FROM messages WHERE session_id='sess-search' AND text LIKE '%tail%'`).Scan(&tailID); err != nil {
+		t.Fatalf("tail id: %v", err)
+	}
+	if _, err := s.PutCompaction(Compaction{
+		SessionID: "sess-search", EntryIDFrom: 0, EntryIDTo: coverTo,
+		Summary: "a zorptastic summary of the opening span",
+	}); err != nil {
+		t.Fatalf("PutCompaction: %v", err)
+	}
+
+	results, err := s.Search("zorptastic", 20, "all", "", 0, 0, true)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("expected results for 'zorptastic'")
+	}
+	if results[0].Role != "compaction" {
+		t.Errorf("compaction summary should rank first, got role %q", results[0].Role)
+	}
+	for _, r := range results {
+		if r.Role == "compaction" {
+			continue
+		}
+		if r.MessageID > 0 && int64(r.MessageID) <= coverTo {
+			t.Errorf("covered raw hit msg:%d should be suppressed by the compaction", r.MessageID)
+		}
+	}
+	tailFound := false
+	for _, r := range results {
+		if int64(r.MessageID) == tailID {
+			tailFound = true
+		}
+	}
+	if !tailFound {
+		t.Errorf("uncovered addenda hit (msg:%d) should flow through unmodified", tailID)
+	}
+}
+
 func TestChainCompactionsNoChain(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 

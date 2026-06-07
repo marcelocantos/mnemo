@@ -828,6 +828,16 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 			fmt.Fprintf(&b, ">> [vault] %s\n>> %s\n\n", r.SessionID, r.Text)
 			continue
 		}
+		// Compaction summaries (🎯T72) are the dense layer: render as a
+		// "[compaction] <session>" header carrying the summary prose.
+		if r.Role == "compaction" {
+			sid := r.SessionID
+			if len(sid) > 8 {
+				sid = sid[:8]
+			}
+			fmt.Fprintf(&b, ">> [compaction] %s\n>> %s\n\n", sid, r.Text)
+			continue
+		}
 		sid := r.SessionID
 		if len(sid) > 8 {
 			sid = sid[:8]

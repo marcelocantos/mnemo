@@ -3238,6 +3238,82 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		results = append(results, r)
 	}
 
+	// Phase 2.5 (🎯T72): compaction summaries — the dense, durable layer.
+	// They are weighted above raw message hits, and any raw hit a matched
+	// compaction covers is suppressed so the summary stands in for it
+	// (raw addenda hits, past every cursor, are never covered and flow
+	// through unchanged). entry_id_from/entry_id_to bound the covered
+	// span in messages.id space.
+	type matchedSpan struct{ from, to int }
+	coveredBy := map[string][]matchedSpan{}
+	var compactionResults []SearchResult
+	compRows, compErr := s.readDB.Query(`
+		SELECT c.id, c.session_id, c.summary, c.entry_id_from, c.entry_id_to, f.rank
+		FROM compactions c
+		JOIN compactions_fts f ON f.rowid = c.id
+		WHERE compactions_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, ftsQuery, fetchLimit)
+	if compErr != nil {
+		slog.Warn("compaction FTS query failed", "err", compErr)
+	} else {
+		for compRows.Next() {
+			var id int64
+			var sid, summary string
+			var from, to int
+			var rank float64
+			if err := compRows.Scan(&id, &sid, &summary, &from, &to, &rank); err != nil {
+				continue
+			}
+			if needSessionFilter {
+				var st string
+				if err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", sid).Scan(&st); err != nil || st != sessionType {
+					continue
+				}
+			}
+			if needRepoFilter {
+				var cnt int
+				pattern := "%" + repoFilter + "%"
+				if err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", sid, pattern, pattern).Scan(&cnt); err != nil || cnt == 0 {
+					continue
+				}
+			}
+			coveredBy[sid] = append(coveredBy[sid], matchedSpan{from: from, to: to})
+			if len(summary) > 500 {
+				summary = summary[:497] + "..."
+			}
+			compactionResults = append(compactionResults, SearchResult{
+				MessageID: int(id), // compaction id; Role distinguishes it
+				SessionID: sid,
+				Role:      "compaction",
+				Text:      summary,
+				Rank:      rank,
+			})
+			if len(compactionResults) >= limit {
+				break
+			}
+		}
+		compRows.Close()
+	}
+	// Suppress transcript hits covered by a matched compaction span.
+	if len(coveredBy) > 0 {
+		kept := results[:0]
+		for _, r := range results {
+			covered := false
+			for _, sp := range coveredBy[r.SessionID] {
+				if r.MessageID > sp.from && r.MessageID <= sp.to {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				kept = append(kept, r)
+			}
+		}
+		results = kept
+	}
+
 	// Phase 3: vault annotation hits (human content below the generated fence).
 	// Vault annotations live in the docs table (kind='vault') and are indexed
 	// alongside transcript messages so search surfaces both at once.
@@ -3275,6 +3351,15 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	}
 
 	results = mergeBySourcePercentile(results)
+	// Compaction summaries rank above transcript/vault hits (🎯T72):
+	// prepend them best-rank-first so the dense layer wins, then let the
+	// shared limit truncate the long tail.
+	if len(compactionResults) > 0 {
+		sort.SliceStable(compactionResults, func(i, j int) bool {
+			return compactionResults[i].Rank < compactionResults[j].Rank
+		})
+		results = append(compactionResults, results...)
+	}
 	if len(results) > limit {
 		results = results[:limit]
 	}
@@ -3282,11 +3367,12 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		return nil, nil
 	}
 
-	// Fetch context messages for each transcript hit (skip vault entries).
+	// Fetch context messages for each transcript hit (skip vault and
+	// compaction entries — neither has surrounding message context).
 	if contextBefore > 0 || contextAfter > 0 {
 		for i := range results {
 			r := &results[i]
-			if r.Role == "vault" {
+			if r.Role == "vault" || r.Role == "compaction" {
 				continue
 			}
 			if contextBefore > 0 {
