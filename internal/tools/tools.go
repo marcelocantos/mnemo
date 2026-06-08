@@ -273,11 +273,17 @@ This is the canonical at-a-glance "what repos do I have and what is each one abo
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
 		),
 		mcp.NewTool("mnemo_status",
-			mcp.WithDescription(`Rich status report of recent work across repos. Returns repos → sessions → conversation excerpts with drill-down offsets.
+			mcp.WithDescription(`Rich status report of recent work across repos, AND the first-line health check for ingest freshness. Returns repos → sessions → conversation excerpts with drill-down offsets, plus a top-level diagnostics block.
+
+The diagnostics block (🎯T75) answers "is the index stale, where, and by how much?" before you resort to grepping ~/.claude/projects or ad-hoc SQL:
+- freshness: daemon now_utc, freshest indexed timestamp, and lag.
+- divergence: per-stream gap, including transcript_index pending bytes/files.
+- transcript_sources: one row per configured project dir — total files, files never ingested, files behind, pending bytes, newest on-disk mtime, and forensic examples of the largest behind files (path, session_id, size, offset, pending bytes, state: new/append_behind/truncated/rewritten).
+- repo_diagnostic (when repo is supplied): the Claude project dirs that map to the repo, latest indexed vs latest on-disk mtime, and an explicit note when no source maps to the filter or when on-disk transcripts are newer than the index.
 
 User messages are shown in full. Assistant messages are truncated (default 200 chars). Each message includes its database ID — use mnemo_read_session with offset to retrieve the full text.
 
-Use this when you need context about recent work: the user references prior discussions, you need to understand project history before making decisions, or you want to know what's been happening across repos. Don't dump the output to the user — use it to inform your own understanding.`),
+Use this when you need context about recent work, OR to check whether fresh transcript content has actually been ingested for a repo. Don't dump the output to the user — use it to inform your own understanding.`),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7)")),
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("max_sessions", mcp.Description("Max sessions per repo (default 3)")),
@@ -1070,7 +1076,11 @@ func (h *callHandler) status(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("status failed: %v", err), true, nil
 	}
-	if len(result.Repos) == 0 && len(result.Streams) == 0 {
+	// 🎯T75: always return the report — the diagnostics block is the
+	// answer to "is the index stale/behind?" precisely when there's no
+	// recent activity to show. Only short-circuit if even diagnostics
+	// couldn't be computed.
+	if result.Diagnostics == nil && len(result.Repos) == 0 && len(result.Streams) == 0 {
 		return "No recent activity found.", false, nil
 	}
 

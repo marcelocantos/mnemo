@@ -176,6 +176,25 @@ prior discussions, you need project history before making decisions, or
 you want to know what's been happening across repos. Don't dump the
 output to the user — use it to inform your own understanding.
 
+It is also the **first-line ingest-freshness health check** (🎯T75). The
+top-level `diagnostics` block answers "is the index stale, where, and by
+how much?" before you grep `~/.claude/projects` or run ad-hoc SQL:
+- `freshness` — `now_utc`, freshest indexed timestamp, and lag.
+- `divergence` — per-stream gap, including `transcript_index` pending
+  bytes/files.
+- `transcript_sources` — one row per configured project dir: total
+  files, files never ingested, files behind, pending bytes, newest
+  on-disk mtime, and forensic examples of the largest behind files
+  (path, session_id, size, offset, pending bytes, and `state`:
+  `new` / `append_behind` / `truncated` / `rewritten`).
+- `repo_diagnostic` (only when `repo` is supplied) — the Claude project
+  dirs that map to the repo, latest indexed vs latest on-disk mtime, and
+  an explicit note when no source maps to the filter or when on-disk
+  transcripts are newer than the index.
+
+So when fresh transcript content for a repo seems missing, call
+`mnemo_status repo=<name>` first.
+
 Parameters:
 - `days` — recency window (default 7)
 - `repo` — filter by repo name or path fragment

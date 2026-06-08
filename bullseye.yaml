@@ -2448,6 +2448,31 @@ targets:
     context: 'Discovered during 🎯T72 work: probing the live DB with an expensive correlated-subquery SELECT via mnemo_query hung for minutes with no bound. Store.Query (internal/store/store.go) runs reads on context.Background() with no deadline; PRAGMA busy_timeout=5000 only bounds lock waits, not statement execution. An MCP tool that can run unbounded against the shared read pool is a denial-of-service-on-self hazard — one bad agent query can stall every other reader. The mnemo_query description already nudges toward indexed columns, but a hard execution budget is the real backstop.'
     origin: manual
     discovered: 2026-06-08
+  T75:
+    name: mnemo_status exposes transcript-ingest freshness and per-source lag diagnostics
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_status returns a top-level diagnostic block that includes daemon observation time (`now_utc`), freshest indexed transcript timestamp, and computed freshness lag in seconds/minutes, independent of the repo/session excerpt list.
+    - mnemo_status includes the existing StreamDivergences output or an equivalent `divergence` block, including `transcript_index` pending bytes/files, so an ingest backlog is visible from the status tool without calling a separate API.
+    - 'mnemo_status includes `transcript_sources`: one row per configured project directory (primary ~/.claude/projects plus extra_project_dirs) with path, exists/readable status, total .jsonl files, files with unknown offset, files behind offset, pending bytes, newest on-disk .jsonl mtime, newest indexed message timestamp attributable to that source when cheap, and examples of the largest/newest behind files.'
+    - 'When `repo` is supplied to mnemo_status, diagnostics help with that repo specifically: include matching Claude project directories or project names derived from session_meta/project encoding, and show the latest indexed session timestamp versus latest on-disk transcript mtime for those matching sources. If no source can be mapped to the repo filter, say so explicitly in the diagnostic block rather than silently returning only global data.'
+    - 'Behind-file examples include enough forensic detail to act: path, project dir basename, inferred session_id, current file size, recorded ingest offset, pending bytes, file mtime, recorded_mtime if present, and whether the source is new/unseen, append-behind, missing, truncated, or rewritten.'
+    - 'The diagnostic output distinguishes at least these cases: daemon globally fresh but a repo stale; transcript files exist and are append-behind; transcript files exist but are not under a configured/watched project dir; source files were deleted/truncated/rewritten; repo filter maps to no transcript source; no backlog but latest indexed activity is old because no matching source has newer mtime.'
+    - 'The implementation keeps mnemo_status backward compatible: existing `days`, `repo`, `max_sessions`, `max_excerpts`, and `truncate_len` behavior remains; existing `repos` and `streams` JSON fields remain present and compatible. New fields are additive only.'
+    - The diagnostic scan is bounded and safe for large transcript corpora. It may walk configured project dirs, but it must cap examples, avoid reading JSONL file bodies during status, and avoid blocking ordinary status calls for an excessive period. Expensive per-repo mapping should use already-indexed session_meta/project data and path/name heuristics, not parse every transcript.
+    - Tests cover a fresh indexed corpus (zero lag/backlog), an append-behind transcript file (pending bytes/files reported), a brand-new unseen transcript file (unknown/new source reported), a repo-filtered stale source matching an encoded Claude project dir such as `-Users-marcelo-work-github-com-squz-multimaze2`, and preservation of the existing `streams` status field.
+    - Tool documentation for mnemo_status explains that it is now the first-line health check for ingestion freshness and points users to the diagnostic fields before resorting to manual ~/.claude/projects inspection.
+    context: 'Discovered 2026-06-08 while checking why fresh squz/multimaze2 Claude transcript content was missing from mnemo. mnemo was alive and answering: status showed recent mnemo maintenance sessions indexed up to 2026-06-08T06:38:32Z, but multimaze2 was stuck at 2026-06-08T05:03:29Z even though the active transcript folder had writes from the last couple of minutes. Exact searches for distinctive recent text such as "T45 is filed", "gold tick sprite", "purchased-pack", "Deploy succeeded on Jevons", and "PID 5671" returned no hits. mnemo_config was default-only (workspace_roots=/Users/marcelo/work, no extra_project_dirs, vault disabled). mnemo_source_drift showed only old deleted mk transcript sources, 0 truncated, 0 rewritten, so source drift did not explain the missing multimaze2 segment. The code already has Store.StreamDivergences() and transcriptIndexDivergence(), but mnemo_status only returns repos/sessions/excerpts plus repo-level ingest_status streams; it does not expose transcript-index gap, configured transcript source dirs, per-dir/per-project lag, newest on-disk transcript mtime, ingest offsets, examples of behind files, watcher coverage hints, or freshness metrics. The next agent should not need to grep ~/.claude/projects or run ad hoc SQL to answer: is mnemo stale, where, by how much, and what file is behind?'
+    tags:
+    - observability
+    - ingest
+    - mcp
+    - diagnostics
+    origin: manual
+    discovered: 2026-06-08
+    achieved: 2026-06-08
   T8:
     name: sqldeep integration
     status: achieved
