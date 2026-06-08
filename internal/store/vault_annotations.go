@@ -130,7 +130,6 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 		mi = &MnemoIgnore{}
 	}
 
-
 	vaultRepo := filepath.Base(vaultPath)
 	indexed, skipped, removed := 0, 0, 0
 

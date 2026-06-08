@@ -39,6 +39,31 @@ var schemaSQL string
 // NoncePrefix is the prefix for self-identification nonces.
 const NoncePrefix = "mnemo:self:"
 
+// CompactorMarker prefixes the prompt of every claudia-spawned
+// compaction run (🎯T72). It lands verbatim as the first user message
+// in the spawned session's transcript, so ingest can flag the session
+// (session_meta.compactor_internal = 1) and the candidate query excludes
+// it. This is the precise recursion guard: unlike the old excludeCWD
+// prefix check it never false-excludes a genuine dev session that
+// happens to share the mnemo repo cwd — only sessions whose first
+// message literally carries the marker are skipped.
+const CompactorMarker = "[mnemo:compactor:v1]"
+
+// LegacyCompactorSignature is the leading text of pre-🎯T72 compaction
+// prompts, which had no explicit marker (the summariser SystemPrompt
+// began with this sentence). Detecting it lets ingest flag the large
+// backlog of historical compactor sessions so they are not swept into
+// the candidate set the instant the excludeCWD prefix check is removed.
+const LegacyCompactorSignature = "You are a session compactor."
+
+// IsCompactorMarker reports whether a message's text marks it as the
+// opening prompt of a mnemo compaction run — either the current marker
+// or the legacy signature. Used at ingest to set compactor_internal.
+func IsCompactorMarker(text string) bool {
+	return strings.HasPrefix(text, CompactorMarker) ||
+		strings.HasPrefix(text, LegacyCompactorSignature)
+}
+
 // Store is a searchable index of Claude Code transcripts.
 type Store struct {
 	writeDB    *sql.DB // SetMaxOpenConns(1) — Go-pool serialises writers
@@ -593,6 +618,12 @@ func New(dbPath, projectDir string) (*Store, error) {
 	// re-reading the first entry of each JSONL file.
 	backfillSessionMeta(writeDB, projectDir)
 
+	// 🎯T72: populate compactions_fts for compaction rows that predate
+	// the FTS table (the compactions_ai trigger only fires on new
+	// inserts). Idempotent — a no-op once the index and table counts
+	// agree, so steady-state boots pay only two COUNT(*) queries.
+	healCompactionsFTS(writeDB)
+
 	n := runtime.NumCPU()
 	if n < 1 {
 		n = 1
@@ -895,7 +926,6 @@ func (s *Store) IngestSkills() error {
 	if err != nil {
 		return err
 	}
-
 
 	files, err := filepath.Glob(filepath.Join(dir, "*.md"))
 	if err != nil {
@@ -1687,7 +1717,6 @@ func (s *Store) ingestTargetFile(path, repo string) error {
 
 	parsed := parseTargetsFile(repo, path, data)
 
-
 	if _, err := s.writeDB.Exec("DELETE FROM targets WHERE file_path = ?", path); err != nil {
 		return fmt.Errorf("delete targets: %w", err)
 	}
@@ -2450,7 +2479,6 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 		}
 	}
 
-
 	for i, run := range runs {
 		_, err := s.writeDB.Exec(`
 			INSERT INTO ci_runs (repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
@@ -2688,7 +2716,6 @@ func (ws *writerState) Close() {
 func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	const commitInterval = 200 * time.Millisecond
 
-
 	ws, err := newWriterState(s.writeDB)
 	if err != nil {
 		return err
@@ -2752,6 +2779,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 
 		// Insert content block messages linked to their entries.
 		// Skip messages whose entry was a duplicate (INSERT OR IGNORE, entryID == 0).
+		compactorInternal := 0
 		for _, m := range pf.messages {
 			entryID := entryIDs[m.entryIdx]
 			if entryID == 0 {
@@ -2769,21 +2797,28 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
 					strings.TrimSpace(m.text), pf.sessionID)
 			}
+
+			// 🎯T72 recursion guard: flag claudia-spawned compaction runs
+			// by the marker on their opening prompt.
+			if m.contentType == "text" && IsCompactorMarker(m.text) {
+				compactorInternal = 1
+			}
 		}
 
 		// Upsert session metadata.
-		if pf.cwd != "" || pf.branch != "" || pf.topic != "" {
+		if pf.cwd != "" || pf.branch != "" || pf.topic != "" || compactorInternal == 1 {
 			repo := extractRepo(pf.cwd)
 			workType := classifyWorkType(pf.branch)
-			ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
-				VALUES (?, ?, ?, ?, ?, ?)
+			ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(session_id) DO UPDATE SET
 					repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
 					cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
 					git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
 					work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
-					topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END`,
-				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic)
+					topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END,
+					compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal)`,
+				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal)
 		}
 
 		// Update ingest offset + fingerprint (🎯T68.6 same-size
@@ -3203,6 +3238,82 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		results = append(results, r)
 	}
 
+	// Phase 2.5 (🎯T72): compaction summaries — the dense, durable layer.
+	// They are weighted above raw message hits, and any raw hit a matched
+	// compaction covers is suppressed so the summary stands in for it
+	// (raw addenda hits, past every cursor, are never covered and flow
+	// through unchanged). entry_id_from/entry_id_to bound the covered
+	// span in messages.id space.
+	type matchedSpan struct{ from, to int }
+	coveredBy := map[string][]matchedSpan{}
+	var compactionResults []SearchResult
+	compRows, compErr := s.readDB.Query(`
+		SELECT c.id, c.session_id, c.summary, c.entry_id_from, c.entry_id_to, f.rank
+		FROM compactions c
+		JOIN compactions_fts f ON f.rowid = c.id
+		WHERE compactions_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, ftsQuery, fetchLimit)
+	if compErr != nil {
+		slog.Warn("compaction FTS query failed", "err", compErr)
+	} else {
+		for compRows.Next() {
+			var id int64
+			var sid, summary string
+			var from, to int
+			var rank float64
+			if err := compRows.Scan(&id, &sid, &summary, &from, &to, &rank); err != nil {
+				continue
+			}
+			if needSessionFilter {
+				var st string
+				if err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", sid).Scan(&st); err != nil || st != sessionType {
+					continue
+				}
+			}
+			if needRepoFilter {
+				var cnt int
+				pattern := "%" + repoFilter + "%"
+				if err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", sid, pattern, pattern).Scan(&cnt); err != nil || cnt == 0 {
+					continue
+				}
+			}
+			coveredBy[sid] = append(coveredBy[sid], matchedSpan{from: from, to: to})
+			if len(summary) > 500 {
+				summary = summary[:497] + "..."
+			}
+			compactionResults = append(compactionResults, SearchResult{
+				MessageID: int(id), // compaction id; Role distinguishes it
+				SessionID: sid,
+				Role:      "compaction",
+				Text:      summary,
+				Rank:      rank,
+			})
+			if len(compactionResults) >= limit {
+				break
+			}
+		}
+		compRows.Close()
+	}
+	// Suppress transcript hits covered by a matched compaction span.
+	if len(coveredBy) > 0 {
+		kept := results[:0]
+		for _, r := range results {
+			covered := false
+			for _, sp := range coveredBy[r.SessionID] {
+				if r.MessageID > sp.from && r.MessageID <= sp.to {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				kept = append(kept, r)
+			}
+		}
+		results = kept
+	}
+
 	// Phase 3: vault annotation hits (human content below the generated fence).
 	// Vault annotations live in the docs table (kind='vault') and are indexed
 	// alongside transcript messages so search surfaces both at once.
@@ -3240,6 +3351,15 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	}
 
 	results = mergeBySourcePercentile(results)
+	// Compaction summaries rank above transcript/vault hits (🎯T72):
+	// prepend them best-rank-first so the dense layer wins, then let the
+	// shared limit truncate the long tail.
+	if len(compactionResults) > 0 {
+		sort.SliceStable(compactionResults, func(i, j int) bool {
+			return compactionResults[i].Rank < compactionResults[j].Rank
+		})
+		results = append(compactionResults, results...)
+	}
 	if len(results) > limit {
 		results = results[:limit]
 	}
@@ -3247,11 +3367,12 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		return nil, nil
 	}
 
-	// Fetch context messages for each transcript hit (skip vault entries).
+	// Fetch context messages for each transcript hit (skip vault and
+	// compaction entries — neither has surrounding message context).
 	if contextBefore > 0 || contextAfter > 0 {
 		for i := range results {
 			r := &results[i]
-			if r.Role == "vault" {
+			if r.Role == "vault" || r.Role == "compaction" {
 				continue
 			}
 			if contextBefore > 0 {
@@ -5117,7 +5238,6 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 		return nil, fmt.Errorf("sqldeep transpile: %w", err)
 	}
 
-
 	ctx := context.Background()
 	conn, err := s.readDB.Conn(ctx)
 	if err != nil {
@@ -5169,6 +5289,32 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+// healCompactionsFTS rebuilds the compactions_fts external-content
+// index when it has drifted from the compactions table — the one-time
+// case being existing compaction rows that predate the FTS table
+// (🎯T72). The compactions_ai trigger keeps the two in lockstep for
+// every subsequent insert, so the row counts match in steady state and
+// this returns after two cheap COUNT(*) reads without touching the
+// index. If applySchema was rejected (older binary vs newer DB) the
+// FTS table is absent and the count query errors — we return silently.
+func healCompactionsFTS(db *sql.DB) {
+	var nComp, nFTS int
+	if err := db.QueryRow("SELECT COUNT(*) FROM compactions").Scan(&nComp); err != nil {
+		return
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM compactions_fts").Scan(&nFTS); err != nil {
+		return
+	}
+	if nComp == nFTS {
+		return
+	}
+	if _, err := db.Exec("INSERT INTO compactions_fts(compactions_fts) VALUES('rebuild')"); err != nil {
+		slog.Warn("compactions_fts rebuild failed", "err", err)
+		return
+	}
+	slog.Info("compactions_fts backfilled", "compactions", nComp)
 }
 
 func backfillSessionMeta(db *sql.DB, projectDir string) {
@@ -5509,6 +5655,7 @@ func (s *Store) ingestFile(path string) error {
 
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
+	metaCompactorInternal := 0 // 🎯T72: set when a compactor-run marker is seen
 
 	const commitInterval = 200 * time.Millisecond
 	const lineCheckInterval = 50
@@ -5599,6 +5746,12 @@ func (s *Store) ingestFile(path string) error {
 					nonce := strings.TrimSpace(b.Text)
 					ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
 				}
+
+				// 🎯T72 recursion guard: flag claudia-spawned compaction
+				// runs by the marker on their opening prompt.
+				if b.ContentType == "text" && IsCompactorMarker(b.Text) {
+					metaCompactorInternal = 1
+				}
 			}
 		}
 
@@ -5634,18 +5787,19 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	// Upsert session metadata.
-	if metaCwd != "" || metaBranch != "" || metaTopic != "" {
+	if metaCwd != "" || metaBranch != "" || metaTopic != "" || metaCompactorInternal == 1 {
 		repo := extractRepo(metaCwd)
 		workType := classifyWorkType(metaBranch)
-		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic)
-			VALUES (?, ?, ?, ?, ?, ?)
+		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
 				cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
 				git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
 				work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
-				topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END`,
-			sessionID, repo, metaCwd, metaBranch, workType, metaTopic)
+				topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END,
+				compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal)`,
+			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
 	newOffset, _ := f.Seek(0, 1)
@@ -6153,7 +6307,6 @@ func (s *Store) DefineTemplate(name, description, queryText string, paramNames [
 		return fmt.Errorf("marshal param_names: %w", err)
 	}
 
-
 	_, err = s.writeDB.Exec(`
 		INSERT INTO query_templates (name, description, query_text, param_names, updated_at)
 		VALUES (?, ?, ?, ?, datetime('now'))
@@ -6413,7 +6566,6 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 		return fmt.Errorf("parse gh pr output: %w", err)
 	}
 
-
 	for _, pr := range prs {
 		// Skip if not newer than our last known update (incremental).
 		if lastUpdated != "" && pr.UpdatedAt <= lastUpdated {
@@ -6465,7 +6617,6 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 	if err := json.Unmarshal(out, &issues); err != nil {
 		return fmt.Errorf("parse gh issue output: %w", err)
 	}
-
 
 	for _, issue := range issues {
 		// Skip if not newer than our last known update (incremental).

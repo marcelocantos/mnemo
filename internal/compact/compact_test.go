@@ -345,6 +345,62 @@ func TestParsePayloadRejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestParsePayloadRecoversFromProsePrefix covers the 🎯T72 robustness
+// fix: the model sometimes echoes the task before the JSON object. The
+// outermost {...} span is extracted and parsed instead of failing.
+func TestParsePayloadRecoversFromProsePrefix(t *testing.T) {
+	body := `Update active-projects.md with refreshed dates` + "\n\n" +
+		`{"targets":[],"decisions":[],"files":["active-projects.md"],"open_threads":[],"summary":"refreshed dates"}`
+	p, _, err := parsePayload(body)
+	if err != nil {
+		t.Fatalf("parsePayload should recover from a prose prefix: %v", err)
+	}
+	if p.Summary != "refreshed dates" {
+		t.Errorf("summary = %q, want \"refreshed dates\"", p.Summary)
+	}
+}
+
+// TestCompactRateLimitedIsTransient covers 🎯T72: a usage-limit notice
+// echoed as prose (not JSON) surfaces as ErrLLMUnavailable, not a hard
+// parse failure, so the watcher backs off instead of marking it failed.
+func TestCompactRateLimitedIsTransient(t *testing.T) {
+	s := &fakeStore{
+		session: "sess-1",
+		msgs:    []store.SessionMessage{{ID: 1, Role: "user", Text: "do the thing"}},
+	}
+	llm := &stubLLM{response: LLMResult{
+		Text: "You've hit your session limit · resets 10:10pm (Australia/Melbourne)",
+	}}
+	c := New(s, llm, Config{})
+	_, err := c.Compact(context.Background(), "", "sess-1", nil)
+	if !errors.Is(err, ErrLLMUnavailable) {
+		t.Fatalf("expected ErrLLMUnavailable for a rate-limit notice, got %v", err)
+	}
+	if len(s.compacts) != 0 {
+		t.Errorf("no compaction should be written on a transient failure")
+	}
+}
+
+// TestSanitizePromptStripsNUL covers the 🎯T72 exec fix: a NUL byte in
+// the transcript would make claudia's exec call fail with EINVAL, so it
+// (and other C0 controls) must be stripped while tabs/newlines survive.
+func TestSanitizePromptStripsNUL(t *testing.T) {
+	in := "before\x00after\tkeep\nnewline\x07bell"
+	got := sanitizePrompt(in)
+	if strings.ContainsRune(got, '\x00') {
+		t.Errorf("NUL byte survived sanitisation: %q", got)
+	}
+	if strings.ContainsRune(got, '\x07') {
+		t.Errorf("control byte survived sanitisation: %q", got)
+	}
+	if !strings.Contains(got, "\t") || !strings.Contains(got, "\n") {
+		t.Errorf("tab/newline should be preserved: %q", got)
+	}
+	if !strings.Contains(got, "beforeafter") || !strings.Contains(got, "newlinebell") {
+		t.Errorf("non-control text should be preserved with controls excised: %q", got)
+	}
+}
+
 func TestRenderTranscriptTruncates(t *testing.T) {
 	msgs := []store.SessionMessage{
 		{Role: "user", Text: strings.Repeat("a", 100)},

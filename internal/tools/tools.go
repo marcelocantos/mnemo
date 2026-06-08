@@ -56,9 +56,8 @@ type CompactorHealth struct {
 	InFlightSession       string
 	Counts                map[string]int64
 	ScanInterval          time.Duration
-	IdleTimeout           time.Duration
 	TickTimeout           time.Duration
-	MinDeltaMessages      int
+	AddendaBudgetTokens   int64
 	MaxCompactionsPerScan int
 	MaxTokenRatio         float64
 }
@@ -480,6 +479,13 @@ mode:
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix)")),
 			mcp.WithString("mode", mcp.Description(`"auto" (default), "strict", or "candidates".`)),
 		),
+		mcp.NewTool("mnemo_compacted_session",
+			mcp.WithDescription(`Return the compacted view of a session: its compaction summaries (the dense, durable layer) followed by the addenda tail — the substantive messages past the latest compaction cursor, computed live from the index.
+
+This is the token-volume retrieval form (🎯T72): a converged session is mostly summary plus a bounded tail; a session below the size floor has no summary and the addenda ARE the whole session (its raw entries are its retrieval form). Use this instead of mnemo_read_session when you want the distilled view rather than the raw transcript.`),
+			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (exact or prefix, consistent with mnemo_read_session).")),
+			mcp.WithNumber("addenda_limit", mcp.Description("Max addenda messages past the cursor to include (default 200).")),
+		),
 		mcp.NewTool("mnemo_whatsup",
 			mcp.WithDescription(`Report which active Claude Code sessions are doing expensive work right now.
 
@@ -747,6 +753,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.restore(args)
 	case "mnemo_chain":
 		return ch.chain(args)
+	case "mnemo_compacted_session":
+		return ch.compactedSession(args)
 	case "mnemo_self":
 		return ch.self(args)
 	case "mnemo_whatsup":
@@ -827,6 +835,16 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 		// format with empty Project/Timestamp/sessionID fields.
 		if r.Role == "vault" {
 			fmt.Fprintf(&b, ">> [vault] %s\n>> %s\n\n", r.SessionID, r.Text)
+			continue
+		}
+		// Compaction summaries (🎯T72) are the dense layer: render as a
+		// "[compaction] <session>" header carrying the summary prose.
+		if r.Role == "compaction" {
+			sid := r.SessionID
+			if len(sid) > 8 {
+				sid = sid[:8]
+			}
+			fmt.Fprintf(&b, ">> [compaction] %s\n>> %s\n\n", sid, r.Text)
 			continue
 		}
 		sid := r.SessionID
@@ -1720,6 +1738,47 @@ func (h *callHandler) restore(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
+// compactedSession implements mnemo_compacted_session (🎯T72): the
+// distilled retrieval form of a session — compaction summaries plus the
+// live addenda tail past the latest cursor.
+func (h *callHandler) compactedSession(args map[string]any) (string, bool, error) {
+	sessionID, _ := args["session_id"].(string)
+	if sessionID == "" {
+		return "session_id is required", true, nil
+	}
+	limit := 200
+	if l, ok := args["addenda_limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	v, err := h.mem.CompactedView(sessionID, limit)
+	if err != nil {
+		return fmt.Sprintf("compacted view failed: %v", err), true, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Compacted view of session %s\n\n", v.SessionID)
+	if len(v.Summaries) == 0 {
+		b.WriteString("(no compaction yet — below the size floor; the addenda below ARE the session's retrieval form)\n\n")
+	} else {
+		b.WriteString("== Compaction summaries (durable layer) ==\n")
+		for i, sm := range v.Summaries {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, sm)
+		}
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, "== Addenda: %d message(s), ~%d tokens past cursor msg:%d ==\n",
+		len(v.Addenda), v.AddendaTokens, v.Cursor)
+	for _, m := range v.Addenda {
+		text := m.Text
+		if len(text) > 500 {
+			text = text[:497] + "..."
+		}
+		fmt.Fprintf(&b, "[%s] %s\n", m.Role, text)
+	}
+	return b.String(), false, nil
+}
+
 func (h *callHandler) chain(args map[string]any) (string, bool, error) {
 	sessionID, _ := args["session_id"].(string)
 	if sessionID == "" {
@@ -2352,7 +2411,7 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 
 	fmt.Fprintf(&b, "  last_scan_at:        %s\n", formatAge(hs.LastScanAt))
 	fmt.Fprintf(&b, "  last_scan_count:     %d\n", hs.LastScanCount)
-	fmt.Fprintf(&b, "  backlog:             %d (owed-but-uncompacted sessions)\n", hs.Backlog)
+	fmt.Fprintf(&b, "  backlog:             %d (sessions whose addenda exceed the budget)\n", hs.Backlog)
 	fmt.Fprintf(&b, "  last_tick_at:        %s\n", formatAge(hs.LastTickAt))
 	if hs.LastTickOutcome != "" {
 		fmt.Fprintf(&b, "  last_tick_outcome:   %s\n", hs.LastTickOutcome)
@@ -2364,18 +2423,24 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	}
 
 	b.WriteString("\nLifetime tick counts:\n")
-	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "skipped_self"}
+	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "rate_limited"}
 	for _, o := range outcomes {
 		fmt.Fprintf(&b, "  %-20s %d\n", o+":", hs.Counts[o])
 	}
+	// 🎯T72: the failure ratio is the load-bearing health signal now that
+	// compactions are rare and durable. A healthy steady state keeps
+	// failed well below compacted (target ≤ 1:5).
+	if comp := hs.Counts["compacted"]; comp > 0 {
+		fmt.Fprintf(&b, "  %-20s %.2f (failed/compacted; healthy ≤ 0.20)\n",
+			"failure_ratio:", float64(hs.Counts["failed"])/float64(comp))
+	}
 
 	b.WriteString("\nConfiguration:\n")
-	fmt.Fprintf(&b, "  scan_interval:           %s\n", hs.ScanInterval)
-	fmt.Fprintf(&b, "  idle_timeout:            %s\n", hs.IdleTimeout)
-	fmt.Fprintf(&b, "  tick_timeout:            %s\n", hs.TickTimeout)
-	fmt.Fprintf(&b, "  min_delta_messages:      %d\n", hs.MinDeltaMessages)
+	fmt.Fprintf(&b, "  scan_interval:            %s\n", hs.ScanInterval)
+	fmt.Fprintf(&b, "  tick_timeout:             %s\n", hs.TickTimeout)
+	fmt.Fprintf(&b, "  addenda_budget_tokens:    %d\n", hs.AddendaBudgetTokens)
 	fmt.Fprintf(&b, "  max_compactions_per_scan: %d\n", hs.MaxCompactionsPerScan)
-	fmt.Fprintf(&b, "  max_token_ratio:         %.2f\n", hs.MaxTokenRatio)
+	fmt.Fprintf(&b, "  max_token_ratio:          %.2f\n", hs.MaxTokenRatio)
 
 	// Health heuristic (🎯T71): the watcher is genuinely stuck only when
 	// neither the per-scan loop NOR the per-tick loop has progressed in

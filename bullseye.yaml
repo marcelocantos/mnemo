@@ -2306,6 +2306,148 @@ targets:
     origin: manual
     discovered: 2026-06-01
     achieved: 2026-06-01
+  T72:
+    name: Compactor convergence model is redesigned around token-volume triggers, addenda-as-tail, and a precise recursion guard
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The "called by us" recursion guard is precise: claudia-spawned summariser sessions are excluded by a marker stamped at invocation (env var or prompt sentinel detected at ingest time and recorded on a `sessions` flag), not by CWD prefix. User dev sessions inside the mnemo repo are eligible for compaction; the over-broad `excludeCWD` prefix check in watcher.go:300 is gone.'
+    - Triggers are token-volume based, not message-count based. The metric is `SUM(output_tokens + cache_creation_tokens)` over the addenda range — entries with `id > MAX(compactions.entry_id_to)` for the session. (`output_tokens` is non-overlapping per turn; `cache_creation_tokens` captures uncached input the model had to process; neither double-counts the way `input_tokens` does.) Re-compaction is owed when the addenda sum exceeds a configurable budget (default tied to the compaction context window, e.g., 50k tokens).
+    - 'The size-floor predicate uses the same token-volume metric applied to the whole session: a session whose total `output_tokens + cache_creation_tokens` is below the addenda budget has no compaction — its raw entries ARE its retrieval form. The floor and the re-compaction trigger become the same measurement applied to different ranges.'
+    - 'The convergence target is redefined: from "every owed session has a current span" to "every session above the size floor has bounded addenda past its latest compaction cursor." `mnemo_compactor_status` backlog reflects this new fixed point — a session with a stale compaction but bounded-token addenda is NOT counted as owed.'
+    - Compactions are FTS5-indexed (new `compactions_fts` virtual table mirroring the summary text, additive schema change per the schema policy) and weighted above raw `messages_fts` hits in `mnemo_search` results. When a search query matches both a compaction and raw messages the compaction covers, the compaction wins; raw addenda hits flow through unmodified. Existing search callers see strictly denser results without touching their query shape.
+    - Retrieval API for "the compacted view of session X" returns `compaction.summary + tail(entries with id > cursor)` — i.e., compaction + addenda. Addenda are computed on the fly from `entries`, not stored separately. An optional `addenda_token_estimate` cached column on the latest compaction row makes the trigger query O(1) but is purely an optimization.
+    - 'The current 2.7:1 lifetime failure-vs-success ratio (`failed: 551` vs `compacted: 204` in `mnemo_compactor_status`) is investigated and brought to a healthy ratio. Concrete bar: over a rolling 7-day window after this redesign ships, failed:compacted ≤ 1:5. Re-compaction failures matter much more under the new model because compactions are rare and load-bearing — "we''ll get it next scan" is no longer adequate recovery.'
+    - The compactor backlog drops from current 8,633 sessions to a stable steady state under the new convergence definition. Backlog should be a small fraction of total sessions, corresponding only to sessions whose addenda actually exceed the budget. A large historical backfill is expected on the first run after the redesign ships and is acceptable; the steady-state number is what's gated.
+    - 'Schema changes are strictly additive per the schema policy. The `compactions` table shape (session_id, entry_id_from, entry_id_to, summary, tokens, ...) is unchanged. New: `compactions_fts` virtual table, optional `addenda_token_estimate` column on `compactions`, a `compactor_internal` boolean on `sessions` (or equivalent) for the recursion marker. No destructive migrations.'
+    - Trigger B (compactions.go:309-320) is corrected to apply the token-volume floor uniformly. The current shape — `delta_substantive_msgs >= 1 AND last_msg <= idleCutoff` admitting any settled session with even one new message — would, under the new model, mean an idle 2-message session qualifies for compaction even though it's below the size floor. The trigger must use total session tokens against the floor, not delta messages.
+    context: |-
+      ## The throughline
+
+      Compactions become the durable, dense layer; addenda are the cheap unprocessed tail past the latest compaction cursor; search and post-analysis sit on top.
+
+      Today's compactor is a continuously-reconciled summary — every 50 new messages re-triggers an expensive LLM call. The result: an 8,633-session backlog the watcher can't drain (made worse by an over-broad CWD-prefix recursion guard skipping 705,043 candidates lifetime against 204 actual compactions), and a fragile contract where the watcher's entire job is "keep up."
+
+      Under the redesign, compaction is deliberate, not continuous. Each session has at most one compaction at a time covering `[0, cursor]`; everything past the cursor is addenda — raw entries pinned by their position past `cursor`. Most sessions are converged most of the time. Re-compaction is rare and triggered by addenda token volume crossing a budget tied to a real constraint (downstream retrieval needs to fit `compaction + addenda` in a context window).
+
+      ## Why token-volume, not message-count
+
+      A 50-message session of one-line exchanges and a 50-message session with 10k tokens of pasted context per turn are wildly different in compaction effort and retrieval pressure. The LLM cost scales with tokens; retrieval budgets are tokens; the addenda-tail tractability question is "does this fit a context window." So message count was always a proxy; tokens are the actual quantity.
+
+      `output_tokens + cache_creation_tokens` is the cleanest content-volume measure. `input_tokens` double-counts prior conversation each turn (grows quadratically with length) — fine as a budget *ratio* (the existing `SessionTokens` use in store/compactions.go is correct as a ratio), wrong as a content measure.
+
+      ## Why "called by us" is the only legitimate exclusion
+
+      The recursion guard exists because claudia (the compaction caller) spawns a Claude Code session whose transcript ingest will pick up — and would summarise on the next scan, creating endless self-recursion. That's the ONLY thing that needs excluding. User dev sessions in the mnemo repo SHOULD be compacted — they are exactly the high-value content. The CWD-prefix check conflates the two and is why the backlog never drains.
+
+      Fix: stamp a marker at the claudia spawn site (env var like `CLAUDIA_INTERNAL=mnemo-compactor` or a sentinel prompt prefix), detect at ingest, set `sessions.compactor_internal = 1`, exclude by that flag. Surgically narrow, never false-positive.
+
+      ## What downstream lights up
+
+      Once compactions are durable, dense, and FTS5-indexed, every post-analysis pass becomes feasible at the corpus scale:
+
+      - **Consolidation across session chains.** A `/clear`-bounded chain of sessions on one task produces N high-overlap compactions; a higher-level "chain summary" pass collapses them. Compactions stay as the durable layer.
+      - **Incomplete-work mining.** Cheap heuristic or LLM-classification pass over compactions surfaces "TODO," "stuck on," "left off at" patterns — feeds a bullseye-target candidate list directly. Much cheaper than scanning raw transcripts.
+      - **Knowledge graph from compactions.** Compactions are dense, one-sentence-per-fact-ish. Entity/relation extraction works at LLM call counts that match corpus size, not message size. The graph is keyed by real-world concepts.
+      - **🎯T64's vault wing themes/patterns/lessons (T64.7–9) consume compactions as input.** The current design points at this implicitly; the addenda model makes it cheaper and higher-signal. The T64 design itself doesn't change — just the input layer it operates on.
+
+      ## The "tiny" rule, corrected
+
+      Earlier framing was "skip tiny deltas — no win." Wrong direction: a tiny delta can be high-signal ("oops, I changed my mind"). The correct rule is "skip tiny **sessions** — there's nothing dense to compress." Under the addenda model, "tiny session" means "total token volume below the addenda budget" — i.e., the entire session IS its own retrieval form, no compaction needed.
+
+      ## Open questions intentionally not pinned by acceptance
+
+      - **The exact budget number.** 50k tokens is a starting point; the right number is tied to downstream retrieval consumers' context budget and may evolve. Acceptance specifies the metric (`output + cache_creation`), not the threshold.
+      - **Re-compaction strategy: differential append, or full re-summary?** Differential (summarise just the addenda, append to summary) is cheaper but lossy across the boundary; full re-summary (re-run claudia over the full transcript) is cleaner but expensive. Probably differential by default with periodic full-re-summary refreshes. To be decided during implementation.
+      - **Chain-scoped vs session-scoped compaction.** Compactions stay session-scoped (no change to claudia). A chain-level consolidation pass (idea 2) stitches them. Keeps LLM-cost predictable; cleanest separation of concerns.
+
+      ## Sequence note
+
+      The recursion-guard fix is independently valuable — the compactor today is functionally broken because of it. The redesign can either ship as one PR or be sequenced as (a) recursion-guard hotfix, (b) full redesign — depending on patience. Decompose into sub-targets if/when execution reveals natural fault lines.
+    origin: manual
+    discovered: 2026-06-07
+    achieved: 2026-06-08
+  T73:
+    name: A three-tier test architecture exists so synthetic and production-scale system tests run against an MCP-driven daemon without putting live data at risk
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A single `MNEMO_HOME=<dir>` environment variable (and equivalent `--home` flag) controls every filesystem path the daemon resolves: database, config.json, state.json, peers/, the resolved transcript scan root, and any other on-disk artefact. No production code path calls `os.UserHomeDir()` directly for these paths; every read/write threads through the configured root. A `go vet`-style check or simple grep is sufficient to demonstrate the rule. The structural consequence: a test daemon launched with `MNEMO_HOME=/tmp/x` is *incapable* of reading or mutating the real `~/.mnemo`.'
+    - An `internal/e2e/` (or similarly-named) test package exists that spawns the daemon as a subprocess against an injectable `MNEMO_HOME`, returns an MCP client handle wired to the daemon's HTTP transport, and tears down cleanly on test exit. Tests drive scenarios via real MCP tool calls — `mnemo_search`, `mnemo_vault_status`, etc. — not via direct Go-package API calls into `store.Backend`. Failure modes that only manifest at the MCP / serialisation / per-user routing layer become testable.
+    - A `cmd/mnemo-test-snapshot/` (or equivalent) helper exists that, on macOS / APFS, uses `cp -c` to clone-by-reference `~/.mnemo` and `~/.claude/projects` into a destination directory; writes a stub `config.json` pointing the daemon's data root at the clone; and prints the `MNEMO_HOME=<path>` line to stdout. The helper refuses to write into a git-tracked directory, refuses to clobber an existing snapshot without explicit `--force`, and defaults the destination to a known-safe location outside any worktree. On non-APFS filesystems it falls back to a regular recursive copy with a clear log line.
+    - A Tier 2 fixture generator exists in `internal/storetest` (or a new package) that, given a seed and a shape spec (session count, messages-per-session distribution, token-volume distribution, repo mix, tool-use density), writes a synthetic `~/.claude/projects/`-style transcript tree to a tempdir. Output is deterministic given the same seed. The generator is sized for use both in fast unit tests (tens of sessions) and in mid-scale integration tests (thousands of sessions) without touching the network or real data.
+    - 'Tier 3 (real-data scale) tests are gated behind a `//go:build scale` build tag so the default `go test ./...` invocation never runs them, and the tests skip with a clear message when `MNEMO_TEST_SNAPSHOT` is unset. CI configuration explicitly never sets that variable. Snapshots-on-disk live outside any git worktree by convention and the helper enforces this; `.gitignore` covers the conventional snapshot location as belt-and-braces. Privacy posture: a casual `go test ./...` against a clean checkout cannot exfiltrate transcript content.'
+    - 'Tier 3 tests assert invariants, not exact values, so they remain stable across snapshots: e.g., "the compaction backlog converges to ≤ N within K scans," "every compaction''s `entry_id_from` equals its predecessor''s `entry_id_to + 1`," "no session is processed twice in one scan," "the token-volume trigger fires before backlog exceeds N." Tier 2 tests assert exact values against known synthetic fixtures. At least one invariant of each shape is implemented as a worked example.'
+    - At least one existing integration test (the vault-sync end-to-end test is a natural candidate) is ported onto the e2e daemon-subprocess shape so the harness is proven end-to-end, not just hypothetically. The ported test passes in CI and demonstrably exercises the MCP transport rather than the in-process Go API.
+    - '`docs/testing.md` documents the three-tier model: when to write a Tier 1 (synthetic in-tree) vs Tier 2 (programmatic mid-scale) vs Tier 3 (snapshot of real data) test, how to run each tier locally, how to take and dispose of a snapshot, and the safety invariants the architecture relies on. The doc is short — a reference, not a tutorial.'
+    - Makefile targets exist for `make test` (Tier 1 + Tier 2; default), `make test-scale` (also Tier 3 with `MNEMO_TEST_SNAPSHOT` set or skipped with a clear message), and `make snapshot` (invokes the helper). The `bullseye` invariant target continues to run only the default tier so CI cost does not balloon.
+    context: |-
+      ## Why now
+
+      Two pressures converge: (a) growing user base means correctness regressions hurt more people more visibly, (b) several large in-flight redesigns (🎯T72 compactor, 🎯T64 vault wing, 🎯T54 ingestion-under-trees-of-interest, eventual 🎯T51 messages dedup) all need to be provable at production shape, not just at fixture shape. Synthetic fixtures don't have the right token-volume distributions, the bimodal session profile (dev vs claudia spawn), or the row counts that surface O(N²) query plans.
+
+      The transcript history + index IS the test corpus you most want — it's the production shape, by definition. The problem is operating on it directly puts the live data at risk: a buggy test could delete, corrupt, or exfiltrate it.
+
+      ## The throughline
+
+      Three tiers, layered by realism vs safety vs CI cost:
+
+      - **Tier 1 — synthetic, in-tree, every PR.** Existing `internal/storetest` shape. Fast, deterministic, safe. Catches most regressions.
+      - **Tier 2 — programmatic mid-scale.** A generator that produces N realistic sessions on demand. No real content (so safe in CI), but large enough to surface scaling bugs. One-time engineering cost.
+      - **Tier 3 — real-data scale, local-only.** Operates on an APFS clone of the user's actual data. Never in CI. Run deliberately when validating against production shape.
+
+      The keystone for Tier 3 is **isolation by construction**: a single `MNEMO_HOME` env var controls every path the daemon touches, so a test that mis-configures CANNOT touch the live data. Belt-and-braces: APFS clone (effectively free on macOS), read-only or chmod-restricted snapshots, snapshots outside any git worktree, Tier 3 tests gated by build tag, CI never sets the trigger env var.
+
+      The keystone for test SHAPE (across all tiers) is **drive via MCP, not via Go-package APIs**. Direct backend calls miss bugs in the MCP serialisation layer, the per-user routing in `registry`, the resolver wiring, the streamable-HTTP handling. Black-box daemon, MCP-only inputs/outputs.
+
+      ## What lights up downstream
+
+      - **🎯T72 (compactor redesign)** becomes provable: the token-volume trigger threshold can be defended with a real number against real data instead of being a guess. Without Tier 3, T72 is a redesign whose acceptance can only be partially demonstrated.
+      - **SQLite query-plan correctness at scale** — index choices, FTS5 rank tuning, JOIN shapes — finally has somewhere to live.
+      - **Schema migration validation under sqlift** — adding `compactions_fts` is a trivial trigger backfill at fixture scale and a multi-million-row backfill at production scale. The performance characteristics differ; both need testing.
+      - **Concurrent-write contention** between compactor, ingest, and vault-output manifest writers is invisible at small fixture sizes and obvious at production sizes.
+      - **Federation correctness (🎯T15)** — peer query fan-out under realistic per-peer corpora.
+
+      ## Determinism trade-off
+
+      Tier 3 produces non-deterministic tests by nature — your transcript history changes daily. A test that asserts "exactly N compactions" will flake. Hence the invariant-style assertions in the acceptance: backlog convergence, cursor monotonicity, no-double-process, trigger-before-overflow. These hold across any reasonable snapshot. Tier 2 keeps exact-value assertions where they belong, against deterministic synthetic data.
+
+      ## Sequence
+
+      The smallest useful first move is the foundation, not the generator:
+
+      1. `MNEMO_HOME` plumbing through the daemon (largest single mechanical change but underpins everything).
+      2. The `mnemo-test-snapshot` helper (≈50 lines of Go or shell).
+      3. The `internal/e2e/` harness that spawns daemons and returns MCP client handles (≈200 lines).
+      4. Port one existing integration test onto the harness as proof.
+      5. Generators and Tier 3 scenarios build on top.
+
+      Steps 1–4 are the foundation worth shipping as one cohesive unit. Steps after that are independently raisable as sub-targets when scope is clearer.
+
+      ## Open questions intentionally not pinned by acceptance
+
+      - **Whether to add `MNEMO_HOME` as an env var, a `--home` CLI flag, or both.** Probably both for ergonomics; precedence rules to be decided.
+      - **Whether the snapshot helper lives in `cmd/mnemo-test-snapshot/` or as a `make snapshot` target wrapping a shell script.** Go binary is cleaner cross-platform but the macOS-APFS specifics suggest shell first, ship Go later if portability matters.
+      - **Whether non-APFS fallback is worth implementing or simply errors out.** Most contributors will be on macOS; Linux fallback to plain `cp -r` is cheap, plus mnemo runs there.
+      - **The exact location and `.gitignore` rule for the conventional snapshot dir** — `~/.mnemo-test-snapshots/` is a sensible default but worth confirming the user's preference.
+    origin: manual
+    discovered: 2026-06-08
+  T74:
+    name: Ad-hoc read queries run under a bounded execution deadline, so a pathological mnemo_query can't wedge the read pool indefinitely
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Store.Query (and any other agent-reachable ad-hoc read path) executes under a context with a deadline rather than context.Background(); the deadline is configurable with a sane default (e.g. 30s).
+    - A query that exceeds the deadline is cancelled via SQLite's interrupt mechanism (QueryContext cancellation / sqlite3_interrupt), not left running, and the connection is returned to the pool cleanly (query_only reset still happens).
+    - The tool surfaces a clear, actionable error on timeout (e.g. 'query exceeded the N-second budget — narrow the query or add a filter') distinct from a SQL error, so the agent learns to refine rather than retry verbatim.
+    - PRAGMA busy_timeout remains for lock-acquisition waits; the new deadline governs statement execution time and the two are documented as distinct.
+    - A test proves a deliberately slow/looping query returns the timeout error within a bounded margin instead of hanging.
+    context: 'Discovered during 🎯T72 work: probing the live DB with an expensive correlated-subquery SELECT via mnemo_query hung for minutes with no bound. Store.Query (internal/store/store.go) runs reads on context.Background() with no deadline; PRAGMA busy_timeout=5000 only bounds lock waits, not statement execution. An MCP tool that can run unbounded against the shared read pool is a denial-of-service-on-self hazard — one bad agent query can stall every other reader. The mnemo_query description already nudges toward indexed columns, but a hard execution budget is the real backstop.'
+    origin: manual
+    discovered: 2026-06-08
   T8:
     name: sqldeep integration
     status: achieved

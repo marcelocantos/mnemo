@@ -409,7 +409,15 @@ CREATE TABLE session_meta (
 			-- Additive, defaulted: old sessions read as "live" until a
 			-- drift event tags them.
 			source_status TEXT NOT NULL DEFAULT 'live',
-			source_state_at TEXT NOT NULL DEFAULT ''
+			source_state_at TEXT NOT NULL DEFAULT '',
+			-- 🎯T72 recursion guard: set to 1 when this session's
+			-- transcript is a claudia-spawned compactor run (detected at
+			-- ingest by the CompactorMarker prefix on the first user
+			-- message), 0 for genuine user/dev sessions. Replaces the
+			-- over-broad excludeCWD prefix check that wrongly skipped real
+			-- dev sessions sharing the mnemo repo cwd. Additive, defaulted:
+			-- old rows read as 0 (eligible) until re-ingest tags a marker.
+			compactor_internal INTEGER NOT NULL DEFAULT 0
 		);
 
 CREATE TABLE session_nonces (
@@ -510,6 +518,14 @@ CREATE INDEX idx_docs_taxonomy ON docs(taxonomy) WHERE taxonomy != '';
 CREATE INDEX idx_entries_agent_id ON entries(agent_id) WHERE agent_id IS NOT NULL;
 
 CREATE INDEX idx_entries_assistant_tokens ON entries(session_id, input_tokens, output_tokens) WHERE type = 'assistant';
+
+-- 🎯T72 addenda-token metric: SUM(output_tokens + cache_creation_tokens)
+-- over assistant entries past a cursor (entries.id > cursor_entry_id),
+-- computed for every session on every compactor scan. Keyed
+-- (session_id, id) with the two summed columns materialised as covering
+-- payload so the per-session range sum is an index-only scan rather than
+-- a json_extract over each row's raw BLOB.
+CREATE INDEX idx_entries_addenda ON entries(session_id, id, output_tokens, cache_creation_tokens) WHERE type = 'assistant';
 
 CREATE INDEX idx_entries_data_hook_event ON entries(data_hook_event) WHERE data_hook_event IS NOT NULL;
 
@@ -651,6 +667,12 @@ CREATE VIRTUAL TABLE claude_configs_fts USING fts5(
 			content_rowid=id
 		);
 
+CREATE VIRTUAL TABLE compactions_fts USING fts5(
+			summary, session_id,
+			content=compactions,
+			content_rowid=id
+		);
+
 CREATE VIRTUAL TABLE decisions_fts USING fts5(
 			proposal_text, confirmation_text, repo,
 			content=decisions,
@@ -781,6 +803,12 @@ CREATE TRIGGER claude_configs_au AFTER UPDATE ON claude_configs
 			VALUES ('delete', old.id, old.content, old.repo);
 			INSERT INTO claude_configs_fts(rowid, content, repo)
 			VALUES (new.id, new.content, new.repo);
+		END;
+
+CREATE TRIGGER compactions_ai AFTER INSERT ON compactions
+		BEGIN
+			INSERT INTO compactions_fts(rowid, summary, session_id)
+			VALUES (new.id, new.summary, new.session_id);
 		END;
 
 CREATE TRIGGER decisions_ad AFTER DELETE ON decisions

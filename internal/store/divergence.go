@@ -86,17 +86,12 @@ func (s *Store) StreamDivergences() []StreamDivergence {
 }
 
 // compactionDivergence reports the owed-but-uncompacted session backlog
-// (🎯T68.1's COUNT(*) OVER () gap). The trigger thresholds mirror the
-// watcher's defaults; this is an estimate of the gap, not an assertion
-// of exactly which sessions a scan will pick.
+// (🎯T72's token-volume fixed point). The budget mirrors the watcher's
+// default; this is an estimate of the gap, not an assertion of exactly
+// which sessions a scan will pick.
 func (s *Store) compactionDivergence() StreamDivergence {
-	const (
-		minDeltaMsgs   = 50
-		idleMinutes    = 15
-		maxBudgetRatio = 0.10
-	)
-	_, backlog, err := s.SelectCompactionCandidates(
-		minDeltaMsgs, time.Now().Add(-idleMinutes*time.Minute), maxBudgetRatio, 1)
+	const maxBudgetRatio = 0.10
+	_, backlog, err := s.SelectCompactionCandidates(DefaultAddendaBudgetTokens, maxBudgetRatio, 1)
 	if err != nil {
 		return StreamDivergence{Stream: "compactions", Known: false,
 			Note: "backlog query failed: " + err.Error()}
@@ -106,7 +101,7 @@ func (s *Store) compactionDivergence() StreamDivergence {
 	return StreamDivergence{
 		Stream: "compactions", Known: true,
 		Gap: int64(backlog), Unit: "sessions", LastReconciled: last,
-		Note: "owed sessions (new substantive messages past the latest compaction)",
+		Note: "owed sessions (addenda token volume past the latest compaction meets the budget)",
 	}
 }
 

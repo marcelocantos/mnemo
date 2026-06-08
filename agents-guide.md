@@ -399,6 +399,26 @@ Use this when you need to understand a work span that crossed `/clear`
 boundaries — e.g., to reconstruct the full context of a multi-session
 task.
 
+### mnemo_compacted_session
+
+Return the compacted view of a session — its distilled retrieval form
+under the token-volume model (🎯T72): the compaction summaries (the
+dense, durable layer) followed by the addenda tail, the substantive
+messages past the latest compaction cursor, computed live from the
+index.
+
+A converged session is mostly summary plus a bounded tail. A session
+below the size floor has no summary and the addenda ARE the whole
+session — its raw entries are its retrieval form. Reach for this instead
+of `mnemo_read_session` when you want the distilled view rather than the
+raw transcript.
+
+Parameters:
+- `session_id` (required) — exact ID or prefix, consistent with
+  `mnemo_read_session`
+- `addenda_limit` — max addenda messages past the cursor to include
+  (default 200)
+
 ### mnemo_self
 
 Discover the calling session's ID. Two-phase nonce protocol:
