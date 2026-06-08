@@ -285,9 +285,14 @@ type RecentActivityInfo struct {
 
 // StatusResult is the top-level response from Status.
 type StatusResult struct {
-	Days    int              `json:"days"`
-	Repos   []RepoStatus     `json:"repos"`
-	Streams []BackfillStatus `json:"streams,omitempty"`
+	Days int `json:"days"`
+	// Diagnostics is the transcript-ingest freshness/lag block (🎯T75):
+	// now_utc, freshness lag, per-stream divergence, per-source coverage,
+	// and (when a repo filter is supplied) a repo-specific section.
+	// Additive — existing consumers can ignore it.
+	Diagnostics *IngestDiagnostics `json:"diagnostics,omitempty"`
+	Repos       []RepoStatus       `json:"repos"`
+	Streams     []BackfillStatus   `json:"streams,omitempty"`
 }
 
 // RepoStatus summarises recent activity for a single repo.
@@ -5003,7 +5008,11 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 		strRows.Close()
 	}
 
-	return &StatusResult{Days: days, Repos: repos, Streams: streams}, nil
+	// 🎯T75: attach the transcript-ingest freshness/lag diagnostics so a
+	// stale or behind index is visible from mnemo_status itself.
+	diag := s.IngestDiagnostics(repoFilter)
+
+	return &StatusResult{Days: days, Diagnostics: diag, Repos: repos, Streams: streams}, nil
 }
 
 // SessionMessage is a single message from a session transcript.
