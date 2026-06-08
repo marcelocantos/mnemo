@@ -226,8 +226,9 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_search` | Full-text search with context (like `grep -C`). Repo filter, configurable before/after context. |
 | `mnemo_sessions` | List sessions by recency; filter by project, repo, work type, or session type |
 | `mnemo_read_session` | Read messages from a specific session (supports prefix IDs) |
+| `mnemo_compacted_session` | Distilled view of a session — compaction summaries plus the live addenda tail past the latest cursor |
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
-| `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts |
+| `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
 | `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
 | `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
 | `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
