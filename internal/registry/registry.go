@@ -142,10 +142,14 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	}
 
 	projectDir := filepath.Join(home, ".claude", "projects")
-	dbPath := filepath.Join(home, ".mnemo", "mnemo.db")
+	mnemoDir := filepath.Join(home, ".mnemo")
+	dbPath := filepath.Join(mnemoDir, "vault", "mnemo.db")
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+	if err := store.MigrateLegacyDBPath(dbPath, filepath.Join(mnemoDir, "mnemo.db")); err != nil {
+		return nil, fmt.Errorf("migrate legacy mnemo.db: %w", err)
 	}
 
 	s, err := store.New(dbPath, projectDir)
