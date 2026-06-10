@@ -2493,6 +2493,75 @@ targets:
     - notes
     origin: manual
     discovered: 2026-06-10
+  T74:
+    name: mnemo operates as an intelligent agent ("the Muse") — synthesising sessions on ingest, accumulating a knowledge layer, and autonomously briefing new sessions
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Per-session synthesis runs automatically after each /clear-span is ingested, using an Anthropic model call, and results are stored in the DB
+    - A knowledge accumulation layer compounds per-session insights into topic-level understanding over time
+    - mnemo_brief returns a rich, AI-synthesised startup context covering active targets, recent decisions, open threads, and relevant knowledge — with no user prompting required
+    - mnemo_patterns exposes recurring themes and stuck points derived from synthesis history
+    - mnemo_connections traces how a concept, decision, or file threads across sessions via synthesised links
+    - Backfill runs on first Muse startup to synthesise all existing /clear-spans
+    - 'All synthesis is opt-in via config (ANTHROPIC_API_KEY present + muse.enabled: true) — default is silent'
+    context: 'Named after Mnemosyne, mother of the Muses: memory enabling creativity. The vision is to move mnemo from a passive retrieval index to an active reasoning agent that synthesises past work into fresh insight. Core capability: every session ingest triggers an AI synthesis pass; insights compound into a knowledge base; new sessions receive an autonomous briefing without the user having to ask. Budget is not a constraint. Quality iterates over time.'
+    tags:
+    - muse
+    - synthesis
+    - intelligence
+    - agent
+    origin: manual
+    discovered: 2026-06-10
+  T74.1:
+    name: Per-session AI synthesis pipeline is operational — Anthropic API call per /clear-span on ingest, results stored in DB
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'New `muse_synthesis` table (append-only): session_id, model, synthesized_at, summary TEXT, decisions JSON, patterns JSON, open_threads JSON, knowledge_atoms JSON, connections JSON'
+    - Synthesis goroutine fires after each /clear-span is compacted; runs async, does not block ingest
+    - 'Synthesis prompt feeds: span messages (truncated to context budget), prior synthesis for the same repo (last N entries), active bullseye targets'
+    - 'Opt-in gate: synthesis only runs when muse.enabled: true in ~/.mnemo/config.json AND ANTHROPIC_API_KEY is present'
+    - 'Backfill: on first Muse-enabled startup, all unprocessed /clear-spans are queued and synthesised (with rate limiting)'
+    - mnemo_synthesis MCP tool returns synthesis for a given session or the N most recent entries for a repo
+    context: Foundation slice — everything else (knowledge accumulation, mnemo_brief, patterns) depends on synthesis results being in the DB. First time mnemo calls Anthropic on its own behalf.
+    depends_on:
+    - T74
+    origin: manual
+    discovered: 2026-06-10
+  T74.2:
+    name: Knowledge accumulation layer compounds per-session synthesis into topic-level understanding over time
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'New `muse_knowledge` table: topic TEXT, repo TEXT, content TEXT (synthesised understanding), updated_at, source_sessions JSON'
+    - After each synthesis pass, a knowledge update step merges new knowledge_atoms from the session into the per-topic muse_knowledge rows
+    - 'mnemo_knowledge MCP tool: query by topic and/or repo, returns synthesised understanding (not raw transcripts)'
+    - Knowledge updates are incremental — each pass reads prior knowledge for affected topics and feeds it as context to the merge call
+    context: 'The compounding layer: where discrete session observations become persistent understanding. This is what makes mnemo_brief possible — it draws from muse_knowledge rather than re-reading raw transcripts.'
+    depends_on:
+    - T74.1
+    origin: manual
+    discovered: 2026-06-10
+  T74.3:
+    name: mnemo_brief provides an autonomous AI-synthesised startup context for new sessions
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_brief MCP tool accepts optional repo and focus parameters
+    - 'Returns: active targets (from bullseye), recent decisions, open threads from recent synthesis, relevant knowledge from muse_knowledge, suggested next action'
+    - Content is AI-synthesised (one Anthropic call over the assembled inputs), not a raw dump
+    - Response arrives in under 10 seconds for a typical repo with 100+ sessions
+    - Output is structured (JSON or well-sectioned markdown) suitable for direct injection into a new session's context
+    context: 'The flagship Muse capability: a new session starts informed rather than blind. Replaces the need for /waw on most sessions.'
+    depends_on:
+    - T74.2
+    origin: manual
+    discovered: 2026-06-10
   T8:
     name: sqldeep integration
     status: achieved
