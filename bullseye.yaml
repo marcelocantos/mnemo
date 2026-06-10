@@ -2506,7 +2506,12 @@ targets:
     - mnemo_connections traces how a concept, decision, or file threads across sessions via synthesised links
     - Backfill runs on first Muse startup to synthesise all existing /clear-spans
     - 'All synthesis is opt-in via config (ANTHROPIC_API_KEY present + muse.enabled: true) — default is silent'
-    context: 'Named after Mnemosyne, mother of the Muses: memory enabling creativity. The vision is to move mnemo from a passive retrieval index to an active reasoning agent that synthesises past work into fresh insight. Core capability: every session ingest triggers an AI synthesis pass; insights compound into a knowledge base; new sessions receive an autonomous briefing without the user having to ask. Budget is not a constraint. Quality iterates over time.'
+    context: |-
+      Named after Mnemosyne, mother of the Muses: memory enabling creativity. The vision is to move mnemo from a passive retrieval index to an active reasoning agent that synthesises past work into fresh insight. Core capability: every session ingest triggers an AI synthesis pass; insights compound into a knowledge base; new sessions receive an autonomous briefing without the user having to ask. Budget is not a constraint. Quality iterates over time.
+
+      Rooted in information-theoretic necessity: store only what cannot be re-derived from observable session state. Code patterns, file structure, git history, and architecture are all re-derivable — they must not be persisted as memory. What cannot be re-derived: user traits (expertise, preferences, style), interaction feedback (corrections and confirmations), project context beyond the code (goals, external constraints, motivations), and pointers to external systems. These four categories are the irreducible core of what an AI collaborator needs to remember.
+
+      At current scale, manually-curated memory files (MEMORY.md + typed topic files) serve as a stopgap: a hand-maintained materialised view of the transcript store. They break at scale — maintenance burden accumulates, staleness creeps in, and the corpus eventually outgrows what a human can curate. The Muse architecture supersedes this pattern: store everything in the transcript store, synthesise on demand at session start. The typed taxonomy (user/feedback/project/reference) becomes a query structure for synthesis, not a storage format for manual curation.
     tags:
     - muse
     - synthesis
