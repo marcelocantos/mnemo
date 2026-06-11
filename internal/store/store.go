@@ -3504,7 +3504,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	// debounce coalesces burst events (editor saves, formatter rewrites, git
 	// operations) for the same path into a single re-index after 300ms of quiet.
 	// Heavy ingest work runs in the timer goroutine, not on the event goroutine.
-	db := newDebouncer(300 * time.Millisecond)
+	db := newDebouncerWithConcurrency(300*time.Millisecond, 4)
 	// On drain, cancel pending debounced ingests so none races the store's
 	// Close/checkpoint (🎯T97.1).
 	defer db.stop()
