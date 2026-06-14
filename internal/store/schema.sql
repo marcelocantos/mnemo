@@ -92,6 +92,21 @@ CREATE TABLE compactions (
 			summary TEXT NOT NULL DEFAULT ''
 		);
 
+-- 🎯T77 durable per-session compaction-failure quarantine. The
+-- watcher's in-memory backoff was lost on every daemon restart, so a
+-- permanently un-summarisable session (e.g. one that EINVALs at exec,
+-- or whose content makes the summariser reply conversationally forever)
+-- failed afresh every boot and dominated the failed:compacted ratio.
+-- fail_count accrues across restarts; the candidate query excludes a
+-- session whose count is at/over the threshold and whose last failure
+-- is within the cooldown. A clean tick deletes the row.
+CREATE TABLE compactor_quarantine (
+			session_id TEXT PRIMARY KEY,
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			last_failed_at TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT ''
+		);
+
 CREATE TABLE connection_sessions (
 			connection_id TEXT NOT NULL,
 			session_id   TEXT NOT NULL,
