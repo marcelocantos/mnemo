@@ -2475,7 +2475,7 @@ targets:
     achieved: 2026-06-08
   T77:
     name: Compactor failure ratio is healthy in production (failed:compacted ≤ 0.20) — the summariser reliably emits JSON, conversational/transient replies aren't hard failures, and persistently-failing sessions are quarantined durably
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2498,6 +2498,7 @@ targets:
     - observability
     origin: manual
     discovered: 2026-06-14
+    achieved: 2026-06-14
   T8:
     name: sqldeep integration
     status: achieved
