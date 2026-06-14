@@ -3030,7 +3030,7 @@ func (s *Store) Watch() error {
 	// debounce coalesces burst events (editor saves, formatter rewrites, git
 	// operations) for the same path into a single re-index after 300ms of quiet.
 	// Heavy ingest work runs in the timer goroutine, not on the event goroutine.
-	db := newDebouncer(300 * time.Millisecond)
+	db := newDebouncerWithConcurrency(300*time.Millisecond, 4)
 
 	for {
 		select {

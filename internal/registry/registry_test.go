@@ -179,7 +179,7 @@ func TestSwapVaultEndToEnd(t *testing.T) {
 
 	oldDir := filepath.Join(t.TempDir(), "old-vault")
 	newDir := filepath.Join(t.TempDir(), "new-vault")
-	oldExp, err := vault.New(s, oldDir)
+	oldExp, err := vault.New(s, oldDir, vault.Options{})
 	if err != nil {
 		t.Fatalf("vault.New old: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestStartVaultWorkersReturnsVctx(t *testing.T) {
 	s := storetest.NewStore(t, projectDir)
 
 	dir := filepath.Join(t.TempDir(), "v")
-	exp, err := vault.New(s, dir)
+	exp, err := vault.New(s, dir, vault.Options{})
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}

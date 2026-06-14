@@ -99,16 +99,55 @@ type Exporter struct {
 	path    string
 	syncMu  sync.Mutex
 	syncing bool
+
+	// layout is the active vault layout — "v1", "both", or "v2". Empty
+	// is treated as "v2". The wing writers (_mnemo/index.md etc.) run
+	// for "both" and "v2"; "v1" suppresses them. (🎯T64.2)
+	layout string
+
+	// soakWarn is the duration past which a "both"-layout vault gets
+	// the weekly "opt into v2" warning. Zero means use the default
+	// (720h). (🎯T64.2)
+	soakWarn time.Duration
+
+	// statePath is the absolute path to the daemon-managed
+	// state.json sidecar. Empty falls back to ~/.mnemo/state.json.
+	// Injectable for tests. (🎯T64.2)
+	statePath string
+}
+
+// Options carries optional Exporter wiring. Each zero-valued field
+// triggers a documented default. Passing Options{} is equivalent to
+// the pre-🎯T64.2 New(backend, path) shape.
+type Options struct {
+	// Layout selects the active vault_layout. Empty defaults to "v2".
+	// Use store.ResolvedVaultLayout to compute the right value from
+	// the current Config + on-disk vault shape.
+	Layout string
+
+	// SoakWarnAfter is the duration past which a "both"-layout vault
+	// gets the weekly soak warning. Zero defaults to 720h.
+	SoakWarnAfter time.Duration
+
+	// StatePath overrides the ~/.mnemo/state.json sidecar location.
+	// Tests pass a tempdir path; production wiring leaves this empty.
+	StatePath string
 }
 
 // New creates a new Exporter rooted at path. The directory is created if
 // it does not exist. path must already be ~ expanded (use
 // Config.ResolvedVaultPath).
-func New(backend store.Backend, path string) (*Exporter, error) {
+func New(backend store.Backend, path string, opts Options) (*Exporter, error) {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, fmt.Errorf("vault: create root %s: %w", path, err)
 	}
-	return &Exporter{backend: backend, path: path}, nil
+	return &Exporter{
+		backend:   backend,
+		path:      path,
+		layout:    opts.Layout,
+		soakWarn:  opts.SoakWarnAfter,
+		statePath: opts.StatePath,
+	}, nil
 }
 
 // Path returns the vault root directory.
@@ -153,8 +192,13 @@ func (e *Exporter) Sync(ctx context.Context) error {
 		}
 	}
 	setErr(err)
-	setErr(e.syncDecisions(ctx, sessionPaths))
-	setErr(e.syncMemories(ctx))
+	layout := e.effectiveLayout()
+	// v1 decision/memory writers run under "v1" and "both" layouts.
+	// Under "v2" they are suppressed; the wing writers handle those. (🎯T64.3)
+	if layout != store.VaultLayoutV2 {
+		setErr(e.syncDecisions(ctx, sessionPaths))
+		setErr(e.syncMemories(ctx))
+	}
 	setErr(e.syncPlans(ctx))
 	setErr(e.syncTargets(ctx))
 	setErr(e.syncCI(ctx))
@@ -168,6 +212,10 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	setErr(err)
 	setErr(e.syncRepoIndices(ctx, repos, sessionPaths))
 	setErr(e.syncRootIndex(repos))
+	// 🎯T64.2/T64.3: library-wing (_mnemo/) writers + state.json bookkeeping
+	// + soak warning. Auxiliary to the v1 writers above; failures are
+	// logged inside and never block the rest of the sync.
+	e.syncMnemoWing(ctx, time.Now())
 
 	slog.Info("vault: sync complete",
 		"elapsed", time.Since(start).Round(time.Millisecond),
@@ -632,6 +680,38 @@ func needsUpdate(absPath, ts string) bool {
 	return fileTime.Before(entityTime)
 }
 
+// atomicWriteFile writes data to absPath via a tempfile-fsync-rename
+// sequence so that a daemon crash between write and rename never leaves
+// a partial file at the destination. The temp file is created in the
+// same directory as absPath so the rename is guaranteed same-filesystem.
+func atomicWriteFile(absPath string, data []byte) error {
+	dir := filepath.Dir(absPath)
+	tmp, err := os.CreateTemp(dir, ".mnemo-*.tmp")
+	if err != nil {
+		return fmt.Errorf("vault: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("vault: write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("vault: sync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("vault: close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, absPath); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("vault: rename temp: %w", err)
+	}
+	return nil
+}
+
 // writeNote writes generated content to absPath, preserving any
 // human-added content that follows the generatedFence marker in an
 // existing file. The fence is always written; human content (if any)
@@ -684,7 +764,7 @@ func writeNote(absPath, generated, entityTS string) error {
 	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 		return fmt.Errorf("vault: mkdir %s: %w", filepath.Dir(absPath), err)
 	}
-	return os.WriteFile(absPath, []byte(out.String()), 0o644)
+	return atomicWriteFile(absPath, []byte(out.String()))
 }
 
 // repackagePreexistingContent prepares a pre-existing user file's content
