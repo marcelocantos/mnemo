@@ -719,6 +719,7 @@ func (a compactorAdapter) Health() tools.CompactorHealth {
 		LastScanAt:            hs.LastScanAt,
 		LastScanCount:         hs.LastScanCount,
 		Backlog:               hs.Backlog,
+		Quarantined:           hs.Quarantined,
 		LastTickAt:            hs.LastTickAt,
 		LastTickOutcome:       hs.LastTickOutcome,
 		InFlightSession:       hs.InFlightSession,

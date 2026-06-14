@@ -248,6 +248,8 @@ type CompactionCandidate struct {
 func (s *Store) SelectCompactionCandidates(
 	budgetTokens int64,
 	maxBudgetRatio float64,
+	quarantineThreshold int,
+	quarantineSince time.Time,
 	limit int,
 ) ([]CompactionCandidate, int, error) {
 	if limit <= 0 {
@@ -259,6 +261,10 @@ func (s *Store) SelectCompactionCandidates(
 	if maxBudgetRatio <= 0 {
 		maxBudgetRatio = 0.10
 	}
+	if quarantineThreshold <= 0 {
+		quarantineThreshold = DefaultQuarantineThreshold
+	}
+	quarantineSinceStr := quarantineSince.UTC().Format(time.RFC3339Nano)
 	rows, err := s.readDB.Query(`
 		WITH session_state AS (
 		  SELECT
@@ -310,9 +316,21 @@ func (s *Store) SelectCompactionCandidates(
 		        SELECT m.entry_id FROM messages m WHERE m.id = s.cursor_msg_id
 		      ), 0)
 		  ), 0) >= ?
+		  -- Durable quarantine (🎯T77): skip sessions that have failed at
+		  -- least the threshold number of times and whose last failure is
+		  -- still within the cooldown window. The row is deleted on any
+		  -- clean tick, and a session past the cooldown gets one parole
+		  -- retry, so a transiently-broken session recovers while a
+		  -- permanently-broken one stops failing every scan.
+		  AND NOT EXISTS (
+		    SELECT 1 FROM compactor_quarantine q
+		    WHERE q.session_id = s.session_id
+		      AND q.fail_count >= ?
+		      AND q.last_failed_at > ?
+		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, maxBudgetRatio, budgetTokens, limit)
+	`, maxBudgetRatio, budgetTokens, quarantineThreshold, quarantineSinceStr, limit)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}
@@ -335,6 +353,62 @@ func (s *Store) SelectCompactionCandidates(
 // whose whole-session volume is below it is never compacted. Tied to the
 // compaction context window; tunable via WatcherConfig.AddendaBudgetTokens.
 const DefaultAddendaBudgetTokens int64 = 50_000
+
+// DefaultQuarantineThreshold is how many failures (hard failures plus
+// non-payload deferrals) a session may accrue before the candidate
+// query excludes it for the cooldown window (🎯T77).
+const DefaultQuarantineThreshold = 4
+
+// DefaultQuarantineCooldown is how long a quarantined session stays
+// excluded after its last failure before earning one parole retry; if
+// it fails again the clock restarts (🎯T77).
+const DefaultQuarantineCooldown = 6 * time.Hour
+
+// RecordCompactionFailure bumps a session's durable failure count and
+// stamps the time + a short error excerpt, so a persistently-failing
+// session is throttled across daemon restarts (🎯T77).
+func (s *Store) RecordCompactionFailure(sessionID, errMsg string) error {
+	if len(errMsg) > 300 {
+		errMsg = errMsg[:300]
+	}
+	_, err := s.writeDB.Exec(`
+		INSERT INTO compactor_quarantine (session_id, fail_count, last_failed_at, last_error)
+		VALUES (?, 1, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			fail_count = fail_count + 1,
+			last_failed_at = excluded.last_failed_at,
+			last_error = excluded.last_error
+	`, sessionID, time.Now().UTC().Format(time.RFC3339Nano), errMsg)
+	if err != nil {
+		return fmt.Errorf("record compaction failure: %w", err)
+	}
+	return nil
+}
+
+// ClearCompactionFailure forgets a session's quarantine after a clean
+// tick (a successful compaction or a benign no-op).
+func (s *Store) ClearCompactionFailure(sessionID string) error {
+	if _, err := s.writeDB.Exec(
+		`DELETE FROM compactor_quarantine WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("clear compaction failure: %w", err)
+	}
+	return nil
+}
+
+// QuarantinedCount returns how many sessions are currently quarantined
+// — fail_count at/over the threshold with their last failure inside the
+// cooldown window (last_failed_at > since).
+func (s *Store) QuarantinedCount(threshold int, since time.Time) int {
+	if threshold <= 0 {
+		threshold = DefaultQuarantineThreshold
+	}
+	var n int
+	_ = s.readDB.QueryRow(`
+		SELECT COUNT(*) FROM compactor_quarantine
+		WHERE fail_count >= ? AND last_failed_at > ?`,
+		threshold, since.UTC().Format(time.RFC3339Nano)).Scan(&n)
+	return n
+}
 
 // AddendaTokens returns the addenda token volume for a session past a
 // cursor — SUM(output_tokens + cache_creation_tokens) over assistant

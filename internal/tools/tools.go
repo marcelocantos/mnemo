@@ -51,6 +51,7 @@ type CompactorHealth struct {
 	LastScanAt            time.Time
 	LastScanCount         int
 	Backlog               int
+	Quarantined           int
 	LastTickAt            time.Time
 	LastTickOutcome       string
 	InFlightSession       string
@@ -2422,6 +2423,7 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	fmt.Fprintf(&b, "  last_scan_at:        %s\n", formatAge(hs.LastScanAt))
 	fmt.Fprintf(&b, "  last_scan_count:     %d\n", hs.LastScanCount)
 	fmt.Fprintf(&b, "  backlog:             %d (sessions whose addenda exceed the budget)\n", hs.Backlog)
+	fmt.Fprintf(&b, "  quarantined:         %d (sessions excluded after repeated failures — 🎯T77)\n", hs.Quarantined)
 	fmt.Fprintf(&b, "  last_tick_at:        %s\n", formatAge(hs.LastTickAt))
 	if hs.LastTickOutcome != "" {
 		fmt.Fprintf(&b, "  last_tick_outcome:   %s\n", hs.LastTickOutcome)
@@ -2433,7 +2435,7 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	}
 
 	b.WriteString("\nLifetime tick counts:\n")
-	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "rate_limited"}
+	outcomes := []string{"compacted", "nothing_to_compact", "budget_exceeded", "failed", "timeout", "rate_limited", "deferred"}
 	for _, o := range outcomes {
 		fmt.Fprintf(&b, "  %-20s %d\n", o+":", hs.Counts[o])
 	}
