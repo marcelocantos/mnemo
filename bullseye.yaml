@@ -2501,9 +2501,10 @@ targets:
     achieved: 2026-06-14
   T78:
     name: mnemo ingests project TODO files into a queryable, manipulable todo index with Obsidian-syntax (dates, tags, priorities) parsing
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 8.0
     acceptance:
     - A new ingest stream discovers TODO files across tracked trees/repos — at minimum root `TODO.md` and `docs/TODO.md` (the global convention), plus configurable extra globs — and indexes their checkbox items. Discovery follows mnemo's existing trees-of-interest / workspace-roots model and respects .gitignore and the loop-safety fence; it does NOT walk arbitrary unrelated dirs.
     - 'Each task line is parsed into a structured row: repo, file_path, line, raw_text, the cleaned task text, indent/parent (nesting), section heading, and status — open `- [ ]`, done `- [x]`, plus Obsidian Tasks extras like cancelled `- [-]` and in-progress `- [/]` where present.'
@@ -2530,6 +2531,7 @@ targets:
     - feature
     origin: manual
     discovered: 2026-06-16
+    achieved: 2026-06-16
   T8:
     name: sqldeep integration
     status: achieved
