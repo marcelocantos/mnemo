@@ -2499,6 +2499,37 @@ targets:
     origin: manual
     discovered: 2026-06-14
     achieved: 2026-06-14
+  T78:
+    name: mnemo ingests project TODO files into a queryable, manipulable todo index with Obsidian-syntax (dates, tags, priorities) parsing
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A new ingest stream discovers TODO files across tracked trees/repos — at minimum root `TODO.md` and `docs/TODO.md` (the global convention), plus configurable extra globs — and indexes their checkbox items. Discovery follows mnemo's existing trees-of-interest / workspace-roots model and respects .gitignore and the loop-safety fence; it does NOT walk arbitrary unrelated dirs.
+    - 'Each task line is parsed into a structured row: repo, file_path, line, raw_text, the cleaned task text, indent/parent (nesting), section heading, and status — open `- [ ]`, done `- [x]`, plus Obsidian Tasks extras like cancelled `- [-]` and in-progress `- [/]` where present.'
+    - 'Obsidian Tasks emoji syntax is parsed into indexed columns: due `📅 YYYY-MM-DD`, scheduled `⏳`, start `🛫`, created `➕`, done `✅`, cancelled `❌`; priority `🔺/⏫/🔼/🔽/⏬` → an ordered priority value; recurrence `🔁 <rule>`; `#tags` and `[[wikilinks]]`. Dates are stored as ISO strings (sortable) and individually indexed so date-range queries are cheap. Lines without Obsidian decorations still index as plain tasks.'
+    - A `todos` table (additive schema per the append-only policy) holds these columns with indexes on (repo), (status), (due_date), (priority), and tags; an FTS5 virtual table covers the task text + tags for full-text search.
+    - 'An MCP tool (`mnemo_todos`) queries the index with rich filters: by repo, status (open/done/cancelled), tag, priority, text search, and date predicates (due before/after, overdue = due < today and open, due-soon within N days, no-date). Results are sorted sensibly (e.g. overdue first, then by due date / priority) and include file_path:line so the source is locatable.'
+    - 'Manipulation is supported and the source file stays authoritative: mutating a todo (mark done/cancelled, set/clear due date or priority, edit text, add a new task under a file/section) writes back to the underlying TODO.md in valid Obsidian Tasks syntax (atomic write: tempfile + fsync + rename), and the index reconciles from the rewritten file. The index is never the sole source of truth — re-ingesting a hand-edited TODO.md and a tool-edited one converge to the same rows. Concurrent external edits are detected (size/mtime fingerprint, mirroring ingest_state) and a write refuses rather than clobbering a file that changed under it.'
+    - 'Round-trip fidelity: ingesting a TODO.md, mutating one task via the tool, and re-reading the file preserves every other line byte-for-byte (no reflow of untouched content, no lost indentation, no stripped non-task prose).'
+    - 'Documentation: agents-guide.md and the README tool table describe `mnemo_todos` (query + manipulate) and the supported Obsidian syntax; CLAUDE.md''s tool list gets an entry. The global `docs/TODO.md` convention is referenced so the feature picks up the canonical location.'
+    - 'Tests cover: discovery of root + docs TODO.md, parsing of each Obsidian decoration (dates/priority/tags/status/recurrence/wikilinks) and an undecorated plain task, the overdue/due-soon/by-tag/by-priority query predicates, and a mutate-then-reingest round-trip proving source-authoritative convergence + untouched-line fidelity.'
+    context: |-
+      Requested 2026-06-16. Extend mnemo from a read-only transcript/derived index into an actionable TODO surface: parse the TODO.md files projects already keep (the global convention is `docs/TODO.md`) into a structured, queryable, mutable todo index, with first-class Obsidian Tasks syntax so dates/priorities/tags are indexed and filterable (overdue, due-soon, by tag/priority, etc.).
+
+      Design tension to resolve during implementation: mnemo's other ingest streams (decisions, docs, commits, compactions) are read-only mirrors — the source file is authoritative and the index is disposable. This feature breaks that by allowing manipulation. The acceptance pins the resolution: keep the source file authoritative by writing mutations back to the TODO.md (atomic, fidelity-preserving, fingerprint-guarded against concurrent edits), so the index can always be rebuilt from source. This avoids a divergent second source of truth and composes with the additive-only schema policy and the loop-safety fence (mnemo must not treat its own writes as new external content).
+
+      Obsidian Tasks emoji reference for the parser: 📅 due, ⏳ scheduled, 🛫 start, ➕ created, ✅ done, ❌ cancelled, 🔁 recurrence, priority 🔺(highest) ⏫(high) 🔼(medium) 🔽(low) ⏬(lowest), plus `#tags` and `[[wikilinks]]`. Status markers: `- [ ]` open, `- [x]` done, `- [-]` cancelled, `- [/]` in-progress.
+
+      Likely decomposes into sub-targets (ingest+parse, schema+FTS, query tool, write-back manipulation, docs) once execution reveals natural fault lines.
+    tags:
+    - ingest
+    - todo
+    - mcp
+    - obsidian
+    - feature
+    origin: manual
+    discovered: 2026-06-16
   T8:
     name: sqldeep integration
     status: achieved
