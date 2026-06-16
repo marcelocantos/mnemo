@@ -196,6 +196,52 @@ func TestMutateTodoMarkDone(t *testing.T) {
 	}
 }
 
+func TestMutateTodoEditText(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	task := findTodo(t, s, "write the tool")
+
+	newText := "write the MCP tool"
+	updated, err := s.MutateTodo(TodoMutation{ID: task.ID, Text: &newText, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Text != "write the MCP tool" {
+		t.Fatalf("text=%q", updated.Text)
+	}
+	// Metadata preserved; round-trip leaves other lines intact.
+	if updated.Due != "2026-06-20" || updated.Priority != "medium" {
+		t.Errorf("metadata lost: due=%q prio=%q", updated.Due, updated.Priority)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "- [ ] write the MCP tool 📅 2026-06-20 🔼 #core") {
+		t.Errorf("file:\n%s", data)
+	}
+	if !strings.Contains(string(data), "- [ ] ship the parser 📅 2026-06-10 #core") {
+		t.Errorf("sibling disturbed:\n%s", data)
+	}
+}
+
+func TestIngestTodosDiscoversDocsTodo(t *testing.T) {
+	projectDir := t.TempDir()
+	repoRoot := filepath.Join(t.TempDir(), "myorg", "myrepo")
+	s := newTestStore(t, projectDir)
+	setupDocRepo(t, s, repoRoot)
+	// Both the root TODO.md and docs/TODO.md must be discovered.
+	writeDoc(t, filepath.Join(repoRoot, "TODO.md"), "- [ ] root task\n")
+	writeDoc(t, filepath.Join(repoRoot, "docs", "TODO.md"), "- [ ] docs task\n")
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
+	texts := map[string]bool{}
+	for _, td := range todos {
+		texts[td.Text] = true
+	}
+	if !texts["root task"] || !texts["docs task"] {
+		t.Errorf("expected both root and docs tasks, got %+v", texts)
+	}
+}
+
 func TestMutateTodoSetDueAndPriority(t *testing.T) {
 	s, path := ingestSampleTodos(t)
 	task := findTodo(t, s, "no due date task")

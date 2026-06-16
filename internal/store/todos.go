@@ -364,6 +364,7 @@ type TodoMutation struct {
 	Status   string  // "" | open | done | cancelled | in_progress
 	Due      *string // nil = unchanged; "" = clear; else ISO date
 	Priority *string // nil = unchanged; priority name
+	Text     *string // nil = unchanged; new prose (emoji-metadata kept)
 	Now      time.Time
 }
 
@@ -399,6 +400,9 @@ func (s *Store) MutateTodo(m TodoMutation) (*TodoInfo, error) {
 	today := now.Format("2006-01-02")
 
 	newLine := rawLine
+	if m.Text != nil {
+		newLine = todo.SetText(newLine, *m.Text)
+	}
 	if m.Status != "" {
 		st := todo.Status(m.Status)
 		date := ""

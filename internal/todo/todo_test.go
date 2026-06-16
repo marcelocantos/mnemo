@@ -211,6 +211,21 @@ func TestSetPriority(t *testing.T) {
 	}
 }
 
+func TestSetText(t *testing.T) {
+	// Trailing emoji-metadata is preserved; prose is replaced.
+	if got := SetText("- [ ] old text 📅 2026-06-20 ⏫", "new text"); got != "- [ ] new text 📅 2026-06-20 ⏫" {
+		t.Errorf("preserve metadata: %q", got)
+	}
+	// No metadata → whole body replaced (caller supplies tags).
+	if got := SetText("  - [x] fix bug #old", "fix the bug properly #new"); got != "  - [x] fix the bug properly #new" {
+		t.Errorf("no metadata: %q", got)
+	}
+	// Indentation and checkbox state preserved.
+	if got := SetText("    - [/] a 🔼", "b"); got != "    - [/] b 🔼" {
+		t.Errorf("indent/state: %q", got)
+	}
+}
+
 func TestNewTaskLine(t *testing.T) {
 	if got := NewTaskLine("buy milk 📅 2026-06-20", 2, StatusOpen); got != "  - [ ] buy milk 📅 2026-06-20" {
 		t.Errorf("new task line: %q", got)

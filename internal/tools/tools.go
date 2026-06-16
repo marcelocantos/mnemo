@@ -477,6 +477,7 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithString("status", mcp.Description("New status: open, done, cancelled, in_progress. done/cancelled stamps today's completion date (✅/❌).")),
 			mcp.WithString("due", mcp.Description("Set the due date (ISO YYYY-MM-DD). Pass 'clear' (or empty) to remove it.")),
 			mcp.WithString("priority", mcp.Description("Set priority: highest, high, medium, low, lowest, or none to clear.")),
+			mcp.WithString("text", mcp.Description("Replace the task prose. Trailing emoji-metadata (dates/priority/recurrence) is preserved; include any #tags or [[links]] you want to keep.")),
 		),
 		mcp.NewTool("mnemo_todo_add",
 			mcp.WithDescription(`Append a new TODO item to an already-tracked TODO file (the file must appear as file_path in mnemo_todos output). Optionally file it under a heading, created at end of file if absent. Text may carry Obsidian decorations, e.g. "review spec 📅 2026-07-01 ⏫ #docs". Written atomically and re-indexed immediately.`),
@@ -1657,8 +1658,12 @@ func (h *callHandler) todoSet(args map[string]any) (string, bool, error) {
 		p := v
 		m.Priority = &p
 	}
-	if m.Status == "" && m.Due == nil && m.Priority == nil {
-		return "nothing to change: pass at least one of status, due, priority", true, nil
+	if v, ok := args["text"].(string); ok && v != "" {
+		txt := v
+		m.Text = &txt
+	}
+	if m.Status == "" && m.Due == nil && m.Priority == nil && m.Text == nil {
+		return "nothing to change: pass at least one of status, due, priority, text", true, nil
 	}
 	updated, err := h.mem.MutateTodo(m)
 	if err != nil {

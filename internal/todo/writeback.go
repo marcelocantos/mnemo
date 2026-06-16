@@ -57,6 +57,40 @@ func SetStatus(raw string, status Status, date string) string {
 	return out
 }
 
+var (
+	// markerBodyRe splits a checkbox line into its prefix (indent +
+	// bullet + checkbox + following space) and its body.
+	markerBodyRe = regexp.MustCompile(`^(\s*[-*+]\s+\[[ xX/\-]\]\s*)(.*)$`)
+
+	// firstMetaEmojiRe finds the first Obsidian Tasks metadata emoji in a
+	// body — the boundary between the editable prose and the trailing
+	// structured decorations (dates, priority, recurrence).
+	firstMetaEmojiRe = regexp.MustCompile(`[📅⏳🛫➕✅❌🔁🔺⏫🔼🔽⏬]`)
+)
+
+// SetText replaces a task's prose, preserving its checkbox, indentation,
+// and any trailing emoji-metadata (dates, priority, recurrence). Tags
+// and wikilinks live within the prose region, so the caller-supplied
+// newText is taken verbatim — include any #tags or [[links]] you want to
+// keep. When the line carries no emoji-metadata, the whole body is
+// replaced.
+func SetText(raw, newText string) string {
+	m := markerBodyRe.FindStringSubmatch(raw)
+	if m == nil {
+		return raw
+	}
+	prefix, body := m[1], m[2]
+	newText = strings.TrimSpace(newText)
+	if loc := firstMetaEmojiRe.FindStringIndex(body); loc != nil {
+		suffix := body[loc[0]:]
+		if newText == "" {
+			return prefix + suffix
+		}
+		return prefix + newText + " " + suffix
+	}
+	return prefix + newText
+}
+
 // SetDue upserts the 📅 due date on raw. An empty date clears it.
 func SetDue(raw, date string) string {
 	if date == "" {
