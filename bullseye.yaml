@@ -2532,6 +2532,68 @@ targets:
     origin: manual
     discovered: 2026-06-16
     achieved: 2026-06-16
+  T79:
+    name: mnemo_vault_status and mnemo_compactor_status fall back to the default user when ?user= is omitted, matching the store resolver
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - '`mnemo_vault_status`, `mnemo_vault_sync`, and `mnemo_compactor_status` succeed against a daemon''s default user when the MCP request omits `?user=` — matching the behaviour of `mnemo_search` / `mnemo_stats` / every other tool today. Today they return "vault not configured" / "compactor not available" respectively in that case because the per-tool resolver lambdas look up `reg.VaultFor("")` / `reg.CompactWatcherFor("")` directly instead of falling back to `defaultUser` the way the shared `resolve(username)` closure does.'
+    - 'The fix lives in `main.go` (the resolver closures wired via `handler.SetVaultResolver` and `handler.SetCompactorResolver`) and mirrors the shape of the existing `resolve := func(username string) ...` closure: empty username → `defaultUser`, unless `defErr != nil` in which case the resolver returns nil (Windows-Service no-default-user path).'
+    - 'Regression test in `internal/e2e/` exercises both tools through the MCP harness without passing `?user=`. The pre-fix vault sync e2e test (`TestVaultSyncViaMCP`) — currently sets `Options{User: cur.Username}` as a workaround — drops the explicit user, with a one-line comment explaining the workaround is no longer needed.'
+    - Multi-user (Windows-Service) deployments are unchanged. An explicit `?user=alice` still routes to Alice's per-user vault / compactor exactly as today. The fallback only applies to the empty-username (default-identity) path.
+    context: |-
+      ## Bug
+
+      Discovered while building the 🎯T73 e2e harness. The daemon has three places where per-tool resolvers are wired in `main.go`:
+
+      ```go
+      resolve := func(username string) (store.Backend, error) {
+          if username == "" {
+              if defErr != nil {
+                  return nil, errors.New("no user identity on request; ...")
+              }
+              username = defaultUser
+          }
+          return reg.ForUser(username)
+      }
+      handler := tools.NewHandler(resolve)
+
+      handler.SetVaultResolver(func(username string) tools.VaultSyncer {
+          v := reg.VaultFor(username)        // ← no defaultUser fallback
+          if v == nil { return nil }
+          return v
+      })
+
+      handler.SetCompactorResolver(func(username string) tools.CompactorHealthReporter {
+          w := reg.CompactWatcherFor(username) // ← no defaultUser fallback
+          if w == nil { return nil }
+          return compactorAdapter{w: w}
+      })
+      ```
+
+      `tools.go` calls each resolver with `cc.Username` (the `?user=` query parameter value, empty if not set). The store resolver normalises the empty case to `defaultUser`; the vault and compactor resolvers do not. So an MCP client that does not bother with `?user=` (the default Claude Code wiring against a single-user daemon) gets store-backed tools working fine and vault/compactor tools reporting "not configured."
+
+      ## Why nobody hit it before
+
+      In production the user's Claude Code MCP registration is the URL produced by `mnemo register-mcp` which DOES include `?user=<name>`. So the bug only surfaces when:
+      - Tests call MCP without a username (the T73 e2e harness's default).
+      - A user manually registers mnemo without the query param.
+
+      The T73 vault sync test sets `Options{User: cur.Username}` to work around this, with a TODO-shaped comment naming the bug.
+
+      ## Fix shape
+
+      Lift the username-normalisation logic into a small helper inside `main.go` (the `runServe` function already has `defaultUser` and `defErr` in scope) and apply it inside the vault and compactor resolver closures. The closure shape stays identical — only the username computation changes.
+
+      Alternative considered: move the fallback into `tools.go` so it's central. Rejected because the existing `resolve` closure has the right shape and the multi-user / Windows-Service case (where `defErr != nil` means "no sensible default") is a `main.go`-level concern, not a tool-handler concern.
+
+      ## Out of scope
+
+      - The `Config.ResolvedSynthesisRoots()` "wrong-home" bug noted in the T73 audit (uses `os.UserHomeDir()` directly even when called with a non-default user). Separate target if you want it tracked.
+      - Any deeper refactor of the per-tool resolver pattern. Cheap pointed fix, not a redesign.
+    origin: manual
+    discovered: 2026-06-16
   T8:
     name: sqldeep integration
     status: achieved
