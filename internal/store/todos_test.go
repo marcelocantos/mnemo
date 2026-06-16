@@ -4,7 +4,9 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -155,3 +157,130 @@ func TestSearchTodosFieldsPopulated(t *testing.T) {
 
 // RepoOrEmpty is a tiny test convenience to make the intent explicit.
 func (t TodoInfo) RepoOrEmpty() string { return t.Repo }
+
+func findTodo(t *testing.T, s *Store, text string) TodoInfo {
+	t.Helper()
+	got, err := s.SearchTodos(TodoQuery{Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, td := range got {
+		if td.Text == text {
+			return td
+		}
+	}
+	t.Fatalf("todo %q not found", text)
+	return TodoInfo{}
+}
+
+func TestMutateTodoMarkDone(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	task := findTodo(t, s, "ship the parser")
+
+	updated, err := s.MutateTodo(TodoMutation{ID: task.ID, Status: "done", Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil || updated.Status != "done" || updated.Done != "2026-06-16" {
+		t.Fatalf("updated: %+v", updated)
+	}
+
+	// File reflects the change and stamps ✅; other lines untouched.
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if !strings.Contains(content, "- [x] ship the parser 📅 2026-06-10 #core ✅ 2026-06-16") {
+		t.Errorf("file not updated as expected:\n%s", content)
+	}
+	if !strings.Contains(content, "- [ ] write the tool 📅 2026-06-20 🔼 #core") {
+		t.Errorf("sibling line was disturbed:\n%s", content)
+	}
+}
+
+func TestMutateTodoSetDueAndPriority(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	task := findTodo(t, s, "no due date task")
+
+	due := "2026-07-01"
+	prio := "high"
+	updated, err := s.MutateTodo(TodoMutation{ID: task.ID, Due: &due, Priority: &prio, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Due != "2026-07-01" || updated.Priority != "high" {
+		t.Fatalf("updated: %+v", updated)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "📅 2026-07-01") || !strings.Contains(string(data), "⏫") {
+		t.Errorf("file:\n%s", data)
+	}
+}
+
+func TestMutateTodoStaleGuard(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	task := findTodo(t, s, "ship the parser")
+
+	// External edit changes the target line without re-indexing.
+	data, _ := os.ReadFile(path)
+	mangled := strings.Replace(string(data), "- [ ] ship the parser", "- [ ] ship the PARSER renamed", 1)
+	if err := os.WriteFile(path, []byte(mangled), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.MutateTodo(TodoMutation{ID: task.ID, Status: "done", Now: fixedNow})
+	if err == nil {
+		t.Fatal("expected stale-line error, got nil")
+	}
+	// File is untouched by the failed mutation.
+	after, _ := os.ReadFile(path)
+	if string(after) != mangled {
+		t.Errorf("file was modified despite stale guard")
+	}
+}
+
+func TestAddTodoEndOfFile(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	added, err := s.AddTodo(TodoAdd{File: path, Text: "brand new task 📅 2026-08-01 #core"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added == nil || added.Text != "brand new task" || added.Due != "2026-08-01" {
+		t.Fatalf("added: %+v", added)
+	}
+	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
+	if len(todos) != 7 {
+		t.Errorf("got %d todos after add, want 7", len(todos))
+	}
+}
+
+func TestAddTodoUnderSection(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	added, err := s.AddTodo(TodoAdd{File: path, Section: "Someday", Text: "eventually do this"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added.Section != "Someday" {
+		t.Fatalf("added under section %q, want Someday", added.Section)
+	}
+}
+
+func TestAddTodoNewSection(t *testing.T) {
+	s, path := ingestSampleTodos(t)
+	added, err := s.AddTodo(TodoAdd{File: path, Section: "Backlog", Text: "future work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added.Section != "Backlog" {
+		t.Fatalf("section %q, want Backlog", added.Section)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "## Backlog") {
+		t.Errorf("heading not created:\n%s", data)
+	}
+}
+
+func TestAddTodoUntrackedFile(t *testing.T) {
+	s, _ := ingestSampleTodos(t)
+	if _, err := s.AddTodo(TodoAdd{File: "/nonexistent/TODO.md", Text: "x"}); err == nil {
+		t.Error("expected error for untracked file")
+	}
+}

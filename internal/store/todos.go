@@ -4,16 +4,29 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/todo"
 )
+
+// headingTextRe matches an ATX heading and captures its text, used by
+// insertTaskLine to locate the section a new task should be filed under.
+var headingTextRe = regexp.MustCompile(`^#{1,6}\s+(.*)$`)
+
+// todoCols is the SELECT list shared by every todos read path so the
+// queryTodos scanner stays in lockstep with the columns selected.
+const todoCols = `t.id, t.repo, t.file_path, t.line, t.indent, t.status, t.text, t.section,
+	t.priority, t.due_date, t.scheduled_date, t.start_date, t.created_date,
+	t.done_date, t.cancelled_date, t.recurrence, t.tags, t.links`
 
 // TodoInfo is one indexed task, returned by SearchTodos and the
 // mnemo_todos tool. Dates are ISO "YYYY-MM-DD" or empty.
@@ -275,32 +288,28 @@ func (s *Store) SearchTodos(q TodoQuery) ([]TodoInfo, error) {
 		args = append(args, today, soon)
 	}
 
-	cols := `t.id, t.repo, t.file_path, t.line, t.indent, t.status, t.text, t.section,
-		t.priority, t.due_date, t.scheduled_date, t.start_date, t.created_date,
-		t.done_date, t.cancelled_date, t.recurrence, t.tags, t.links`
-
-	var sql string
+	var query string
 	if q.Query != "" {
 		args = append([]any{relaxQuery(q.Query)}, args...)
-		sql = `SELECT ` + cols + ` FROM todos t
+		query = `SELECT ` + todoCols + ` FROM todos t
 			JOIN todos_fts f ON f.rowid = t.id
 			WHERE todos_fts MATCH ?`
 		if len(where) > 0 {
-			sql += " AND " + strings.Join(where, " AND ")
+			query += " AND " + strings.Join(where, " AND ")
 		}
-		sql += " ORDER BY rank LIMIT ?"
+		query += " ORDER BY rank LIMIT ?"
 	} else {
-		sql = `SELECT ` + cols + ` FROM todos t`
+		query = `SELECT ` + todoCols + ` FROM todos t`
 		if len(where) > 0 {
-			sql += " WHERE " + strings.Join(where, " AND ")
+			query += " WHERE " + strings.Join(where, " AND ")
 		}
 		// Undated tasks sort last; otherwise by due date ascending then
 		// priority descending so the most urgent work surfaces first.
-		sql += ` ORDER BY (t.due_date = '') ASC, t.due_date ASC, t.priority DESC, t.id ASC LIMIT ?`
+		query += ` ORDER BY (t.due_date = '') ASC, t.due_date ASC, t.priority DESC, t.id ASC LIMIT ?`
 	}
 	args = append(args, limit)
 
-	return s.queryTodos(sql, args...)
+	return s.queryTodos(query, args...)
 }
 
 func (s *Store) queryTodos(sql string, args ...any) ([]TodoInfo, error) {
@@ -330,4 +339,226 @@ func (s *Store) queryTodos(sql string, args ...any) ([]TodoInfo, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// todoAt returns the single task at a (file_path, line), or nil when
+// none exists there. Used after a write-back to echo the fresh row.
+func (s *Store) todoAt(filePath string, line int) (*TodoInfo, error) {
+	out, err := s.queryTodos(
+		`SELECT `+todoCols+` FROM todos t WHERE t.file_path = ? AND t.line = ? LIMIT 1`,
+		filePath, line)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return &out[0], nil
+}
+
+// TodoMutation describes an in-place edit to one existing task. A zero
+// string / nil pointer leaves that facet unchanged; *Due == "" clears
+// the due date; *Priority == "none" clears the priority.
+type TodoMutation struct {
+	ID       int64
+	Status   string  // "" | open | done | cancelled | in_progress
+	Due      *string // nil = unchanged; "" = clear; else ISO date
+	Priority *string // nil = unchanged; priority name
+	Now      time.Time
+}
+
+// MutateTodo applies a mutation to the source TODO file authoritatively:
+// it rewrites only the target line, leaving the rest of the file
+// byte-for-byte intact, writes atomically (tmp + fsync + rename), and
+// re-indexes the file. The edit is guarded against concurrent external
+// changes — if the line no longer matches what was indexed, it fails
+// without touching the file. Transitioning to done/cancelled stamps the
+// completion date.
+func (s *Store) MutateTodo(m TodoMutation) (*TodoInfo, error) {
+	var filePath, rawLine, repo string
+	var line int
+	err := s.readDB.QueryRow(
+		"SELECT file_path, line, raw_line, repo FROM todos WHERE id = ?", m.ID,
+	).Scan(&filePath, &line, &rawLine, &repo)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("todo %d not found", m.ID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filePath, err)
+	}
+
+	now := m.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	today := now.Format("2006-01-02")
+
+	newLine := rawLine
+	if m.Status != "" {
+		st := todo.Status(m.Status)
+		date := ""
+		if st == todo.StatusDone || st == todo.StatusCancelled {
+			date = today
+		}
+		newLine = todo.SetStatus(newLine, st, date)
+	}
+	if m.Due != nil {
+		newLine = todo.SetDue(newLine, *m.Due)
+	}
+	if m.Priority != nil {
+		newLine = todo.SetPriority(newLine, todo.PriorityFromString(*m.Priority))
+	}
+
+	updated, err := todo.ReplaceLine(string(data), line, rawLine, newLine)
+	if err != nil {
+		return nil, err
+	}
+	if err := atomicWriteFile(filePath, []byte(updated)); err != nil {
+		return nil, err
+	}
+	s.ingestTodoFile(filePath, repo)
+	return s.todoAt(filePath, line)
+}
+
+// TodoAdd describes a new task to append to a TODO file.
+type TodoAdd struct {
+	File    string // absolute path to an already-indexed TODO file
+	Text    string // task body (may include Obsidian decorations)
+	Section string // optional heading to file the task under
+	Status  string // "" defaults to open
+}
+
+// AddTodo appends a new task to an existing TODO file and re-indexes it.
+// When Section names an existing heading the task is inserted after that
+// section's last line; otherwise it is appended at end of file (creating
+// the heading when Section is set but absent). The file must already be
+// a tracked TODO file.
+func (s *Store) AddTodo(a TodoAdd) (*TodoInfo, error) {
+	if a.File == "" || strings.TrimSpace(a.Text) == "" {
+		return nil, fmt.Errorf("file and text are required")
+	}
+	var repo string
+	err := s.readDB.QueryRow("SELECT repo FROM todo_files WHERE file_path = ?", a.File).Scan(&repo)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("%s is not a tracked TODO file", a.File)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(a.File)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", a.File, err)
+	}
+
+	status := todo.Status(a.Status)
+	if status == "" {
+		status = todo.StatusOpen
+	}
+	newLine := todo.NewTaskLine(strings.TrimSpace(a.Text), 0, status)
+
+	updated, lineNo := insertTaskLine(string(data), a.Section, newLine)
+	if err := atomicWriteFile(a.File, []byte(updated)); err != nil {
+		return nil, err
+	}
+	s.ingestTodoFile(a.File, repo)
+	return s.todoAt(a.File, lineNo)
+}
+
+// insertTaskLine inserts newLine into content under the given section,
+// returning the new content and the 1-based line number of the inserted
+// task. An empty section, or one not found, appends at end of file
+// (creating an "## <section>" heading first when section is non-empty
+// and absent).
+func insertTaskLine(content, section, newLine string) (string, int) {
+	// Normalise: strip a single trailing newline so we control spacing,
+	// remembering whether the file ended with one.
+	lines := strings.Split(content, "\n")
+	// A trailing newline yields a final empty element; drop it.
+	hadTrailing := len(lines) > 0 && lines[len(lines)-1] == ""
+	if hadTrailing {
+		lines = lines[:len(lines)-1]
+	}
+
+	insertAt := len(lines) // default: end of file
+	if section != "" {
+		secIdx := -1
+		for i, l := range lines {
+			if m := headingTextRe.FindStringSubmatch(l); m != nil && strings.EqualFold(strings.TrimSpace(m[1]), section) {
+				secIdx = i
+				break
+			}
+		}
+		if secIdx >= 0 {
+			// Insert after the last non-blank line before the next heading.
+			insertAt = len(lines)
+			for i := secIdx + 1; i < len(lines); i++ {
+				if headingTextRe.MatchString(lines[i]) {
+					insertAt = i
+					break
+				}
+			}
+			// Trim trailing blank lines within the section.
+			for insertAt > secIdx+1 && strings.TrimSpace(lines[insertAt-1]) == "" {
+				insertAt--
+			}
+		} else {
+			// Section absent: append a heading then the task.
+			lines = append(lines, "", "## "+section)
+			insertAt = len(lines)
+		}
+	}
+
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:insertAt]...)
+	out = append(out, newLine)
+	out = append(out, lines[insertAt:]...)
+	result := strings.Join(out, "\n")
+	if hadTrailing {
+		result += "\n"
+	}
+	return result, insertAt + 1
+}
+
+// atomicWriteFile writes data to path via a sibling tmp file + fsync +
+// rename, so a concurrent reader (or a crash mid-write) never observes a
+// partial file. The target's existing mode is preserved when present.
+func atomicWriteFile(path string, data []byte) error {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("chmod tmp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
 }
