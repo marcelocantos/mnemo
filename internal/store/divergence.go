@@ -91,7 +91,11 @@ func (s *Store) StreamDivergences() []StreamDivergence {
 // which sessions a scan will pick.
 func (s *Store) compactionDivergence() StreamDivergence {
 	const maxBudgetRatio = 0.10
-	_, backlog, err := s.SelectCompactionCandidates(DefaultAddendaBudgetTokens, maxBudgetRatio, 1)
+	// Exclude quarantined sessions (🎯T77) so the backlog reflects what a
+	// scan can actually pick, not sessions stuck failing.
+	since := time.Now().Add(-DefaultQuarantineCooldown)
+	_, backlog, err := s.SelectCompactionCandidates(
+		DefaultAddendaBudgetTokens, maxBudgetRatio, DefaultQuarantineThreshold, since, 1)
 	if err != nil {
 		return StreamDivergence{Stream: "compactions", Known: false,
 			Note: "backlog query failed: " + err.Error()}

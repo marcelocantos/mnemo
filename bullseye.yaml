@@ -2473,6 +2473,32 @@ targets:
     origin: manual
     discovered: 2026-06-08
     achieved: 2026-06-08
+  T77:
+    name: Compactor failure ratio is healthy in production (failed:compacted ≤ 0.20) — the summariser reliably emits JSON, conversational/transient replies aren't hard failures, and persistently-failing sessions are quarantined durably
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The dominant ''no JSON object in summariser output'' failure is eliminated: the summariser prompt frames the embedded transcript as inert DATA (not a conversation to continue) and re-states the JSON-only contract AFTER the transcript, so claude -p stops replying conversationally (observed raw outputs like ''Understood — waiting for your direction.'' / ''The plan is ready but I haven''''t exited plan mode…''). Measured: this failure class drops to a small fraction of ticks.'
+    - A summariser response that is still not a parseable payload (conversational reply, empty output, error/refusal text) is classified as a transient/deferred outcome that backs the session off — NOT counted as a hard 'failed' tick. The failed tally reflects only genuine, actionable failures.
+    - Per-session failure state is durable across daemon restarts — persisted in the DB, not in-memory only. A session that accumulates ≥ N failures is quarantined (excluded from candidate selection until its source advances/grows), so a single un-summarisable session cannot inflate the ratio indefinitely. Concretely, session 253b0d31-d629-4073-8a29-a0f382f5c82f (which EINVALs at fork/exec every scan even though its only NUL-bearing messages sit BEFORE its compaction cursor and are therefore not in the window) stops being re-selected forever.
+    - mnemo_compactor_status surfaces the quarantined-session count and distinguishes transient/deferred outcomes from hard failures, so the failed/compacted ratio it prints is meaningful.
+    - 'Steady-state failed:compacted ratio reported by mnemo_compactor_status is ≤ 0.20 (the 🎯T72 acceptance #7 bar, which regressed to 0.97 in production by 2026-06-14).'
+    context: |-
+      Discovered post-v0.48.0 (🎯T72 shipped 2026-06-08). The backlog drained well under the new token-volume model (8,696 → 1,449 by 2026-06-14), but the failed:compacted ratio in mnemo_compactor_status REGRESSED from 0.23 (Jun 10) to 0.97 (Jun 14) — the compactor now burns ~half its ticks on failures (it still drains because the per-scan cap counts only successes). Two root causes diagnosed:
+
+      1. DOMINANT — claude -p responds conversationally to the embedded transcript instead of emitting the JSON payload. The compactor renders the session transcript as the user prompt; when the window ends on something prompt-shaped (plan mode, 'waiting for your direction'), the summariser continues THAT conversation. 1000/1000 recent 'no JSON object' samples are non-empty conversational replies, not errors. T72's robust {...} extraction can't help — there is no JSON at all. The fix is prompt framing (inert-data fences + JSON instruction restated after the transcript), plus reclassifying a non-payload response as transient/deferred rather than a hard failure.
+
+      2. SECONDARY — a couple of poison sessions (253b0d31, agent-a73cb85a) EINVAL at fork/exec ('invalid argument') every scan. Surprisingly NOT the NUL-in-window cause T72's sanitizePrompt addressed: 253b0d31's NUL messages (ids 982657–982705) are BEFORE its cursor (997370), so they are not in the rendered window, and the prompt is NUL-free yet still fails. Cause is elsewhere (env/arg/claudia-level, TBD). The in-memory per-session backoff resets on daemon restart, so these never get permanently quarantined. The robust fix is a DURABLE quarantine that survives restarts, independent of the exact EINVAL cause.
+
+      T72's hardening (NUL sanitisation, robust JSON extraction, rate-limit cooldown + in-memory backoff) addressed the failure modes visible at ship time but not these two, which dominate in steady-state production.
+    tags:
+    - compactor
+    - reliability
+    - observability
+    origin: manual
+    discovered: 2026-06-14
+    achieved: 2026-06-14
   T8:
     name: sqldeep integration
     status: achieved

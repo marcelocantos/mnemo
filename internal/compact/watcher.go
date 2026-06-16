@@ -112,12 +112,23 @@ type storeSource interface {
 	SelectCompactionCandidates(
 		budgetTokens int64,
 		maxBudgetRatio float64,
+		quarantineThreshold int,
+		quarantineSince time.Time,
 		limit int,
 	) ([]store.CompactionCandidate, int, error)
 	// SessionCWD returns the cwd recorded for a session, used by
 	// loadTargetContext to find a bullseye.yaml alongside the
 	// session's working tree. Empty if unknown.
 	SessionCWD(sessionID string) string
+	// RecordCompactionFailure / ClearCompactionFailure maintain the
+	// durable per-session quarantine (🎯T77): the watcher records a hard
+	// failure or non-payload deferral and clears it on a clean tick, and
+	// SelectCompactionCandidates excludes quarantined sessions.
+	RecordCompactionFailure(sessionID, errMsg string) error
+	ClearCompactionFailure(sessionID string) error
+	// QuarantinedCount reports how many sessions are currently excluded
+	// by the quarantine, for mnemo_compactor_status.
+	QuarantinedCount(threshold int, since time.Time) int
 }
 
 // Watcher periodically scans session activity and drives compactions
@@ -141,13 +152,13 @@ type Watcher struct {
 	mu                  sync.Mutex
 	lastN               int       // candidates returned by the last scan
 	lastBacklog         int       // owed sessions before the per-scan limit (gap to fixed point)
+	lastQuarantined     int       // sessions excluded by the durable quarantine at last scan (🎯T77)
 	lastScanAt          time.Time // wall clock of the last scan return
 	lastTickAt          time.Time // wall clock of the last tick completion
 	lastTickOutcome     tickOutcome
-	inFlightSession     string                     // session_id currently being ticked (or "")
-	counts              map[tickOutcome]int64      // lifetime tick-outcome tallies
-	failures            map[string]*sessionBackoff // per-session failure backoff (🎯T72)
-	globalCooldownUntil time.Time                  // watcher-wide pause after a rate limit (🎯T72)
+	inFlightSession     string                // session_id currently being ticked (or "")
+	counts              map[tickOutcome]int64 // lifetime tick-outcome tallies
+	globalCooldownUntil time.Time             // watcher-wide pause after a rate limit (🎯T72)
 }
 
 // inGlobalCooldown reports whether the watcher is paused after a recent
@@ -164,48 +175,6 @@ func (w *Watcher) setGlobalCooldown(until time.Time) {
 	if until.After(w.globalCooldownUntil) {
 		w.globalCooldownUntil = until
 	}
-}
-
-// sessionCoolingDown reports whether a session is still inside its
-// post-failure backoff window and should be skipped this scan.
-func (w *Watcher) sessionCoolingDown(sessionID string, now time.Time) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	b := w.failures[sessionID]
-	return b != nil && now.Before(b.until)
-}
-
-// recordFailure bumps a session's consecutive-failure count and sets an
-// exponentially growing backoff (capped), so one persistently
-// un-summarisable session cannot generate a failure every scan.
-func (w *Watcher) recordFailure(sessionID string, now time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.failures == nil {
-		w.failures = map[string]*sessionBackoff{}
-	}
-	b := w.failures[sessionID]
-	if b == nil {
-		b = &sessionBackoff{}
-		w.failures[sessionID] = b
-	}
-	b.consecutive++
-	shift := b.consecutive - 1
-	if shift > failureBackoffCap {
-		shift = failureBackoffCap
-	}
-	backoff := failureBackoffBase << uint(shift)
-	if backoff > failureBackoffMax {
-		backoff = failureBackoffMax
-	}
-	b.until = now.Add(backoff)
-}
-
-// clearFailure forgets a session's backoff after a non-failing tick.
-func (w *Watcher) clearFailure(sessionID string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	delete(w.failures, sessionID)
 }
 
 // NewWatcher builds an activity-driven watcher. Self-sessions (claudia
@@ -231,6 +200,7 @@ type HealthSnapshot struct {
 	LastScanAt            time.Time
 	LastScanCount         int
 	Backlog               int // owed-but-uncompacted sessions at last scan (gap to fixed point)
+	Quarantined           int // sessions excluded by the durable quarantine at last scan (🎯T77)
 	LastTickAt            time.Time
 	LastTickOutcome       string
 	InFlightSession       string
@@ -254,6 +224,7 @@ func (w *Watcher) Health() HealthSnapshot {
 		LastScanAt:            w.lastScanAt,
 		LastScanCount:         w.lastN,
 		Backlog:               w.lastBacklog,
+		Quarantined:           w.lastQuarantined,
 		LastTickAt:            w.lastTickAt,
 		LastTickOutcome:       string(w.lastTickOutcome),
 		InFlightSession:       w.inFlightSession,
@@ -293,9 +264,12 @@ func (w *Watcher) LastScanCount() int {
 
 func (w *Watcher) scan(ctx context.Context) {
 	now := time.Now()
+	quarantineSince := now.Add(-store.DefaultQuarantineCooldown)
 	cands, backlog, err := w.src.SelectCompactionCandidates(
 		w.cfg.addendaBudgetTokens(),
 		w.compactor.MaxTokenRatio(),
+		store.DefaultQuarantineThreshold,
+		quarantineSince,
 		w.cfg.maxCandidates(),
 	)
 	elapsed := time.Since(now)
@@ -317,9 +291,11 @@ func (w *Watcher) scan(ctx context.Context) {
 		"backlog", backlog,
 		"elapsed", elapsed.Round(time.Millisecond),
 	)
+	quarantined := w.src.QuarantinedCount(store.DefaultQuarantineThreshold, quarantineSince)
 	w.mu.Lock()
 	w.lastN = len(cands)
 	w.lastBacklog = backlog
+	w.lastQuarantined = quarantined
 	w.lastScanAt = time.Now()
 	w.mu.Unlock()
 
@@ -346,11 +322,8 @@ func (w *Watcher) scan(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Skip sessions still inside their post-failure backoff so one
-		// un-summarisable session can't fail every scan (🎯T72).
-		if w.sessionCoolingDown(c.SessionID, now) {
-			continue
-		}
+		// Quarantined sessions are already excluded by the candidate
+		// query (🎯T77), so every candidate here is eligible.
 		outcome := w.tick(ctx, c)
 		switch outcome {
 		case outcomeRateLimited:
@@ -360,12 +333,20 @@ func (w *Watcher) scan(ctx context.Context) {
 			slog.Warn("compact: summariser rate-limited; backing off",
 				"cooldown", rateLimitCooldown)
 			return
-		case outcomeFailed, outcomeTimeout:
-			w.recordFailure(c.SessionID, time.Now())
+		case outcomeFailed, outcomeTimeout, outcomeDeferred:
+			// Durably record the failure (🎯T77) so a permanently-broken
+			// session is quarantined across restarts. Deferrals (non-
+			// payload replies) accrue toward quarantine too, even though
+			// they are not hard failures in the ratio.
+			if rerr := w.src.RecordCompactionFailure(c.SessionID, string(outcome)); rerr != nil {
+				slog.Warn("compact: record failure", "session_id", c.SessionID, "err", rerr)
+			}
 		default:
 			// compacted / nothing_to_compact / budget_exceeded — the
-			// session is healthy; forget any prior backoff.
-			w.clearFailure(c.SessionID)
+			// session is healthy; clear any durable quarantine.
+			if cerr := w.src.ClearCompactionFailure(c.SessionID); cerr != nil {
+				slog.Warn("compact: clear failure", "session_id", c.SessionID, "err", cerr)
+			}
 		}
 		if outcome == outcomeCompacted {
 			compacted++
@@ -395,27 +376,20 @@ const (
 	// a hard failure: it self-heals and triggers a global backoff rather
 	// than being retried session-by-session.
 	outcomeRateLimited tickOutcome = "rate_limited"
+	// outcomeDeferred (🎯T77) marks a tick whose summariser returned a
+	// non-payload — usually a conversational reply to the transcript
+	// ("Understood — waiting for your direction") rather than the JSON
+	// object. It is NOT a hard failure (it does not count in the failed
+	// tally), but it accrues toward the durable quarantine so a session
+	// that keeps producing non-payloads is eventually excluded.
+	outcomeDeferred tickOutcome = "deferred"
 )
 
-// Failure-recovery tuning (🎯T72). Under the rare-and-durable model a
-// compaction failure matters far more than under the old continuous
-// model, so the watcher does not blindly re-tick a failing session every
-// scan. A genuine per-session failure backs that session off with
-// exponential delay; a rate-limit backs the whole watcher off so it
-// doesn't march every owed session through the same wall.
-const (
-	failureBackoffBase = 2 * time.Minute
-	failureBackoffMax  = time.Hour
-	failureBackoffCap  = 5 // max doublings of the base delay
-	rateLimitCooldown  = 10 * time.Minute
-)
-
-// sessionBackoff tracks consecutive failures for one session and the
-// time before which it should not be re-ticked.
-type sessionBackoff struct {
-	consecutive int
-	until       time.Time
-}
+// rateLimitCooldown is how long the whole watcher pauses after the
+// summariser reports a usage/rate limit (🎯T72). Per-session failure
+// throttling is now durable (🎯T77 quarantine in the candidate query),
+// replacing the old in-memory exponential backoff.
+const rateLimitCooldown = 10 * time.Minute
 
 // recordOutcome bumps the lifetime counter for outcome and records
 // the most recent tick state. Safe to call concurrently.
@@ -503,6 +477,11 @@ func (w *Watcher) runTick(ctx context.Context, c store.CompactionCandidate, tc *
 		return outcomeBudgetExceeded, nil
 	case errors.Is(err, ErrLLMUnavailable):
 		return outcomeRateLimited, []any{"reason", err.Error()}
+	case errors.Is(err, ErrNoPayload):
+		// The summariser replied but not with a payload (🎯T77) — not a
+		// hard failure; defer the session and let it accrue toward
+		// quarantine.
+		return outcomeDeferred, []any{"reason", err.Error()}
 	case errors.Is(err, exec.ErrNotFound):
 		slog.Error("compact: claude subprocess spawn failed — executable not found in PATH",
 			"err", err,

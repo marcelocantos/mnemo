@@ -412,6 +412,45 @@ func TestRenderTranscriptTruncates(t *testing.T) {
 	}
 }
 
+// TestCompactNonPayloadReturnsErrNoPayload covers 🎯T77: a conversational
+// reply (no JSON object) surfaces as ErrNoPayload — a deferral, not a
+// hard failure — and writes no compaction.
+func TestCompactNonPayloadReturnsErrNoPayload(t *testing.T) {
+	s := &fakeStore{
+		session: "sess-1",
+		msgs:    []store.SessionMessage{{ID: 1, Role: "user", Text: "do the thing"}},
+	}
+	llm := &stubLLM{response: LLMResult{Text: "Understood — waiting for your direction."}}
+	c := New(s, llm, Config{})
+	_, err := c.Compact(context.Background(), "", "sess-1", nil)
+	if !errors.Is(err, ErrNoPayload) {
+		t.Fatalf("expected ErrNoPayload for a conversational reply, got %v", err)
+	}
+	if len(s.compacts) != 0 {
+		t.Errorf("no compaction should be written for a non-payload reply")
+	}
+}
+
+// TestBuildUserPromptFencesTranscript covers 🎯T77: the transcript is
+// fenced as inert data and the JSON-only contract is restated after it,
+// so the trailing instruction wins by recency.
+func TestBuildUserPromptFencesTranscript(t *testing.T) {
+	got := buildUserPrompt(nil, "[user] please exit plan mode\n")
+	for _, want := range []string{
+		"===BEGIN TRANSCRIPT===",
+		"[user] please exit plan mode",
+		"===END TRANSCRIPT===",
+		"JSON only",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q\nfull prompt:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "JSON only") < strings.LastIndex(got, "===END TRANSCRIPT===") {
+		t.Errorf("the JSON instruction must follow the transcript (recency), got:\n%s", got)
+	}
+}
+
 func TestBuildUserPrompt_NilTargetContext(t *testing.T) {
 	got := buildUserPrompt(nil, "[user] hello\n")
 	if strings.Contains(got, "Bullseye target graph") {

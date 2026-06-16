@@ -25,11 +25,15 @@ import (
 type fakeStoreSource struct {
 	mu         sync.Mutex
 	candidates []store.CompactionCandidate
+	recorded   map[string]int // RecordCompactionFailure calls per session (🎯T77)
+	cleared    map[string]int // ClearCompactionFailure calls per session (🎯T77)
 }
 
 func (f *fakeStoreSource) SelectCompactionCandidates(
 	budgetTokens int64,
 	maxBudgetRatio float64,
+	quarantineThreshold int,
+	quarantineSince time.Time,
 	limit int,
 ) ([]store.CompactionCandidate, int, error) {
 	f.mu.Lock()
@@ -43,6 +47,40 @@ func (f *fakeStoreSource) SelectCompactionCandidates(
 }
 
 func (f *fakeStoreSource) SessionCWD(sessionID string) string { return "" }
+
+func (f *fakeStoreSource) RecordCompactionFailure(sessionID, errMsg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.recorded == nil {
+		f.recorded = map[string]int{}
+	}
+	f.recorded[sessionID]++
+	return nil
+}
+
+func (f *fakeStoreSource) ClearCompactionFailure(sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cleared == nil {
+		f.cleared = map[string]int{}
+	}
+	f.cleared[sessionID]++
+	return nil
+}
+
+func (f *fakeStoreSource) QuarantinedCount(threshold int, since time.Time) int { return 0 }
+
+func (f *fakeStoreSource) recordCount(sessionID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recorded[sessionID]
+}
+
+func (f *fakeStoreSource) clearCount(sessionID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cleared[sessionID]
+}
 
 func (f *fakeStoreSource) setCandidates(cs ...store.CompactionCandidate) {
 	f.mu.Lock()
@@ -382,29 +420,58 @@ func (r *rateLimitLLM) Call(ctx context.Context, sys, user string) (LLMResult, e
 	return LLMResult{Text: "You've hit your session limit · resets 10:10pm"}, nil
 }
 
-// TestWatcherSessionFailureBackoff covers the per-session backoff
-// helpers (🎯T72): a failed session is skipped until its exponential
-// window elapses, and a clean tick forgets the backoff.
-func TestWatcherSessionFailureBackoff(t *testing.T) {
-	w := &Watcher{}
-	now := time.Now()
-	if w.sessionCoolingDown("s", now) {
-		t.Fatal("a fresh session must not be cooling down")
+// nonPayloadLLM returns a conversational reply instead of a JSON payload.
+type nonPayloadLLM struct {
+	calls atomic.Int64
+}
+
+func (n *nonPayloadLLM) Call(ctx context.Context, sys, user string) (LLMResult, error) {
+	n.calls.Add(1)
+	return LLMResult{Text: "Understood — waiting for your direction."}, nil
+}
+
+// TestWatcherDefersNonPayload covers 🎯T77: a non-payload (conversational)
+// reply is a "deferred" outcome — NOT a hard failure — but it is durably
+// recorded so the session accrues toward quarantine.
+func TestWatcherDefersNonPayload(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{SessionID: "s1"})
+	llm := &nonPayloadLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{ScanInterval: 10 * time.Millisecond})
+
+	runUntil(t, w, func() bool { return src.recordCount("s1") >= 1 })
+
+	hs := w.Health()
+	if hs.Counts["deferred"] < 1 {
+		t.Errorf("a non-payload reply must record a deferred outcome, got counts %v", hs.Counts)
 	}
-	w.recordFailure("s", now)
-	if !w.sessionCoolingDown("s", now.Add(time.Second)) {
-		t.Error("a just-failed session must be cooling down")
+	if hs.Counts["failed"] != 0 {
+		t.Errorf("a non-payload reply must NOT count as a hard failure, got %d", hs.Counts["failed"])
 	}
-	if w.sessionCoolingDown("s", now.Add(failureBackoffMax+time.Minute)) {
-		t.Error("the backoff must elapse eventually")
+	if src.recordCount("s1") < 1 {
+		t.Errorf("a deferred tick must durably record a failure for quarantine, got %d", src.recordCount("s1"))
 	}
-	w.recordFailure("s", now)
-	if got := w.failures["s"].consecutive; got != 2 {
-		t.Errorf("consecutive failures = %d, want 2", got)
+}
+
+// TestWatcherClearsFailureOnSuccess covers 🎯T77: a clean compaction
+// clears the session's durable quarantine record.
+func TestWatcherClearsFailureOnSuccess(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setCandidates(store.CompactionCandidate{SessionID: "s-ok"})
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{ScanInterval: 10 * time.Millisecond})
+
+	runUntil(t, w, func() bool { return src.clearCount("s-ok") >= 1 })
+
+	if src.clearCount("s-ok") < 1 {
+		t.Errorf("a successful tick must clear the durable quarantine record, got %d", src.clearCount("s-ok"))
 	}
-	w.clearFailure("s")
-	if w.failures["s"] != nil {
-		t.Error("a clean tick must clear the backoff")
+	if src.recordCount("s-ok") != 0 {
+		t.Errorf("a successful tick must not record a failure, got %d", src.recordCount("s-ok"))
 	}
 }
 

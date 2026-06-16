@@ -94,7 +94,10 @@ func asstTok(text, ts string, outTokens, cacheCreation, inputTokens int) map[str
 
 func candidateIDs(t *testing.T, s *Store, budget int64, ratio float64) map[string]bool {
 	t.Helper()
-	cands, _, err := s.SelectCompactionCandidates(budget, ratio, 100)
+	// No quarantine in these tests (no compactor_quarantine rows) — pass
+	// the defaults with a recent cooldown window (🎯T77).
+	cands, _, err := s.SelectCompactionCandidates(
+		budget, ratio, DefaultQuarantineThreshold, time.Now().Add(-DefaultQuarantineCooldown), 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -169,7 +172,8 @@ func TestSelectCompactionCandidatesSizeFloor(t *testing.T) {
 	// Bind sess-big so we also confirm attribution survives.
 	s.RecordConnectionSessionAt("conn-big", "sess-big", now)
 
-	cands, backlog, err := s.SelectCompactionCandidates(100, 0.10, 100)
+	cands, backlog, err := s.SelectCompactionCandidates(
+		100, 0.10, DefaultQuarantineThreshold, now.Add(-DefaultQuarantineCooldown), 100)
 	if err != nil {
 		t.Fatalf("SelectCompactionCandidates: %v", err)
 	}
@@ -477,6 +481,65 @@ func TestCompactedView(t *testing.T) {
 		if strings.Contains(m.Text, "phase one") {
 			t.Errorf("addenda leaked a compacted (phase-one) message: %q", m.Text)
 		}
+	}
+}
+
+// TestSelectCompactionCandidatesQuarantine covers the 🎯T77 durable
+// quarantine: a session that accrues failures to the threshold is
+// excluded from candidates within the cooldown, QuarantinedCount
+// reflects it, a clean tick clears it, and a failure older than the
+// cooldown earns a parole retry.
+func TestSelectCompactionCandidatesQuarantine(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-q", []map[string]any{
+		msg("user", "a question with enough text here", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		asstTok("a sizeable answer body", now.Add(-1*time.Minute).Format(time.RFC3339), 200, 0, 500),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	if !candidateIDs(t, s, 100, 0.10)["sess-q"] {
+		t.Fatalf("above-floor session should be owed")
+	}
+
+	// Accrue failures to the threshold → quarantined → excluded.
+	for i := 0; i < DefaultQuarantineThreshold; i++ {
+		if err := s.RecordCompactionFailure("sess-q", "boom"); err != nil {
+			t.Fatalf("RecordCompactionFailure: %v", err)
+		}
+	}
+	if candidateIDs(t, s, 100, 0.10)["sess-q"] {
+		t.Errorf("a session at the quarantine threshold must be excluded")
+	}
+	if n := s.QuarantinedCount(DefaultQuarantineThreshold, now.Add(-DefaultQuarantineCooldown)); n != 1 {
+		t.Errorf("QuarantinedCount = %d, want 1", n)
+	}
+
+	// A clean tick clears it → owed again.
+	if err := s.ClearCompactionFailure("sess-q"); err != nil {
+		t.Fatalf("ClearCompactionFailure: %v", err)
+	}
+	if !candidateIDs(t, s, 100, 0.10)["sess-q"] {
+		t.Errorf("clearing the quarantine must make the session owed again")
+	}
+
+	// Re-quarantine, then age the last failure past the cooldown → parole.
+	for i := 0; i < DefaultQuarantineThreshold; i++ {
+		s.RecordCompactionFailure("sess-q", "boom")
+	}
+	if candidateIDs(t, s, 100, 0.10)["sess-q"] {
+		t.Fatalf("freshly re-quarantined session must be excluded")
+	}
+	if _, err := s.writeDB.Exec(
+		`UPDATE compactor_quarantine SET last_failed_at = ? WHERE session_id = 'sess-q'`,
+		now.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("age last_failed_at: %v", err)
+	}
+	if !candidateIDs(t, s, 100, 0.10)["sess-q"] {
+		t.Errorf("a quarantined session past the cooldown must get a parole retry")
 	}
 }
 
