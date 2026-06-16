@@ -2948,5 +2948,5 @@ func renderConfigWrite(merged store.Config, report ConfigReport) string {
 // resolution if needed; the current callers only need a best-effort
 // path for read-side rendering.
 func osUserHome() (string, error) {
-	return os.UserHomeDir()
+	return store.EffectiveHome()
 }

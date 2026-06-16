@@ -7,3 +7,7 @@ bin/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 bullseye.yaml.lock
+# 🎯T73: Tier 3 test snapshots may default to this conventional
+# location; belt-and-braces against the helper or a wayward test
+# ever materialising a clone inside a worktree.
+mnemo-test-snapshots/

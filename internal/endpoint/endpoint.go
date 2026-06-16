@@ -38,6 +38,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/marcelocantos/mnemo/internal/store"
 )
 
 const (
@@ -233,7 +235,7 @@ func (e *Endpoint) PinnedClientTLSConfig(peerCert *x509.Certificate) (*tls.Confi
 
 // DefaultDir returns ~/.mnemo for the calling process's home.
 func DefaultDir() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := store.EffectiveHome()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}

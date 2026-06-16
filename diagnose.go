@@ -355,10 +355,10 @@ func toolVersion(path string, args []string) string {
 
 func checkFilesystem() checkResult {
 	r := checkResult{title: "Filesystem"}
-	home, err := os.UserHomeDir()
+	home, err := store.EffectiveHome()
 	if err != nil {
 		r.status = statusFail
-		r.add(fmt.Sprintf("os.UserHomeDir failed: %v", err))
+		r.add(fmt.Sprintf("store.EffectiveHome failed: %v", err))
 		return r
 	}
 
@@ -439,7 +439,7 @@ func humanBytes(n int64) string {
 
 func checkDatabase() checkResult {
 	r := checkResult{title: "Database"}
-	home, err := os.UserHomeDir()
+	home, err := store.EffectiveHome()
 	if err != nil {
 		r.status = statusFail
 		r.add(err.Error())
@@ -507,7 +507,7 @@ func checkDatabase() checkResult {
 
 func checkIndexFreshness() checkResult {
 	r := checkResult{title: "Index freshness"}
-	home, err := os.UserHomeDir()
+	home, err := store.EffectiveHome()
 	if err != nil {
 		r.status = statusFail
 		r.add(err.Error())
@@ -607,7 +607,7 @@ func checkConfiguration() checkResult {
 			r.add(pathStatus(p))
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := store.EffectiveHome(); err == nil {
 		if vp := cfg.ResolvedVaultPath(home); vp != "" {
 			count := countMDFilesLocal(vp)
 			r.add(fmt.Sprintf("vault_path: %s (%d .md files)", vp, count))

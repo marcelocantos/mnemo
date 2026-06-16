@@ -937,7 +937,7 @@ type SkillInfo struct {
 
 // skillsDir returns the path to ~/.claude/skills/.
 func skillsDir() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return "", err
 	}
@@ -1087,7 +1087,7 @@ func (s *Store) IngestClaudeConfigs() error {
 	}
 
 	// Also check ~/.claude/CLAUDE.md and ~/CLAUDE.md.
-	if homeDir, err := os.UserHomeDir(); err == nil {
+	if homeDir, err := EffectiveHome(); err == nil {
 		for _, extra := range []struct{ path, repo string }{
 			{filepath.Join(homeDir, ".claude", "CLAUDE.md"), "global"},
 			{filepath.Join(homeDir, "CLAUDE.md"), "home"},
@@ -5213,7 +5213,7 @@ func (s *Store) LiveSessions() map[string]int {
 	if time.Since(s.liveCacheTime) < liveSessionsTTL {
 		return s.liveCache
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := EffectiveHome()
 	projectsDir := filepath.Join(home, ".claude", "projects")
 	result := parseLsofOutput(runLsof(projectsDir))
 	s.liveCache = result
@@ -6067,7 +6067,7 @@ func parsePsEnvOutput(data []byte) map[int]string {
 // under ~/.claude/projects/<encoded-cwd>/.  The encoded name replaces each '/'
 // with '-'.  Files are returned sorted newest-mtime first.
 func cwdToTranscripts(cwd string) []WhatsupTranscript {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return nil
 	}
@@ -6203,7 +6203,7 @@ func (s *Store) Whatsup(postmortem bool) (*WhatsupResult, error) {
 // collectPostmortem scans ~/.claude/projects/ for transcript files modified
 // within the recency window and groups them by decoded cwd.
 func collectPostmortem(window time.Duration) []WhatsupPostmortemEntry {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return nil
 	}

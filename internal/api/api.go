@@ -476,7 +476,7 @@ func (h *Handler) dbstats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// File size
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := store.EffectiveHome()
 	if err != nil {
 		slog.Warn("api/dbstats: cannot determine home directory", "err", err)
 	}

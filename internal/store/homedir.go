@@ -27,20 +27,59 @@ func CurrentUsername() (string, error) {
 	return normaliseUsername(u.Username), nil
 }
 
+// MnemoHomeEnv is the environment variable name that overrides the
+// daemon's notion of "home" — the directory under which sidecar state
+// (~/.mnemo/...) and the default user's data tree (~/.claude/...) are
+// resolved (🎯T73). Tests and the snapshot helper set this so a test
+// daemon launched with MNEMO_HOME=<tempdir> is *incapable* of reading
+// or mutating the real $HOME-rooted state.
+//
+// MNEMO_HOME affects only the default-identity path. Explicit
+// per-user lookups via ResolveHomeFor("alice") still consult the OS
+// user database (multi-user Windows-Service deployments preserved).
+const MnemoHomeEnv = "MNEMO_HOME"
+
+// EffectiveHome returns the directory the daemon should treat as
+// $HOME for sidecar state and default-user data. MNEMO_HOME wins
+// when set; otherwise os.UserHomeDir() is consulted (🎯T73).
+//
+// This is the ONLY function in the codebase that should consult
+// MNEMO_HOME / os.UserHomeDir() for daemon-state purposes. All other
+// call sites must route through here (or through ResolveHomeFor)
+// so MNEMO_HOME isolation holds end-to-end.
+func EffectiveHome() (string, error) {
+	if h := os.Getenv(MnemoHomeEnv); h != "" {
+		return h, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve current home: %w", err)
+	}
+	return home, nil
+}
+
 // ResolveHomeFor returns the absolute home directory for the named
 // user. On Windows this uses user.Lookup which, under the hood, calls
 // LookupAccountName + GetUserProfileDirectory. On Unix it reads the
 // user's entry from /etc/passwd (or getpwnam_r).
 //
-// The empty username resolves to the current process's home — useful
-// for interactive runs where the default identity is implicit.
+// The empty username resolves to EffectiveHome — the daemon's notion
+// of "home," respecting MNEMO_HOME for test isolation.
+//
+// An explicit username that matches the process owner ALSO routes
+// through EffectiveHome so MNEMO_HOME isolation holds end-to-end
+// (the daemon's eager-start path passes the resolved default
+// username, which would otherwise bypass MNEMO_HOME and load the
+// real DB). A different explicit username — Alice on a Windows
+// Service daemon running as SYSTEM — still consults the OS user
+// database so multi-user deployments continue to read each user's
+// real home.
 func ResolveHomeFor(username string) (string, error) {
 	if username == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve current home: %w", err)
-		}
-		return home, nil
+		return EffectiveHome()
+	}
+	if cur, err := CurrentUsername(); err == nil && cur == normaliseUsername(username) {
+		return EffectiveHome()
 	}
 	u, err := user.Lookup(username)
 	if err != nil {

@@ -110,7 +110,20 @@ func main() {
 	addr := flag.String("addr", defaultAddr, "HTTP listen address")
 	federatedAddr := flag.String("federated-addr", defaultFederatedAddr,
 		"mTLS federated listen address (empty disables federation)")
+	homeFlag := flag.String("home", "",
+		"daemon home directory (overrides $MNEMO_HOME; defaults to OS user home). "+
+			"Routes ~/.mnemo and the default-user data tree to this root. (🎯T73)")
 	flag.Parse()
+
+	// --home wins over MNEMO_HOME; both end up exported as MNEMO_HOME so
+	// every store.EffectiveHome() call sees the same value regardless of
+	// which entry point it came in through.
+	if *homeFlag != "" {
+		if err := os.Setenv(store.MnemoHomeEnv, *homeFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "set %s: %v\n", store.MnemoHomeEnv, err)
+			os.Exit(1)
+		}
+	}
 
 	if *showVersion {
 		fmt.Println("mnemo", version)

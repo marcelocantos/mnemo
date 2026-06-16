@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__spyder__screenshot",
+      "mcp__spyder__app_channel_list",
+      "mcp__bullseye__bullseye_get",
+      "mcp__spyder__logs",
+      "mcp__spyder__app_state",
+      "mcp__spyder__devices",
+      "mcp__spyder__is_running",
+      "mcp__spyder__crashes",
+      "mcp__mobile-mcp__mobile_get_screen_size"
+    ]
+  }
+}
