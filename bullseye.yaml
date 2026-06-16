@@ -2370,7 +2370,7 @@ targets:
     achieved: 2026-06-08
   T73:
     name: A three-tier test architecture exists so synthetic and production-scale system tests run against an MCP-driven daemon without putting live data at risk
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2434,6 +2434,7 @@ targets:
       - **The exact location and `.gitignore` rule for the conventional snapshot dir** — `~/.mnemo-test-snapshots/` is a sensible default but worth confirming the user's preference.
     origin: manual
     discovered: 2026-06-08
+    achieved: 2026-06-16
   T74:
     name: Ad-hoc read queries run under a bounded execution deadline, so a pathological mnemo_query can't wedge the read pool indefinitely
     status: identified
