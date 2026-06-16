@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/marcelocantos/mnemo/internal/store"
 )
 
 // DefaultURL is the HTTP MCP endpoint used when no user identity is
@@ -43,7 +45,7 @@ func URLForUser(username string) string {
 // ConfigPath returns the Claude Code user config file path.
 // On every supported platform this is ~/.claude.json.
 func ConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := store.EffectiveHome()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}

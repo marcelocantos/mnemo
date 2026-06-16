@@ -355,7 +355,7 @@ type LinkedInstance struct {
 // non-https URL, unresolvable peer cert) returns an error so startup
 // fails loud rather than silently disabling federation.
 func LoadConfig() (Config, error) {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return Config{}, err
 	}
@@ -388,7 +388,7 @@ func loadConfigFrom(path string) (Config, error) {
 // current process user. Returns an error only when the home directory
 // cannot be resolved.
 func ConfigPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return "", err
 	}
@@ -410,7 +410,7 @@ func ConfigPath() (string, error) {
 // Used by the mnemo_config MCP tool to apply runtime configuration
 // changes (chiefly vault_path) without requiring a daemon restart.
 func WriteConfig(cfg Config) error {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return err
 	}
@@ -582,7 +582,7 @@ func looksLikeInlinePEM(s string) bool {
 // This matches the convention used across the global CLAUDE.md for
 // Go-style repo layouts (~/work/github.com/org/repo).
 func DefaultWorkspaceRoots() []string {
-	home, err := os.UserHomeDir()
+	home, err := EffectiveHome()
 	if err != nil {
 		return nil
 	}
@@ -687,7 +687,7 @@ func (c Config) ResolvedSynthesisRoots() []string {
 	if len(c.SynthesisRoots) == 0 {
 		return nil
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := EffectiveHome()
 	out := make([]string, 0, len(c.SynthesisRoots))
 	for _, r := range c.SynthesisRoots {
 		if r == "" {
