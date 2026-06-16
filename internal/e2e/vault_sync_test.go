@@ -6,7 +6,6 @@ package e2e
 import (
 	"context"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,16 +33,10 @@ func TestVaultSyncViaMCP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e vault sync skipped under -short")
 	}
-	// Pass ?user= explicitly. mnemo's vault resolver bypasses the
-	// default-user fallback that the store resolver applies, so a
-	// vault-touching test that omits ?user= sees "vault not
-	// configured." Setting it explicitly is the documented usage and
-	// avoids the asymmetry.
-	cur, err := user.Current()
-	if err != nil {
-		t.Skipf("user.Current unavailable: %v", err)
-	}
-	d := Start(t, Options{User: cur.Username})
+	// 🎯T79: omit ?user= — the vault resolver now falls back to the
+	// default user just like every other tool, so the explicit-user
+	// workaround this test used to need is gone.
+	d := Start(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
