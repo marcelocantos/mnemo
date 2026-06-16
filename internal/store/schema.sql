@@ -480,6 +480,49 @@ CREATE TABLE targets (
 			UNIQUE(file_path, target_id)
 		);
 
+-- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash
+-- drives incremental skip, and (size, mtime) is the write-back
+-- fingerprint that lets a mutation detect an external edit since the
+-- file was indexed and refuse to clobber it. todos holds one row per
+-- parsed checkbox line; raw_line preserves the exact source line so a
+-- single task can be rewritten in place. Obsidian Tasks dates are
+-- stored as ISO strings ('' when absent); priority is an integer
+-- ordered Highest(6) > High(5) > Medium(4) > None(3) > Low(2) >
+-- Lowest(1); tags are space-joined (#-stripped) for FTS; links is a
+-- JSON array of wikilink targets. All append-only, additive.
+CREATE TABLE todo_files (
+			file_path TEXT PRIMARY KEY,
+			repo TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL DEFAULT '',
+			size INTEGER NOT NULL DEFAULT 0,
+			mtime TEXT NOT NULL DEFAULT '',
+			todo_count INTEGER NOT NULL DEFAULT 0,
+			indexed_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE todos (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL DEFAULT '',
+			file_path TEXT NOT NULL,
+			line INTEGER NOT NULL,
+			indent INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'open',
+			text TEXT NOT NULL DEFAULT '',
+			raw_line TEXT NOT NULL DEFAULT '',
+			section TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 3,
+			due_date TEXT NOT NULL DEFAULT '',
+			scheduled_date TEXT NOT NULL DEFAULT '',
+			start_date TEXT NOT NULL DEFAULT '',
+			created_date TEXT NOT NULL DEFAULT '',
+			done_date TEXT NOT NULL DEFAULT '',
+			cancelled_date TEXT NOT NULL DEFAULT '',
+			recurrence TEXT NOT NULL DEFAULT '',
+			tags TEXT NOT NULL DEFAULT '',
+			links TEXT NOT NULL DEFAULT '',
+			indexed_at TEXT NOT NULL DEFAULT ''
+		);
+
 CREATE TABLE trees_of_interest (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			root_path TEXT NOT NULL UNIQUE,
@@ -663,6 +706,16 @@ CREATE INDEX idx_targets_status ON targets(status);
 
 CREATE INDEX idx_targets_target_id ON targets(target_id);
 
+CREATE INDEX idx_todos_due ON todos(due_date) WHERE due_date != '';
+
+CREATE INDEX idx_todos_file ON todos(file_path);
+
+CREATE INDEX idx_todos_priority ON todos(priority);
+
+CREATE INDEX idx_todos_repo ON todos(repo);
+
+CREATE INDEX idx_todos_status ON todos(status);
+
 -- Virtual tables (FTS5)
 
 CREATE VIRTUAL TABLE audit_entries_fts USING fts5(
@@ -761,6 +814,12 @@ CREATE VIRTUAL TABLE snapshot_files_fts USING fts5(
 CREATE VIRTUAL TABLE targets_fts USING fts5(
 			name, description, raw_text, repo,
 			content=targets,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE todos_fts USING fts5(
+			text, tags, section, repo,
+			content=todos,
 			content_rowid=id
 		);
 
@@ -1082,6 +1141,26 @@ CREATE TRIGGER targets_au AFTER UPDATE ON targets
 			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
 			INSERT INTO targets_fts(rowid, name, description, raw_text, repo)
 			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER todos_ad AFTER DELETE ON todos
+		BEGIN
+			INSERT INTO todos_fts(todos_fts, rowid, text, tags, section, repo)
+			VALUES ('delete', old.id, old.text, old.tags, old.section, old.repo);
+		END;
+
+CREATE TRIGGER todos_ai AFTER INSERT ON todos
+		BEGIN
+			INSERT INTO todos_fts(rowid, text, tags, section, repo)
+			VALUES (new.id, new.text, new.tags, new.section, new.repo);
+		END;
+
+CREATE TRIGGER todos_au AFTER UPDATE ON todos
+		BEGIN
+			INSERT INTO todos_fts(todos_fts, rowid, text, tags, section, repo)
+			VALUES ('delete', old.id, old.text, old.tags, old.section, old.repo);
+			INSERT INTO todos_fts(rowid, text, tags, section, repo)
+			VALUES (new.id, new.text, new.tags, new.section, new.repo);
 		END;
 
 -- Views

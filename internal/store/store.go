@@ -99,6 +99,12 @@ type Store struct {
 	// non-repo planning spaces. Mutated only via SetSynthesisRoots.
 	synthesisRoots []string
 
+	// todoGlobs are extra repo-relative globs that IngestTodos matches
+	// when discovering TODO files, beyond the default TODO.md / todos.md
+	// names (🎯T78). Mutated only via SetTodoGlobs, read under
+	// rootsMu.RLock.
+	todoGlobs []string
+
 	// liveness cache
 	liveMu        sync.Mutex
 	liveCache     map[string]int // sessionID → PID
@@ -197,6 +203,19 @@ func (s *Store) SetSynthesisRoots(roots []string) {
 		return
 	}
 	s.synthesisRoots = append(s.synthesisRoots[:0:0], roots...)
+}
+
+// SetTodoGlobs configures extra repo-relative globs that IngestTodos
+// matches when discovering TODO files, beyond the default TODO.md /
+// todos.md names (🎯T78). Call once after Store.New.
+func (s *Store) SetTodoGlobs(globs []string) {
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	if len(globs) == 0 {
+		s.todoGlobs = nil
+		return
+	}
+	s.todoGlobs = append(s.todoGlobs[:0:0], globs...)
 }
 
 // projectDirs returns the full list of project directories to scan:
@@ -3097,6 +3116,21 @@ func (s *Store) Watch() error {
 							if err := s.ingestTargetFile(name, repo); err != nil {
 								slog.Error("ingest targets failed", "file", name, "err", err)
 							}
+						})
+					}
+				}
+
+				// TODO.md / todos.md at the repo root or under docs/.
+				// Deeper or glob-matched TODO files refresh on the next
+				// startup backfill; the common locations are live-watched.
+				if isTodoFileName(base) {
+					repoRoot := dir
+					if filepath.Base(dir) == "docs" {
+						repoRoot = filepath.Dir(dir)
+					}
+					if repo, ok := repoForRoot[repoRoot]; ok {
+						db.enqueue(name, func() {
+							s.ingestTodoFile(name, repo)
 						})
 					}
 				}

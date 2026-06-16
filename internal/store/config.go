@@ -45,6 +45,12 @@ type Config struct {
 	// still indexed via WorkspaceRoots + IngestDocs).
 	SynthesisRoots []string `json:"synthesis_roots,omitempty"`
 
+	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
+	// that the TODO indexer matches when discovering TODO files (🎯T78),
+	// beyond the default TODO.md / todos.md names found at any depth.
+	// E.g. ["TASKS.md", "docs/roadmap.md"]. Empty → defaults only.
+	TodoGlobs []string `json:"todo_globs,omitempty"`
+
 	// VaultPath is the directory where mnemo writes its Markdown knowledge
 	// graph. When set, mnemo continuously exports sessions, decisions,
 	// memories, skills, configs, plans, targets, CI runs, and PRs as

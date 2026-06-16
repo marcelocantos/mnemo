@@ -154,6 +154,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	}
 	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
 	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
+	s.SetTodoGlobs(r.cfg.TodoGlobs)
 
 	synthRoots := r.cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
@@ -251,6 +252,9 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		}
 		if err := e.store.IngestSynthesis(); err != nil {
 			logger.Error("synthesis ingest failed", "err", err)
+		}
+		if err := e.store.IngestTodos(); err != nil {
+			logger.Error("todo ingest failed", "err", err)
 		}
 		// Initial vault sync: materialise all knowledge-graph entities as
 		// Markdown notes. Spawned in its own goroutine so Watch() starts
@@ -734,6 +738,13 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 			e.store.SetSynthesisRoots(newCfg.ResolvedSynthesisRoots())
 		}
 		report.Adopted = append(report.Adopted, "synthesis_roots")
+	}
+	if !stringSlicesEqual(old.TodoGlobs, newCfg.TodoGlobs) {
+		report.Changed = append(report.Changed, "todo_globs")
+		for _, e := range entries {
+			e.store.SetTodoGlobs(newCfg.TodoGlobs)
+		}
+		report.Adopted = append(report.Adopted, "todo_globs")
 	}
 	if old.VaultPath != newCfg.VaultPath {
 		report.Changed = append(report.Changed, "vault_path")
