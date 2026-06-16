@@ -560,6 +560,24 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		return reg.ForUser(username)
 	}
 
+	// effectiveUser maps an empty username (a request that omitted
+	// ?user=) to the default user, mirroring resolve's fallback. Returns
+	// ("", false) only on the Windows-Service path where there is no
+	// default identity (defErr != nil); callers then resolve to nil. The
+	// per-tool vault/compactor resolvers below route through this so they
+	// reach the default user's instance exactly like every Backend tool
+	// (🎯T79) — without it they returned "not configured" whenever the
+	// request omitted ?user=.
+	effectiveUser := func(username string) (string, bool) {
+		if username == "" {
+			if defErr != nil {
+				return "", false
+			}
+			return defaultUser, true
+		}
+		return username, true
+	}
+
 	// Build the MCP server, register every tool, and expose it as an
 	// HTTP streamable endpoint. Stateful mode lets clients maintain an
 	// Mcp-Session-Id across requests — the value we thread through to
@@ -577,7 +595,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// mnemo_vault_status work. Returns nil when vault is not configured
 	// for the requested user; the tool handlers gracefully report this.
 	handler.SetVaultResolver(func(username string) tools.VaultSyncer {
-		v := reg.VaultFor(username)
+		u, ok := effectiveUser(username)
+		if !ok {
+			return nil
+		}
+		v := reg.VaultFor(u)
 		if v == nil {
 			return nil // avoid (*vault.Exporter)(nil) wrapped in interface
 		}
@@ -589,7 +611,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Returns nil when the user's workers haven't started yet; the
 	// tool gracefully reports "not available" in that case.
 	handler.SetCompactorResolver(func(username string) tools.CompactorHealthReporter {
-		w := reg.CompactWatcherFor(username)
+		u, ok := effectiveUser(username)
+		if !ok {
+			return nil
+		}
+		w := reg.CompactWatcherFor(u)
 		if w == nil {
 			return nil
 		}

@@ -2535,9 +2535,10 @@ targets:
     achieved: 2026-06-16
   T79:
     name: mnemo_vault_status and mnemo_compactor_status fall back to the default user when ?user= is omitted, matching the store resolver
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - '`mnemo_vault_status`, `mnemo_vault_sync`, and `mnemo_compactor_status` succeed against a daemon''s default user when the MCP request omits `?user=` — matching the behaviour of `mnemo_search` / `mnemo_stats` / every other tool today. Today they return "vault not configured" / "compactor not available" respectively in that case because the per-tool resolver lambdas look up `reg.VaultFor("")` / `reg.CompactWatcherFor("")` directly instead of falling back to `defaultUser` the way the shared `resolve(username)` closure does.'
     - 'The fix lives in `main.go` (the resolver closures wired via `handler.SetVaultResolver` and `handler.SetCompactorResolver`) and mirrors the shape of the existing `resolve := func(username string) ...` closure: empty username → `defaultUser`, unless `defErr != nil` in which case the resolver returns nil (Windows-Service no-default-user path).'
@@ -2595,6 +2596,7 @@ targets:
       - Any deeper refactor of the per-tool resolver pattern. Cheap pointed fix, not a redesign.
     origin: manual
     discovered: 2026-06-16
+    achieved: 2026-06-16
   T8:
     name: sqldeep integration
     status: achieved
