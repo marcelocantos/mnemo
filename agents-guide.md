@@ -524,13 +524,59 @@ Hot-reload coverage:
 - `vault_path` — applied live. Old vault workers stop, a fresh
   exporter is built at the new path, and an initial sync starts in the
   background. Set to `""` to disable vault export entirely.
-- `workspace_roots`, `extra_project_dirs`, `synthesis_roots` — applied
-  live; subsequent ingest passes pick up the new roots.
+- `workspace_roots`, `extra_project_dirs`, `synthesis_roots`,
+  `todo_globs` — applied live; subsequent ingest passes pick up the new
+  roots/globs.
 - `linked_instances` — persisted but requires a daemon restart (the
   federation client is wired once at startup).
 
 The write response lists which fields changed, which were adopted live,
 and which require a restart.
+
+### mnemo_todos / mnemo_todo_set / mnemo_todo_add
+
+mnemo indexes TODO items from `TODO.md` and `todos.md` files found at
+any depth in every known repo — including the canonical `docs/TODO.md`
+convention and the repo-root `TODO.md` — plus any `todo_globs` you
+configure, parsed in the **Obsidian Tasks** dialect. Discovery honours
+`.gitignore`, the shared doc-exclude dirs, and the loop-safety exclusion
+fence; a file is re-parsed only when its content hash changes.
+
+Recognised decorations: 📅 due, ⏳ scheduled, 🛫 start, ➕ created,
+✅ done, ❌ cancelled, 🔁 recurrence; priority 🔺 highest, ⏫ high,
+🔼 medium, 🔽 low, ⏬ lowest; `#tags` and `[[wikilinks]]`. Checkbox
+state maps `- [ ]`→open, `- [x]`→done, `- [-]`→cancelled,
+`- [/]`→in_progress. Priority orders Highest > High > Medium > None >
+Low > Lowest (an unmarked task sits between medium and low, as Obsidian
+displays it).
+
+**Query — `mnemo_todos`.** Filters compose:
+- `query` — full-text over task text, tags, and section (fuzzy OR)
+- `repo`, `status`, `tag`, `priority`, `section`
+- date predicates: `due_before` / `due_after` / `due_on` (ISO dates),
+  `overdue` (past due and not done/cancelled), `due_soon_days` (within
+  N days), `no_date`
+- `limit` (default 50)
+
+Each result carries `file_path` and `line` — the coordinates the
+write-back tools need.
+
+**Edit — `mnemo_todo_set`.** Given an `id` from `mnemo_todos`, change
+`status`, `due`, and/or `priority` in the source file. Only the target
+line is rewritten; the rest of the file is preserved byte-for-byte and
+written atomically (tmp + fsync + rename). The edit is **stale-guarded**:
+if the line changed since it was indexed (someone edited the file), the
+call fails and the file is left untouched — re-query and retry.
+Transitioning to `done`/`cancelled` stamps today's ✅/❌ date; pass
+`due: "clear"` to drop a due date, `priority: "none"` to drop priority.
+
+**Add — `mnemo_todo_add`.** Append a new task to a tracked TODO file
+(`file` = a `file_path` from `mnemo_todos`). Optional `section` files it
+under a heading (created at end of file if absent); `text` may carry
+Obsidian decorations, e.g. `"review spec 📅 2026-07-01 ⏫ #docs"`.
+
+Typical loop: `mnemo_todos {overdue: true}` → pick an `id` →
+`mnemo_todo_set {id, status: "done"}`.
 
 ## Federation across linked instances
 
@@ -561,8 +607,8 @@ original local-only response shape unchanged. Write- and
 control-shaped tools (`mnemo_self`, `mnemo_define`, `mnemo_evaluate`,
 `mnemo_list_templates`, `mnemo_restore`, `mnemo_whatsup`,
 `mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
-`mnemo_stats`, `mnemo_status`, `mnemo_chain`) bypass federation
-entirely.
+`mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_todos`,
+`mnemo_todo_set`, `mnemo_todo_add`) bypass federation entirely.
 
 Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,

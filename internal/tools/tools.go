@@ -455,6 +455,37 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
+		mcp.NewTool("mnemo_todos",
+			mcp.WithDescription(`Query TODO items indexed from TODO.md / todos.md files across all repos (Obsidian Tasks dialect: 📅 due, ⏳ scheduled, 🛫 start, ✅/❌ done/cancelled, 🔺⏫🔼🔽⏬ priority, 🔁 recurrence, #tags, [[wikilinks]]). Filters compose. Each result carries its source file_path and line so it can be edited with mnemo_todo_set.`),
+			mcp.WithString("query", mcp.Description("Full-text search over task text, tags, and section (fuzzy OR). Omit to list.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
+			mcp.WithString("status", mcp.Description("Filter by status: open, done, cancelled, in_progress")),
+			mcp.WithString("tag", mcp.Description("Filter by exact #tag (leading # optional)")),
+			mcp.WithString("priority", mcp.Description("Filter by priority: highest, high, medium, none, low, lowest")),
+			mcp.WithString("section", mcp.Description("Filter by the heading/section a task lives under")),
+			mcp.WithString("due_before", mcp.Description("Tasks with a due date on/before this ISO date (YYYY-MM-DD)")),
+			mcp.WithString("due_after", mcp.Description("Tasks with a due date on/after this ISO date")),
+			mcp.WithString("due_on", mcp.Description("Tasks due exactly on this ISO date")),
+			mcp.WithBoolean("overdue", mcp.Description("Only tasks past their due date and not done/cancelled")),
+			mcp.WithNumber("due_soon_days", mcp.Description("Only tasks due within N days from today and not done/cancelled")),
+			mcp.WithBoolean("no_date", mcp.Description("Only tasks with no due date")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
+		),
+		mcp.NewTool("mnemo_todo_set",
+			mcp.WithDescription(`Edit an existing TODO item in place in its source file (status, due date, and/or priority). Only the target line is rewritten — the rest of the file is preserved byte-for-byte and written atomically (tmp + fsync + rename). The edit is guarded against concurrent external changes: if the line moved or changed since indexing, it fails without touching the file. Get the id from mnemo_todos.`),
+			mcp.WithNumber("id", mcp.Required(), mcp.Description("Task id from mnemo_todos")),
+			mcp.WithString("status", mcp.Description("New status: open, done, cancelled, in_progress. done/cancelled stamps today's completion date (✅/❌).")),
+			mcp.WithString("due", mcp.Description("Set the due date (ISO YYYY-MM-DD). Pass 'clear' (or empty) to remove it.")),
+			mcp.WithString("priority", mcp.Description("Set priority: highest, high, medium, low, lowest, or none to clear.")),
+			mcp.WithString("text", mcp.Description("Replace the task prose. Trailing emoji-metadata (dates/priority/recurrence) is preserved; include any #tags or [[links]] you want to keep.")),
+		),
+		mcp.NewTool("mnemo_todo_add",
+			mcp.WithDescription(`Append a new TODO item to an already-tracked TODO file (the file must appear as file_path in mnemo_todos output). Optionally file it under a heading, created at end of file if absent. Text may carry Obsidian decorations, e.g. "review spec 📅 2026-07-01 ⏫ #docs". Written atomically and re-indexed immediately.`),
+			mcp.WithString("file", mcp.Required(), mcp.Description("Absolute path to a tracked TODO file (from mnemo_todos file_path)")),
+			mcp.WithString("text", mcp.Required(), mcp.Description("Task text, optionally with Obsidian Tasks decorations")),
+			mcp.WithString("section", mcp.Description("Heading to file the task under (created if absent)")),
+			mcp.WithString("status", mcp.Description("Initial status: open (default), done, cancelled, in_progress")),
+		),
 		mcp.NewTool("mnemo_restore",
 			mcp.WithDescription(`Return the compacted context for a session chain — all compaction summaries across the full /clear-bounded chain, oldest first.
 
@@ -756,6 +787,12 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.commits(args)
 	case "mnemo_decisions":
 		return ch.decisions(args)
+	case "mnemo_todos":
+		return ch.todos(args)
+	case "mnemo_todo_set":
+		return ch.todoSet(args)
+	case "mnemo_todo_add":
+		return ch.todoAdd(args)
 	case "mnemo_restore":
 		return ch.restore(args)
 	case "mnemo_chain":
@@ -1557,6 +1594,121 @@ func (h *callHandler) decisions(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
+}
+
+func (h *callHandler) todos(args map[string]any) (string, bool, error) {
+	var q store.TodoQuery
+	q.Query, _ = args["query"].(string)
+	q.Repo, _ = args["repo"].(string)
+	q.Status, _ = args["status"].(string)
+	q.Tag, _ = args["tag"].(string)
+	q.Priority, _ = args["priority"].(string)
+	q.Section, _ = args["section"].(string)
+	q.DueBefore, _ = args["due_before"].(string)
+	q.DueAfter, _ = args["due_after"].(string)
+	q.DueOn, _ = args["due_on"].(string)
+	q.Overdue, _ = args["overdue"].(bool)
+	q.NoDate, _ = args["no_date"].(bool)
+	if v, ok := args["due_soon_days"].(float64); ok && v > 0 {
+		q.DueSoonDays = int(v)
+	}
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		q.Limit = int(v)
+	}
+	if q.Status != "" && !validTodoStatus(q.Status) {
+		return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", q.Status), true, nil
+	}
+	results, err := h.mem.SearchTodos(q)
+	if err != nil {
+		return fmt.Sprintf("todos search failed: %v", err), true, nil
+	}
+	if len(results) == 0 {
+		return "No matching todos found.", false, nil
+	}
+	out, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) todoSet(args map[string]any) (string, bool, error) {
+	idf, ok := args["id"].(float64)
+	if !ok {
+		return "id is required", true, nil
+	}
+	m := store.TodoMutation{ID: int64(idf)}
+	if v, ok := args["status"].(string); ok && v != "" {
+		if !validTodoStatus(v) {
+			return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", v), true, nil
+		}
+		m.Status = v
+	}
+	if v, ok := args["due"].(string); ok {
+		due := v
+		if v == "clear" || v == "none" {
+			due = ""
+		}
+		m.Due = &due
+	}
+	if v, ok := args["priority"].(string); ok && v != "" {
+		if !validTodoPriority(v) {
+			return fmt.Sprintf("invalid priority %q (want highest/high/medium/low/lowest/none)", v), true, nil
+		}
+		p := v
+		m.Priority = &p
+	}
+	if v, ok := args["text"].(string); ok && v != "" {
+		txt := v
+		m.Text = &txt
+	}
+	if m.Status == "" && m.Due == nil && m.Priority == nil && m.Text == nil {
+		return "nothing to change: pass at least one of status, due, priority, text", true, nil
+	}
+	updated, err := h.mem.MutateTodo(m)
+	if err != nil {
+		return fmt.Sprintf("todo update failed: %v", err), true, nil
+	}
+	out, _ := json.MarshalIndent(updated, "", "  ")
+	return string(out), false, nil
+}
+
+func (h *callHandler) todoAdd(args map[string]any) (string, bool, error) {
+	file, _ := args["file"].(string)
+	text, _ := args["text"].(string)
+	if file == "" || text == "" {
+		return "file and text are required", true, nil
+	}
+	a := store.TodoAdd{File: file, Text: text}
+	a.Section, _ = args["section"].(string)
+	if v, ok := args["status"].(string); ok && v != "" {
+		if !validTodoStatus(v) {
+			return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", v), true, nil
+		}
+		a.Status = v
+	}
+	added, err := h.mem.AddTodo(a)
+	if err != nil {
+		return fmt.Sprintf("todo add failed: %v", err), true, nil
+	}
+	out, _ := json.MarshalIndent(added, "", "  ")
+	return string(out), false, nil
+}
+
+func validTodoStatus(s string) bool {
+	switch s {
+	case "open", "done", "cancelled", "in_progress":
+		return true
+	}
+	return false
+}
+
+func validTodoPriority(s string) bool {
+	switch s {
+	case "highest", "high", "medium", "low", "lowest", "none":
+		return true
+	}
+	return false
 }
 
 func (h *callHandler) self(args map[string]any) (string, bool, error) {

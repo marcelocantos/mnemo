@@ -248,6 +248,9 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_plans` | Search implementation plans from all repos |
 | `mnemo_audit` | Search audit logs from all repos |
 | `mnemo_docs` | Search markdown, text, and PDF documentation from all repos |
+| `mnemo_todos` | Query TODO items indexed from TODO.md / todos.md files (Obsidian Tasks dialect) — filter by status, tag, priority, section, due date (overdue/due-soon/no-date), and full text |
+| `mnemo_todo_set` | Edit an existing TODO item in place (status / due / priority) — line-precise, atomic, stale-guarded write-back to the source file |
+| `mnemo_todo_add` | Append a new TODO item to a tracked TODO file, optionally under a heading |
 
 ### External source indexing
 
