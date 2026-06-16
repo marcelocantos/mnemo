@@ -92,13 +92,13 @@ func PriorityFromString(s string) Priority {
 
 // Task is one parsed checkbox line.
 type Task struct {
-	Line     int    `json:"line"`     // 1-based line number in the file
-	Indent   int    `json:"indent"`   // leading-whitespace columns (tab = 4)
-	Status   Status `json:"status"`   //
-	Text     string `json:"text"`     // task body with decorations stripped
-	RawLine  string `json:"-"`        // the exact original line (for write-back)
-	Section  string `json:"section"`  // nearest preceding heading, "" if none
-	Priority Priority `json:"-"`      //
+	Line     int      `json:"line"`    // 1-based line number in the file
+	Indent   int      `json:"indent"`  // leading-whitespace columns (tab = 4)
+	Status   Status   `json:"status"`  //
+	Text     string   `json:"text"`    // task body with decorations stripped
+	RawLine  string   `json:"-"`       // the exact original line (for write-back)
+	Section  string   `json:"section"` // nearest preceding heading, "" if none
+	Priority Priority `json:"-"`       //
 
 	// Obsidian Tasks dates, ISO "YYYY-MM-DD", empty when absent.
 	Due       string `json:"due,omitempty"`
