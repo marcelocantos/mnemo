@@ -1,0 +1,69 @@
+name: E2E Nightly
+
+# Runs the internal/e2e daemon-subprocess suite on a schedule so flakes
+# are caught in a non-blocking context. The suite is excluded from the
+# standard CI gate (ci.yml) via the MNEMO_E2E env-gate in TestMain;
+# this workflow sets MNEMO_E2E=1 to opt in.
+#
+# Trigger:
+#   - Daily at 03:00 UTC
+#   - Manual via workflow_dispatch for ad-hoc debugging
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mnemo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: marcelocantos/sqldeep
+          ref: v0.22.0
+          path: sqldeep
+          submodules: recursive
+
+      - name: Build sqldeep
+        working-directory: sqldeep
+        env:
+          CC: cc
+          CXX: c++
+          AR: ar
+        run: |
+          mkdir -p build/deepparser
+          DP_SRC=vendor/deepparser/src
+          DP_CFLAGS="-Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -O2 -DNDEBUG -I${DP_SRC}"
+          for f in arena liteparser lp_tokenize lp_unparse parse; do
+            "$CC" $DP_CFLAGS -c "${DP_SRC}/${f}.c" -o "build/deepparser/${f}.o"
+          done
+          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -I${DP_SRC} -c dist/sqldeep.cpp -o build/sqldeep.o
+          "$CC" -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
+          "$AR" rcs build/libsqldeep.a build/sqldeep.o build/deepparser/*.o
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mnemo/go.mod
+
+      - name: Build daemon binary
+        working-directory: mnemo
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags sqlite_fts5 -o bin/mnemo .
+
+      - name: Run e2e tests
+        working-directory: mnemo
+        env:
+          CGO_ENABLED: "1"
+          MNEMO_E2E: "1"
+        # -timeout=10m is generous for linux; the suite should finish
+        # in well under 5m on an unloaded ubuntu-latest runner.
+        run: go test -tags sqlite_fts5 -timeout=10m -v -run . ./internal/e2e/

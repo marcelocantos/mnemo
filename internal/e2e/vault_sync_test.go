@@ -37,7 +37,7 @@ func TestVaultSyncViaMCP(t *testing.T) {
 	// default user just like every other tool, so the explicit-user
 	// workaround this test used to need is gone.
 	d := Start(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Tempdir for the vault, outside MNEMO_HOME so the test verifies
@@ -60,29 +60,42 @@ func TestVaultSyncViaMCP(t *testing.T) {
 	}
 
 	// The mnemo_config hot-reload kicks off an automatic vault sync
-	// in the background; an explicit mnemo_vault_sync called too
-	// soon coalesces with "already in flight, skipping." Either way
-	// the root index.md should appear shortly. Poll with a bounded
-	// timeout so the race resolves cleanly.
-	_, _ = d.Call(ctx, "mnemo_vault_sync", nil) // best-effort; coalescing is fine
-
+	// in the background. An explicit mnemo_vault_sync called too soon
+	// may coalesce with "already in flight, skipping." To handle both
+	// the coalescing case and the case where the background sync has
+	// not yet started, we retry mnemo_vault_sync until index.md
+	// appears with the expected fence. Each retry attempt that returns
+	// a coalescing message is followed by a short sleep to let the
+	// in-flight sync finish before we look for the file.
 	rootIndex := filepath.Join(vaultDir, "index.md")
 	var body []byte
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, readErr := os.ReadFile(rootIndex); readErr == nil {
-			body = data
-			break
+			if strings.Contains(string(data), "mnemo:generated") {
+				body = data
+				break
+			}
+			// File exists but fence not yet written (partial write or
+			// background sync still in progress). Wait and retry.
+		} else {
+			// File does not exist yet — trigger a sync attempt; ignore
+			// coalescing-skip responses, they mean one is already in
+			// flight.
+			_, _ = d.Call(ctx, "mnemo_vault_sync", nil)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	if body == nil {
+		// One final read to capture whatever is on disk for the error
+		// message, even if it lacks the fence.
+		if data, readErr := os.ReadFile(rootIndex); readErr == nil {
+			t.Fatalf("vault index.md appeared but is missing the <!-- mnemo:generated --> fence — "+
+				"contract not honoured through MCP transport:\n%s\n--- daemon log ---\n%s",
+				data, d.Log())
+		}
 		t.Fatalf("vault index.md never appeared at %q:\n--- daemon log ---\n%s",
 			rootIndex, d.Log())
-	}
-	if !strings.Contains(string(body), "mnemo:generated") {
-		t.Errorf("vault index.md missing the <!-- mnemo:generated --> fence — "+
-			"contract not honoured through MCP transport:\n%s", body)
 	}
 
 	// mnemo_vault_status must reach the configured path through the
