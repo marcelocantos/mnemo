@@ -2644,6 +2644,53 @@ targets:
     origin: manual
     discovered: 2026-06-18
     achieved: 2026-06-18
+  T82:
+    name: The compactor/reviewer summariser runs in a dedicated, always-present temp working directory and never hammers on a missing cwd
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The compactor and CLAUDE.md reviewer spawn `claude -p` in a dedicated working directory under the OS temp root (e.g. $TMPDIR/mnemo-summariser), created via MkdirAll at startup. They no longer depend on a developer checkout existing at ~/work/github.com/marcelocantos/mnemo (main.go's hardcoded mnemoRepoDir).
+    - The chosen directory has no CLAUDE.md/project-context ancestors, so the summariser loads no project instructions (cleaner, recursion-safer than the repo or ~/.mnemo).
+    - 'If the working directory cannot be created or used, the summariser path is disabled and logs the condition once, instead of failing every tick with `chdir: no such file or directory`.'
+    - 'Regression test: on a host without the old hardcoded path, the compactor makes progress or cleanly idles rather than logging per-tick chdir failures; a unit test covers workDir resolution and the disable-on-unusable-dir behaviour.'
+    - The registry field/comment is renamed from mnemoRepoDir to reflect that it is a generic summariser workdir, not a source checkout.
+    context: 'Discovered 2026-06-18 on a second machine running 0.50.0. main.go:520 hardcodes the compactor/reviewer claude-spawn cwd to <home>/work/github.com/marcelocantos/mnemo (passed as registry.mnemoRepoDir → ClaudiaCaller.workDir). On any machine without that exact checkout, every compaction tick fails `claudia: run task: start claude: chdir <path>: no such file or directory`, retries per-second, contends the single SQLite writer (each failure writes a quarantine row) and starves the indexer — docs/todos/transcript backfill stops. The summariser is stateless (summarises prompt text); its cwd contents are irrelevant, so a neutral temp dir is correct. Root fix; T84 (circuit-breaker) is the safety net and T83 (diagnostics) the surfacing.'
+    origin: manual
+    discovered: 2026-06-18
+  T83:
+    name: mnemo self-diagnoses its health (startup + timer, fast/full) and surfaces problems via mnemo_doctor, opt-out OS notifications, and a dashboard health page
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A diagnostics subsystem runs a registry of named health checks; each returns severity (ok/warn/fail), detail, and a remediation hint, tagged tier (fast/full) and cadence (startup/timer). Adding a check is one registry entry.
+    - 'Startup runs the full suite once — environment/config validation: summariser workDir exists+writable (the T82 condition), `claude` resolvable on PATH, DB writable + schema current, configured roots (workspace_roots/synthesis_roots/extra_project_dirs/~/.claude/projects) resolvable. Warn/fail are logged prominently; fail triggers a notification.'
+    - A timer runs fast checks every few minutes (worker liveness + failure-ratio, systemic-compactor-failure / tripped-breaker from T84, backfill-ran-since-daemon-start, transcript freshness lag, WAL/resource) and full checks ~hourly (re-validate env, recompute convergence).
+    - An `mnemo_doctor` MCP tool runs the full suite on demand and returns the per-check report (name/tier/severity/detail/remediation) — the single 'is mnemo healthy and what do I do' call.
+    - OS-level notifications fire on a transition into fail (opt-out default, fail-only; configurable severity threshold + cooldown). Local-only (macOS osascript / Linux notify-send, no network). Deduped per distinct problem with a re-notify cooldown; the notification deep-links to the dashboard health page.
+    - 'The dashboard gains a health page listing current issues (severity, detail, remediation) with affordances to resolve them: links to file a fix, copy-paste remediation commands, restart-service guidance.'
+    - 'The two buggy mnemo_divergence metrics are fixed so convergence checks are trustworthy: docs records cumulative indexed (not per-run-changed), and todos records consistent file counts (not task-count in the files_indexed slot — the T78 unit bug).'
+    - Tests cover the check registry, key checks (the cwd/PATH startup checks and the systemic-compactor-failure runtime check), the doctor tool, notification gating/dedup, and the metric fixes. Docs (agents-guide + README + CLAUDE.md) describe mnemo_doctor, the cadence, the notification config, and the dashboard health page.
+    context: 'Requested 2026-06-18 after the T82 cwd bug went undetected for hours (silent unhealth; only signal was a log on the broken box). Decisions taken with the user: build the whole suite and ship once (0.51.0) with T82+T84; notifications opt-out + fail-only; notifications deep-link to a new dashboard health page with remediation affordances. Much of the read-data already exists (mnemo_status T75 freshness block, mnemo_divergence, mnemo_compactor_status, mnemo_whatsup) — this unifies it into pass/warn/fail + remediation and adds startup env validation, the timer scheduler, proactive notifications, and the dashboard surface. Depends on T84 (breaker state is a checked signal).'
+    depends_on:
+    - T84
+    origin: manual
+    discovered: 2026-06-18
+  T84:
+    name: A repeatedly-failing background task trips a circuit-breaker and halts/backs-off instead of hammering CPU and contending shared resources
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A reusable circuit-breaker primitive exists: a unit of work that fails K consecutive times trips open and halts (or backs off to a long interval); after a cooldown it half-opens for a single trial and closes on success. State + last error are queryable.'
+    - 'The convergence/worker engine applies the breaker so any repeatedly-failing task halts rather than retrying hot: at minimum the compaction watcher (worker-level systemic failure, distinct from T77''s per-session quarantine) and the StreamReconciler loop. A broken task stops consuming CPU and stops contending the single SQLite writer, so it cannot starve ingest or other workers.'
+    - 'Concretely: a compactor whose every tick fails (e.g. the T82 cwd scenario, or claude missing from PATH) trips the breaker within K failures, logs the condition once, and pauses — co-running ingest continues to make progress.'
+    - 'Breaker state is observable and feeds the diagnostics suite (T83): a tripped breaker surfaces as a fail-severity health check carrying the failure count and last error.'
+    - 'Tests: the breaker trips after K consecutive failures, backs off, half-opens, and recovers on success; and a failing worker under the breaker does not block a concurrently-running worker (no starvation).'
+    context: Requested 2026-06-18 alongside T82/T83. The cwd bug (T82) caused unbounded per-tick retries that ate CPU and starved the indexer. T77 added per-session compaction quarantine, but that is per-item; there is no generic per-task safety net, so a systemic failure (every item fails for the same external reason — missing cwd, claude not on PATH, DB locked) hammers indefinitely. Build a generic circuit-breaker into the worker/convergence engine so the failure class is contained regardless of cause. Layers with T82 (don't create the bad condition) and T83 (surface it).
+    origin: manual
+    discovered: 2026-06-18
   T9:
     name: Full-fidelity ingest and observability tools
     status: achieved
