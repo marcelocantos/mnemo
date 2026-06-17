@@ -2611,6 +2611,22 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-07
+  T80:
+    name: TODO ingestion indexes TODO files under every known root — git repos AND non-git synthesis roots — not only git-repo roots
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    actual_cost: 2.0
+    acceptance:
+    - 'IngestTodos discovers TODO.md / todos.md under all roots mnemo knows about, not just git repos: the git-repo roots from knownRepoRoots (workspace_roots discovery + session cwd → findRepoRoot) AND the non-git synthesis_roots (planning spaces such as ~/think, which the config explicitly documents as not requiring a .git marker).'
+    - Git-repo discovery is unchanged (kept as-is per the 'keep git roots for now' decision); the change is purely additive — synthesis roots are now also walked. A TODO.md in a non-git synthesis root is indexed.
+    - Roots are deduplicated by path and a shared seen-set prevents a TODO file reachable from two overlapping roots (e.g. a repo nested under a synthesis root) from being ingested twice in one pass.
+    - 'Existing bounding still applies to every root: .gitignore where present, the doc-exclude dirs, and the loop-safety exclusion fence (so the vault path is never re-ingested even under a synthesis root).'
+    - A store test proves a TODO.md under a non-git synthesis root is discovered by IngestTodos (would fail before this change).
+    context: 'Discovered 2026-06-17 while reviewing T78. The TODO feature was built on knownRepoRoots(), whose BOTH sources gate on .git (discoverRepos requires hasGitEntry; session cwds go through findRepoRoot which needs a .git ancestor). This silently imported a git-repo requirement that the T78 acceptance never stated — it said "trees-of-interest / workspace-roots model". Synthesis roots (non-git planning spaces) were missed entirely. User decision: keep git-repo discovery for now, but make sure ALL known roots are tracked for TODO files — i.e. additively include synthesis_roots. Live-watch for synthesis-root TODO edits remains out of scope (matches existing synthesis-doc behavior: backfill/restart only); this target covers backfill discovery.'
+    origin: manual
+    discovered: 2026-06-17
+    achieved: 2026-06-17
   T9:
     name: Full-fidelity ingest and observability tools
     status: achieved
