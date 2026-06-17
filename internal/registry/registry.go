@@ -70,13 +70,13 @@ type Registry struct {
 	// leaving the registry with two live exporters per user. mu is
 	// still acquired in fine-grained sections inside Reload; reloadMu
 	// is the coarse-grained guard.
-	reloadMu       sync.Mutex
-	baseCtx        context.Context
-	cancel         context.CancelFunc
-	stores         map[string]*userEntry
-	cfg            store.Config
-	mnemoRepoDir   string
-	compactorModel string
+	reloadMu          sync.Mutex
+	baseCtx           context.Context
+	cancel            context.CancelFunc
+	stores            map[string]*userEntry
+	cfg               store.Config
+	summariserWorkDir string
+	compactorModel    string
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -103,18 +103,18 @@ type userEntry struct {
 
 // NewRegistry builds an empty Registry. The baseCtx is cancelled on
 // Close and is the parent of every per-user worker context.
-// mnemoRepoDir is passed to the compactor watcher (it's the same for
-// every user — the compactor spawns claudia against mnemo's source
-// tree regardless of whose transcripts are being compacted).
-func NewRegistry(parent context.Context, cfg store.Config, mnemoRepoDir string) *Registry {
+// summariserWorkDir is the cwd for the compactor/reviewer `claude -p`
+// subprocesses (the same for every user — a neutral scratch dir, not a
+// per-user path). Empty disables summarisation (🎯T82).
+func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir string) *Registry {
 	ctx, cancel := context.WithCancel(parent)
 	return &Registry{
-		baseCtx:        ctx,
-		cancel:         cancel,
-		stores:         map[string]*userEntry{},
-		cfg:            cfg,
-		mnemoRepoDir:   mnemoRepoDir,
-		compactorModel: "sonnet",
+		baseCtx:           ctx,
+		cancel:            cancel,
+		stores:            map[string]*userEntry{},
+		cfg:               cfg,
+		summariserWorkDir: summariserWorkDir,
+		compactorModel:    "sonnet",
 	}
 }
 
@@ -289,28 +289,38 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 
 	r.startVaultWorkers(username, e)
 
-	// Compaction watcher.
-	e.workers.Add(1)
-	go func() {
-		defer e.workers.Done()
-		caller := compact.NewClaudiaCaller(r.mnemoRepoDir, r.compactorModel)
-		compactor := compact.New(e.store, caller, compact.Config{})
-		watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{})
-		e.compactWatcher = watcher
-		logger.Info("compact: watcher starting")
-		watcher.Run(r.baseCtx)
-	}()
+	// Summariser-backed workers (compactor, CLAUDE.md reviewer) only
+	// start when there is a usable working directory for the `claude -p`
+	// subprocess. An empty summariserWorkDir means even the temp dir
+	// couldn't be created at startup (🎯T82); rather than spawn into a
+	// missing cwd and fail every tick, we skip these workers entirely
+	// and log once. Ingest and the other workers below run regardless.
+	if r.summariserWorkDir == "" {
+		logger.Warn("compaction and CLAUDE.md review disabled: no usable summariser workdir")
+	} else {
+		// Compaction watcher.
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
+			compactor := compact.New(e.store, caller, compact.Config{})
+			watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{})
+			e.compactWatcher = watcher
+			logger.Info("compact: watcher starting")
+			watcher.Run(r.baseCtx)
+		}()
 
-	// CLAUDE.md summary review worker (🎯T41). Same claudia.Task
-	// path as the compactor but a different cadence and trigger
-	// (cheap-signal entry-count gate, see store.ShouldReview).
-	e.workers.Add(1)
-	go func() {
-		defer e.workers.Done()
-		caller := compact.NewClaudiaCaller(r.mnemoRepoDir, r.compactorModel)
-		rev := reviewer.New(e.store, llmAdapter{caller})
-		reviewer.Run(r.baseCtx, rev)
-	}()
+		// CLAUDE.md summary review worker (🎯T41). Same claudia.Task
+		// path as the compactor but a different cadence and trigger
+		// (cheap-signal entry-count gate, see store.ShouldReview).
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
+			rev := reviewer.New(e.store, llmAdapter{caller})
+			reviewer.Run(r.baseCtx, rev)
+		}()
+	}
 
 	// External mirror reconciler (🎯T68.5): divergence-driven reconcile
 	// of the mirror streams (CI today; GitHub/commits as they convert).

@@ -71,6 +71,26 @@ const (
 	defaultFederatedAddr = ":19420"
 )
 
+// summariserWorkDir returns a dedicated, always-present working
+// directory for the compactor/reviewer's `claude -p` subprocesses
+// (🎯T82). The summariser is stateless — it summarises the prompt text,
+// so the cwd's contents are irrelevant — hence a neutral directory under
+// the OS temp root. It is deliberately NOT a repo checkout (the old
+// hardcoded ~/work/github.com/marcelocantos/mnemo broke on every machine
+// without that path) and deliberately has no CLAUDE.md ancestors, so the
+// summariser loads no project instructions. Returns "" only if even the
+// temp dir can't be created, signalling the caller to disable
+// summarisation rather than spawn into a missing cwd.
+func summariserWorkDir() string {
+	dir := filepath.Join(os.TempDir(), "mnemo-summariser")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Error("summariser workdir unavailable; compaction and review disabled",
+			"dir", dir, "err", err)
+		return ""
+	}
+	return dir
+}
+
 func main() {
 	// Subcommands are dispatched before flag.Parse so their own flags
 	// don't collide with the global ones (--addr, --version). The
@@ -513,13 +533,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		slog.Info("extra project dirs configured", "dirs", cfg.ExtraProjectDirs)
 	}
 
-	// The compactor watcher needs mnemo's own source tree to invoke
-	// claudia, regardless of whose transcripts are being compacted.
-	// Resolve via the process owner's home (not each indexed user's).
-	procHome, _ := os.UserHomeDir()
-	mnemoRepoDir := filepath.Join(procHome, "work", "github.com", "marcelocantos", "mnemo")
+	// The compactor and CLAUDE.md reviewer spawn `claude -p` to
+	// summarise transcript text; that subprocess only needs a valid
+	// directory to chdir into — its contents are irrelevant to the
+	// stateless summarisation. Use a dedicated dir under the OS temp
+	// root: it always exists (created here), has no CLAUDE.md ancestors
+	// so the summariser loads no project context, and never depends on a
+	// developer checkout being present (🎯T82). Empty only when even the
+	// temp dir can't be created — the registry then disables
+	// summarisation rather than spawning into a missing cwd.
+	summariserDir := summariserWorkDir()
 
-	reg := registry.NewRegistry(ctx, cfg, mnemoRepoDir)
+	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
 	// Determine the default username — used when a request arrives
