@@ -83,6 +83,30 @@ func TestIngestTodosIncremental(t *testing.T) {
 	}
 }
 
+func TestIngestTodosDiscoversSynthesisRoot(t *testing.T) {
+	// A synthesis root is a non-git "tree of interest" (e.g. ~/think).
+	// 🎯T80: its TODO files must be indexed even though there is no .git.
+	projectDir := t.TempDir()
+	synthRoot := t.TempDir() // deliberately NOT a git repo
+	s := newTestStore(t, projectDir)
+	s.SetSynthesisRoots([]string{synthRoot})
+	writeDoc(t, filepath.Join(synthRoot, "TODO.md"), "- [ ] non-git planning task #think\n")
+
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
+	found := false
+	for _, td := range todos {
+		if td.Text == "non-git planning task" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("TODO under non-git synthesis root not indexed: %+v", todos)
+	}
+}
+
 func TestSearchTodosFilters(t *testing.T) {
 	s, _ := ingestSampleTodos(t)
 
