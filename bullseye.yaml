@@ -2627,6 +2627,23 @@ targets:
     origin: manual
     discovered: 2026-06-17
     achieved: 2026-06-17
+  T81:
+    name: 'The internal/e2e suite never flakes a release: it is excluded from the default `go test ./...` gate (env-gated) and exercised by a dedicated nightly workflow, and the known timing races are hardened'
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    actual_cost: 3.0
+    acceptance:
+    - '`go test -tags sqlite_fts5 ./...` (without MNEMO_E2E set) reports `[no test files]` or `ok` (skip) for `internal/e2e` — the suite contributes zero test results and cannot block a PR or release.'
+    - A `TestMain` in `internal/e2e` skips all tests when `MNEMO_E2E` is unset; `MNEMO_E2E=1 go test -tags sqlite_fts5 ./internal/e2e/ -v` runs all tests including those that currently exist.
+    - A `.github/workflows/e2e-nightly.yml` workflow runs on a daily schedule and on `workflow_dispatch`, sets `MNEMO_E2E=1`, and executes `go test -tags sqlite_fts5 -run . ./internal/e2e/ -v` with the same CGO/sqlite_fts5/Go toolchain setup as ci.yml.
+    - The `TestVaultSyncViaMCP` file-poll deadline is extended (30s+) and the vault-sync wait loop is hardened against the coalescing race so the test cannot fail within 0.4s on a loaded runner.
+    - All e2e tests that poll for daemon readiness or background effects use bounded retry loops rather than point-in-time assertions, so transient scheduling jitter does not produce false negatives.
+    - The `ci.yml` and `release.yml` workflows are unchanged — they continue to run `go test ./...` without `MNEMO_E2E`, guaranteeing e2e tests are never in the blocking gate.
+    context: 'The internal/e2e tests (TestVaultSyncViaMCP, TestSmoke, TestIsolation, TestCompactorStatusDefaultUserViaMCP) have flaked repeatedly on loaded CI runners — both ubuntu-latest (missing mnemo:generated fence, 0.42s fast-fail) and windows-latest (daemon never becomes ready, 30s timeout). These flakes forced multiple release force-merges. Root causes: (1) on windows-latest the daemon takes >30s to start because go test spawns the e2e binary compile inside the same already-loaded runner, (2) on ubuntu-latest vault-sync coalescing races cause the index.md to be written without the mnemo:generated fence before the hot-reload completes. The fix is three-part: env-gate the suite out of the default gate, add a nightly workflow, and harden the timing-sensitive assertions.'
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
   T9:
     name: Full-fidelity ingest and observability tools
     status: achieved

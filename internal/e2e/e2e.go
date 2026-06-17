@@ -110,7 +110,11 @@ func Start(t *testing.T, opts ...Options) *Daemon {
 		o = opts[0]
 	}
 	if o.StartTimeout == 0 {
-		o.StartTimeout = 30 * time.Second
+		// 60s is generous enough for cold daemon startup on a loaded
+		// Windows CI runner where the preceding test packages have
+		// already saturated the CPU. The previous 30s ceiling caused
+		// intermittent false-red failures on windows-latest.
+		o.StartTimeout = 60 * time.Second
 	}
 	if o.Home == "" {
 		o.Home = t.TempDir()
