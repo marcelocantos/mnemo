@@ -536,11 +536,14 @@ and which require a restart.
 ### mnemo_todos / mnemo_todo_set / mnemo_todo_add
 
 mnemo indexes TODO items from `TODO.md` and `todos.md` files found at
-any depth in every known repo — including the canonical `docs/TODO.md`
-convention and the repo-root `TODO.md` — plus any `todo_globs` you
-configure, parsed in the **Obsidian Tasks** dialect. Discovery honours
-`.gitignore`, the shared doc-exclude dirs, and the loop-safety exclusion
-fence; a file is re-parsed only when its content hash changes.
+any depth under every known root — both git repos (discovered from
+`workspace_roots` and from session cwds, including the canonical
+`docs/TODO.md` convention and the repo-root `TODO.md`) and non-git
+`synthesis_roots` (planning spaces such as `~/think`) — plus any
+`todo_globs` you configure, parsed in the **Obsidian Tasks** dialect.
+Discovery honours `.gitignore`, the shared doc-exclude dirs, and the
+loop-safety exclusion fence; a file is re-parsed only when its content
+hash changes.
 
 Recognised decorations: 📅 due, ⏳ scheduled, 🛫 start, ➕ created,
 ✅ done, ❌ cancelled, 🔁 recurrence; priority 🔺 highest, ⏫ high,

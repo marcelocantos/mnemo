@@ -78,12 +78,39 @@ type TodoQuery struct {
 func (s *Store) IngestTodos() error {
 	s.rootsMu.RLock()
 	roots := s.knownRepoRootsLocked()
+	synthRoots := append([]string(nil), s.synthesisRoots...)
 	globs := append([]string(nil), s.todoGlobs...)
 	s.rootsMu.RUnlock()
 
-	indexed, onDisk := 0, 0
+	// Track TODO files under every known root: the git-repo roots from
+	// knownRepoRoots (workspace_roots discovery + session cwd →
+	// findRepoRoot) AND the non-git synthesis roots (planning spaces such
+	// as ~/think, which carry no .git marker). Roots are deduplicated by
+	// path, and a shared seen-set keeps a TODO file reachable from two
+	// overlapping roots — e.g. a repo nested under a synthesis root —
+	// from being walked twice in one pass.
+	type todoRoot struct{ root, repo string }
+	seenRoot := map[string]bool{}
+	var all []todoRoot
 	for _, rr := range roots {
-		n, od := s.ingestTodosForRepo(rr.root, rr.repo, globs)
+		if seenRoot[rr.root] {
+			continue
+		}
+		seenRoot[rr.root] = true
+		all = append(all, todoRoot{rr.root, rr.repo})
+	}
+	for _, sr := range synthRoots {
+		if sr == "" || seenRoot[sr] {
+			continue
+		}
+		seenRoot[sr] = true
+		all = append(all, todoRoot{sr, repoNameFromPath(sr)})
+	}
+
+	seenFile := map[string]bool{}
+	indexed, onDisk := 0, 0
+	for _, rr := range all {
+		n, od := s.ingestTodosForRepo(rr.root, rr.repo, globs, seenFile)
 		indexed += n
 		onDisk += od
 	}
@@ -101,10 +128,13 @@ func isTodoFileName(name string) bool {
 	return false
 }
 
-// ingestTodosForRepo walks one repo root, ingesting every TODO file it
-// finds (default names plus configured globs), honouring .gitignore, the
-// shared doc-exclude dirs, and the loop-safety exclusion fence.
-func (s *Store) ingestTodosForRepo(repoRoot, repo string, globs []string) (indexed, onDisk int) {
+// ingestTodosForRepo walks one root, ingesting every TODO file it finds
+// (default names plus configured globs), honouring .gitignore, the shared
+// doc-exclude dirs, and the loop-safety exclusion fence. The root need
+// not be a git repo — synthesis roots are walked the same way. seen is
+// shared across roots in one IngestTodos pass so a file reachable from
+// two overlapping roots is ingested only once.
+func (s *Store) ingestTodosForRepo(repoRoot, repo string, globs []string, seen map[string]bool) (indexed, onDisk int) {
 	gitignore := parseGitignorePatterns(filepath.Join(repoRoot, ".gitignore"))
 
 	_ = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
@@ -132,6 +162,10 @@ func (s *Store) ingestTodosForRepo(repoRoot, repo string, globs []string) (index
 		if !isTodoFileName(name) && !matchesTodoGlob(globs, rel) {
 			return nil
 		}
+		if seen[path] {
+			return nil
+		}
+		seen[path] = true
 		onDisk++
 		indexed += s.ingestTodoFile(path, repo)
 		return nil
