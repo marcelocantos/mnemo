@@ -199,7 +199,7 @@ func (s *Store) IngestDocs() error {
 		skipped += sk
 		onDisk += od
 	}
-	s.recordBackfillStatus("docs", indexed, onDisk)
+	s.recordBackfillStatus("docs", indexed+skipped, onDisk)
 	slog.Info("ingested docs", "indexed", indexed, "skipped_unchanged", skipped, "on_disk", onDisk)
 	return nil
 }
