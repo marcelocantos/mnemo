@@ -26,6 +26,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
+	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -333,6 +334,11 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		defer e.workers.Done()
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
+		// Per-stream circuit breakers (🎯T84): a reconciler that keeps
+		// erroring (e.g. gh down, a wedged query) trips after 5 consecutive
+		// failures and is skipped for 10m, so one broken stream can't
+		// retry hot every minute forever.
+		breakers := map[string]*breaker.Breaker{}
 		for {
 			now := time.Now()
 			// 🎯T68.7 capstone: drive every registered periodic stream
@@ -340,10 +346,23 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			// stream is one entry in Store.StreamReconcilers(); this
 			// loop stays the same.
 			for _, sr := range e.store.StreamReconcilers() {
-				if n, err := sr.Reconcile(r.baseCtx, now); err != nil {
+				b := breakers[sr.Name()]
+				if b == nil {
+					b = breaker.New(5, 10*time.Minute)
+					breakers[sr.Name()] = b
+				}
+				if !b.Allow(now) {
+					continue
+				}
+				n, err := sr.Reconcile(r.baseCtx, now)
+				if err != nil {
+					b.Record(time.Now(), false, err.Error())
 					logger.Warn("reconcile failed", "stream", sr.Name(), "err", err)
-				} else if n > 0 {
-					logger.Info("reconciled", "stream", sr.Name(), "count", n)
+				} else {
+					b.Record(time.Now(), true, "")
+					if n > 0 {
+						logger.Info("reconciled", "stream", sr.Name(), "count", n)
+					}
 				}
 			}
 			select {
