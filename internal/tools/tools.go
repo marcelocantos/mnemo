@@ -495,8 +495,9 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithString("text", mcp.Description("Replace the task prose. Trailing emoji-metadata (dates/priority/recurrence) is preserved; include any #tags or [[links]] you want to keep.")),
 		),
 		mcp.NewTool("mnemo_todo_add",
-			mcp.WithDescription(`Append a new TODO item to an already-tracked TODO file (the file must appear as file_path in mnemo_todos output). Optionally file it under a heading, created at end of file if absent. Text may carry Obsidian decorations, e.g. "review spec 📅 2026-07-01 ⏫ #docs". Written atomically and re-indexed immediately.`),
-			mcp.WithString("file", mcp.Required(), mcp.Description("Absolute path to a tracked TODO file (from mnemo_todos file_path)")),
+			mcp.WithDescription(`Add a new TODO item, creating the TODO file if it does not yet exist. Locate the target by `+"`file`"+` (an explicit absolute path) or by `+"`dir`"+` (any directory in the target project, which resolves to that project's docs/TODO.md). A non-existent target is created — provided it sits within a known session root (tree-of-interest) and carries an auto-indexable name (TODO.md/todos.md or a configured todo_glob) — so the item is immediately re-indexable; otherwise the add is refused with an explanation. Optionally file it under a heading, created at end of file if absent. Text may carry Obsidian decorations, e.g. "review spec 📅 2026-07-01 ⏫ #docs". Written atomically and re-indexed immediately.`),
+			mcp.WithString("file", mcp.Description("Absolute path to the target TODO file; created if missing. Overrides dir.")),
+			mcp.WithString("dir", mcp.Description("A directory in the target project; resolves to <project root>/docs/TODO.md. Use to get the conventional location without computing the path.")),
 			mcp.WithString("text", mcp.Required(), mcp.Description("Task text, optionally with Obsidian Tasks decorations")),
 			mcp.WithString("section", mcp.Description("Heading to file the task under (created if absent)")),
 			mcp.WithString("status", mcp.Description("Initial status: open (default), done, cancelled, in_progress")),
@@ -1695,11 +1696,15 @@ func (h *callHandler) todoSet(args map[string]any) (string, bool, error) {
 
 func (h *callHandler) todoAdd(args map[string]any) (string, bool, error) {
 	file, _ := args["file"].(string)
+	dir, _ := args["dir"].(string)
 	text, _ := args["text"].(string)
-	if file == "" || text == "" {
-		return "file and text are required", true, nil
+	if text == "" {
+		return "text is required", true, nil
 	}
-	a := store.TodoAdd{File: file, Text: text}
+	if file == "" && dir == "" {
+		return "file or dir is required", true, nil
+	}
+	a := store.TodoAdd{File: file, Dir: dir, Text: text}
 	a.Section, _ = args["section"].(string)
 	if v, ok := args["status"].(string); ok && v != "" {
 		if !validTodoStatus(v) {

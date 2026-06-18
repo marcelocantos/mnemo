@@ -355,6 +355,105 @@ func TestAddTodoUntrackedFile(t *testing.T) {
 	}
 }
 
+// --- 🎯T88: mnemo_todo_add creates the file when none exists ---
+
+// TestAddTodoCreatesDefaultInTree: a dir locator inside a non-git session tree
+// resolves to <tree>/docs/TODO.md, which is created (with a title heading), the
+// task appended, and the file re-indexed by a subsequent IngestTodos pass.
+func TestAddTodoCreatesDefaultInTree(t *testing.T) {
+	projectDir := t.TempDir()
+	treeDir := filepath.Join(t.TempDir(), "think", "threads", "demo")
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, projectDir)
+	seedSession(t, s, "sess-add", treeDir, "interactive")
+
+	info, err := s.AddTodo(TodoAdd{Dir: treeDir, Text: "first task #x"})
+	if err != nil {
+		t.Fatalf("AddTodo: %v", err)
+	}
+	want := filepath.Join(treeDir, "docs", "TODO.md")
+	if info == nil || info.FilePath != want {
+		t.Fatalf("want todo at %s, got %+v", want, info)
+	}
+	if info.Text != "first task" {
+		t.Errorf("text = %q, want %q", info.Text, "first task")
+	}
+	data, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("created file unreadable: %v", err)
+	}
+	if !strings.Contains(string(data), "# TODO") || !strings.Contains(string(data), "first task") {
+		t.Errorf("created file missing seed heading or task:\n%s", data)
+	}
+	// Re-discoverable: a fresh IngestTodos keeps the task (standard name, in a tree).
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
+	found := false
+	for _, td := range todos {
+		if td.Text == "first task" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("created task not re-indexed by IngestTodos")
+	}
+}
+
+// TestAddTodoCreatesExplicitFile: an explicit file path inside a tree is
+// created even when it is not the default docs/TODO.md.
+func TestAddTodoCreatesExplicitFile(t *testing.T) {
+	projectDir := t.TempDir()
+	treeDir := filepath.Join(t.TempDir(), "space", "plan")
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, projectDir)
+	seedSession(t, s, "sess-explicit", treeDir, "interactive")
+
+	target := filepath.Join(treeDir, "TODO.md")
+	info, err := s.AddTodo(TodoAdd{File: target, Text: "root task"})
+	if err != nil {
+		t.Fatalf("AddTodo: %v", err)
+	}
+	if info == nil || info.FilePath != target {
+		t.Fatalf("want todo at %s, got %+v", target, info)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("explicit target not created: %v", err)
+	}
+}
+
+// TestAddTodoRefusesOutsideTree: a target outside every known tree is refused,
+// so a task never lands in a file IngestTodos cannot re-discover.
+func TestAddTodoRefusesOutsideTree(t *testing.T) {
+	projectDir := t.TempDir()
+	s := newTestStore(t, projectDir)
+	orphan := filepath.Join(t.TempDir(), "loose", "TODO.md")
+	if _, err := s.AddTodo(TodoAdd{File: orphan, Text: "x"}); err == nil {
+		t.Error("expected refusal for a target outside any known tree")
+	}
+}
+
+// TestAddTodoRefusesNonIndexableName: a target inside a tree but with a name
+// IngestTodos would never pick up is refused.
+func TestAddTodoRefusesNonIndexableName(t *testing.T) {
+	projectDir := t.TempDir()
+	treeDir := filepath.Join(t.TempDir(), "space", "plan")
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, projectDir)
+	seedSession(t, s, "sess-badname", treeDir, "interactive")
+
+	if _, err := s.AddTodo(TodoAdd{File: filepath.Join(treeDir, "NOTES.txt"), Text: "x"}); err == nil {
+		t.Error("expected refusal for a non-indexable file name")
+	}
+}
+
 // TestTodoIngestStatusMetric verifies that ingest_status.files_indexed equals
 // ingest_status.files_on_disk (gap = 0) after a full todos ingest, even on the
 // second pass when all files are skipped-unchanged. This guards against the

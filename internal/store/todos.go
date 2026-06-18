@@ -473,35 +473,97 @@ func (s *Store) MutateTodo(m TodoMutation) (*TodoInfo, error) {
 	return s.todoAt(filePath, line)
 }
 
-// TodoAdd describes a new task to append to a TODO file.
+// TodoAdd describes a new task to add to a TODO file. The target is located
+// by File (an explicit absolute path, the override) or, when File is empty,
+// by Dir: the tree-of-interest (session root) containing Dir, under which the
+// conventional docs/TODO.md is used. A target that does not yet exist is
+// created — provided it sits within a known tree and carries an auto-indexable
+// name — so the task is immediately re-discoverable by IngestTodos.
 type TodoAdd struct {
-	File    string // absolute path to an already-indexed TODO file
+	File    string // absolute path to the target TODO file (override); created if missing
+	Dir     string // a directory in the target project; resolves to <tree>/docs/TODO.md
 	Text    string // task body (may include Obsidian decorations)
 	Section string // optional heading to file the task under
 	Status  string // "" defaults to open
 }
 
-// AddTodo appends a new task to an existing TODO file and re-indexes it.
-// When Section names an existing heading the task is inserted after that
-// section's last line; otherwise it is appended at end of file (creating
-// the heading when Section is set but absent). The file must already be
-// a tracked TODO file.
+// defaultTodoRelPath is the conventional location of a project's TODO file,
+// used when AddTodo resolves a target from a directory rather than an explicit
+// file path.
+var defaultTodoRelPath = filepath.Join("docs", "TODO.md")
+
+// newTodoFileSeed is the initial content written when AddTodo creates a TODO
+// file that does not yet exist: a single title heading, so the file is a
+// well-formed document rather than a bare task list.
+const newTodoFileSeed = "# TODO\n\n"
+
+// AddTodo adds a new task to a TODO file, creating the file when it does not
+// yet exist. When Section names an existing heading the task is inserted after
+// that section's last line; otherwise it is appended at end of file (creating
+// the heading when Section is set but absent). A freshly created file is
+// seeded with a title heading. Creation is refused when the resolved target is
+// outside every known tree-of-interest, or its name is neither TODO.md/todos.md
+// nor a configured todo_glob — either case would write to a file IngestTodos
+// could never re-discover.
 func (s *Store) AddTodo(a TodoAdd) (*TodoInfo, error) {
-	if a.File == "" || strings.TrimSpace(a.Text) == "" {
-		return nil, fmt.Errorf("file and text are required")
+	if strings.TrimSpace(a.Text) == "" {
+		return nil, fmt.Errorf("text is required")
 	}
+
+	// Resolve the target path. An explicit File wins; otherwise derive the
+	// conventional docs/TODO.md under the tree-of-interest containing Dir.
+	target := a.File
+	if target == "" {
+		if a.Dir == "" {
+			return nil, fmt.Errorf("file or dir is required")
+		}
+		root, _, ok := s.treeRootContaining(a.Dir)
+		if !ok {
+			return nil, fmt.Errorf("%s is not within a known session root; run a session there first or pass an explicit file", a.Dir)
+		}
+		target = filepath.Join(root, defaultTodoRelPath)
+	}
+	if !filepath.IsAbs(target) {
+		return nil, fmt.Errorf("file must be an absolute path, got %q", target)
+	}
+	target = filepath.Clean(target)
+
+	// Resolve the owning repo. A tracked file is appended as-is; an untracked
+	// target must sit inside a known tree with an auto-indexable name, else the
+	// task would land in a file mnemo can never re-discover.
 	var repo string
-	err := s.readDB.QueryRow("SELECT repo FROM todo_files WHERE file_path = ?", a.File).Scan(&repo)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("%s is not a tracked TODO file", a.File)
-	}
-	if err != nil {
+	err := s.readDB.QueryRow("SELECT repo FROM todo_files WHERE file_path = ?", target).Scan(&repo)
+	switch err {
+	case nil:
+		// Tracked file: fall through to append.
+	case sql.ErrNoRows:
+		root, treeRepo, ok := s.treeRootContaining(target)
+		if !ok {
+			return nil, fmt.Errorf("%s is not within a known session root; create it under a repo or session directory so it can be indexed", target)
+		}
+		s.rootsMu.RLock()
+		globs := append([]string(nil), s.todoGlobs...)
+		s.rootsMu.RUnlock()
+		rel, _ := filepath.Rel(root, target)
+		if !isTodoFileName(filepath.Base(target)) && !matchesTodoGlob(globs, rel) {
+			return nil, fmt.Errorf("%s would not be auto-indexed: name is not TODO.md/todos.md and matches no todo_glob", target)
+		}
+		repo = treeRepo
+		if _, statErr := os.Stat(target); os.IsNotExist(statErr) {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return nil, fmt.Errorf("create %s: %w", filepath.Dir(target), err)
+			}
+			if err := atomicWriteFile(target, []byte(newTodoFileSeed)); err != nil {
+				return nil, err
+			}
+		}
+	default:
 		return nil, err
 	}
 
-	data, err := os.ReadFile(a.File)
+	data, err := os.ReadFile(target)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", a.File, err)
+		return nil, fmt.Errorf("read %s: %w", target, err)
 	}
 
 	status := todo.Status(a.Status)
@@ -511,11 +573,55 @@ func (s *Store) AddTodo(a TodoAdd) (*TodoInfo, error) {
 	newLine := todo.NewTaskLine(strings.TrimSpace(a.Text), 0, status)
 
 	updated, lineNo := insertTaskLine(string(data), a.Section, newLine)
-	if err := atomicWriteFile(a.File, []byte(updated)); err != nil {
+	if err := atomicWriteFile(target, []byte(updated)); err != nil {
 		return nil, err
 	}
-	s.ingestTodoFile(a.File, repo)
-	return s.todoAt(a.File, lineNo)
+	s.ingestTodoFile(target, repo)
+	return s.todoAt(target, lineNo)
+}
+
+// treeRootContaining returns the deepest known tree-of-interest (a session
+// root from knownRepoRoots, or a synthesis root) that contains path — i.e.
+// path is the root itself or a descendant of it. ok is false when no known
+// tree contains path. The deepest match wins, so a repo nested under a
+// synthesis root owns its own files.
+func (s *Store) treeRootContaining(path string) (root, repo string, ok bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", false
+	}
+	abs = filepath.Clean(abs)
+
+	s.rootsMu.RLock()
+	roots := s.knownRepoRootsLocked()
+	synth := append([]string(nil), s.synthesisRoots...)
+	s.rootsMu.RUnlock()
+
+	best := ""
+	for _, rr := range roots {
+		if pathWithin(rr.root, abs) && len(rr.root) > len(best) {
+			best, root, repo, ok = rr.root, rr.root, rr.repo, true
+		}
+	}
+	for _, sr := range synth {
+		if sr == "" {
+			continue
+		}
+		if pathWithin(sr, abs) && len(sr) > len(best) {
+			best, root, repo, ok = sr, sr, repoNameFromPath(sr), true
+		}
+	}
+	return root, repo, ok
+}
+
+// pathWithin reports whether target is root itself or a descendant of root,
+// comparing on a clean path-segment boundary so /a/bc is not "within" /a/b.
+func pathWithin(root, target string) bool {
+	if root == target {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(target, strings.TrimRight(root, sep)+sep)
 }
 
 // insertTaskLine inserts newLine into content under the given section,
