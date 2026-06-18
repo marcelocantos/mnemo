@@ -1462,10 +1462,12 @@ targets:
     - Trees-of-interest are derived from the DISTINCT per-entry working directories (json_extract(raw,'$.cwd') over entries) of real sessions, excluding worktree/ephemeral session types — NOT session_meta.cwd. Optional extra_trees config supplements them.
     - 'Tree roots are the session cwds themselves: no walk-up to a .git ancestor and no workspace_roots filesystem walk (repo-root discovery is removed).'
     - 'An over-broad guard prevents pathological trees: $HOME itself, filesystem roots / very-shallow paths, and any IsExcluded path are never registered as a tree.'
+    - 'Parent-child overlap among trees needs no new de-duplication: a file reached by multiple trees yields one path-keyed docs row plus one doc_tree_refs per tree (the existing SHA-256 content-hash skip + T53 references already handle it). Any content-identical rows from path/symlink aliasing are benign (same hash) and are erased once the CAS objective lands.'
     - A single ingestion walk handles all trees-of-interest; IngestDocs and IngestSynthesis are collapsed into one path; classifyTaxonomy only assigns the taxonomy tag and no longer gates inclusion.
     - workspace_roots and synthesis_roots config fields are removed or accepted-but-ignored with a deprecation warning.
-    - Loop-safety holds via the T52 exclusion registry; parent-child overlap is deduped via the T53 references/content model; the trees list is append-only (no auto-pruning).
-    - 'Unit tests cover: a non-git session cwd becoming a tree and its TODO/doc files indexing; the over-broad guard; worktree/ephemeral exclusion; per-entry (not first-cwd) derivation.'
+    - Loop-safety holds via the T52 exclusion registry; the trees list is append-only (no auto-pruning).
+    - 'Unit tests cover: a non-git session cwd becoming a tree and indexing its files; the over-broad guard; worktree/ephemeral exclusion; per-entry (not first-cwd) derivation.'
+    - 'Optional polish, deferred (not corrections): deterministic nearest-tree ownership for the scalar repo label under overlap; walk-minimal-cover for efficiency; normalized-path identity (these are subsumed by / moved to the content-addressable-store objective).'
     context: 'T52 (loop-safety exclusion registry) and T53 (references/content overlap model) are both ACHIEVED, so this is now directly actionable. Refined design after confirming the cwd mechanics: repo-root discovery is removed — the user does not care about finding repo roots; mnemo only needs project (session) roots for document discovery. Trees-of-interest are the session working directories themselves, no .git walk-up and no workspace_roots filesystem walk. Crucially, session_meta.cwd records only each session''s FIRST cwd (store.go:2908 sets it once); the working directory varies widely within a session (the live DB has sessions with up to 28 distinct cwds), so trees must be derived from the DISTINCT per-entry cwds (json_extract(raw,''$.cwd'') over the entries table), filtered to real sessions (exclude worktree/ephemeral), with an over-broad guard ($HOME, shallow roots, IsExcluded). Loop-safety is provided by the T52 registry; parent-child overlap by the T53 references model.'
     depends_on:
     - T52
@@ -2685,6 +2687,43 @@ targets:
     origin: manual
     discovered: 2026-06-18
     achieved: 2026-06-18
+  T87:
+    name: mnemo retains a queryable revision history of indexed documents, not just the latest snapshot
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A document's content history is retained across changes — revisions are appended, not overwritten — keyed on normalized path + content hash + observed timestamp.
+    - 'Prior revisions are queryable: fetch a document as of a given date, and diff between two revisions.'
+    - Latest-only reads (search, current content) stay fast — the current revision is cheap to resolve without scanning history.
+    - 'Composes with the trees-of-interest / normalized-path-identity model: one logical document with many revisions, referenced by any number of trees.'
+    - A retention / GC policy bounds revision growth (e.g. keep-N, age-out, or dedup of identical content hashes); silent unbounded growth is not acceptable.
+    context: 'Today the document index is latest-only: ingestDocFile overwrites the docs row in place on a content-hash change, and ingestTodoFile deletes+reinserts a file''s tasks. Only the current filesystem state exists; the previous content is discarded. The transcript (entries) is the sole append-only/versioned layer. This target adds document versioning — retaining revisions over time so a doc''s history is queryable (e.g. ''as of date'', diff between revisions). It composes with the T54 single-object-per-normalized-path model: one logical document (identity = normalized path), many revisions, referenced by trees; a change appends a revision rather than overwriting, while latest-only reads stay cheap. Orthogonal to T54; not for implementation yet (filed for the future per the user''s instruction).'
+    tags:
+    - ingest
+    - versioning
+    - docs
+    origin: manual
+    discovered: 2026-06-18
+  T88:
+    name: mnemo_todo_add creates the TODO file when none exists, defaulting to docs/TODO.md
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'AddTodo accepts a `dir` locator: the deepest tree-of-interest containing dir is resolved and the conventional <root>/docs/TODO.md is the target when no explicit file is given.'
+    - AddTodo accepts an explicit `file` locator (absolute path) that overrides dir and may name a not-yet-existing file.
+    - A non-existent target within a known tree and with an auto-indexable name is created (parent dirs made, seeded with a title heading) atomically, then the task is appended and the file re-indexed.
+    - Creation is refused with a clear error when the target is outside every known tree, or its name is neither TODO.md/todos.md nor a configured todo_glob (would never re-index).
+    - Appending to an already-tracked file is unchanged; the mnemo_todo_add tool exposes file/dir/text/section/status with text plus one of file|dir required.
+    - 'Unit tests cover: dir->docs/TODO.md creation in a non-git session tree; explicit-file creation; outside-tree refusal; non-indexable-name refusal; append-to-existing still works.'
+    context: 'Today AddTodo requires an already-tracked TODO file and errors otherwise, so an agent cannot start a TODO list from scratch via mnemo. This extends it to create the file. Target is located by an explicit `file` (absolute path, the override) or by `dir` (any directory in the target project, resolving to the containing tree-of-interest''s docs/TODO.md, the default). Creation is guarded: the target must sit within a known session root (tree-of-interest) AND carry an auto-indexable name (TODO.md/todos.md or a configured todo_glob), otherwise the task would land in a file IngestTodos can never re-discover (there is no prune, but it would never refresh). A created file is seeded with a title heading. Composes with T54 (session-root trees), which is what lets thread/planning dirs resolve as creation targets. Unblocks rewriting the /todo skill onto mnemo tools.'
+    tags:
+    - todos
+    - mcp
+    - ingest
+    origin: manual
+    discovered: 2026-06-18
   T9:
     name: Full-fidelity ingest and observability tools
     status: achieved
