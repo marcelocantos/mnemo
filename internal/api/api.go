@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -14,9 +15,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
 )
+
+// DiagRunner is the subset of diag.Registry used by the health endpoint.
+// Accepts a nil implementation — the endpoint reports "unavailable" in that
+// case so the dashboard degrades gracefully before the registry is wired.
+type DiagRunner interface {
+	Run(ctx context.Context, full bool, now time.Time) diag.Report
+}
 
 // Handler wraps a store resolver and serves JSON REST endpoints.
 // resolve("") returns the default user's backend, matching the behaviour
@@ -24,6 +34,7 @@ import (
 // username explicitly if needed in future.
 type Handler struct {
 	resolve func(string) (store.Backend, error)
+	diags   DiagRunner // optional; nil until wired by SetDiagRunner
 }
 
 // New creates a Handler backed by resolve. Pass the same resolver used
@@ -32,6 +43,10 @@ type Handler struct {
 func New(resolve func(string) (store.Backend, error)) *Handler {
 	return &Handler{resolve: resolve}
 }
+
+// SetDiagRunner wires the diag registry into the handler. Call once during
+// startup wiring, before serving requests.
+func (h *Handler) SetDiagRunner(r DiagRunner) { h.diags = r }
 
 // backend returns the default user's store.Backend.
 func (h *Handler) backend() (store.Backend, error) {
@@ -52,6 +67,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/messages", getOnly(h.messages))
 	mux.HandleFunc("/api/dbstats", getOnly(h.dbstats))
 	mux.HandleFunc("/api/active", getOnly(h.active))
+	mux.HandleFunc("/health", getOnly(h.health))
 }
 
 // getOnly rejects non-GET requests with 405 Method Not Allowed.
@@ -619,4 +635,21 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// health serves GET /health → diag.Report (JSON).
+// When no DiagRunner has been wired (h.diags == nil) it returns 503 with a
+// minimal error payload so the dashboard can degrade gracefully.
+// A full-tier run is triggered on each request; callers should poll at ~30 s.
+func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
+	if h.diags == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "diag registry not yet wired",
+		})
+		return
+	}
+	report := h.diags.Run(r.Context(), true, time.Now().UTC())
+	writeJSON(w, report)
 }

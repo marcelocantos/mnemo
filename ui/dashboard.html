@@ -240,6 +240,52 @@
   .loading { color: var(--text-dim); font-style: italic; padding: 10px 0; text-align: center; }
   .error { color: var(--red); font-size: 11px; padding: 4px 0; }
 
+  /* HEALTH PAGE */
+  .health-badge {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
+    border: 1px solid transparent; cursor: pointer; text-decoration: none;
+    color: inherit;
+  }
+  .health-badge.ok     { background: color-mix(in srgb, var(--accent2) 15%, transparent); border-color: var(--accent2); color: var(--accent2); }
+  .health-badge.warn   { background: color-mix(in srgb, var(--accent3) 15%, transparent); border-color: var(--accent3); color: var(--accent3); }
+  .health-badge.fail   { background: color-mix(in srgb, var(--red) 15%, transparent); border-color: var(--red); color: var(--red); }
+  .health-badge.none   { background: var(--bg3); border-color: var(--border); color: var(--text-dim); }
+  .health-badge .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+  .row-health { grid-template-columns: 1fr; }
+  .health-summary { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .health-count { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; }
+  .health-count.fail   { color: var(--red); }
+  .health-count.warn   { color: var(--accent3); }
+  .health-count.ok     { color: var(--accent2); }
+  .health-count.dim    { color: var(--text-dim); }
+  .health-generated { font-size: 9px; color: var(--text-dim); margin-left: auto; }
+
+  .health-results { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .health-result {
+    background: var(--bg3); border-radius: 6px; padding: 10px 12px;
+    border-left: 3px solid var(--border);
+    display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; align-items: start;
+  }
+  .health-result.fail { border-left-color: var(--red); }
+  .health-result.warn { border-left-color: var(--accent3); }
+  .health-result.ok   { border-left-color: var(--accent2); }
+  .health-result-main { display: flex; flex-direction: column; gap: 3px; }
+  .health-result-name { font-size: 11px; font-weight: 700; color: var(--text-bright); }
+  .health-result-detail { font-size: 10px; color: var(--text-dim); }
+  .health-result-remediation { font-size: 10px; color: var(--accent3); margin-top: 3px; font-style: italic; }
+  .health-result-actions { display: flex; gap: 6px; align-items: flex-start; flex-wrap: nowrap; }
+  .health-action-btn {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 3px 8px; border-radius: 4px; cursor: pointer;
+    font-family: inherit; font-size: 9px; white-space: nowrap; flex-shrink: 0;
+  }
+  .health-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .health-action-btn.copied { border-color: var(--accent2); color: var(--accent2); }
+  .health-tier-tag { font-size: 9px; color: var(--text-dim); padding: 1px 5px; background: var(--bg); border-radius: 3px; border: 1px solid var(--border); white-space: nowrap; }
+  .health-unavail { color: var(--text-dim); font-style: italic; padding: 16px 0; text-align: center; font-size: 11px; }
+
   /* RESPONSIVE */
   @media (max-width: 1200px) {
     .row-top { grid-template-columns: 1fr 1fr; }
@@ -265,6 +311,10 @@
       <option value="7">7d</option>
       <option value="30">30d</option>
     </select>
+    <a href="#health" id="healthBadge" class="health-badge none" title="System health">
+      <span class="badge-dot"></span>
+      <span id="healthBadgeLabel">health</span>
+    </a>
     <button id="refreshBtn" onclick="refreshAll()" title="Refresh now">↻</button>
     <select id="intervalSelect" onchange="onIntervalChange()">
       <option value="0">off</option>
@@ -355,6 +405,17 @@
     <div class="card">
       <div class="card-title" id="ctxTitle">Context Pressure (1d)</div>
       <div id="ctxContent" style="max-height:calc(4 * 52px);overflow-y:auto;"><div class="loading">loading…</div></div>
+    </div>
+  </div>
+
+  <!-- HEALTH (🎯T83) — deep-link target: #health -->
+  <div class="row row-health" id="health">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-title">System Health</div>
+        <div id="healthRefreshDot" style="width:7px;height:7px;border-radius:50%;background:var(--text-dim);flex-shrink:0;"></div>
+      </div>
+      <div id="healthContent"><div class="loading">loading…</div></div>
     </div>
   </div>
 </div>
@@ -961,6 +1022,180 @@ async function loadContext() {
   }
 }
 
+// ── Health (🎯T83) ────────────────────────────────────────────────────
+// Representative fixture for local testing / smoke-testing. Consumed
+// when window.__HEALTH_FIXTURE__ is set (e.g. from a test harness or
+// an injected <script> block). In production the live /health endpoint
+// is used instead.
+//
+// Example: paste this in the browser console to test the page locally
+// without a running daemon:
+//
+//   window.__HEALTH_FIXTURE__ = {
+//     generated_at: new Date().toISOString(), ok: 3, warn: 1, fail: 1,
+//     results: [
+//       { name:"compactor.workdir",  severity:"fail", tier:"full",
+//         detail:"summariser workdir /tmp/mnemo-summariser is missing",
+//         remediation:"brew services restart mnemo" },
+//       { name:"ingest.drift",       severity:"warn", tier:"fast",
+//         detail:"3 files unindexed (total 842 KB)",
+//         remediation:"wait 30 s; if persists: brew services restart mnemo" },
+//       { name:"db.schema",          severity:"ok",   tier:"full",  detail:"schema version 42" },
+//       { name:"db.writable",        severity:"ok",   tier:"fast",  detail:"~/.mnemo is writable" },
+//       { name:"mcp.endpoint",       severity:"ok",   tier:"fast",  detail:"initialize OK (4 ms)" },
+//     ]
+//   };
+
+let healthTimer = null;
+
+function severityOrder(s) {
+  return s === 'fail' ? 0 : s === 'warn' ? 1 : 2;
+}
+
+function updateHealthBadge(report) {
+  const badge = document.getElementById('healthBadge');
+  const label = document.getElementById('healthBadgeLabel');
+  if (!badge) return;
+
+  // Remove all severity classes.
+  badge.classList.remove('ok', 'warn', 'fail', 'none');
+
+  if (!report) {
+    badge.classList.add('none');
+    label.textContent = 'health';
+    return;
+  }
+
+  const worst = report.fail > 0 ? 'fail' : report.warn > 0 ? 'warn' : 'ok';
+  badge.classList.add(worst);
+  if (worst === 'ok') {
+    label.textContent = 'healthy';
+  } else if (worst === 'fail') {
+    label.textContent = report.fail + ' fail';
+  } else {
+    label.textContent = report.warn + ' warn';
+  }
+}
+
+function renderHealthReport(report) {
+  const el = document.getElementById('healthContent');
+  const dot = document.getElementById('healthRefreshDot');
+
+  updateHealthBadge(report);
+
+  // Sort by severity: fail → warn → ok, then by name.
+  const sorted = [...(report.results || [])].sort((a, b) => {
+    const so = severityOrder(a.severity) - severityOrder(b.severity);
+    return so !== 0 ? so : a.name.localeCompare(b.name);
+  });
+
+  const worst = report.fail > 0 ? 'fail' : report.warn > 0 ? 'warn' : 'ok';
+  const dotColor = worst === 'fail' ? 'var(--red)' : worst === 'warn' ? 'var(--accent3)' : 'var(--accent2)';
+  if (dot) dot.style.background = dotColor;
+
+  const genAt = report.generated_at
+    ? new Date(report.generated_at).toLocaleTimeString()
+    : '';
+
+  const summaryHTML = `
+    <div class="health-summary">
+      ${report.fail > 0 ? `<span class="health-count fail">✗ ${report.fail} fail</span>` : ''}
+      ${report.warn > 0 ? `<span class="health-count warn">⚠ ${report.warn} warn</span>` : ''}
+      <span class="health-count ok">✓ ${report.ok} ok</span>
+      ${genAt ? `<span class="health-generated">checked at ${esc(genAt)}</span>` : ''}
+    </div>
+  `;
+
+  const resultsHTML = sorted.map(res => {
+    const hasRemediation = res.remediation && res.remediation.trim();
+    const hasActions = res.severity !== 'ok' && hasRemediation;
+
+    // Unique id for the copy button feedback.
+    const btnId = 'hcopy-' + Math.random().toString(36).slice(2);
+
+    const remediationHTML = hasRemediation
+      ? `<div class="health-result-remediation">${esc(res.remediation)}</div>`
+      : '';
+
+    // Copy button copies the remediation text (typically a shell command).
+    const copyBtn = hasActions ? `
+      <button id="${esc(btnId)}" class="health-action-btn" title="Copy remediation to clipboard"
+        onclick="healthCopyRemediation(${JSON.stringify(btnId)}, ${JSON.stringify(res.remediation || '')})">
+        copy fix
+      </button>` : '';
+
+    // File-a-fix link to GitHub issues with prefilled title + body.
+    const issueTitle = encodeURIComponent('[health] ' + res.name + ': ' + (res.detail || '').substring(0, 80));
+    const issueBody = encodeURIComponent(
+      '**Check:** `' + res.name + '`\n' +
+      '**Severity:** ' + res.severity + '\n' +
+      '**Detail:** ' + (res.detail || '') + '\n' +
+      (res.remediation ? '**Suggested remediation:** `' + res.remediation + '`\n' : '') +
+      '\n_Reported by mnemo dashboard health page._'
+    );
+    const issueURL = 'https://github.com/marcelocantos/mnemo/issues/new?title=' + issueTitle + '&body=' + issueBody;
+    const fileBtn = hasActions ? `
+      <a href="${esc(issueURL)}" target="_blank" rel="noopener" class="health-action-btn" title="File a GitHub issue for this check">
+        file issue
+      </a>` : '';
+
+    return `
+      <div class="health-result ${esc(res.severity)}">
+        <div class="health-result-main">
+          <div class="health-result-name">${esc(res.name)}</div>
+          ${res.detail ? `<div class="health-result-detail">${esc(res.detail)}</div>` : ''}
+          ${remediationHTML}
+        </div>
+        <div class="health-result-actions">
+          <span class="health-tier-tag">${esc(res.tier)}</span>
+          ${copyBtn}
+          ${fileBtn}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  el.innerHTML = summaryHTML + `<div class="health-results">${resultsHTML || '<div class="health-unavail">No checks registered.</div>'}</div>`;
+}
+
+function healthCopyRemediation(btnId, text) {
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+  }).catch(() => {/* clipboard blocked — no-op */});
+}
+
+async function loadHealth() {
+  // Support a fixture object for local smoke testing without a daemon.
+  if (window.__HEALTH_FIXTURE__) {
+    renderHealthReport(window.__HEALTH_FIXTURE__);
+    return;
+  }
+
+  try {
+    const report = await apiFetch('/health');
+    renderHealthReport(report);
+  } catch (e) {
+    const el = document.getElementById('healthContent');
+    const dot = document.getElementById('healthRefreshDot');
+    if (dot) dot.style.background = 'var(--text-dim)';
+    updateHealthBadge(null);
+    if (el) el.innerHTML = `<div class="health-unavail">Health endpoint unavailable — <span class="error">${esc(e.message)}</span></div>`;
+  }
+}
+
+function startHealthMonitor() {
+  loadHealth();
+  clearInterval(healthTimer);
+  // Poll every 30 s as specified for 🎯T83.
+  healthTimer = setInterval(loadHealth, 30_000);
+}
+
 // ── Orchestration ─────────────────────────────────────────────────────
 async function refreshAll() {
   const dot = document.getElementById('statusDot');
@@ -977,6 +1212,7 @@ async function refreshAll() {
       loadRepoCost(),
       loadDailyCost(),
       loadActivity(),
+      loadHealth(),
     ]);
     const now = new Date();
     document.getElementById('updatedAt').textContent =
@@ -1002,6 +1238,7 @@ applyTheme();
 refreshAll();
 onIntervalChange();
 startLiveMonitor();
+startHealthMonitor();
 </script>
 </body>
 </html>
