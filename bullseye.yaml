@@ -2646,9 +2646,10 @@ targets:
     achieved: 2026-06-18
   T82:
     name: The compactor/reviewer summariser runs in a dedicated, always-present temp working directory and never hammers on a missing cwd
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - The compactor and CLAUDE.md reviewer spawn `claude -p` in a dedicated working directory under the OS temp root (e.g. $TMPDIR/mnemo-summariser), created via MkdirAll at startup. They no longer depend on a developer checkout existing at ~/work/github.com/marcelocantos/mnemo (main.go's hardcoded mnemoRepoDir).
     - The chosen directory has no CLAUDE.md/project-context ancestors, so the summariser loads no project instructions (cleaner, recursion-safer than the repo or ~/.mnemo).
@@ -2658,11 +2659,13 @@ targets:
     context: 'Discovered 2026-06-18 on a second machine running 0.50.0. main.go:520 hardcodes the compactor/reviewer claude-spawn cwd to <home>/work/github.com/marcelocantos/mnemo (passed as registry.mnemoRepoDir → ClaudiaCaller.workDir). On any machine without that exact checkout, every compaction tick fails `claudia: run task: start claude: chdir <path>: no such file or directory`, retries per-second, contends the single SQLite writer (each failure writes a quarantine row) and starves the indexer — docs/todos/transcript backfill stops. The summariser is stateless (summarises prompt text); its cwd contents are irrelevant, so a neutral temp dir is correct. Root fix; T84 (circuit-breaker) is the safety net and T83 (diagnostics) the surfacing.'
     origin: manual
     discovered: 2026-06-18
+    achieved: 2026-06-18
   T83:
     name: mnemo self-diagnoses its health (startup + timer, fast/full) and surfaces problems via mnemo_doctor, opt-out OS notifications, and a dashboard health page
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 8.0
     acceptance:
     - A diagnostics subsystem runs a registry of named health checks; each returns severity (ok/warn/fail), detail, and a remediation hint, tagged tier (fast/full) and cadence (startup/timer). Adding a check is one registry entry.
     - 'Startup runs the full suite once — environment/config validation: summariser workDir exists+writable (the T82 condition), `claude` resolvable on PATH, DB writable + schema current, configured roots (workspace_roots/synthesis_roots/extra_project_dirs/~/.claude/projects) resolvable. Warn/fail are logged prominently; fail triggers a notification.'
@@ -2677,11 +2680,13 @@ targets:
     - T84
     origin: manual
     discovered: 2026-06-18
+    achieved: 2026-06-18
   T84:
     name: A repeatedly-failing background task trips a circuit-breaker and halts/backs-off instead of hammering CPU and contending shared resources
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - 'A reusable circuit-breaker primitive exists: a unit of work that fails K consecutive times trips open and halts (or backs off to a long interval); after a cooldown it half-opens for a single trial and closes on success. State + last error are queryable.'
     - 'The convergence/worker engine applies the breaker so any repeatedly-failing task halts rather than retrying hot: at minimum the compaction watcher (worker-level systemic failure, distinct from T77''s per-session quarantine) and the StreamReconciler loop. A broken task stops consuming CPU and stops contending the single SQLite writer, so it cannot starve ingest or other workers.'
@@ -2691,6 +2696,7 @@ targets:
     context: Requested 2026-06-18 alongside T82/T83. The cwd bug (T82) caused unbounded per-tick retries that ate CPU and starved the indexer. T77 added per-session compaction quarantine, but that is per-item; there is no generic per-task safety net, so a systemic failure (every item fails for the same external reason — missing cwd, claude not on PATH, DB locked) hammers indefinitely. Build a generic circuit-breaker into the worker/convergence engine so the failure class is contained regardless of cause. Layers with T82 (don't create the bad condition) and T83 (surface it).
     origin: manual
     discovered: 2026-06-18
+    achieved: 2026-06-18
   T9:
     name: Full-fidelity ingest and observability tools
     status: achieved
