@@ -67,15 +67,15 @@ func TestIngestTodosBasic(t *testing.T) {
 func TestIngestTodosIncremental(t *testing.T) {
 	s, path := ingestSampleTodos(t)
 
-	// Re-ingest unchanged → no change in count.
-	if n := s.ingestTodoFile(path, "myrepo"); n != 0 {
-		t.Errorf("unchanged re-ingest wrote %d, want 0 (skipped)", n)
+	// Re-ingest unchanged → 0 tasks written, but file is still ok (skipped).
+	if n, ok := s.ingestTodoFile(path, "myrepo"); n != 0 || !ok {
+		t.Errorf("unchanged re-ingest: tasks=%d ok=%v, want tasks=0 ok=true (skipped)", n, ok)
 	}
 
 	// Modify the file → re-ingest replaces.
 	writeDoc(t, path, "# X\n- [ ] only one\n")
-	if n := s.ingestTodoFile(path, "myrepo"); n != 1 {
-		t.Errorf("changed re-ingest wrote %d, want 1", n)
+	if n, ok := s.ingestTodoFile(path, "myrepo"); n != 1 || !ok {
+		t.Errorf("changed re-ingest: tasks=%d ok=%v, want tasks=1 ok=true", n, ok)
 	}
 	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
 	if len(todos) != 1 || todos[0].Text != "only one" {
@@ -352,5 +352,51 @@ func TestAddTodoUntrackedFile(t *testing.T) {
 	s, _ := ingestSampleTodos(t)
 	if _, err := s.AddTodo(TodoAdd{File: "/nonexistent/TODO.md", Text: "x"}); err == nil {
 		t.Error("expected error for untracked file")
+	}
+}
+
+// TestTodoIngestStatusMetric verifies that ingest_status.files_indexed equals
+// ingest_status.files_on_disk (gap = 0) after a full todos ingest, even on the
+// second pass when all files are skipped-unchanged. This guards against the
+// former unit mismatch where files_indexed was a task count and files_on_disk
+// was a file count.
+func TestTodoIngestStatusMetric(t *testing.T) {
+	projectDir := t.TempDir()
+	repoRoot := filepath.Join(t.TempDir(), "myorg", "myrepo")
+	s := newTestStore(t, projectDir)
+	setupDocRepo(t, s, repoRoot)
+
+	// Two TODO files: root TODO.md and docs/TODO.md.
+	writeDoc(t, filepath.Join(repoRoot, "TODO.md"), sampleTodo)
+	writeDoc(t, filepath.Join(repoRoot, "docs", "TODO.md"), "- [ ] docs task\n")
+
+	// First pass: both files freshly indexed.
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	checkTodoMetricGap(t, s, "after first ingest")
+
+	// Second pass: all files unchanged — skipped-unchanged files must still
+	// count toward files_indexed so the gap remains 0.
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	checkTodoMetricGap(t, s, "after second ingest (all skipped-unchanged)")
+}
+
+func checkTodoMetricGap(t *testing.T, s *Store, label string) {
+	t.Helper()
+	rows, err := s.Query("SELECT files_indexed, files_on_disk FROM ingest_status WHERE stream = 'todos'")
+	if err != nil {
+		t.Fatalf("%s: query ingest_status: %v", label, err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("%s: no ingest_status row for todos stream", label)
+	}
+	fi, _ := rows[0]["files_indexed"].(int64)
+	fd, _ := rows[0]["files_on_disk"].(int64)
+	if fi != fd {
+		t.Errorf("%s: todos ingest_status gap = %d (files_indexed=%d files_on_disk=%d), want 0",
+			label, fd-fi, fi, fd)
 	}
 }

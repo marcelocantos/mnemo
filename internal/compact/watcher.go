@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/targets"
 )
@@ -159,6 +160,18 @@ type Watcher struct {
 	inFlightSession     string                // session_id currently being ticked (or "")
 	counts              map[tickOutcome]int64 // lifetime tick-outcome tallies
 	globalCooldownUntil time.Time             // watcher-wide pause after a rate limit (🎯T72)
+	breaker             *breaker.Breaker      // per-task circuit breaker for systemic tick failures (🎯T84)
+}
+
+// BreakerSnapshot returns the compaction watcher's circuit-breaker state
+// (🎯T84) for the diagnostics suite — a tripped breaker means every tick
+// is failing systemically (e.g. a missing summariser cwd, claude off
+// PATH), which surfaces as a fail-severity health check (🎯T83).
+func (w *Watcher) BreakerSnapshot() breaker.Snapshot {
+	if w.breaker == nil {
+		return breaker.Snapshot{State: breaker.StateClosed}
+	}
+	return w.breaker.Snapshot()
 }
 
 // inGlobalCooldown reports whether the watcher is paused after a recent
@@ -188,6 +201,7 @@ func NewWatcher(src storeSource, c *Compactor, cfg WatcherConfig) *Watcher {
 		compactor: c,
 		cfg:       cfg,
 		counts:    map[tickOutcome]int64{},
+		breaker:   breaker.New(systemicFailureThreshold, systemicFailureCooldown),
 	}
 }
 
@@ -308,6 +322,41 @@ func (w *Watcher) scan(ctx context.Context) {
 		return
 	}
 
+	// Circuit-breaker (🎯T84): if every attempted tick has failed for
+	// several consecutive scans, the cause is systemic (missing summariser
+	// cwd, claude off PATH, a wedged DB), not a few poison sessions. Skip
+	// the scan while the breaker is open so the watcher stops spawning
+	// failing subprocesses and contending the SQLite writer, freeing
+	// ingest and the other workers.
+	if !w.breaker.Allow(now) {
+		snap := w.breaker.Snapshot()
+		slog.Warn("compact: circuit-breaker open; skipping scan",
+			"lifetime_trips", snap.TripCount, "last_error", snap.LastError)
+		return
+	}
+
+	// Tally tick outcomes for the breaker. A scan where the summariser
+	// actually ran (compacted/nothing/budget/deferred) is a success; a
+	// scan where every attempt hard-failed (failed/timeout) is a failure.
+	// A rate-limited scan has its own back-off and must not also trip it.
+	okTicks, failedTicks := 0, 0
+	rateLimited := false
+	var lastTickErr string
+	defer func() {
+		switch {
+		case rateLimited:
+			return
+		case okTicks > 0:
+			w.breaker.Record(time.Now(), true, "")
+		case failedTicks > 0:
+			w.breaker.Record(time.Now(), false, lastTickErr)
+			if snap := w.breaker.Snapshot(); snap.Open {
+				slog.Warn("compact: every tick failed; circuit-breaker tripped, pausing",
+					"cooldown", systemicFailureCooldown, "last_error", lastTickErr)
+			}
+		}
+	}()
+
 	// Per-scan compaction cap (🎯T68.1): bound the number of real
 	// compactions one scan performs so draining a large historical
 	// backlog never starves live sessions (which sort first) or
@@ -329,6 +378,7 @@ func (w *Watcher) scan(ctx context.Context) {
 		case outcomeRateLimited:
 			// Account-wide condition: stop this scan and back the whole
 			// watcher off rather than failing every remaining candidate.
+			rateLimited = true
 			w.setGlobalCooldown(time.Now().Add(rateLimitCooldown))
 			slog.Warn("compact: summariser rate-limited; backing off",
 				"cooldown", rateLimitCooldown)
@@ -341,12 +391,22 @@ func (w *Watcher) scan(ctx context.Context) {
 			if rerr := w.src.RecordCompactionFailure(c.SessionID, string(outcome)); rerr != nil {
 				slog.Warn("compact: record failure", "session_id", c.SessionID, "err", rerr)
 			}
+			// Breaker tally (🎯T84): a deferral means the summariser ran
+			// (a content issue), so it is not a systemic worker failure; a
+			// hard failure / timeout is.
+			if outcome == outcomeDeferred {
+				okTicks++
+			} else {
+				failedTicks++
+				lastTickErr = string(outcome)
+			}
 		default:
 			// compacted / nothing_to_compact / budget_exceeded — the
 			// session is healthy; clear any durable quarantine.
 			if cerr := w.src.ClearCompactionFailure(c.SessionID); cerr != nil {
 				slog.Warn("compact: clear failure", "session_id", c.SessionID, "err", cerr)
 			}
+			okTicks++
 		}
 		if outcome == outcomeCompacted {
 			compacted++
@@ -390,6 +450,20 @@ const (
 // throttling is now durable (🎯T77 quarantine in the candidate query),
 // replacing the old in-memory exponential backoff.
 const rateLimitCooldown = 10 * time.Minute
+
+const (
+	// systemicFailureThreshold trips the watcher's circuit breaker after
+	// this many consecutive scans in which every attempted tick failed —
+	// the signature of a systemic problem (missing summariser cwd, claude
+	// off PATH, a wedged DB) rather than a few poison sessions, which the
+	// durable per-session quarantine (🎯T77) already handles. Tripping
+	// pauses the watcher so it stops spawning failing subprocesses and
+	// contending the SQLite writer (🎯T84).
+	systemicFailureThreshold = 3
+	// systemicFailureCooldown is how long the watcher idles after the
+	// breaker trips before allowing a single trial scan.
+	systemicFailureCooldown = 10 * time.Minute
+)
 
 // recordOutcome bumps the lifetime counter for outcome and records
 // the most recent tick state. Safe to call concurrently.

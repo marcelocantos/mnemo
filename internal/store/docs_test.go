@@ -451,6 +451,51 @@ func TestSelectDoc(t *testing.T) {
 	}
 }
 
+// TestDocIngestStatusMetric verifies that ingest_status.files_indexed equals
+// ingest_status.files_on_disk (gap = 0) after a full docs ingest, even on the
+// second pass when all files are skipped-unchanged.
+func TestDocIngestStatusMetric(t *testing.T) {
+	projectDir := t.TempDir()
+	repoRoot := filepath.Join(t.TempDir(), "org", "repo")
+	s := newTestStore(t, projectDir)
+	setupDocRepo(t, s, repoRoot)
+
+	docsDir := filepath.Join(repoRoot, "docs")
+	writeDoc(t, filepath.Join(docsDir, "a.md"), "# A\n\nContent for doc A.\n")
+	writeDoc(t, filepath.Join(docsDir, "b.md"), "# B\n\nContent for doc B.\n")
+	writeDoc(t, filepath.Join(repoRoot, "README.md"), "# Readme\n\nTop-level readme.\n")
+
+	// First pass: all three files are freshly indexed.
+	if err := s.IngestDocs(); err != nil {
+		t.Fatal(err)
+	}
+	checkDocMetricGap(t, s, "after first ingest")
+
+	// Second pass: all files are unchanged — they are skipped but must still
+	// count toward files_indexed so the gap remains 0.
+	if err := s.IngestDocs(); err != nil {
+		t.Fatal(err)
+	}
+	checkDocMetricGap(t, s, "after second ingest (all skipped-unchanged)")
+}
+
+func checkDocMetricGap(t *testing.T, s *Store, label string) {
+	t.Helper()
+	rows, err := s.Query("SELECT files_indexed, files_on_disk FROM ingest_status WHERE stream = 'docs'")
+	if err != nil {
+		t.Fatalf("%s: query ingest_status: %v", label, err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("%s: no ingest_status row for docs stream", label)
+	}
+	fi, _ := rows[0]["files_indexed"].(int64)
+	fd, _ := rows[0]["files_on_disk"].(int64)
+	if fi != fd {
+		t.Errorf("%s: docs ingest_status gap = %d (files_indexed=%d files_on_disk=%d), want 0",
+			label, fd-fi, fi, fd)
+	}
+}
+
 // TestMatchesGitignore verifies the simplified gitignore matching.
 func TestMatchesGitignore(t *testing.T) {
 	patterns := []string{"generated/", "*.min.js", "dist/**", "vendor"}

@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/vault"
 )
@@ -41,6 +42,13 @@ type VaultSyncer interface {
 // internal/compact/watcher.go.
 type CompactorHealthReporter interface {
 	Health() CompactorHealth
+}
+
+// DiagRunner runs mnemo's self-diagnostics for the mnemo_doctor tool
+// (🎯T83). Satisfied by *diag.Registry; an interface so this package
+// stays decoupled from how the registry is assembled.
+type DiagRunner interface {
+	Run(ctx context.Context, full bool, now time.Time) diag.Report
 }
 
 // CompactorHealth is the externally-visible snapshot returned by the
@@ -96,6 +104,7 @@ type Handler struct {
 	resolve          func(username string) (store.Backend, error)
 	resolveVault     func(username string) VaultSyncer             // nil when vault disabled
 	resolveCompactor func(username string) CompactorHealthReporter // nil when compactor health not wired
+	diagRunner       DiagRunner                                    // nil when diagnostics not wired
 	cfgCtl           ConfigController                              // nil when mnemo_config disabled
 	seen             sync.Map
 }
@@ -121,6 +130,12 @@ func (h *Handler) SetVaultResolver(fn func(string) VaultSyncer) {
 // startup hasn't completed yet for the calling user).
 func (h *Handler) SetCompactorResolver(fn func(string) CompactorHealthReporter) {
 	h.resolveCompactor = fn
+}
+
+// SetDiagRunner wires the self-diagnostics registry for mnemo_doctor
+// (🎯T83). Optional; when unset the tool reports diagnostics unavailable.
+func (h *Handler) SetDiagRunner(r DiagRunner) {
+	h.diagRunner = r
 }
 
 // SetConfigController wires the mnemo_config tool to a live config
@@ -647,6 +662,9 @@ Vault must be configured via vault_path in ~/.mnemo/config.json.`),
 		mcp.NewTool("mnemo_vault_status",
 			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, and a count of notes on disk by section."),
 		),
+		mcp.NewTool("mnemo_doctor",
+			mcp.WithDescription(`Run mnemo's self-diagnostics and report health (🎯T83). Returns a per-check report — name, severity (ok/warn/fail), tier (fast/full), detail, and a remediation hint — covering the summariser working directory, claude on PATH, configured roots, the compaction circuit-breaker (a tripped breaker means every compaction is failing systemically), whether the indexer has backfilled since startup, and database responsiveness. The single "is mnemo healthy, and what do I do about it" call; the same data backs the dashboard health page (http://localhost:19419/#health) and opt-out OS notifications.`),
+		),
 		mcp.NewTool("mnemo_compactor_status",
 			mcp.WithDescription(`Report the live state of mnemo's background session compactor (🎯T67). Returns:
 
@@ -827,6 +845,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultStatus(h.cfgCtl)
 	case "mnemo_compactor_status":
 		return ch.compactorStatus(h.resolveCompactor)
+	case "mnemo_doctor":
+		return ch.doctor(h.diagRunner)
 	case "mnemo_divergence":
 		return ch.divergence()
 	case "mnemo_source_drift":
@@ -2540,6 +2560,21 @@ func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 	}
 	fmt.Fprintf(&b, "  %-12s %d\n", "total", total)
 	return b.String(), false, nil
+}
+
+// doctor implements mnemo_doctor (🎯T83): it runs the full self-
+// diagnostics suite and returns the per-check report as JSON. The same
+// report backs the dashboard health page and the OS notifications.
+func (h *callHandler) doctor(runner DiagRunner) (string, bool, error) {
+	if runner == nil {
+		return "Diagnostics not available (the daemon was started without the diagnostics registry wired).", false, nil
+	}
+	rep := runner.Run(h.ctx, true, time.Now())
+	out, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }
 
 // compactorStatus implements mnemo_compactor_status (🎯T67). It

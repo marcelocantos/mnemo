@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/marcelocantos/mnemo/internal/api"
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
@@ -66,10 +68,30 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.50.0"
+	version              = "0.51.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 )
+
+// summariserWorkDir returns a dedicated, always-present working
+// directory for the compactor/reviewer's `claude -p` subprocesses
+// (🎯T82). The summariser is stateless — it summarises the prompt text,
+// so the cwd's contents are irrelevant — hence a neutral directory under
+// the OS temp root. It is deliberately NOT a repo checkout (the old
+// hardcoded ~/work/github.com/marcelocantos/mnemo broke on every machine
+// without that path) and deliberately has no CLAUDE.md ancestors, so the
+// summariser loads no project instructions. Returns "" only if even the
+// temp dir can't be created, signalling the caller to disable
+// summarisation rather than spawn into a missing cwd.
+func summariserWorkDir() string {
+	dir := filepath.Join(os.TempDir(), "mnemo-summariser")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Error("summariser workdir unavailable; compaction and review disabled",
+			"dir", dir, "err", err)
+		return ""
+	}
+	return dir
+}
 
 func main() {
 	// Subcommands are dispatched before flag.Parse so their own flags
@@ -513,13 +535,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		slog.Info("extra project dirs configured", "dirs", cfg.ExtraProjectDirs)
 	}
 
-	// The compactor watcher needs mnemo's own source tree to invoke
-	// claudia, regardless of whose transcripts are being compacted.
-	// Resolve via the process owner's home (not each indexed user's).
-	procHome, _ := os.UserHomeDir()
-	mnemoRepoDir := filepath.Join(procHome, "work", "github.com", "marcelocantos", "mnemo")
+	// The compactor and CLAUDE.md reviewer spawn `claude -p` to
+	// summarise transcript text; that subprocess only needs a valid
+	// directory to chdir into — its contents are irrelevant to the
+	// stateless summarisation. Use a dedicated dir under the OS temp
+	// root: it always exists (created here), has no CLAUDE.md ancestors
+	// so the summariser loads no project context, and never depends on a
+	// developer checkout being present (🎯T82). Empty only when even the
+	// temp dir can't be created — the registry then disables
+	// summarisation rather than spawning into a missing cwd.
+	summariserDir := summariserWorkDir()
 
-	reg := registry.NewRegistry(ctx, cfg, mnemoRepoDir)
+	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
 	// Determine the default username — used when a request arrives
@@ -544,6 +571,26 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			return err
 		}
 	}
+
+	// Self-diagnostics (🎯T83). A registry of health checks (summariser
+	// workdir, claude on PATH, configured roots, the compaction breaker,
+	// backfill-since-startup, db responsiveness) driven by a scheduler:
+	// the full suite at startup, fast checks every few minutes, the full
+	// suite hourly. A fail-severity transition fires an opt-out OS
+	// notification that deep-links to the dashboard health page. The same
+	// registry backs the /health endpoint and the mnemo_doctor tool.
+	daemonStart := time.Now()
+	diagReg := reg.BuildDiagRegistry(defaultUser, daemonStart)
+	dashHost := addr
+	if strings.HasPrefix(addr, ":") {
+		dashHost = "localhost" + addr
+	}
+	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/#health")
+	if cfg.DisableHealthNotifications {
+		notifyCfg.Enabled = false
+	}
+	diagScheduler := diag.NewScheduler(diagReg, diag.NewNotifier(notifyCfg), 0, 0)
+	go diagScheduler.Run(ctx)
 
 	// Resolver threaded into tools.Handler. If the inbound request
 	// carried no ?user= parameter, fall back to the process default
@@ -629,6 +676,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// already-initialised per-user Store.
 	handler.SetConfigController(configController{reg: reg})
 
+	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
+	// same registry that backs the /health endpoint and the scheduler.
+	handler.SetDiagRunner(diagReg)
+
 	// Build a federation client if linked_instances are configured —
 	// this owns one persistent http.Client per peer and is shared
 	// across every fan-out tool registration. Failure to construct
@@ -681,7 +732,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", httpSrv)
 	mux.Handle("/mcp/", httpSrv) // catch sub-paths used by the MCP transport
-	api.New(resolve).RegisterRoutes(mux)
+	apiHandler := api.New(resolve)
+	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
+	apiHandler.RegisterRoutes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

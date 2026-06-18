@@ -229,6 +229,7 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_compacted_session` | Distilled view of a session — compaction summaries plus the live addenda tail past the latest cursor |
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
+| `mnemo_doctor` | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
 | `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
 | `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
 | `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |

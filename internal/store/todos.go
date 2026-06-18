@@ -108,14 +108,15 @@ func (s *Store) IngestTodos() error {
 	}
 
 	seenFile := map[string]bool{}
-	indexed, onDisk := 0, 0
+	filesIndexed, tasks, onDisk := 0, 0, 0
 	for _, rr := range all {
-		n, od := s.ingestTodosForRepo(rr.root, rr.repo, globs, seenFile)
-		indexed += n
+		fi, tk, od := s.ingestTodosForRepo(rr.root, rr.repo, globs, seenFile)
+		filesIndexed += fi
+		tasks += tk
 		onDisk += od
 	}
-	s.recordBackfillStatus("todos", indexed, onDisk)
-	slog.Info("ingested todos", "tasks_indexed", indexed, "files_on_disk", onDisk)
+	s.recordBackfillStatus("todos", filesIndexed, onDisk)
+	slog.Info("ingested todos", "files_indexed", filesIndexed, "tasks_written", tasks, "files_on_disk", onDisk)
 	return nil
 }
 
@@ -134,7 +135,10 @@ func isTodoFileName(name string) bool {
 // not be a git repo — synthesis roots are walked the same way. seen is
 // shared across roots in one IngestTodos pass so a file reachable from
 // two overlapping roots is ingested only once.
-func (s *Store) ingestTodosForRepo(repoRoot, repo string, globs []string, seen map[string]bool) (indexed, onDisk int) {
+// Returns (filesIndexed, tasksWritten, onDisk): filesIndexed counts files
+// successfully handled (freshly indexed or skipped-unchanged); tasksWritten
+// is the total number of tasks written this pass; onDisk is files seen.
+func (s *Store) ingestTodosForRepo(repoRoot, repo string, globs []string, seen map[string]bool) (filesIndexed, tasksWritten, onDisk int) {
 	gitignore := parseGitignorePatterns(filepath.Join(repoRoot, ".gitignore"))
 
 	_ = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
@@ -167,7 +171,11 @@ func (s *Store) ingestTodosForRepo(repoRoot, repo string, globs []string, seen m
 		}
 		seen[path] = true
 		onDisk++
-		indexed += s.ingestTodoFile(path, repo)
+		tasks, ok := s.ingestTodoFile(path, repo)
+		if ok {
+			filesIndexed++
+			tasksWritten += tasks
+		}
 		return nil
 	})
 	return
@@ -192,21 +200,23 @@ func matchesTodoGlob(globs []string, rel string) bool {
 }
 
 // ingestTodoFile parses one TODO file and replaces its tasks in the
-// index. Returns the number of tasks written (0 when skipped unchanged
-// or on read error). The todos for a file are replaced atomically: a
-// stale parse never half-overwrites the previous one.
-func (s *Store) ingestTodoFile(path, repo string) int {
+// index. Returns (tasksWritten, ok): ok is true when the file was
+// successfully handled — either freshly indexed or skipped because the
+// content hash is unchanged. ok is false only on a hard error (unreadable
+// file, database failure). The todos for a file are replaced atomically:
+// a stale parse never half-overwrites the previous one.
+func (s *Store) ingestTodoFile(path, repo string) (int, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		slog.Warn("read todo file failed", "file", path, "err", err)
-		return 0
+		return 0, false
 	}
 	hash := contentHash(raw)
 
 	var existing string
 	_ = s.readDB.QueryRow("SELECT content_hash FROM todo_files WHERE file_path = ?", path).Scan(&existing)
 	if existing == hash {
-		return 0
+		return 0, true // skipped-unchanged: file is present and up-to-date
 	}
 
 	tasks := todo.Parse(string(raw))
@@ -216,13 +226,13 @@ func (s *Store) ingestTodoFile(path, repo string) int {
 	tx, err := s.writeDB.Begin()
 	if err != nil {
 		slog.Error("todo tx begin failed", "file", path, "err", err)
-		return 0
+		return 0, false
 	}
 	defer tx.Rollback()
 
 	if _, err := tx.Exec("DELETE FROM todos WHERE file_path = ?", path); err != nil {
 		slog.Error("todo delete failed", "file", path, "err", err)
-		return 0
+		return 0, false
 	}
 	for _, t := range tasks {
 		links, _ := json.Marshal(t.Links)
@@ -236,7 +246,7 @@ func (s *Store) ingestTodoFile(path, repo string) int {
 			t.Done, t.Cancelled, t.Recurrence, strings.Join(t.Tags, " "), string(links), now,
 		); err != nil {
 			slog.Error("todo insert failed", "file", path, "err", err)
-			return 0
+			return 0, false
 		}
 	}
 	if _, err := tx.Exec(`
@@ -251,13 +261,13 @@ func (s *Store) ingestTodoFile(path, repo string) int {
 			indexed_at   = excluded.indexed_at`,
 		path, repo, hash, size, mtime, len(tasks), now); err != nil {
 		slog.Error("todo_files upsert failed", "file", path, "err", err)
-		return 0
+		return 0, false
 	}
 	if err := tx.Commit(); err != nil {
 		slog.Error("todo tx commit failed", "file", path, "err", err)
-		return 0
+		return 0, false
 	}
-	return len(tasks)
+	return len(tasks), true
 }
 
 // SearchTodos returns tasks matching q, newest-indexed first (or by FTS

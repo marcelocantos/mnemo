@@ -617,6 +617,42 @@ Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,
 `mnemo ping-peer <name>` are the operator-facing CLI tools.
 
+## Self-diagnostics
+
+mnemo continuously checks its own health (🎯T83). A registry of named
+checks runs on a schedule — the full suite at startup, fast checks every
+~3 minutes, the full suite hourly — each returning a severity
+(ok / warn / fail), a detail, and a remediation hint.
+
+Checks: `compactor.workdir` (the summariser's working dir exists and is
+writable), `claude.path` (the `claude` binary is on the daemon's PATH),
+`ingest.roots` (configured roots resolve), `compactor.breaker` (the
+compaction circuit-breaker has not tripped), `ingest.backfill` (the
+indexer has backfilled since the daemon started), `db.readable`.
+
+Three surfaces expose the same report:
+- **`mnemo_doctor`** (MCP) — runs the full suite on demand: the single
+  "is mnemo healthy, and what do I do about it" call.
+- **`GET /health`** — the JSON report; backs the dashboard **health
+  page** at `http://localhost:19419/#health` (issues sorted by severity,
+  with copy-remediation and file-a-fix affordances).
+- **OS notifications** — on a transition *into* fail severity, a native
+  notification (macOS `osascript`, Linux `notify-send`; local-only, no
+  network) deep-links the health page. **Opt-out**: enabled by default,
+  fail-only, deduped with a 6h re-notify cooldown. Silence with
+  `"disable_health_notifications": true` in `~/.mnemo/config.json`.
+
+(There is also a one-shot `mnemo diagnose` CLI subcommand for a
+terminal health check.)
+
+**Resilience (🎯T84).** A background task that fails repeatedly — the
+compaction watcher when every tick fails (a missing summariser cwd,
+`claude` off PATH), or a stream reconciler that keeps erroring — trips a
+circuit-breaker and backs off for a cooldown instead of retrying hot.
+This stops one broken task from burning CPU and contending the SQLite
+writer, so it can never starve ingestion. A tripped breaker surfaces as
+a fail-severity `mnemo_doctor` check.
+
 ## Index freshness
 
 **Invariant: `mnemo_*` tools reflect the full on-disk corpus at the time
