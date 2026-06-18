@@ -1233,7 +1233,70 @@ func (s *Store) knownRepoRootsLocked() []repoRoot {
 		}
 		roots = append(roots, repoRoot{root: root, repo: repo})
 	}
+
+	// 3. Non-git session working directories (🎯T54). A directory an agent has
+	// actually worked in but that is not inside any git repo — threads,
+	// planning spaces, scratch dirs — is itself a tree-of-interest. The cwd
+	// varies within a session and session_meta.cwd records only the first one,
+	// so this reads the DISTINCT per-entry cwds. Worktree/ephemeral sessions
+	// are excluded (transient checkouts shouldn't become permanent trees), and
+	// over-broad roots ($HOME, very shallow paths, excluded paths) are guarded
+	// out. Loop-safety is the T52 exclusion registry; overlap dedup is T53.
+	var entryCwds []string
+	if er, err := s.readDB.Query(`
+		SELECT DISTINCT json_extract(e.raw, '$.cwd') AS cwd
+		FROM entries e
+		JOIN session_summary ss ON ss.session_id = e.session_id
+		WHERE ss.session_type NOT IN ('worktree', 'ephemeral')
+		  AND json_extract(e.raw, '$.cwd') IS NOT NULL
+		  AND json_extract(e.raw, '$.cwd') != ''`); err == nil {
+		for er.Next() {
+			var c string
+			if er.Scan(&c) == nil {
+				entryCwds = append(entryCwds, c)
+			}
+		}
+		er.Close()
+	}
+	home, _ := EffectiveHome()
+	for _, cwd := range entryCwds {
+		root := filepath.Clean(cwd)
+		if findRepoRoot(root) != "" {
+			continue // inside a git repo — handled by source 2 above
+		}
+		if seen[root] || !viableTreeRoot(root, home, s.IsExcluded) {
+			continue
+		}
+		seen[root] = true
+		repo := extractRepo(cwd)
+		if repo == "" {
+			repo = repoNameFromPath(root)
+		}
+		roots = append(roots, repoRoot{root: root, repo: repo})
+	}
+
 	return roots
+}
+
+// viableTreeRoot guards against over-broad trees-of-interest: a session cwd is
+// rejected as a tree root when it's the filesystem root, the user's home (or an
+// ancestor of it), too shallow (fewer than two path components), or already
+// registered as an excluded path (🎯T52). Everything else — a specific
+// project, thread, or planning directory — is allowed.
+func viableTreeRoot(root, home string, isExcluded func(string) bool) bool {
+	if root == "" || root == "/" || root == "." {
+		return false
+	}
+	if isExcluded(root) {
+		return false
+	}
+	if home != "" && (root == home || strings.HasPrefix(home, root+string(os.PathSeparator))) {
+		return false
+	}
+	if strings.Count(strings.Trim(root, "/"), "/") < 1 {
+		return false
+	}
+	return true
 }
 
 // findRepoRoot walks up from dir to find the nearest directory containing .git.

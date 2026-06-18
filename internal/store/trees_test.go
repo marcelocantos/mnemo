@@ -182,3 +182,91 @@ func TestTreesOfInterestIngest(t *testing.T) {
 		t.Fatalf("re-ingest should keep one link, got %d", len(docs2))
 	}
 }
+
+// --- 🎯T54: trees-of-interest from session cwds (incl. non-git dirs) ---
+
+// seedSession inserts a session_summary row and one entry whose raw cwd is dir,
+// so knownRepoRootsLocked's per-entry-cwd source picks it up.
+func seedSession(t *testing.T, s *Store, sessionID, dir, sessionType string) {
+	t.Helper()
+	if _, err := s.writeDB.Exec(
+		"INSERT OR IGNORE INTO session_summary (session_id, project, session_type) VALUES (?, '', ?)",
+		sessionID, sessionType); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(
+		"INSERT INTO entries (session_id, project, type, timestamp, raw) VALUES (?, '', 'user', '', jsonb(?))",
+		sessionID, `{"cwd":"`+dir+`"}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestViableTreeRoot(t *testing.T) {
+	home := "/Users/x"
+	noExcl := func(string) bool { return false }
+
+	for _, p := range []string{"", "/", "/Users/x", "/Users", "/tmp", "/var"} {
+		if viableTreeRoot(p, home, noExcl) {
+			t.Errorf("viableTreeRoot(%q) = true, want false (over-broad)", p)
+		}
+	}
+	for _, p := range []string{"/Users/x/work/repo", "/tmp/clone", "/var/folders/a/b/c"} {
+		if !viableTreeRoot(p, home, noExcl) {
+			t.Errorf("viableTreeRoot(%q) = false, want true", p)
+		}
+	}
+	if viableTreeRoot("/Users/x/secret", home, func(p string) bool { return p == "/Users/x/secret" }) {
+		t.Error("excluded path should be rejected as a tree root")
+	}
+}
+
+// TestNonGitSessionDirIndexed is the core behaviour: a directory an agent
+// worked in that is not a git repo becomes a tree-of-interest, so its TODO
+// files index even with no .git and no configured root.
+func TestNonGitSessionDirIndexed(t *testing.T) {
+	projectDir := t.TempDir()
+	treeDir := filepath.Join(t.TempDir(), "think", "threads", "demo") // non-git, deep
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, projectDir)
+	seedSession(t, s, "sess-nongit", treeDir, "interactive")
+	writeDoc(t, filepath.Join(treeDir, "TODO.md"), "- [ ] thread task #x\n")
+
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
+	found := false
+	for _, td := range todos {
+		if td.Text == "thread task" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("TODO under a non-git session dir was not indexed: %+v", todos)
+	}
+}
+
+// TestWorktreeSessionDirNotIndexed verifies transient session types don't turn
+// their cwd into a permanent tree-of-interest.
+func TestWorktreeSessionDirNotIndexed(t *testing.T) {
+	projectDir := t.TempDir()
+	treeDir := filepath.Join(t.TempDir(), "wt", "checkout")
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, projectDir)
+	seedSession(t, s, "sess-wt", treeDir, "worktree")
+	writeDoc(t, filepath.Join(treeDir, "TODO.md"), "- [ ] transient task\n")
+
+	if err := s.IngestTodos(); err != nil {
+		t.Fatal(err)
+	}
+	todos, _ := s.SearchTodos(TodoQuery{Now: fixedNow})
+	for _, td := range todos {
+		if td.Text == "transient task" {
+			t.Errorf("worktree session dir should not become a tree-of-interest")
+		}
+	}
+}
