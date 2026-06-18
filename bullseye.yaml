@@ -1455,30 +1455,18 @@ targets:
     achieved: 2026-05-20
   T54:
     name: Ingestion is unified under trees-of-interest derived from session cwds
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - Trees-of-interest are derived from `cwd` values in the indexed session transcripts (plus optional `extra_trees` config) and are not user-configured.
-    - A single ingestion entry point walks all trees-of-interest. `IngestDocs` and `IngestSynthesis` are collapsed into one code path.
-    - '`classifyTaxonomy` is used only to assign the `taxonomy` tag on indexed rows; it no longer gates inclusion.'
-    - '`synthesis_roots` and `workspace_roots` config fields are removed (or accepted-but-ignored with a deprecation warning).'
-    - The trees-of-interest list is append-only within the lifetime of a mnemo install; no automatic pruning.
-    - 🎯T52 (fence-based loop-safety) and 🎯T53 (references vs. content for parent-child overlap) are both achieved before this target retires.
-    context: |-
-      mnemo currently has two ingestion entry points with different policies: `IngestDocs` walks `knownRepoRoots` permissively (post-T48 recursive walk, .gitignore-filtered), and `IngestSynthesis` walks `synthesisRoots` restrictively (taxonomy-gated via `classifyTaxonomy`). The split uses *root type* as a sloppy proxy for *curation level* and is wrong in both directions: messy repos slip garbage in, well-organised non-repo planning dirs get most of their content rejected.
-
-      The honest unifying concept is: mnemo cares about **trees where agents work**. Operationally, those are trees with one or more Claude Code sessions on record — derivable from `cwd` values in the transcript index. A directory's status as repo vs. non-repo is incidental; whether agents have run there is the load-bearing signal.
-
-      Under the unified model:
-      - Trees-of-interest are derived data from session `cwd`s, not configured.
-      - One ingestion walk handles all trees-of-interest with a single filter stack (junk-dirs, .gitignore if present, fence-aware via 🎯T52).
-      - `classifyTaxonomy` remains as a path-derived tag function but stops doing inclusion duty — synthesis-ness becomes a label, not a gate.
-      - `synthesis_roots` and `workspace_roots` deprecate as user-configurable fields. Optional `extra_trees` provides an escape hatch for the unusual case of a tree the user wants indexed without ever running an agent there.
-      - Trees-of-interest list is monotonic — never pruned. Future GC may revisit.
-      - Parent-child overlap (sessions run in subdirs of a tree) is handled by 🎯T53's references-vs-content distinction.
-
-      Once this lands, the vault PR (#74) simplifies dramatically: the vault is just a directory like any other, picked up if agents have run there, made loop-safe by the fence. The exporter's `vault_path` config is purely a write-side concern with no role in ingest.
+    - Trees-of-interest are derived from the DISTINCT per-entry working directories (json_extract(raw,'$.cwd') over entries) of real sessions, excluding worktree/ephemeral session types — NOT session_meta.cwd. Optional extra_trees config supplements them.
+    - 'Tree roots are the session cwds themselves: no walk-up to a .git ancestor and no workspace_roots filesystem walk (repo-root discovery is removed).'
+    - 'An over-broad guard prevents pathological trees: $HOME itself, filesystem roots / very-shallow paths, and any IsExcluded path are never registered as a tree.'
+    - A single ingestion walk handles all trees-of-interest; IngestDocs and IngestSynthesis are collapsed into one path; classifyTaxonomy only assigns the taxonomy tag and no longer gates inclusion.
+    - workspace_roots and synthesis_roots config fields are removed or accepted-but-ignored with a deprecation warning.
+    - Loop-safety holds via the T52 exclusion registry; parent-child overlap is deduped via the T53 references/content model; the trees list is append-only (no auto-pruning).
+    - 'Unit tests cover: a non-git session cwd becoming a tree and its TODO/doc files indexing; the over-broad guard; worktree/ephemeral exclusion; per-entry (not first-cwd) derivation.'
+    context: 'T52 (loop-safety exclusion registry) and T53 (references/content overlap model) are both ACHIEVED, so this is now directly actionable. Refined design after confirming the cwd mechanics: repo-root discovery is removed — the user does not care about finding repo roots; mnemo only needs project (session) roots for document discovery. Trees-of-interest are the session working directories themselves, no .git walk-up and no workspace_roots filesystem walk. Crucially, session_meta.cwd records only each session''s FIRST cwd (store.go:2908 sets it once); the working directory varies widely within a session (the live DB has sessions with up to 28 distinct cwds), so trees must be derived from the DISTINCT per-entry cwds (json_extract(raw,''$.cwd'') over the entries table), filtered to real sessions (exclude worktree/ephemeral), with an over-broad guard ($HOME, shallow roots, IsExcluded). Loop-safety is provided by the T52 registry; parent-child overlap by the T53 references model.'
     depends_on:
     - T52
     - T53
