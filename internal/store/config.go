@@ -51,6 +51,13 @@ type Config struct {
 	// E.g. ["TASKS.md", "docs/roadmap.md"]. Empty → defaults only.
 	TodoGlobs []string `json:"todo_globs,omitempty"`
 
+	// DisableHealthNotifications turns off the self-diagnostics OS
+	// notifications (🎯T83). They are opt-out — enabled by default,
+	// fail-severity only, local-only (osascript / notify-send). Set true
+	// to silence them; the dashboard health page and mnemo_doctor are
+	// unaffected.
+	DisableHealthNotifications bool `json:"disable_health_notifications,omitempty"`
+
 	// VaultPath is the directory where mnemo writes its Markdown knowledge
 	// graph. When set, mnemo continuously exports sessions, decisions,
 	// memories, skills, configs, plans, targets, CI runs, and PRs as

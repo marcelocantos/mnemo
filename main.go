@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/marcelocantos/mnemo/internal/api"
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
@@ -570,6 +572,26 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		}
 	}
 
+	// Self-diagnostics (🎯T83). A registry of health checks (summariser
+	// workdir, claude on PATH, configured roots, the compaction breaker,
+	// backfill-since-startup, db responsiveness) driven by a scheduler:
+	// the full suite at startup, fast checks every few minutes, the full
+	// suite hourly. A fail-severity transition fires an opt-out OS
+	// notification that deep-links to the dashboard health page. The same
+	// registry backs the /health endpoint and the mnemo_doctor tool.
+	daemonStart := time.Now()
+	diagReg := reg.BuildDiagRegistry(defaultUser, daemonStart)
+	dashHost := addr
+	if strings.HasPrefix(addr, ":") {
+		dashHost = "localhost" + addr
+	}
+	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/#health")
+	if cfg.DisableHealthNotifications {
+		notifyCfg.Enabled = false
+	}
+	diagScheduler := diag.NewScheduler(diagReg, diag.NewNotifier(notifyCfg), 0, 0)
+	go diagScheduler.Run(ctx)
+
 	// Resolver threaded into tools.Handler. If the inbound request
 	// carried no ?user= parameter, fall back to the process default
 	// (empty on a service deployment, which produces a useful error).
@@ -654,6 +676,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// already-initialised per-user Store.
 	handler.SetConfigController(configController{reg: reg})
 
+	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
+	// same registry that backs the /health endpoint and the scheduler.
+	handler.SetDiagRunner(diagReg)
+
 	// Build a federation client if linked_instances are configured —
 	// this owns one persistent http.Client per peer and is shared
 	// across every fan-out tool registration. Failure to construct
@@ -706,7 +732,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", httpSrv)
 	mux.Handle("/mcp/", httpSrv) // catch sub-paths used by the MCP transport
-	api.New(resolve).RegisterRoutes(mux)
+	apiHandler := api.New(resolve)
+	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
+	apiHandler.RegisterRoutes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
