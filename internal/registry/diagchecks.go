@@ -157,6 +157,24 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			}
 			return diag.Healthy("database responsive")
 		}},
+
+		diag.Check{Name: "db.wal", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("store not started yet")
+			}
+			fi, err := os.Stat(s.DBPath() + "-wal")
+			if err != nil {
+				return diag.Healthy("no WAL backlog")
+			}
+			const warnAt = 256 << 20 // 256 MiB
+			if fi.Size() > warnAt {
+				return diag.Warning(
+					fmt.Sprintf("WAL is large (%d MiB) — a writer may be stuck or checkpoints are overdue", fi.Size()>>20),
+					"if it keeps growing, restart the daemon; a wedged worker shows up as compactor.breaker")
+			}
+			return diag.Healthy("WAL size healthy")
+		}},
 	)
 	return reg
 }
