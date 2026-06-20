@@ -1899,9 +1899,10 @@ targets:
     discovered: 2026-05-22
   T65:
     name: mnemo provides cross-session agent-to-agent messaging via directory-addressed inbox notes
-    status: identified
+    status: achieved
     value: 5.0
     cost: 5.0
+    actual_cost: 5.0
     acceptance:
     - '`mnemo_note_post(inbox, body, from_session?, from_repo?)` MCP tool — `inbox` and `body` are required; `inbox` is a directory path (absolute or relative to the calling session''s initial cwd); `from_session` and `from_repo` default from the MCP connection identity.'
     - '`mnemo_note_recv(inbox, unread_only=true, mark_read=true, limit?)` MCP tool — `inbox` required; defaults return only unread notes and mark them read.'
@@ -1937,6 +1938,7 @@ targets:
     - T49
     origin: '2026-05-23 design discussion (this session); supersedes the abandoned mid-flight T64 from 2026-05-21 which lost its slot to PR #95''s vault-library-wing parent'
     discovered: 2026-05-23
+    achieved: 2026-06-20
   T66:
     name: mnemo_query's documented schema is the only schema agents reach for; sqlite_master/PRAGMA introspection is structurally discouraged
     status: identified
