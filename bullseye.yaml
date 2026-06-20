@@ -2832,9 +2832,10 @@ targets:
     achieved: 2026-04-13
   T90:
     name: Fresh-DB schema creation bypasses sqlift, so per-test and first-run schema setup is cheap
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - applySchema detects an empty database (no user-defined objects) and creates the schema by executing schema.sql directly, bypassing sqlift's parse/extract/diff/apply.
     - An existing (non-empty) database still goes through the sqlift-mediated migration path under AllowNone — the upgrade contract is unchanged, and the migration tests still exercise sqlift.
@@ -2848,3 +2849,4 @@ targets:
     - schema
     origin: manual
     discovered: 2026-06-20
+    achieved: 2026-06-20
