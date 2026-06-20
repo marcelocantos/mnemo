@@ -21,11 +21,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: mnemo
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: marcelocantos/sqldeep
           ref: v0.22.0
@@ -49,7 +49,7 @@ jobs:
           "$CC" -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
           "$AR" rcs build/libsqldeep.a build/sqldeep.o build/deepparser/*.o
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: mnemo/go.mod
 
