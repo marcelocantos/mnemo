@@ -543,6 +543,20 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 // The sqlift handle is opened exclusively for the migration and closed
 // before returning so the caller can reopen with its own PRAGMA settings.
 func applySchema(dbPath string) error {
+	// Fast path: a brand-new / empty database needs no migration diffing.
+	// sqlift's parse/extract/diff/apply only earns its keep when *upgrading*
+	// an existing schema; for a fresh DB the desired schema can be created
+	// by executing schema.sql directly. This avoids re-parsing and
+	// re-diffing the full 42 KB schema on every store.New() — the common
+	// case for tests (a fresh DB per test, 123+ in internal/store alone)
+	// and for a first-run install — and is dramatically cheaper than the
+	// cgo sqlift path, especially on Windows (🎯T90).
+	if created, err := applyFreshSchema(dbPath); err != nil {
+		return err
+	} else if created {
+		return nil
+	}
+
 	sdb, err := sqlift.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("sqlift open: %w", err)
@@ -611,6 +625,48 @@ func applySchema(dbPath string) error {
 	}
 
 	return sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone})
+}
+
+// applyFreshSchema creates the full schema by executing schema.sql
+// directly when dbPath has no user-defined objects yet, bypassing
+// sqlift entirely (🎯T90). Returns (true, nil) when it created the
+// schema, (false, nil) when the DB already has objects (the caller then
+// runs the sqlift-mediated migration), or an error.
+//
+// schema.sql is pure additive DDL ordered so each CREATE's dependencies
+// precede it (base tables before their FTS mirrors and triggers), so a
+// single multi-statement Exec in file order reproduces exactly what
+// sqlift would build for a fresh DB. The emptiness guard means we only
+// take this path when nothing exists, so the absence of IF NOT EXISTS in
+// schema.sql is not a problem. Existing DBs fall through to sqlift, which
+// keeps owning the upgrade contract under AllowNone.
+//
+// One short-lived connection does both the probe and the create, to
+// avoid the close-then-reopen file-lock churn that mattn/go-sqlite3
+// exhibits on Windows (see the pre-migration backup note above).
+func applyFreshSchema(dbPath string) (bool, error) {
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return false, fmt.Errorf("open for fresh-schema check: %w", err)
+	}
+	defer db.Close()
+
+	var n int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master
+		 WHERE type IN ('table', 'view', 'trigger', 'index')
+		   AND name NOT LIKE 'sqlite_%'`,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("inspect existing schema: %w", err)
+	}
+	if n > 0 {
+		return false, nil // existing schema — defer to sqlift's migration
+	}
+
+	if _, err := db.Exec(schemaSQL); err != nil {
+		return false, fmt.Errorf("apply schema.sql directly: %w", err)
+	}
+	return true, nil
 }
 
 // New creates or opens a transcript store.
