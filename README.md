@@ -266,8 +266,9 @@ repo root): the producer posts, the consumer pulls.
 | `mnemo_note_recv` | Receive notes for an inbox; by default returns only unread notes and marks them read (idempotent) |
 | `mnemo_note_list` | Browse notes without consuming them; omit `inbox` to list every inbox with recent traffic |
 
-The inbox is a canonicalized absolute path — `~` is rejected, relative
-paths resolve against the **session's initial cwd** (not the process
+The inbox is a canonicalized absolute path — a leading `~` is rejected
+(shell home-expansion is ambiguous), relative paths resolve against the
+**session's initial cwd** (not the process
 pwd, which drifts when an agent `cd`s), and symlinks plus `./..` are
 collapsed, so every spelling of one directory addresses one inbox.
 

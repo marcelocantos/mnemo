@@ -64,7 +64,10 @@ type NoteListParams struct {
 // canonicalizeInbox resolves a caller-supplied inbox to a single
 // canonical absolute directory, identically for post and recv so both
 // sides address the same notes row (🎯T65). Rules:
-//   - reject any path containing "~" — no shell expansion, no ambiguity;
+//   - reject a leading "~" — shell home-expansion (~, ~/…, ~user/…) is
+//     ambiguous to the daemon, so the caller must expand it or pass an
+//     absolute path. A "~" elsewhere in the path is a legitimate literal
+//     (e.g. Windows 8.3 short names like C:\Users\RUNNER~1\…) and is fine;
 //   - a relative path joins baseCwd (the calling session's *initial*
 //     cwd, NOT the process pwd, which drifts when an agent cd's);
 //   - filepath.Clean collapses lexical ./.. ; filepath.EvalSymlinks
@@ -77,8 +80,8 @@ func canonicalizeInbox(inbox, baseCwd string) (string, error) {
 	if inbox == "" {
 		return "", fmt.Errorf("inbox is required")
 	}
-	if strings.Contains(inbox, "~") {
-		return "", fmt.Errorf("inbox path must not contain '~'; pass an absolute path or one relative to the session cwd")
+	if strings.HasPrefix(inbox, "~") {
+		return "", fmt.Errorf("inbox path must not start with '~' (shell home-expansion is ambiguous); pass an absolute path or one relative to the session cwd")
 	}
 	p := inbox
 	if !filepath.IsAbs(p) {

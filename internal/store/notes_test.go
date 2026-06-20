@@ -141,9 +141,18 @@ func TestNoteInboxCanonicalization(t *testing.T) {
 		t.Errorf("got %d notes in canonical inbox, want %d", len(all), len(spellings))
 	}
 
-	// A "~" anywhere in the path is rejected.
+	// A leading "~" (shell home-expansion) is rejected.
 	if _, err := s.PostNote(NotePostParams{Inbox: "~/work/foo", Body: "x"}); err == nil {
-		t.Error("expected error for inbox containing '~'")
+		t.Error("expected error for inbox starting with '~'")
+	}
+	// A "~" *inside* a path component is a legitimate literal (e.g. Windows
+	// 8.3 short names like C:\Users\RUNNER~1\...) and must be accepted.
+	tildeDir := filepath.Join(dir, "RUNNER~1")
+	if err := os.MkdirAll(tildeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PostNote(NotePostParams{Inbox: tildeDir, Body: "x"}); err != nil {
+		t.Errorf("inbox with a non-leading '~' should be accepted, got: %v", err)
 	}
 
 	// Posting to a non-existent directory errors and inserts no row.

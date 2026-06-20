@@ -727,7 +727,7 @@ Response includes which fields changed, which were adopted live, and which requi
 		mcp.NewTool("mnemo_note_post",
 			mcp.WithDescription(`Post a cross-session inbox note for another Claude Code session to pick up (🎯T65).
 
-The "inbox" is a directory path identifying the recipient — typically the root of the repo whose session should receive the note. It may be absolute, or relative to YOUR session's initial working directory (e.g. "../ytt" from a session rooted at ~/work/.../mnemo posts to ~/work/.../ytt). The path must contain no "~" and must resolve to an existing directory; symlinks and ./.. are collapsed so different spellings of the same directory address one inbox.
+The "inbox" is a directory path identifying the recipient — typically the root of the repo whose session should receive the note. It may be absolute, or relative to YOUR session's initial working directory (e.g. "../ytt" from a session rooted at ~/work/.../mnemo posts to ~/work/.../ytt). The path must not start with "~" (shell home-expansion is ambiguous) and must resolve to an existing directory; symlinks and ./.. are collapsed so different spellings of the same directory address one inbox.
 
 from_session and from_repo are stamped automatically from your MCP connection identity (resolved via mnemo_self) — pass them only to override. Relative inbox paths REQUIRE a known session cwd, so call mnemo_self once first (the /post and /inbox skills do this for you) or use an absolute path.
 
@@ -740,7 +740,7 @@ The consumer reads the note with mnemo_note_recv. For the wait-on-event case, th
 		mcp.NewTool("mnemo_note_recv",
 			mcp.WithDescription(`Receive cross-session inbox notes addressed to a directory (🎯T65).
 
-By default returns only unread notes and marks them read (mark-read is idempotent — concurrent receivers never double-deliver). Notes are retained after delivery and remain browsable via mnemo_note_list. The "inbox" is canonicalized identically to mnemo_note_post: absolute, or relative to your session's initial cwd; no "~"; must resolve to an existing directory.`),
+By default returns only unread notes and marks them read (mark-read is idempotent — concurrent receivers never double-deliver). Notes are retained after delivery and remain browsable via mnemo_note_list. The "inbox" is canonicalized identically to mnemo_note_post: absolute, or relative to your session's initial cwd; no leading "~"; must resolve to an existing directory.`),
 			mcp.WithString("inbox", mcp.Required(), mcp.Description("Your inbox directory path (absolute, or relative to your session's initial cwd).")),
 			mcp.WithBoolean("unread_only", mcp.Description("Return only undelivered notes (default true).")),
 			mcp.WithBoolean("mark_read", mcp.Description("Stamp the returned notes read (default true).")),
