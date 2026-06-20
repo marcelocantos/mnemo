@@ -1899,9 +1899,10 @@ targets:
     discovered: 2026-05-22
   T65:
     name: mnemo provides cross-session agent-to-agent messaging via directory-addressed inbox notes
-    status: identified
+    status: achieved
     value: 5.0
     cost: 5.0
+    actual_cost: 5.0
     acceptance:
     - '`mnemo_note_post(inbox, body, from_session?, from_repo?)` MCP tool — `inbox` and `body` are required; `inbox` is a directory path (absolute or relative to the calling session''s initial cwd); `from_session` and `from_repo` default from the MCP connection identity.'
     - '`mnemo_note_recv(inbox, unread_only=true, mark_read=true, limit?)` MCP tool — `inbox` required; defaults return only unread notes and mark them read.'
@@ -1937,6 +1938,7 @@ targets:
     - T49
     origin: '2026-05-23 design discussion (this session); supersedes the abandoned mid-flight T64 from 2026-05-21 which lost its slot to PR #95''s vault-library-wing parent'
     discovered: 2026-05-23
+    achieved: 2026-06-20
   T66:
     name: mnemo_query's documented schema is the only schema agents reach for; sqlite_master/PRAGMA introspection is structurally discouraged
     status: identified
@@ -2828,3 +2830,23 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-13
+  T90:
+    name: Fresh-DB schema creation bypasses sqlift, so per-test and first-run schema setup is cheap
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    actual_cost: 2.0
+    acceptance:
+    - applySchema detects an empty database (no user-defined objects) and creates the schema by executing schema.sql directly, bypassing sqlift's parse/extract/diff/apply.
+    - An existing (non-empty) database still goes through the sqlift-mediated migration path under AllowNone — the upgrade contract is unchanged, and the migration tests still exercise sqlift.
+    - The internal/store test suite (123+ fresh DBs via newTestStore) passes and is measurably faster, keeping the Windows CI job comfortably under the go test timeout.
+    context: The store test suite creates a fresh DB per test (newTestStore is called 123 times across 217 store test functions), and every store.New() ran the full sqlift migration (open + extract + parse the 42 KB schema.sql + diff + apply) through cgo. That cgo+SQLite work is ~45x slower on the Windows CI runner (~1052s) than on macOS (~23s), leaving only ~12% headroom under the 20m go-test timeout. Growing the schema (🎯T65 added a table + FTS + 3 triggers, re-parsed/diffed on every New()) plus normal runner variance tipped the Windows store binary over 20m, blocking the v0.52.0 release. sqlift only earns its keep when upgrading an existing schema; a fresh/empty DB can create the desired schema by executing schema.sql directly. This makes per-test setup and first-run install dramatically cheaper without weakening the upgrade path.
+    tags:
+    - performance
+    - windows
+    - ci
+    - store
+    - schema
+    origin: manual
+    discovered: 2026-06-20
+    achieved: 2026-06-20

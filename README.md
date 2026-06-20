@@ -253,6 +253,38 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_todo_set` | Edit an existing TODO item in place (status / due / priority) — line-precise, atomic, stale-guarded write-back to the source file |
 | `mnemo_todo_add` | Append a new TODO item to a tracked TODO file, optionally under a heading |
 
+### Cross-session messaging
+
+Directory-addressed inbox notes let one Claude Code session hand work
+off to another — "A finishes its bit, B picks up" — without copy-paste
+between terminals. A note is addressed to a **directory** (typically a
+repo root): the producer posts, the consumer pulls.
+
+| Tool | Description |
+|---|---|
+| `mnemo_note_post` | Post a note to an inbox directory (absolute, or relative to your session's initial cwd). `from_session`/`from_repo` are stamped from the MCP connection identity |
+| `mnemo_note_recv` | Receive notes for an inbox; by default returns only unread notes and marks them read (idempotent) |
+| `mnemo_note_list` | Browse notes without consuming them; omit `inbox` to list every inbox with recent traffic |
+
+The inbox is a canonicalized absolute path — a leading `~` is rejected
+(shell home-expansion is ambiguous), relative paths resolve against the
+**session's initial cwd** (not the process
+pwd, which drifts when an agent `cd`s), and symlinks plus `./..` are
+collapsed, so every spelling of one directory addresses one inbox.
+
+**Producer (session A, e.g. mid-`/release` in mnemo):**
+
+```
+mnemo_note_post(inbox: "../ytt", body: "mnemo v0.42 published, brew formula updated")
+```
+
+**Consumer (session B, in the downstream repo):** type `/inbox` to pull
+pending notes. For the wait-on-event case — B is blocked on a release
+that's ~30 minutes out — run `/loop /inbox` and walk away: the loop
+self-paces (cache-aware `ScheduleWakeup`) until a note arrives, then
+injects it and continues. mnemo's MCP layer stays synchronous; the wait
+primitive lives in the harness, not the daemon.
+
 ### External source indexing
 
 | Tool | Description |

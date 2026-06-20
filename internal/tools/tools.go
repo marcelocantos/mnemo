@@ -724,6 +724,35 @@ Response includes which fields changed, which were adopted live, and which requi
 			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),
 			mcp.WithObject("patch", mcp.Description("For op=write: object with the keys to update. Same shape as ~/.mnemo/config.json. Omitted keys are left unchanged.")),
 		),
+		mcp.NewTool("mnemo_note_post",
+			mcp.WithDescription(`Post a cross-session inbox note for another Claude Code session to pick up (🎯T65).
+
+The "inbox" is a directory path identifying the recipient — typically the root of the repo whose session should receive the note. It may be absolute, or relative to YOUR session's initial working directory (e.g. "../ytt" from a session rooted at ~/work/.../mnemo posts to ~/work/.../ytt). The path must not start with "~" (shell home-expansion is ambiguous) and must resolve to an existing directory; symlinks and ./.. are collapsed so different spellings of the same directory address one inbox.
+
+from_session and from_repo are stamped automatically from your MCP connection identity (resolved via mnemo_self) — pass them only to override. Relative inbox paths REQUIRE a known session cwd, so call mnemo_self once first (the /post and /inbox skills do this for you) or use an absolute path.
+
+The consumer reads the note with mnemo_note_recv. For the wait-on-event case, the consumer runs "/loop /inbox" and walks away until the note arrives.`),
+			mcp.WithString("inbox", mcp.Required(), mcp.Description("Recipient directory path (absolute, or relative to your session's initial cwd). Must exist; no '~'.")),
+			mcp.WithString("body", mcp.Required(), mcp.Description("The note text.")),
+			mcp.WithString("from_session", mcp.Description("Override the sender session id (defaults from connection identity).")),
+			mcp.WithString("from_repo", mcp.Description("Override the sender repo (defaults from connection identity).")),
+		),
+		mcp.NewTool("mnemo_note_recv",
+			mcp.WithDescription(`Receive cross-session inbox notes addressed to a directory (🎯T65).
+
+By default returns only unread notes and marks them read (mark-read is idempotent — concurrent receivers never double-deliver). Notes are retained after delivery and remain browsable via mnemo_note_list. The "inbox" is canonicalized identically to mnemo_note_post: absolute, or relative to your session's initial cwd; no leading "~"; must resolve to an existing directory.`),
+			mcp.WithString("inbox", mcp.Required(), mcp.Description("Your inbox directory path (absolute, or relative to your session's initial cwd).")),
+			mcp.WithBoolean("unread_only", mcp.Description("Return only undelivered notes (default true).")),
+			mcp.WithBoolean("mark_read", mcp.Description("Stamp the returned notes read (default true).")),
+			mcp.WithNumber("limit", mcp.Description("Maximum notes to return (default: no limit).")),
+		),
+		mcp.NewTool("mnemo_note_list",
+			mcp.WithDescription(`Browse inbox notes without consuming them (🎯T65).
+
+Omitting "inbox" lists every inbox touched within the window (default 30 days), newest first — useful to see which inboxes have traffic. Supplying "inbox" restricts to that directory (canonicalized as in mnemo_note_post). Read state is preserved; this never marks notes read.`),
+			mcp.WithString("inbox", mcp.Description("Restrict to one inbox directory (absolute, or relative to your session's initial cwd). Omit to list all inboxes.")),
+			mcp.WithNumber("days", mcp.Description("Look-back window in days (default 30).")),
+		),
 	}
 }
 
@@ -811,6 +840,12 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.todoSet(args)
 	case "mnemo_todo_add":
 		return ch.todoAdd(args)
+	case "mnemo_note_post":
+		return ch.notePost(args)
+	case "mnemo_note_recv":
+		return ch.noteRecv(args)
+	case "mnemo_note_list":
+		return ch.noteList(args)
 	case "mnemo_restore":
 		return ch.restore(args)
 	case "mnemo_chain":
@@ -1729,6 +1764,79 @@ func validTodoPriority(s string) bool {
 		return true
 	}
 	return false
+}
+
+func (h *callHandler) notePost(args map[string]any) (string, bool, error) {
+	inbox, _ := args["inbox"].(string)
+	body, _ := args["body"].(string)
+	if inbox == "" {
+		return "inbox is required", true, nil
+	}
+	if body == "" {
+		return "body is required", true, nil
+	}
+	p := store.NotePostParams{Inbox: inbox, Body: body, ConnectionID: h.cc.MCPSessionID}
+	p.FromSession, _ = args["from_session"].(string)
+	p.FromRepo, _ = args["from_repo"].(string)
+	n, err := h.mem.PostNote(p)
+	if err != nil {
+		return fmt.Sprintf("note post failed: %v", err), true, nil
+	}
+	return fmt.Sprintf("Posted note #%d to inbox %s", n.ID, n.Inbox), false, nil
+}
+
+func (h *callHandler) noteRecv(args map[string]any) (string, bool, error) {
+	inbox, _ := args["inbox"].(string)
+	if inbox == "" {
+		return "inbox is required", true, nil
+	}
+	p := store.NoteRecvParams{
+		Inbox:        inbox,
+		ConnectionID: h.cc.MCPSessionID,
+		UnreadOnly:   true,
+		MarkRead:     true,
+	}
+	if v, ok := args["unread_only"].(bool); ok {
+		p.UnreadOnly = v
+	}
+	if v, ok := args["mark_read"].(bool); ok {
+		p.MarkRead = v
+	}
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		p.Limit = int(v)
+	}
+	notes, err := h.mem.RecvNotes(p)
+	if err != nil {
+		return fmt.Sprintf("note recv failed: %v", err), true, nil
+	}
+	if len(notes) == 0 {
+		return "No notes.", false, nil
+	}
+	out, err := json.MarshalIndent(notes, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) noteList(args map[string]any) (string, bool, error) {
+	p := store.NoteListParams{ConnectionID: h.cc.MCPSessionID, Days: 30}
+	p.Inbox, _ = args["inbox"].(string)
+	if v, ok := args["days"].(float64); ok && v > 0 {
+		p.Days = int(v)
+	}
+	notes, err := h.mem.ListNotes(p)
+	if err != nil {
+		return fmt.Sprintf("note list failed: %v", err), true, nil
+	}
+	if len(notes) == 0 {
+		return "No notes.", false, nil
+	}
+	out, err := json.MarshalIndent(notes, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
 }
 
 func (h *callHandler) self(args map[string]any) (string, bool, error) {

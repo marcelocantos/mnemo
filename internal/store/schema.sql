@@ -340,6 +340,21 @@ CREATE TABLE memories (
 			updated_at TEXT NOT NULL
 		);
 
+-- notes: cross-session agent-to-agent inbox notes (🎯T65). inbox is a
+-- canonicalized absolute directory path (see canonicalizeInbox); a
+-- producer session posts a note addressed to a consumer session's root
+-- directory, and the consumer pulls it. read_at is NULL until a recv
+-- consumes the note; rows are retained after delivery (append-only).
+CREATE TABLE notes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			inbox TEXT NOT NULL,
+			body TEXT NOT NULL,
+			from_session TEXT NOT NULL DEFAULT '',
+			from_repo TEXT NOT NULL DEFAULT '',
+			posted_at TEXT NOT NULL,
+			read_at TEXT
+		);
+
 CREATE TABLE messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			entry_id INTEGER REFERENCES entries(id),
@@ -643,6 +658,8 @@ CREATE INDEX idx_memories_project ON memories(project);
 
 CREATE INDEX idx_memories_type ON memories(memory_type);
 
+CREATE INDEX idx_notes_inbox ON notes(inbox, posted_at);
+
 CREATE INDEX idx_messages_content_type ON messages(content_type);
 
 CREATE INDEX idx_messages_entry_id ON messages(entry_id) WHERE entry_id IS NOT NULL;
@@ -784,6 +801,12 @@ CREATE VIRTUAL TABLE image_ocr_fts USING fts5(
 CREATE VIRTUAL TABLE memories_fts USING fts5(
 			name, description, content, project,
 			content=memories,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE notes_fts USING fts5(
+			body, inbox, from_repo,
+			content=notes,
 			content_rowid=id
 		);
 
@@ -1057,6 +1080,26 @@ CREATE TRIGGER memories_au AFTER UPDATE ON memories
 			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
 			INSERT INTO memories_fts(rowid, name, description, content, project)
 			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+
+CREATE TRIGGER notes_ai AFTER INSERT ON notes
+		BEGIN
+			INSERT INTO notes_fts(rowid, body, inbox, from_repo)
+			VALUES (new.id, new.body, new.inbox, new.from_repo);
+		END;
+
+CREATE TRIGGER notes_ad AFTER DELETE ON notes
+		BEGIN
+			INSERT INTO notes_fts(notes_fts, rowid, body, inbox, from_repo)
+			VALUES ('delete', old.id, old.body, old.inbox, old.from_repo);
+		END;
+
+CREATE TRIGGER notes_au AFTER UPDATE ON notes
+		BEGIN
+			INSERT INTO notes_fts(notes_fts, rowid, body, inbox, from_repo)
+			VALUES ('delete', old.id, old.body, old.inbox, old.from_repo);
+			INSERT INTO notes_fts(rowid, body, inbox, from_repo)
+			VALUES (new.id, new.body, new.inbox, new.from_repo);
 		END;
 
 CREATE TRIGGER messages_ai AFTER INSERT ON messages

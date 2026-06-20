@@ -131,6 +131,15 @@ func (f *fakeBackend) MutateTodo(m store.TodoMutation) (*store.TodoInfo, error) 
 func (f *fakeBackend) AddTodo(a store.TodoAdd) (*store.TodoInfo, error) {
 	panic("unexpected AddTodo call")
 }
+func (f *fakeBackend) PostNote(p store.NotePostParams) (*store.Note, error) {
+	panic("unexpected PostNote call")
+}
+func (f *fakeBackend) RecvNotes(p store.NoteRecvParams) ([]store.Note, error) {
+	panic("unexpected RecvNotes call")
+}
+func (f *fakeBackend) ListNotes(p store.NoteListParams) ([]store.Note, error) {
+	panic("unexpected ListNotes call")
+}
 func (f *fakeBackend) SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]store.GitHubActivityResult, error) {
 	panic("unexpected SearchGitHubActivity call")
 }
