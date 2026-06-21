@@ -23,10 +23,13 @@ import (
 // planted. SessionCWD returns "" — these tests don't exercise the
 // target-graph loading path.
 type fakeStoreSource struct {
-	mu         sync.Mutex
-	candidates []store.CompactionCandidate
-	recorded   map[string]int // RecordCompactionFailure calls per session (🎯T77)
-	cleared    map[string]int // ClearCompactionFailure calls per session (🎯T77)
+	mu          sync.Mutex
+	candidates  []store.CompactionCandidate
+	recorded    map[string]int // RecordCompactionFailure calls per session (🎯T77)
+	cleared     map[string]int // ClearCompactionFailure calls per session (🎯T77)
+	watermark   int64          // backing value for CompactionScanWatermark (🎯T91)
+	fixedMark   bool           // when set, CompactionScanWatermark returns watermark verbatim (🎯T91)
+	selectCalls int            // SelectCompactionCandidates invocations (🎯T91 idle-gate assertion)
 }
 
 func (f *fakeStoreSource) SelectCompactionCandidates(
@@ -38,6 +41,7 @@ func (f *fakeStoreSource) SelectCompactionCandidates(
 ) ([]store.CompactionCandidate, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.selectCalls++
 	out := make([]store.CompactionCandidate, len(f.candidates))
 	copy(out, f.candidates)
 	if limit > 0 && len(out) > limit {
@@ -69,6 +73,36 @@ func (f *fakeStoreSource) ClearCompactionFailure(sessionID string) error {
 }
 
 func (f *fakeStoreSource) QuarantinedCount(threshold int, since time.Time) int { return 0 }
+
+// CompactionScanWatermark returns a monotonically increasing value by
+// default so the 🎯T91 idle gate never short-circuits a scan in the
+// existing tests — each scan must run for the candidate/quarantine
+// assertions to hold. setFixedWatermark switches it to a stable value so
+// the idle-gate tests can exercise the skip path.
+func (f *fakeStoreSource) CompactionScanWatermark() (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.fixedMark {
+		f.watermark++
+	}
+	return f.watermark, nil
+}
+
+// setFixedWatermark pins CompactionScanWatermark to v (no auto-increment),
+// simulating "no new entries ingested between scans" for the idle gate.
+func (f *fakeStoreSource) setFixedWatermark(v int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fixedMark = true
+	f.watermark = v
+}
+
+// selectCallCount returns how many times SelectCompactionCandidates ran.
+func (f *fakeStoreSource) selectCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.selectCalls
+}
 
 func (f *fakeStoreSource) recordCount(sessionID string) int {
 	f.mu.Lock()
@@ -184,6 +218,59 @@ func TestWatcherScansAndCompactsSession(t *testing.T) {
 	}
 	if got := w.LastScanCount(); got != 2 {
 		t.Fatalf("expected LastScanCount=2, got %d", got)
+	}
+}
+
+// TestWatcherIdleGateSkipsUnchangedScan verifies the 🎯T91 idle gate:
+// once a scan establishes a baseline with nothing owed, subsequent scans
+// are skipped while the entries watermark is unchanged, and resume the
+// moment the watermark advances (new ingest). This is what stops the
+// every-interval re-sum of the entries table from burning CPU at idle.
+func TestWatcherIdleGateSkipsUnchangedScan(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setFixedWatermark(100) // stable: no new entries between scans
+	// No candidates → backlog 0, and QuarantinedCount returns 0.
+
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{ScanInterval: time.Hour})
+
+	ctx := context.Background()
+	w.scan(ctx) // baseline: watermark 0→100 changed → runs, records backlog 0
+	w.scan(ctx) // gated: watermark unchanged, backlog 0, quarantine 0
+	w.scan(ctx) // gated
+	if got := src.selectCallCount(); got != 1 {
+		t.Fatalf("idle gate: expected 1 candidate scan, got %d", got)
+	}
+
+	src.setFixedWatermark(101) // new ingest → watermark advances
+	w.scan(ctx)                // must run again
+	if got := src.selectCallCount(); got != 2 {
+		t.Fatalf("after watermark bump: expected 2 candidate scans, got %d", got)
+	}
+}
+
+// TestWatcherIdleGateRunsWhenBacklog verifies the gate never strands a
+// backlog: while sessions remain owed, scans keep firing even when the
+// watermark is unchanged, so the per-scan cap can drain them over
+// successive ticks (🎯T91).
+func TestWatcherIdleGateRunsWhenBacklog(t *testing.T) {
+	src := &fakeStoreSource{}
+	src.setFixedWatermark(100)
+	src.setCandidates(store.CompactionCandidate{SessionID: "s1"}) // backlog stays > 0
+
+	llm := &stubNopLLM{}
+	cs := newCountingStore()
+	compactor := New(cs, llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{ScanInterval: time.Hour})
+
+	ctx := context.Background()
+	w.scan(ctx)
+	w.scan(ctx)
+	w.scan(ctx)
+	if got := src.selectCallCount(); got != 3 {
+		t.Fatalf("backlog present: expected every scan to run (3), got %d", got)
 	}
 }
 

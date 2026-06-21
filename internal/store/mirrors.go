@@ -104,13 +104,18 @@ func (s *Store) ReconcileStaleMirrors(now time.Time) (int, error) {
 			slog.Warn("mirror: list repos failed", "stream", mr.stream, "err", err)
 			continue
 		}
-		cutoff := now.Add(-mr.interval)
 		for _, repo := range repos {
-			if !s.mirrorStale(repo, mr.stream, cutoff) {
+			if !s.mirrorDue(repo, mr.stream, mr.interval, now) {
 				continue
 			}
 			if err := mr.reconcile(ghPath, repo); err != nil {
 				slog.Warn("mirror: reconcile failed", "stream", mr.stream, "repo", repo, "err", err)
+				// 🎯T91: stamp the failure so a persistently-failing repo
+				// (no Actions, deleted, auth-scoped out) backs off instead of
+				// re-spawning a failing subprocess every reconcile pass.
+				if rerr := s.recordMirrorFailure(repo, mr.stream, now); rerr != nil {
+					slog.Warn("mirror: record failure failed", "stream", mr.stream, "repo", repo, "err", rerr)
+				}
 				continue
 			}
 			if err := s.recordMirrorReconcile(repo, mr.stream, now); err != nil {
@@ -139,15 +144,100 @@ func (s *Store) mirrorStale(repo, stream string, cutoff time.Time) bool {
 	return true // unparseable → treat as stale
 }
 
-// recordMirrorReconcile upserts the reconcile cursor for (repo, stream).
+// recordMirrorReconcile upserts the reconcile cursor for (repo, stream)
+// on success, clearing any failure backoff (🎯T91).
 func (s *Store) recordMirrorReconcile(repo, stream string, at time.Time) error {
+	ts := at.UTC().Format(time.RFC3339Nano)
 	_, err := s.writeDB.Exec(`
-		INSERT INTO mirror_status (repo, stream, last_reconciled_at)
-		VALUES (?, ?, ?)
+		INSERT INTO mirror_status (repo, stream, last_reconciled_at, fail_count, last_attempt_at)
+		VALUES (?, ?, ?, 0, ?)
 		ON CONFLICT(repo, stream) DO UPDATE SET
-			last_reconciled_at = excluded.last_reconciled_at
+			last_reconciled_at = excluded.last_reconciled_at,
+			fail_count = 0,
+			last_attempt_at = excluded.last_attempt_at
+	`, repo, stream, ts, ts)
+	return err
+}
+
+// recordMirrorFailure records a failed reconcile attempt for (repo,
+// stream): it bumps the consecutive-failure count and stamps the attempt
+// time, without touching last_reconciled_at (the success cursor). The
+// scheduler reads these via mirrorDue to back the repo off (🎯T91).
+func (s *Store) recordMirrorFailure(repo, stream string, at time.Time) error {
+	_, err := s.writeDB.Exec(`
+		INSERT INTO mirror_status (repo, stream, last_reconciled_at, fail_count, last_attempt_at)
+		VALUES (?, ?, '', 1, ?)
+		ON CONFLICT(repo, stream) DO UPDATE SET
+			fail_count = mirror_status.fail_count + 1,
+			last_attempt_at = excluded.last_attempt_at
 	`, repo, stream, at.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// mirrorBackoff is the minimum quiet period after a failed attempt before
+// a (repo, stream) is retried: exponential in the consecutive-failure
+// count, based on the stream's interval, capped at mirrorBackoffCap. A
+// fail_count of 0 yields no backoff, preserving the pre-🎯T91 cadence for
+// healthy repos.
+func mirrorBackoff(interval time.Duration, failCount int) time.Duration {
+	if failCount <= 0 {
+		return 0
+	}
+	d := interval
+	for i := 1; i < failCount && d < mirrorBackoffCap; i++ {
+		d *= 2
+	}
+	if d > mirrorBackoffCap {
+		d = mirrorBackoffCap
+	}
+	return d
+}
+
+// mirrorBackoffCap bounds the failure backoff so a repo that recovers is
+// retried within a day even after many failures.
+const mirrorBackoffCap = 6 * time.Hour
+
+// mirrorDue reports whether (repo, stream) should be reconciled now: its
+// success cursor is missing or older than interval (stale) AND it is not
+// within a failure backoff window (🎯T91). A missing row is due. This
+// replaces the bare staleness check in the reconcile loop so persistently
+// failing repos stop being retried every pass; MirrorBacklog keeps using
+// mirrorStale, so the divergence gap still reflects genuine success.
+func (s *Store) mirrorDue(repo, stream string, interval time.Duration, now time.Time) bool {
+	var lastReconciled, lastAttempt string
+	var failCount int
+	if err := s.readDB.QueryRow(
+		`SELECT last_reconciled_at, fail_count, last_attempt_at FROM mirror_status WHERE repo = ? AND stream = ?`,
+		repo, stream).Scan(&lastReconciled, &failCount, &lastAttempt); err != nil {
+		return true // missing → never reconciled → due
+	}
+	// Staleness: due only if the last success is missing/unparseable or
+	// older than the interval.
+	cutoff := now.Add(-interval)
+	stale := true
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, lastReconciled); err == nil {
+			stale = t.Before(cutoff)
+			break
+		}
+	}
+	if !stale {
+		return false
+	}
+	// Failure backoff: hold off until the backoff window since the last
+	// attempt has elapsed.
+	if failCount > 0 && lastAttempt != "" {
+		backoff := mirrorBackoff(interval, failCount)
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if t, err := time.Parse(layout, lastAttempt); err == nil {
+				if now.Sub(t) < backoff {
+					return false
+				}
+				break
+			}
+		}
+	}
+	return true
 }
 
 // MirrorBacklog returns the gap for the github_mirrors divergence row

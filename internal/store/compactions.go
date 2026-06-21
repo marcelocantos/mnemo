@@ -347,6 +347,23 @@ func (s *Store) SelectCompactionCandidates(
 	return out, backlog, rows.Err()
 }
 
+// CompactionScanWatermark returns the largest entries.id currently in
+// the index — a cheap O(1) activity signal (MAX over the rowid) the
+// compaction watcher uses to skip a full candidate scan (🎯T91). Where
+// SelectCompactionCandidates re-sums the entries table for every
+// session on every tick, this is a single rowid lookup. When the
+// watermark is unchanged since the last scan and that scan left nothing
+// owed or quarantined, no session's addenda volume can have grown, so
+// the owed-set is unchanged and the expensive scan can be skipped.
+// Returns 0 for an empty index.
+func (s *Store) CompactionScanWatermark() (int64, error) {
+	var maxID int64
+	if err := s.readDB.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM entries`).Scan(&maxID); err != nil {
+		return 0, fmt.Errorf("compaction scan watermark: %w", err)
+	}
+	return maxID, nil
+}
+
 // DefaultAddendaBudgetTokens is the default re-compaction / size-floor
 // threshold (🎯T72): a session is owed a compaction once the token
 // volume past its latest cursor reaches this many tokens, and a session

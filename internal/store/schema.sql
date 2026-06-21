@@ -310,6 +310,19 @@ CREATE TABLE mirror_status (
 			repo TEXT NOT NULL,
 			stream TEXT NOT NULL,
 			last_reconciled_at TEXT NOT NULL,
+			-- 🎯T91 failure backoff: a (repo, stream) whose gh/git reconcile
+			-- fails must not be retried every pass (a persistently-failing
+			-- repo — no Actions, deleted, no local checkout — otherwise
+			-- spawns a failing subprocess on every reconcile tick). fail_count
+			-- is consecutive failures since the last success; last_attempt_at
+			-- stamps the most recent attempt (success or failure). The
+			-- scheduler treats a repo as due only once last_attempt_at is
+			-- older than an exponential backoff of the stream interval.
+			-- Additive + defaulted: old rows read as "never failed, never
+			-- attempted" and are due immediately, preserving prior behaviour
+			-- until the first failure records a backoff.
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (repo, stream)
 		);
 
