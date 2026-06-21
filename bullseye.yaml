@@ -2883,3 +2883,24 @@ targets:
     - images
     origin: manual
     discovered: 2026-06-21
+  T92:
+    name: mnemo's read-side stays cheap on a large DB — dashboard analytics and ingest decision-detection don't sustain multi-core load at idle
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The residual ~1.2-4 core sustained/bursty read load observed after 🎯T91 is attributed to specific call sites via a CPU profile (ship a gated pprof endpoint or reuse the symboled build + delve), not inferred.
+    - 'Dashboard analytics endpoints (/api/usage, /api/activity, /api/context, /api/stats, /api/dbstats) do not run full aggregate scans of the 15 GB DB on every request: results are cached/throttled (these change slowly) and/or the underlying queries are indexed or incrementally maintained.'
+    - Ingest-path decision detection (detectDecisions/backfillDecisions via IngestAll) is confirmed not to re-scan history on every ingest; if backfillDecisions is re-running over the whole corpus, it is gated to run once / incrementally.
+    - With the dashboard closed and no active ingest, the daemon's sustained CPU is < ~0.3 cores (true idle).
+    - 'HUMAN GATE: confirm whether the dashboard being open is an acceptable cost or should be optimised.'
+    context: 'Discovered 2026-06-21 during 🎯T91. After fixing the three background-worker defects (compaction scan, mirror reconcile, image pools — all verified gone behaviourally), a single daemon still burned ~1.2-4 cores (bursty) on the 15 GB DB. delve on a symboled build (stock brew 0.52.0 is stripped; the deployed fix binary built via plain `go build` retains Go symbols) showed the readers funnel through the generic Store.Query (store.go:5365) and come from a MIX: (a) dashboard HTTP analytics handlers api.(*Handler).usage / .context / .activity (Store.Usage→activeHours etc. are heavy token aggregates), driven by ui/dashboard.html which polls /api/active every 5s (loadLive) and loads /api/usage|activity|context|stats on tab interaction; (b) ingest-path decision detection store.detectDecisions/backfillDecisions via IngestAll, continuous as transcripts grow. No single dominant culprit — distributed read cost amplified by DB size. Note: 🎯T90 (fresh-DB schema creation bypasses sqlift) and a general ''large-DB read cost'' theme are related. Profiling tooling gap: mnemo has no pprof endpoint and the release binary is stripped, which made this multi-hour to diagnose — a gated pprof endpoint would pay for itself.'
+    tags:
+    - perf
+    - daemon
+    - cpu
+    - dashboard
+    - ingest
+    - read-pool
+    origin: manual
+    discovered: 2026-06-21
