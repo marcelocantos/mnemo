@@ -2908,7 +2908,7 @@ targets:
     achieved: 2026-06-22
   T93:
     name: Usage/cost analytics queries are index-served, so an open dashboard doesn't sustain CPU on a large DB
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2925,3 +2925,4 @@ targets:
     - index
     origin: manual
     discovered: 2026-06-22
+    achieved: 2026-06-22
