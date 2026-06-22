@@ -2906,3 +2906,22 @@ targets:
     origin: manual
     discovered: 2026-06-21
     achieved: 2026-06-22
+  T93:
+    name: Usage/cost analytics queries are index-served, so an open dashboard doesn't sustain CPU on a large DB
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Store.Usage and activeHours no longer scan all assistant entries (all time) to satisfy a bounded time window: a covering index lets the window range-scan index-only. Verified by EXPLAIN QUERY PLAN using the new index (not idx_entries_type) and the /api/usage cold-query time dropping from ~2.8s to well under ~0.5s on the production-size DB.'
+    - With the dashboard open on its default auto-refresh, daemon CPU stays low (no sustained multi-core load from repeated usage queries).
+    - The index is additive (migrates under sqlift AllowNone); go test -tags sqlite_fts5 ./... is green.
+    context: 'Follow-up to T92, surfaced immediately after v0.53.0: with the decision-detection burn fixed, the remaining CPU spikes were entirely the open dashboard''s /api/usage analytics. Root cause (EXPLAIN QUERY PLAN on the live 15GB DB): Store.Usage''s main aggregation and activeHours both filter `type=''assistant'' AND timestamp BETWEEN ...` but the only usable index is idx_entries_type, so SQLite SEARCHes all 763,309 assistant entries (of 2.3M total) and table-fetches each to apply the timestamp filter, keeping only ~199k for a 30-day window — ~2.8s per cold query, re-run by the dashboard''s auto-refresh (default 10s) across 4 query variants. The 15s response cache (T92) caps but doesn''t eliminate it. Fix: a partial covering index `entries(timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, session_id) WHERE type=''assistant''` so the window range-scans index-only. T92''s human-gate (dashboard-open cost) is the trigger; the user confirmed it''s not acceptable.'
+    tags:
+    - perf
+    - daemon
+    - cpu
+    - dashboard
+    - sqlite
+    - index
+    origin: manual
+    discovered: 2026-06-22
