@@ -2864,7 +2864,7 @@ targets:
     achieved: 2026-06-20
   T91:
     name: mnemo's background workers stay cheap at idle — no busy-loop CPU burn from the compaction scan, mirror reconcile, or image worker pools
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2883,9 +2883,10 @@ targets:
     - images
     origin: manual
     discovered: 2026-06-21
+    achieved: 2026-06-22
   T92:
     name: mnemo's read-side stays cheap on a large DB — dashboard analytics and ingest decision-detection don't sustain multi-core load at idle
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2904,3 +2905,4 @@ targets:
     - read-pool
     origin: manual
     discovered: 2026-06-21
+    achieved: 2026-06-22
