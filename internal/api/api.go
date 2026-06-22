@@ -33,15 +33,22 @@ type DiagRunner interface {
 // of a local single-user deployment; multi-user deployments can pass a
 // username explicitly if needed in future.
 type Handler struct {
-	resolve func(string) (store.Backend, error)
-	diags   DiagRunner // optional; nil until wired by SetDiagRunner
+	resolve   func(string) (store.Backend, error)
+	diags     DiagRunner // optional; nil until wired by SetDiagRunner
+	analytics *respCache // 🎯T92: TTL cache for heavy read-only endpoints
 }
+
+// analyticsCacheTTL is how long a heavy analytics response is reused. The
+// dashboard polls/refreshes faster than these aggregates meaningfully
+// change, so a short TTL collapses repeated identical queries while keeping
+// the view fresh enough (🎯T92).
+const analyticsCacheTTL = 15 * time.Second
 
 // New creates a Handler backed by resolve. Pass the same resolver used
 // by the MCP layer so the dashboard always reflects the default user's
 // store.
 func New(resolve func(string) (store.Backend, error)) *Handler {
-	return &Handler{resolve: resolve}
+	return &Handler{resolve: resolve, analytics: newRespCache(analyticsCacheTTL)}
 }
 
 // SetDiagRunner wires the diag registry into the handler. Call once during
@@ -58,14 +65,19 @@ func (h *Handler) backend() (store.Backend, error) {
 // same mux, so cross-origin access is not needed and would expose
 // sensitive transcript data to any page the user visits.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/stats", getOnly(h.stats))
-	mux.HandleFunc("/api/usage", getOnly(h.usage))
+	// Heavy aggregate endpoints are TTL-cached (🎯T92): they scan a large
+	// DB and change slowly, so an open dashboard must not re-run them on
+	// every poll. Live/cheap endpoints (sessions, messages, active,
+	// whatsup, health) are left uncached so they stay current.
+	cache := h.analytics.wrap
+	mux.HandleFunc("/api/stats", getOnly(cache(h.stats)))
+	mux.HandleFunc("/api/usage", getOnly(cache(h.usage)))
 	mux.HandleFunc("/api/sessions", getOnly(h.sessions))
-	mux.HandleFunc("/api/activity", getOnly(h.activity))
+	mux.HandleFunc("/api/activity", getOnly(cache(h.activity)))
 	mux.HandleFunc("/api/whatsup", getOnly(h.whatsup))
-	mux.HandleFunc("/api/context", getOnly(h.context))
+	mux.HandleFunc("/api/context", getOnly(cache(h.context)))
 	mux.HandleFunc("/api/messages", getOnly(h.messages))
-	mux.HandleFunc("/api/dbstats", getOnly(h.dbstats))
+	mux.HandleFunc("/api/dbstats", getOnly(cache(h.dbstats)))
 	mux.HandleFunc("/api/active", getOnly(h.active))
 	mux.HandleFunc("/health", getOnly(h.health))
 }
