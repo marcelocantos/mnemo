@@ -6783,17 +6783,31 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 	return nil
 }
 
-// backfillDecisions runs detectDecisions for all ingested sessions
-// that don't yet have any decisions entries. Safe to call on every startup.
+// backfillDecisions catches up decision detection for sessions that have
+// never been scanned (no decision_scan_state watermark). Safe to call on
+// every startup; converges to a cheap no-op once every session is
+// watermarked.
+//
+// 🎯T92: the old predicate ("no row in decisions") never converged — a
+// session with zero decisions never produced a decisions row, so it was
+// rescanned on every pass forever. Worse, on a large existing DB the first
+// watermark-based pass would re-scan tens of thousands of sessions serially
+// (each loading its full message history) — observed at ~200 sessions/min,
+// i.e. hours of multi-core load for a one-time catch-up.
+//
+// The catch-up is split by whether decisions have ever been detected:
+//
+//   - decisions already exist → this DB has been backfilled before (the old
+//     code ran detectDecisions over all existing content on every startup),
+//     so every detectable pair in existing content is already stored.
+//     Re-scanning would find nothing new. Instead, bulk-record each
+//     unwatermarked session's watermark in ONE indexed aggregate query
+//     (per-session MAX(message id)); the incremental forward path then takes
+//     over for future appends. This turns the hours-long migration into a
+//     single query.
+//   - no decisions yet → a fresh import. Scan each candidate once to find
+//     its pairs (the original behaviour), recording watermarks as it goes.
 func backfillDecisions(db *sql.DB) {
-	// 🎯T92: only scan sessions that have never been scanned for decisions.
-	// The old predicate ("no row in decisions") never converged — a session
-	// with zero decisions never produced a decisions row, so it was rescanned
-	// on every ingest pass forever. detection now records a decision_scan_state
-	// watermark for every scanned session (pairs or not), so absence of a
-	// watermark row is the correct "never scanned" signal and the backfill
-	// drains to empty. Sessions that subsequently grow are picked up
-	// incrementally by the forward path (detectDecisions on ingest).
 	rows, err := db.Query(`
 		SELECT DISTINCT sm.session_id, COALESCE(sm.repo, '')
 		FROM session_meta sm
@@ -6816,12 +6830,43 @@ func backfillDecisions(db *sql.DB) {
 		}
 	}
 	rows.Close()
+	if len(sessions) == 0 {
+		return // fully converged — cheap no-op
+	}
 
+	var decisionsExist bool
+	_ = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM decisions)`).Scan(&decisionsExist)
+
+	if decisionsExist {
+		// Cold migration on an already-backfilled DB: bulk-seed watermarks
+		// for the unwatermarked candidates in one aggregate query rather
+		// than re-scanning each session's history. The watermark is the
+		// session's current MAX text-message id, so the forward path resumes
+		// inclusively from it (boundary-safe) on the next append.
+		res, err := db.Exec(`
+			INSERT OR IGNORE INTO decision_scan_state (session_id, scanned_through_id, scanned_at)
+			SELECT m.session_id, MAX(m.id), ?
+			FROM messages m
+			WHERE m.is_noise = 0 AND m.content_type = 'text'
+			  AND m.session_id IN (
+			    SELECT sm.session_id FROM session_meta sm
+			    WHERE NOT EXISTS (SELECT 1 FROM decision_scan_state st WHERE st.session_id = sm.session_id)
+			  )
+			GROUP BY m.session_id`, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			slog.Warn("backfill decisions seed failed", "err", err)
+			return
+		}
+		n, _ := res.RowsAffected()
+		slog.Info("seeded decision watermarks (migration)", "sessions_seeded", n, "candidates", len(sessions))
+		return
+	}
+
+	// Fresh import: scan each candidate once to detect its pairs.
 	found := 0
 	for _, sr := range sessions {
 		detectDecisions(db, sr.id, sr.repo)
 	}
-	// Count total decisions found.
 	db.QueryRow("SELECT COUNT(*) FROM decisions").Scan(&found)
 	if found > 0 {
 		slog.Info("backfilled decisions", "sessions_scanned", len(sessions), "decisions_found", found)

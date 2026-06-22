@@ -128,3 +128,41 @@ func TestBackfillDecisionsConverges(t *testing.T) {
 		t.Fatalf("backfill must converge: expected 0 unscanned sessions, got %d", remaining)
 	}
 }
+
+// TestBackfillDecisionsMigrationBulkSeeds verifies the 🎯T92 cold-migration
+// path: when decisions already exist (the DB was backfilled by the old
+// code), unwatermarked sessions are bulk-seeded with their MAX message id
+// in one query rather than re-scanned, and no new full-history scan runs.
+func TestBackfillDecisionsMigrationBulkSeeds(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	// Two unwatermarked sessions in session_meta with message history.
+	for _, sess := range []string{"mig-a", "mig-b"} {
+		if _, err := s.writeDB.Exec(
+			`INSERT INTO session_meta (session_id, repo) VALUES (?, '')`, sess); err != nil {
+			t.Fatal(err)
+		}
+		insertDecisionMsg(t, s, sess, "user", "some historical conversation content here")
+		insertDecisionMsg(t, s, sess, "assistant", "more historical content, no actionable decision pair")
+	}
+
+	// Simulate "this DB has been backfilled before": a decision already
+	// exists. This selects the bulk-seed migration path.
+	if _, err := s.writeDB.Exec(`
+		INSERT INTO decisions (session_id, proposal_text, confirmation_text, repo, timestamp)
+		VALUES ('other', 'p', 'c', '', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	backfillDecisions(s.writeDB)
+
+	// Both sessions must now be watermarked at their own MAX message id.
+	for _, sess := range []string{"mig-a", "mig-b"} {
+		var wm, maxID int64
+		s.readDB.QueryRow(`SELECT scanned_through_id FROM decision_scan_state WHERE session_id=?`, sess).Scan(&wm)
+		s.readDB.QueryRow(`SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=? AND is_noise=0 AND content_type='text'`, sess).Scan(&maxID)
+		if wm == 0 || wm != maxID {
+			t.Fatalf("session %s: expected watermark == max msg id %d, got %d", sess, maxID, wm)
+		}
+	}
+}
