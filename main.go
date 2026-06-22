@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,7 +69,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.52.0"
+	version              = "0.53.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 )
@@ -735,6 +736,23 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.RegisterRoutes(mux)
+
+	// 🎯T92: opt-in pprof on the local listener. Diagnosing the CPU burn
+	// that motivated T91/T92 was slow because the release binary is stripped
+	// and has no profiling surface — every investigation fell back to
+	// `sample`/lldb across the cgo boundary. Gated behind MNEMO_PPROF=1
+	// (off by default — pprof exposes runtime internals and a debug surface)
+	// so the next "why is mnemo hot?" is a 30-second `go tool pprof`, not a
+	// multi-hour delve session. Local listener only; never on the federated
+	// mTLS port.
+	if os.Getenv("MNEMO_PPROF") == "1" {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		slog.Info("pprof enabled (MNEMO_PPROF=1)", "url", "http://localhost"+addr+"/debug/pprof/")
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

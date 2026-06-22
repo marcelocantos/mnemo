@@ -32,15 +32,50 @@ const (
 	maxImageDimension   = 1568 // downscale images beyond this longest edge
 )
 
+// maxBackfillWorkers caps image backfill fan-out well below NumCPU
+// (🎯T91). The previous NumCPU cap meant 16 workers on this machine, each
+// running a BLOB-reading scan of the images table in a tight claim loop —
+// a multi-core burn. Backfill is a background catch-up, not latency-
+// critical, so a small pool drains it without saturating the box or the
+// claude -p subprocess budget.
+const maxBackfillWorkers = 4
+
 // describerBackfillWorkers returns the number of concurrent claude -p
-// invocations the backfill drain should run. Capped at runtime.NumCPU()
-// so it matches the per-pipeline semaphore used on the forward path.
+// invocations the backfill drain should run: min(NumCPU, maxBackfillWorkers).
 func describerBackfillWorkers() int {
 	n := runtime.NumCPU()
+	if n > maxBackfillWorkers {
+		n = maxBackfillWorkers
+	}
 	if n < 1 {
 		return 1
 	}
 	return n
+}
+
+// hasPendingImageWork reports whether any image still lacks a row in the
+// given derived table (image_descriptions or image_ocr) — i.e. there is
+// backfill work to do. It is an index-only anti-join existence probe (no
+// BLOBs read) that short-circuits at the first pending image, used to
+// gate the describer/OCR worker fan-out so a fully-drained queue does not
+// spawn workers that each scan the images table (🎯T91). The table name
+// comes from a fixed internal set and is validated before interpolation.
+// On any error or unknown table it returns true, so work is never
+// silently suppressed.
+func hasPendingImageWork(db *sql.DB, derivedTable string) bool {
+	switch derivedTable {
+	case "image_descriptions", "image_ocr":
+	default:
+		return true
+	}
+	var exists int
+	if err := db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM images img
+		WHERE NOT EXISTS (SELECT 1 FROM ` + derivedTable + ` d WHERE d.image_id = img.id)
+	)`).Scan(&exists); err != nil {
+		return true
+	}
+	return exists == 1
 }
 
 // describerSystemPrompt is appended to claude -p's system prompt. It
@@ -89,6 +124,14 @@ func (s *Store) StartImageDescriber() {
 		describerOnce.Do(func() {
 			slog.Warn("claude CLI not found on PATH — image descriptions will be skipped")
 		})
+		return
+	}
+	// 🎯T91 pending gate: do not spawn the worker fan-out (each worker
+	// runs a BLOB-reading scan of the images table) when nothing is
+	// undescribed. This existence check is index-only (no BLOBs) and
+	// short-circuits at the first pending row; when the queue is already
+	// drained it replaces N concurrent scan loops with one cheap probe.
+	if !hasPendingImageWork(s.readDB, "image_descriptions") {
 		return
 	}
 	w := describerBackfillWorkers()

@@ -87,6 +87,12 @@ func (s *Store) StartImageOCR() {
 		})
 		return
 	}
+	// 🎯T91 pending gate: skip the images-table scan when every image is
+	// already OCR'd. Without this, each backfill pass scans the table even
+	// with no work to do.
+	if !hasPendingImageWork(s.readDB, "image_ocr") {
+		return
+	}
 	slog.Info("starting OCR backfill", "backend", backend)
 	go processPendingOCR(s.writeDB, backend)
 }

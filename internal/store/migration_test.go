@@ -92,6 +92,107 @@ func rowCount(t *testing.T, path, tbl string) int {
 	return n
 }
 
+// TestUpgradeMirrorStatusBackoffColumns pins the 🎯T91 additive
+// migration: the failure-backoff columns (fail_count, last_attempt_at)
+// are added to an existing mirror_status under AllowNone, preserving rows
+// and defaulting the new columns. This is what lets the deployed daemon
+// migrate the production DB with no flag and no rebuild.
+func TestUpgradeMirrorStatusBackoffColumns(t *testing.T) {
+	path := freshDB(t)
+	// Pre-🎯T91 shape.
+	applyDDL(t, path, `
+		CREATE TABLE mirror_status (
+			repo TEXT NOT NULL,
+			stream TEXT NOT NULL,
+			last_reconciled_at TEXT NOT NULL,
+			PRIMARY KEY (repo, stream)
+		);
+	`)
+	{
+		db, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO mirror_status(repo, stream, last_reconciled_at)
+			 VALUES('o/r','ci','2026-01-01T00:00:00Z')`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+	// Upgrade to the post-🎯T91 shape under AllowNone — must succeed.
+	if err := tryUpgrade(t, path, `
+		CREATE TABLE mirror_status (
+			repo TEXT NOT NULL,
+			stream TEXT NOT NULL,
+			last_reconciled_at TEXT NOT NULL,
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (repo, stream)
+		);
+	`); err != nil {
+		t.Fatalf("AllowNone upgrade of mirror_status must succeed: %v", err)
+	}
+	// Existing row preserved; new columns take their defaults.
+	{
+		db, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var fc int
+		var la string
+		if err := db.QueryRow(
+			`SELECT fail_count, last_attempt_at FROM mirror_status
+			 WHERE repo='o/r' AND stream='ci'`).Scan(&fc, &la); err != nil {
+			t.Fatalf("read migrated row: %v", err)
+		}
+		if fc != 0 || la != "" {
+			t.Errorf("expected defaults (0, \"\"), got (%d, %q)", fc, la)
+		}
+	}
+}
+
+// TestUpgradeAddsDecisionScanState pins the 🎯T92 additive migration: the
+// decision_scan_state table is created on an existing DB under AllowNone
+// (it is a brand-new table, the simplest additive change), so the deployed
+// daemon migrates the production DB with no flag.
+func TestUpgradeAddsDecisionScanState(t *testing.T) {
+	path := freshDB(t)
+	// A pre-🎯T92 schema without the watermark table.
+	applyDDL(t, path, `
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			proposal_text TEXT NOT NULL,
+			confirmation_text TEXT NOT NULL,
+			timestamp TEXT NOT NULL
+		);
+	`)
+	if rowCount(t, path, "decision_scan_state") != -1 {
+		t.Fatalf("expected decision_scan_state absent before upgrade")
+	}
+	if err := tryUpgrade(t, path, `
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			proposal_text TEXT NOT NULL,
+			confirmation_text TEXT NOT NULL,
+			timestamp TEXT NOT NULL
+		);
+		CREATE TABLE decision_scan_state (
+			session_id TEXT PRIMARY KEY,
+			scanned_through_id INTEGER NOT NULL DEFAULT 0,
+			scanned_at TEXT NOT NULL DEFAULT ''
+		);
+	`); err != nil {
+		t.Fatalf("AllowNone upgrade adding decision_scan_state must succeed: %v", err)
+	}
+	if rowCount(t, path, "decision_scan_state") != 0 {
+		t.Fatalf("expected empty decision_scan_state after upgrade")
+	}
+}
+
 func TestUpgradePreservesData(t *testing.T) {
 	// Criterion 7: an additive upgrade (new column + new table + new
 	// index + new trigger) preserves rows in pre-existing tables.

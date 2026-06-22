@@ -130,6 +130,12 @@ type storeSource interface {
 	// QuarantinedCount reports how many sessions are currently excluded
 	// by the quarantine, for mnemo_compactor_status.
 	QuarantinedCount(threshold int, since time.Time) int
+	// CompactionScanWatermark returns MAX(entries.id) — a cheap O(1)
+	// activity signal (🎯T91). The watcher skips the expensive candidate
+	// scan when this is unchanged since the last scan and that scan left
+	// nothing owed (backlog) or quarantined awaiting parole, since the
+	// owed-set cannot have changed without new ingested entries.
+	CompactionScanWatermark() (int64, error)
 }
 
 // Watcher periodically scans session activity and drives compactions
@@ -154,6 +160,7 @@ type Watcher struct {
 	lastN               int       // candidates returned by the last scan
 	lastBacklog         int       // owed sessions before the per-scan limit (gap to fixed point)
 	lastQuarantined     int       // sessions excluded by the durable quarantine at last scan (🎯T77)
+	lastScanMaxEntryID  int64     // MAX(entries.id) observed at the last full scan; the 🎯T91 idle gate
 	lastScanAt          time.Time // wall clock of the last scan return
 	lastTickAt          time.Time // wall clock of the last tick completion
 	lastTickOutcome     tickOutcome
@@ -278,6 +285,28 @@ func (w *Watcher) LastScanCount() int {
 
 func (w *Watcher) scan(ctx context.Context) {
 	now := time.Now()
+
+	// 🎯T91 idle gate: SelectCompactionCandidates re-sums the entries
+	// table for every session, so on a 15 GB index a single tick costs
+	// many seconds — and the watcher fires one every ScanInterval even
+	// when nothing changed. MAX(entries.id) is an O(1) rowid lookup; if
+	// no new entries have been ingested since the last full scan and that
+	// scan left nothing owed (backlog) or quarantined (awaiting parole),
+	// no session's addenda volume can have grown, so the owed-set is
+	// unchanged and the expensive scan is pure waste. Skip it. (A
+	// watermark read error falls through to a normal scan.)
+	maxEntryID, watermarkErr := w.src.CompactionScanWatermark()
+	if watermarkErr == nil {
+		w.mu.Lock()
+		gated := maxEntryID == w.lastScanMaxEntryID && w.lastBacklog == 0 && w.lastQuarantined == 0
+		if gated {
+			w.lastScanAt = now
+			w.mu.Unlock()
+			return
+		}
+		w.mu.Unlock()
+	}
+
 	quarantineSince := now.Add(-store.DefaultQuarantineCooldown)
 	cands, backlog, err := w.src.SelectCompactionCandidates(
 		w.cfg.addendaBudgetTokens(),
@@ -310,6 +339,13 @@ func (w *Watcher) scan(ctx context.Context) {
 	w.lastN = len(cands)
 	w.lastBacklog = backlog
 	w.lastQuarantined = quarantined
+	// Record the watermark observed at the START of this scan (not now):
+	// entries ingested while the scan ran have a higher id, so the next
+	// tick sees the watermark advance and re-scans rather than skipping
+	// activity that landed mid-scan (🎯T91).
+	if watermarkErr == nil {
+		w.lastScanMaxEntryID = maxEntryID
+	}
 	w.lastScanAt = time.Now()
 	w.mu.Unlock()
 

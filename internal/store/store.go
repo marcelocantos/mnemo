@@ -2339,14 +2339,27 @@ func isConfirmation(text string) bool {
 // and inserts detected proposal+confirmation pairs into the decisions table.
 // Uses INSERT OR IGNORE so re-running on the same session is safe.
 func detectDecisions(db *sql.DB, sessionID string, repo string) {
-	// Load all text-content messages for this session in order.
+	// 🎯T92 incremental scan: the watcher calls this on every transcript
+	// append, so re-scanning the whole session each time is O(all history)
+	// per append — a multi-core busy-loop across many active sessions on a
+	// large DB. Instead, resume from the per-session watermark and scan
+	// only new messages. The watermark is the highest message id already
+	// scanned; we start from it (inclusive) so a proposal that sat at the
+	// boundary can still pair with a confirmation that just arrived. A
+	// missing row (watermark 0) means "never scanned" → full first scan.
+	var fromID int64
+	_ = db.QueryRow(
+		`SELECT scanned_through_id FROM decision_scan_state WHERE session_id = ?`,
+		sessionID).Scan(&fromID)
+
 	rows, err := db.Query(`
 		SELECT id, role, text, timestamp
 		FROM messages
 		WHERE session_id = ?
 		  AND content_type = 'text'
 		  AND is_noise = 0
-		ORDER BY id ASC`, sessionID)
+		  AND id >= ?
+		ORDER BY id ASC`, sessionID, fromID)
 	if err != nil {
 		return
 	}
@@ -2360,12 +2373,16 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 	}
 
 	var msgs []msg
+	var maxID int64
 	for rows.Next() {
 		var m msg
 		if err := rows.Scan(&m.id, &m.role, &m.text, &m.timestamp); err != nil {
 			continue
 		}
 		msgs = append(msgs, m)
+		if int64(m.id) > maxID {
+			maxID = int64(m.id)
+		}
 	}
 	rows.Close()
 
@@ -2389,6 +2406,21 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 				(session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			sessionID, a.id, u.id, proposal, u.text, repo, u.timestamp)
+	}
+
+	// Advance the watermark so the next append rescans only new messages.
+	// Record even when no pair was found — that is exactly the case the old
+	// code mis-handled (a decision-less session was rescanned forever). We
+	// store the last message id seen; the next scan resumes inclusively
+	// from it (one-message overlap) to catch a pair spanning the boundary.
+	if maxID >= fromID && len(msgs) > 0 {
+		db.Exec(`
+			INSERT INTO decision_scan_state (session_id, scanned_through_id, scanned_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				scanned_through_id = excluded.scanned_through_id,
+				scanned_at = excluded.scanned_at`,
+			sessionID, maxID, time.Now().UTC().Format(time.RFC3339Nano))
 	}
 }
 
@@ -6751,13 +6783,35 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 	return nil
 }
 
-// backfillDecisions runs detectDecisions for all ingested sessions
-// that don't yet have any decisions entries. Safe to call on every startup.
+// backfillDecisions catches up decision detection for sessions that have
+// never been scanned (no decision_scan_state watermark). Safe to call on
+// every startup; converges to a cheap no-op once every session is
+// watermarked.
+//
+// 🎯T92: the old predicate ("no row in decisions") never converged — a
+// session with zero decisions never produced a decisions row, so it was
+// rescanned on every pass forever. Worse, on a large existing DB the first
+// watermark-based pass would re-scan tens of thousands of sessions serially
+// (each loading its full message history) — observed at ~200 sessions/min,
+// i.e. hours of multi-core load for a one-time catch-up.
+//
+// The catch-up is split by whether decisions have ever been detected:
+//
+//   - decisions already exist → this DB has been backfilled before (the old
+//     code ran detectDecisions over all existing content on every startup),
+//     so every detectable pair in existing content is already stored.
+//     Re-scanning would find nothing new. Instead, bulk-record each
+//     unwatermarked session's watermark in ONE indexed aggregate query
+//     (per-session MAX(message id)); the incremental forward path then takes
+//     over for future appends. This turns the hours-long migration into a
+//     single query.
+//   - no decisions yet → a fresh import. Scan each candidate once to find
+//     its pairs (the original behaviour), recording watermarks as it goes.
 func backfillDecisions(db *sql.DB) {
 	rows, err := db.Query(`
 		SELECT DISTINCT sm.session_id, COALESCE(sm.repo, '')
 		FROM session_meta sm
-		WHERE NOT EXISTS (SELECT 1 FROM decisions d WHERE d.session_id = sm.session_id)`)
+		WHERE NOT EXISTS (SELECT 1 FROM decision_scan_state st WHERE st.session_id = sm.session_id)`)
 	if err != nil {
 		slog.Warn("backfill decisions query failed", "err", err)
 		return
@@ -6776,12 +6830,43 @@ func backfillDecisions(db *sql.DB) {
 		}
 	}
 	rows.Close()
+	if len(sessions) == 0 {
+		return // fully converged — cheap no-op
+	}
 
+	var decisionsExist bool
+	_ = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM decisions)`).Scan(&decisionsExist)
+
+	if decisionsExist {
+		// Cold migration on an already-backfilled DB: bulk-seed watermarks
+		// for the unwatermarked candidates in one aggregate query rather
+		// than re-scanning each session's history. The watermark is the
+		// session's current MAX text-message id, so the forward path resumes
+		// inclusively from it (boundary-safe) on the next append.
+		res, err := db.Exec(`
+			INSERT OR IGNORE INTO decision_scan_state (session_id, scanned_through_id, scanned_at)
+			SELECT m.session_id, MAX(m.id), ?
+			FROM messages m
+			WHERE m.is_noise = 0 AND m.content_type = 'text'
+			  AND m.session_id IN (
+			    SELECT sm.session_id FROM session_meta sm
+			    WHERE NOT EXISTS (SELECT 1 FROM decision_scan_state st WHERE st.session_id = sm.session_id)
+			  )
+			GROUP BY m.session_id`, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			slog.Warn("backfill decisions seed failed", "err", err)
+			return
+		}
+		n, _ := res.RowsAffected()
+		slog.Info("seeded decision watermarks (migration)", "sessions_seeded", n, "candidates", len(sessions))
+		return
+	}
+
+	// Fresh import: scan each candidate once to detect its pairs.
 	found := 0
 	for _, sr := range sessions {
 		detectDecisions(db, sr.id, sr.repo)
 	}
-	// Count total decisions found.
 	db.QueryRow("SELECT COUNT(*) FROM decisions").Scan(&found)
 	if found > 0 {
 		slog.Info("backfilled decisions", "sessions_scanned", len(sessions), "decisions_found", found)
