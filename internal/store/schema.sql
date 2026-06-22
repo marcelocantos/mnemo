@@ -621,6 +621,19 @@ CREATE INDEX idx_entries_agent_id ON entries(agent_id) WHERE agent_id IS NOT NUL
 
 CREATE INDEX idx_entries_assistant_tokens ON entries(session_id, input_tokens, output_tokens) WHERE type = 'assistant';
 
+-- 🎯T93 usage-analytics covering index. Store.Usage (token/cost rollups by
+-- day/model/repo) and activeHours both filter assistant entries by a
+-- timestamp window. Without a timestamp-leading index they fall back to
+-- idx_entries_type and SEARCH every assistant entry ever (~763k), table-
+-- fetching each to apply the window filter (~2.8s on a large DB, re-run by
+-- the dashboard's auto-refresh). Leading timestamp makes the window a range
+-- scan; the materialised token columns + model + session_id make both
+-- queries index-only over just the window's rows. Partial on type so it
+-- covers only assistant entries (matching the queries' WHERE type clause).
+CREATE INDEX idx_entries_assistant_usage
+			ON entries(timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, session_id)
+			WHERE type = 'assistant';
+
 -- 🎯T72 addenda-token metric: SUM(output_tokens + cache_creation_tokens)
 -- over assistant entries past a cursor (entries.id > cursor_entry_id),
 -- computed for every session on every compactor scan. Keyed

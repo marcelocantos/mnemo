@@ -257,6 +257,12 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		if err := e.store.IngestTodos(); err != nil {
 			logger.Error("todo ingest failed", "err", err)
 		}
+		// 🎯T93: refresh planner statistics once the initial ingest has
+		// landed its bulk writes. On a fresh install (which skips the
+		// migration ANALYZE) this gives the planner its first stats so
+		// covering indexes are used; on an upgrade it keeps them current
+		// after the startup catch-up. Cheap and self-tuning.
+		e.store.Optimize()
 		// Initial vault sync: materialise all knowledge-graph entities as
 		// Markdown notes. Spawned in its own goroutine so Watch() starts
 		// immediately and live JSONL ingestion is not delayed. The SQLite
@@ -322,6 +328,27 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			reviewer.Run(r.baseCtx, rev)
 		}()
 	}
+
+	// Planner-statistics maintenance (🎯T93): periodically run
+	// `PRAGMA optimize` so the query planner keeps choosing the right
+	// indexes as the DB grows over a long-running daemon's lifetime.
+	// Self-tuning and cheap (analyses only tables whose stats have
+	// drifted). The post-ingest call covers startup; this covers the days
+	// a daemon stays up between restarts.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.baseCtx.Done():
+				return
+			case <-ticker.C:
+				e.store.Optimize()
+			}
+		}
+	}()
 
 	// External mirror reconciler (🎯T68.5): divergence-driven reconcile
 	// of the mirror streams (CI today; GitHub/commits as they convert).

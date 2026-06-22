@@ -193,6 +193,56 @@ func TestUpgradeAddsDecisionScanState(t *testing.T) {
 	}
 }
 
+// TestUpgradeAddsUsageIndex pins the 🎯T93 additive migration: the usage
+// covering index is added to an existing entries table under AllowNone
+// (a new index, the simplest additive change).
+func TestUpgradeAddsUsageIndex(t *testing.T) {
+	path := freshDB(t)
+	applyDDL(t, path, `
+		CREATE TABLE entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			timestamp TEXT,
+			raw BLOB,
+			model TEXT GENERATED ALWAYS AS (raw->>'$.message.model'),
+			input_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.input_tokens')),
+			output_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.output_tokens')),
+			cache_read_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_read_input_tokens')),
+			cache_creation_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation_input_tokens'))
+		);
+	`)
+	if err := tryUpgrade(t, path, `
+		CREATE TABLE entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			timestamp TEXT,
+			raw BLOB,
+			model TEXT GENERATED ALWAYS AS (raw->>'$.message.model'),
+			input_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.input_tokens')),
+			output_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.output_tokens')),
+			cache_read_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_read_input_tokens')),
+			cache_creation_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation_input_tokens'))
+		);
+		CREATE INDEX idx_entries_assistant_usage
+			ON entries(timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, session_id)
+			WHERE type = 'assistant';
+	`); err != nil {
+		t.Fatalf("AllowNone upgrade adding the usage index must succeed: %v", err)
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var name string
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_entries_assistant_usage'`).Scan(&name); err != nil {
+		t.Fatalf("expected idx_entries_assistant_usage after upgrade: %v", err)
+	}
+}
+
 func TestUpgradePreservesData(t *testing.T) {
 	// Criterion 7: an additive upgrade (new column + new table + new
 	// index + new trigger) preserves rows in pre-existing tables.
