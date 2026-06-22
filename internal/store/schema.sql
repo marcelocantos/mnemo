@@ -134,6 +134,22 @@ CREATE TABLE decisions (
 			timestamp TEXT NOT NULL
 		);
 
+-- 🎯T92 decision-detection watermark. detectDecisions used to re-scan a
+-- session's ENTIRE message history on every ingest (the watcher fires one
+-- ingest per transcript append), and backfillDecisions re-scanned every
+-- decision-less session on every pass (a session with no decisions never
+-- got a decisions row, so "has a decisions row" wrongly read as "not yet
+-- scanned"). Both became O(all history) busy-loops on a large DB. This
+-- table records, per session, the highest message id already scanned for
+-- decision pairs, so detection is incremental (scan only new messages) and
+-- the backfill converges (each session scanned at most once until it
+-- grows). scanned_through_id 0 / a missing row both mean "never scanned".
+CREATE TABLE decision_scan_state (
+			session_id TEXT PRIMARY KEY,
+			scanned_through_id INTEGER NOT NULL DEFAULT 0,
+			scanned_at TEXT NOT NULL DEFAULT ''
+		);
+
 CREATE TABLE doc_tree_refs (
 			doc_id INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
 			tree_id INTEGER NOT NULL REFERENCES trees_of_interest(id) ON DELETE CASCADE,

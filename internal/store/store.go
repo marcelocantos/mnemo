@@ -2339,14 +2339,27 @@ func isConfirmation(text string) bool {
 // and inserts detected proposal+confirmation pairs into the decisions table.
 // Uses INSERT OR IGNORE so re-running on the same session is safe.
 func detectDecisions(db *sql.DB, sessionID string, repo string) {
-	// Load all text-content messages for this session in order.
+	// 🎯T92 incremental scan: the watcher calls this on every transcript
+	// append, so re-scanning the whole session each time is O(all history)
+	// per append — a multi-core busy-loop across many active sessions on a
+	// large DB. Instead, resume from the per-session watermark and scan
+	// only new messages. The watermark is the highest message id already
+	// scanned; we start from it (inclusive) so a proposal that sat at the
+	// boundary can still pair with a confirmation that just arrived. A
+	// missing row (watermark 0) means "never scanned" → full first scan.
+	var fromID int64
+	_ = db.QueryRow(
+		`SELECT scanned_through_id FROM decision_scan_state WHERE session_id = ?`,
+		sessionID).Scan(&fromID)
+
 	rows, err := db.Query(`
 		SELECT id, role, text, timestamp
 		FROM messages
 		WHERE session_id = ?
 		  AND content_type = 'text'
 		  AND is_noise = 0
-		ORDER BY id ASC`, sessionID)
+		  AND id >= ?
+		ORDER BY id ASC`, sessionID, fromID)
 	if err != nil {
 		return
 	}
@@ -2360,12 +2373,16 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 	}
 
 	var msgs []msg
+	var maxID int64
 	for rows.Next() {
 		var m msg
 		if err := rows.Scan(&m.id, &m.role, &m.text, &m.timestamp); err != nil {
 			continue
 		}
 		msgs = append(msgs, m)
+		if int64(m.id) > maxID {
+			maxID = int64(m.id)
+		}
 	}
 	rows.Close()
 
@@ -2389,6 +2406,21 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 				(session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			sessionID, a.id, u.id, proposal, u.text, repo, u.timestamp)
+	}
+
+	// Advance the watermark so the next append rescans only new messages.
+	// Record even when no pair was found — that is exactly the case the old
+	// code mis-handled (a decision-less session was rescanned forever). We
+	// store the last message id seen; the next scan resumes inclusively
+	// from it (one-message overlap) to catch a pair spanning the boundary.
+	if maxID >= fromID && len(msgs) > 0 {
+		db.Exec(`
+			INSERT INTO decision_scan_state (session_id, scanned_through_id, scanned_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				scanned_through_id = excluded.scanned_through_id,
+				scanned_at = excluded.scanned_at`,
+			sessionID, maxID, time.Now().UTC().Format(time.RFC3339Nano))
 	}
 }
 
@@ -6754,10 +6786,18 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 // backfillDecisions runs detectDecisions for all ingested sessions
 // that don't yet have any decisions entries. Safe to call on every startup.
 func backfillDecisions(db *sql.DB) {
+	// 🎯T92: only scan sessions that have never been scanned for decisions.
+	// The old predicate ("no row in decisions") never converged — a session
+	// with zero decisions never produced a decisions row, so it was rescanned
+	// on every ingest pass forever. detection now records a decision_scan_state
+	// watermark for every scanned session (pairs or not), so absence of a
+	// watermark row is the correct "never scanned" signal and the backfill
+	// drains to empty. Sessions that subsequently grow are picked up
+	// incrementally by the forward path (detectDecisions on ingest).
 	rows, err := db.Query(`
 		SELECT DISTINCT sm.session_id, COALESCE(sm.repo, '')
 		FROM session_meta sm
-		WHERE NOT EXISTS (SELECT 1 FROM decisions d WHERE d.session_id = sm.session_id)`)
+		WHERE NOT EXISTS (SELECT 1 FROM decision_scan_state st WHERE st.session_id = sm.session_id)`)
 	if err != nil {
 		slog.Warn("backfill decisions query failed", "err", err)
 		return

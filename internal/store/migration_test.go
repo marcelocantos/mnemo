@@ -153,6 +153,46 @@ func TestUpgradeMirrorStatusBackoffColumns(t *testing.T) {
 	}
 }
 
+// TestUpgradeAddsDecisionScanState pins the 🎯T92 additive migration: the
+// decision_scan_state table is created on an existing DB under AllowNone
+// (it is a brand-new table, the simplest additive change), so the deployed
+// daemon migrates the production DB with no flag.
+func TestUpgradeAddsDecisionScanState(t *testing.T) {
+	path := freshDB(t)
+	// A pre-🎯T92 schema without the watermark table.
+	applyDDL(t, path, `
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			proposal_text TEXT NOT NULL,
+			confirmation_text TEXT NOT NULL,
+			timestamp TEXT NOT NULL
+		);
+	`)
+	if rowCount(t, path, "decision_scan_state") != -1 {
+		t.Fatalf("expected decision_scan_state absent before upgrade")
+	}
+	if err := tryUpgrade(t, path, `
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			proposal_text TEXT NOT NULL,
+			confirmation_text TEXT NOT NULL,
+			timestamp TEXT NOT NULL
+		);
+		CREATE TABLE decision_scan_state (
+			session_id TEXT PRIMARY KEY,
+			scanned_through_id INTEGER NOT NULL DEFAULT 0,
+			scanned_at TEXT NOT NULL DEFAULT ''
+		);
+	`); err != nil {
+		t.Fatalf("AllowNone upgrade adding decision_scan_state must succeed: %v", err)
+	}
+	if rowCount(t, path, "decision_scan_state") != 0 {
+		t.Fatalf("expected empty decision_scan_state after upgrade")
+	}
+}
+
 func TestUpgradePreservesData(t *testing.T) {
 	// Criterion 7: an additive upgrade (new column + new table + new
 	// index + new trigger) preserves rows in pre-existing tables.
