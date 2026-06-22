@@ -624,7 +624,57 @@ func applySchema(dbPath string) error {
 		}
 	}
 
-	return sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone})
+	if err := sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone}); err != nil {
+		return err
+	}
+
+	// 🎯T93: refresh planner statistics after a schema change. A migration
+	// that adds an index leaves it without sqlite_stat1 data, and SQLite's
+	// cost model will keep choosing the old (worse) index until ANALYZE
+	// runs — e.g. the usage covering index is ignored, reverting to a full
+	// assistant-table scan (~2.8s vs ~0.1s). Runs only here, on a real
+	// migration (rare; this path already took a pre-migration backup), so
+	// it is not a per-startup cost. Best-effort: a failure only costs
+	// planner stats, never correctness.
+	analyzeForPlanner(dbPath)
+	return nil
+}
+
+// Optimize runs `PRAGMA optimize`, SQLite's lightweight, self-tuning
+// statistics maintenance (🎯T93). It analyses only the tables whose
+// statistics have drifted enough to matter (including tables that have
+// never been analysed), so it is cheap to call periodically and on a
+// long-running daemon keeps the planner's index choices correct as the
+// DB grows. Complements the one-shot post-migration ANALYZE: that gives a
+// newly-added index immediate stats; this keeps them fresh over time and
+// covers fresh installs (which take the no-migration schema path). Runs on
+// the writer connection (PRAGMA optimize records analysis results).
+// Best-effort: a failure only affects planner quality.
+func (s *Store) Optimize() {
+	if s.writeDB == nil {
+		return
+	}
+	if _, err := s.writeDB.Exec("PRAGMA optimize"); err != nil {
+		slog.Warn("PRAGMA optimize failed; planner stats may drift", "err", err)
+	}
+}
+
+// analyzeForPlanner runs ANALYZE so the query planner has up-to-date
+// index statistics. Opens its own short-lived connection (mirroring the
+// backup hook) and is best-effort. Called after a schema migration adds
+// or changes indexes (🎯T93).
+func analyzeForPlanner(dbPath string) {
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		slog.Warn("post-migration ANALYZE: open failed; planner stats may be stale", "err", err)
+		return
+	}
+	defer db.Close()
+	if _, err := db.Exec("ANALYZE"); err != nil {
+		slog.Warn("post-migration ANALYZE failed; planner stats may be stale", "err", err)
+		return
+	}
+	slog.Info("post-migration ANALYZE complete (planner statistics refreshed)")
 }
 
 // applyFreshSchema creates the full schema by executing schema.sql
