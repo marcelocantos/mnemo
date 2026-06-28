@@ -5055,113 +5055,126 @@ func (s *Store) Status(days int, repoFilter string, maxSessions int, maxExcerpts
 		truncateLen = 200
 	}
 
-	// Step 1: Find repos with recent activity.
-	repoWhere := []string{
-		"ss.session_type = 'interactive'",
-		"ss.last_msg >= datetime('now', ?)",
-	}
-	repoArgs := []any{fmt.Sprintf("-%d days", days)}
-
-	if repoFilter != "" {
-		repoWhere = append(repoWhere, "(sm.repo LIKE ? OR sm.cwd LIKE ?)")
-		pattern := "%" + repoFilter + "%"
-		repoArgs = append(repoArgs, pattern, pattern)
-	}
-
-	repoQ := `
-		SELECT
-			CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
-			MAX(sm.cwd) AS path,
-			MAX(ss.last_msg) AS last_activity
-		FROM session_summary ss
-		JOIN session_meta sm ON sm.session_id = ss.session_id
-		WHERE ` + strings.Join(repoWhere, " AND ") + `
-		GROUP BY display_repo
-		HAVING display_repo != ''
-		ORDER BY last_activity DESC
-	`
-
-	repoRows, err := s.readDB.Query(repoQ, repoArgs...)
+	// Fetch the repo → sessions → excerpts hierarchy in a single sqldeep
+	// nested-projection query (🎯T94). The previous version ran 1 + R + R*S
+	// queries (repos, then sessions per repo, then excerpts per session)
+	// and stitched the tree in Go; this collapses them into one round-trip
+	// whose result is the tree as JSON, one repo object per row.
+	//
+	// Mechanics worth knowing before editing this query:
+	//   - Named params (:window etc.) are reused across nesting levels and
+	//     are immune to sqldeep's clause reordering; positional `?` is not
+	//     (sqldeep v0.23.0). repoFilter is optional via the :repoPat=''
+	//     sentinel, so one query serves filtered and unfiltered calls.
+	//   - A nested SELECT with a *direct* LIMIT transpiles to a singular
+	//     object, not an array. So each level's LIMIT (maxSessions, and
+	//     newest-maxExcerpts) is pushed into a wrapped subquery; the outer
+	//     nested SELECT has no LIMIT and pluralises via json_group_array.
+	//     The excerpts subquery takes id DESC LIMIT N to pick the newest N.
+	//   - Array element order is NOT reliably controllable from SQL here:
+	//     json_group_array follows the inner subquery's order, and an outer
+	//     ORDER BY on the aggregate query is ignored. So the final ordering
+	//     (sessions by recency desc, excerpts by id asc) and the byte-based
+	//     truncation are done in the Go pass below. Excerpt truncation is
+	//     byte-based + sets Truncated; SQLite substr is char-based and would
+	//     diverge on multibyte text.
+	const statusQuery = `
+FROM (
+  SELECT
+    CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END AS display_repo,
+    MAX(sm.cwd) AS path,
+    MAX(ss.last_msg) AS last_activity
+  FROM session_summary ss
+  JOIN session_meta sm ON sm.session_id = ss.session_id
+  WHERE ss.session_type = 'interactive'
+    AND ss.last_msg >= datetime('now', :window)
+    AND (:repoPat = '' OR sm.repo LIKE :repoPat OR sm.cwd LIKE :repoPat)
+  GROUP BY display_repo
+  HAVING display_repo != ''
+  ORDER BY last_activity DESC
+) r
+SELECT {
+  repo: r.display_repo,
+  path: r.path,
+  last_activity: r.last_activity,
+  sessions: SELECT {
+    session_id: sess.session_id,
+    last_msg: sess.last_msg,
+    messages: sess.substantive_msgs,
+    work_type: sess.work_type,
+    topic: sess.topic,
+    excerpts: SELECT { id: ex.id, role: ex.role, text: ex.text, timestamp: ex.timestamp }
+      FROM (
+        SELECT id, role, text, timestamp FROM messages
+        WHERE session_id = sess.session_id AND is_noise = 0 AND role IN ('user', 'assistant')
+        ORDER BY id DESC LIMIT :maxExcerpts
+      ) ex
+  } FROM (
+    SELECT ss.session_id AS session_id, ss.last_msg AS last_msg,
+           ss.substantive_msgs AS substantive_msgs,
+           COALESCE(sm.work_type, '') AS work_type, COALESCE(sm.topic, '') AS topic
+    FROM session_summary ss
+    JOIN session_meta sm ON sm.session_id = ss.session_id
+    WHERE ss.session_type = 'interactive'
+      AND ss.last_msg >= datetime('now', :window)
+      AND (sm.repo = r.display_repo OR sm.cwd = r.path)
+    ORDER BY ss.last_msg DESC LIMIT :maxSessions
+  ) sess
+}
+`
+	transpiled, err := sqldeep.Transpile(statusQuery)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("status: transpile: %w", err)
+	}
+
+	repoPat := ""
+	if repoFilter != "" {
+		repoPat = "%" + repoFilter + "%"
+	}
+
+	repoRows, err := s.readDB.Query(transpiled,
+		sql.Named("window", fmt.Sprintf("-%d days", days)),
+		sql.Named("repoPat", repoPat),
+		sql.Named("maxSessions", maxSessions),
+		sql.Named("maxExcerpts", maxExcerpts),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("status: query: %w", err)
 	}
 	defer repoRows.Close()
 
 	var repos []RepoStatus
 	for repoRows.Next() {
-		var r RepoStatus
-		if err := repoRows.Scan(&r.Repo, &r.Path, &r.LastActivity); err != nil {
+		var blob []byte
+		if err := repoRows.Scan(&blob); err != nil {
 			continue
+		}
+		var r RepoStatus
+		if err := json.Unmarshal(blob, &r); err != nil {
+			continue
+		}
+		// Order the JSON arrays (json_group_array order is not reliable) and
+		// truncate excerpts — all deterministic, on at most maxSessions ×
+		// maxExcerpts rows. Sessions: most-recent first. Excerpts: oldest
+		// first among the newest-N. Truncation is byte-based + sets the flag,
+		// matching the pre-T94 behaviour (SQLite substr is char-based).
+		sort.SliceStable(r.Sessions, func(a, b int) bool {
+			return r.Sessions[a].LastMsg > r.Sessions[b].LastMsg
+		})
+		for si := range r.Sessions {
+			exs := r.Sessions[si].Excerpts
+			sort.SliceStable(exs, func(a, b int) bool { return exs[a].ID < exs[b].ID })
+			for ei := range exs {
+				if len(exs[ei].Text) > truncateLen {
+					exs[ei].Text = exs[ei].Text[:truncateLen] + "..."
+					exs[ei].Truncated = true
+				}
+			}
 		}
 		repos = append(repos, r)
 	}
-
-	// Step 2: For each repo, find recent sessions.
-	for i := range repos {
-		sessQ := `
-			SELECT ss.session_id, ss.last_msg, ss.substantive_msgs,
-				COALESCE(sm.work_type, ''), COALESCE(sm.topic, '')
-			FROM session_summary ss
-			JOIN session_meta sm ON sm.session_id = ss.session_id
-			WHERE ss.session_type = 'interactive'
-				AND ss.last_msg >= datetime('now', ?)
-				AND (sm.repo = ? OR sm.cwd = ?)
-			ORDER BY ss.last_msg DESC
-			LIMIT ?
-		`
-		sessRows, err := s.readDB.Query(sessQ,
-			fmt.Sprintf("-%d days", days), repos[i].Repo, repos[i].Path, maxSessions)
-		if err != nil {
-			continue
-		}
-
-		for sessRows.Next() {
-			var ss SessionStatus
-			if err := sessRows.Scan(&ss.SessionID, &ss.LastMsg, &ss.Messages,
-				&ss.WorkType, &ss.Topic); err != nil {
-				continue
-			}
-			repos[i].Sessions = append(repos[i].Sessions, ss)
-		}
-		sessRows.Close()
-
-		// Step 3: For each session, pull substantive messages.
-		for j := range repos[i].Sessions {
-			sid := repos[i].Sessions[j].SessionID
-			msgQ := `
-				SELECT id, role, text, timestamp FROM messages
-				WHERE session_id = ? AND is_noise = 0
-					AND role IN ('user', 'assistant')
-				ORDER BY id ASC
-			`
-			msgRows, err := s.readDB.Query(msgQ, sid)
-			if err != nil {
-				continue
-			}
-
-			var excerpts []MessageExcerpt
-			for msgRows.Next() {
-				var m MessageExcerpt
-				if err := msgRows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp); err != nil {
-					continue
-				}
-				// Truncate every excerpt — user pastes (logs, code,
-				// command output) inflate response size just as much
-				// as assistant tool-call serialisations do.
-				if len(m.Text) > truncateLen {
-					m.Text = m.Text[:truncateLen] + "..."
-					m.Truncated = true
-				}
-				excerpts = append(excerpts, m)
-			}
-			msgRows.Close()
-
-			// Keep last N excerpts if there are too many.
-			if len(excerpts) > maxExcerpts {
-				excerpts = excerpts[len(excerpts)-maxExcerpts:]
-			}
-			repos[i].Sessions[j].Excerpts = excerpts
-		}
+	if err := repoRows.Err(); err != nil {
+		return nil, fmt.Errorf("status: scan: %w", err)
 	}
 
 	// Per-stream backfill status.

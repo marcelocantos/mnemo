@@ -2926,3 +2926,25 @@ targets:
     origin: manual
     discovered: 2026-06-22
     achieved: 2026-06-22
+  T94:
+    name: mnemo_status is served by one sqldeep nested-projection query instead of a 3-level N+1
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'sqldeep is bumped to v0.23.0 (the positional-parameter-order fix): go.mod require + the pinned ref in release.yml and e2e-nightly.yml all read v0.23.0, and the build/tests are green.'
+    - Store.Status fetches the repos -> sessions -> excerpts hierarchy in a single sqldeep nested-projection query (no per-repo and per-session follow-up queries); the prior 1 + R + R*S round-trips collapse to one.
+    - 'Output is behaviourally identical to the previous implementation: a golden/parity test asserts the new StatusResult (repos, sessions, excerpts, ordering, per-excerpt truncation + Truncated flag, keep-last-N) matches the old shape for representative data.'
+    - 'The delicate per-excerpt truncation and keep-last-N-excerpts semantics are preserved (hybrid: nesting in SQL, truncation/tail in a thin Go pass or via SQL substr + newest-N-then-reverse).'
+    - Named parameters are used (not positional ?) so sqldeep's clause reordering can't misbind args; a small transpile+bind test confirms sqldeep passes the params through.
+    - go test -tags sqlite_fts5 ./... is green; this is the first internal use of sqldeep.Transpile outside mnemo_query, so it is covered by a test that the transpiled SQL runs and returns the expected JSON.
+    context: 'Follow-up from the sqldeep review (the four-agent sweep after T93). Of ~150 SELECTs, Store.Status (internal/store/store.go:5043) was the single strong sqldeep nested-projection candidate, flagged independently by all four reviewers: a genuine 3-level N+1 (repos -> per-repo sessions -> per-session excerpts) whose result is marshalled straight to JSON for mnemo_status, exactly sqldeep''s sweet spot. Prereq: sqldeep v0.23.0 (''Preserve positional parameter order, or fail'', commit 9923bff) fixes ?-placeholder behaviour under sqldeep''s clause reordering; mnemo''s current sqldeep use (mnemo_query, literal SQL) doesn''t need it, but internal parameterized queries do — hence the bump is bundled here as the enabling change. mnemo consumes sqldeep via a local replace (../sqldeep/go/sqldeep), already at 0.23.0 with rebuilt artifacts; CI/release clone it at the pinned workflow ref (currently v0.22.0). Fiddly bits to preserve: keep-last-N excerpts is a TAIL not a LIMIT-head; per-excerpt truncation is byte-based in Go vs char-based substr in SQL; params thread through 3 nesting levels (use named params). Recommended shape is hybrid — nest in SQL to kill the N+1, keep truncation/tail in a thin Go post-pass. This is a code-quality + latency refactor, not a correctness/CPU fix; lower urgency than T91-T93.'
+    tags:
+    - perf
+    - sqldeep
+    - refactor
+    - status
+    - n+1
+    origin: manual
+    discovered: 2026-06-28
+    achieved: 2026-06-28
