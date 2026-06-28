@@ -2928,7 +2928,7 @@ targets:
     achieved: 2026-06-22
   T94:
     name: mnemo_status is served by one sqldeep nested-projection query instead of a 3-level N+1
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2947,3 +2947,4 @@ targets:
     - n+1
     origin: manual
     discovered: 2026-06-28
+    achieved: 2026-06-28
