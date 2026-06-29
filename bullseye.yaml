@@ -3137,9 +3137,10 @@ targets:
     achieved: 2026-06-28
   T95:
     name: menu_bar_app toggles live — opting the menu-bar app in/out takes effect with no daemon restart
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - The menu-bar shim runs under a supervisor goroutine that reconciles against the live menu_bar_app flag on a ticker and on demand, rather than being gated once at startup.
     - configController.Put pokes the supervisor on every config change, so setting menu_bar_app via mnemo_config starts (true) or stops (false) supervising Mnemo.app immediately, with no daemon restart.
@@ -3154,3 +3155,4 @@ targets:
     - hot-reload
     origin: manual
     discovered: 2026-06-29
+    achieved: 2026-06-29
