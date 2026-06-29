@@ -3158,9 +3158,10 @@ targets:
     achieved: 2026-06-29
   T96:
     name: mnemo_config patch validation is drift-proof — every Config field is patchable without a hand-maintained allowlist
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - The mnemo_config patch key-allowlist is derived from store.Config's json tags via reflection, not a hand-maintained map, so adding a Config field automatically makes it patchable.
     - 'mnemo_config op=write with {menu_bar_app: ...} (and threads_root, todo_globs, backup, etc.) is accepted, not rejected as an unknown config key; genuine typos still error.'
@@ -3173,3 +3174,4 @@ targets:
     - robustness
     origin: manual
     discovered: 2026-06-29
+    achieved: 2026-06-29
