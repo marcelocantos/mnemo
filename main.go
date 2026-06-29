@@ -792,9 +792,15 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
 
-	// Launch and supervise the Threads menu-bar shim (🎯T85.5). Best-effort
-	// and macOS-only; a no-op when no Mnemo.app is installed.
-	go superviseThreadsShim(ctx)
+	// Launch and supervise the Threads menu-bar shim (🎯T85.5) only when the
+	// user has opted in via `menu_bar_app: true` in ~/.mnemo/config.json. The
+	// Threads daemon API (mnemo_thread_* tools, the `mnemo thread` CLI, the
+	// HTTP thread routes) stays available unconditionally; only the menu-bar
+	// app auto-launch is opt-in. Best-effort, macOS-only; a no-op when no
+	// Mnemo.app is installed.
+	if cfg.MenuBarApp {
+		go superviseThreadsShim(ctx)
+	}
 
 	// Optionally start the federated mTLS server in parallel
 	// (🎯T15.3). A startup failure here is non-fatal — we log and

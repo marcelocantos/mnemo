@@ -719,6 +719,7 @@ Hot-reload coverage:
   - vault_path: applied live. The existing vault workers stop, a fresh exporter is built at the new path, and an initial sync starts in the background. Set vault_path to "" to disable vault export entirely.
   - workspace_roots, extra_project_dirs, synthesis_roots: applied live; subsequent ingest passes pick up the new roots.
   - linked_instances: persisted to disk but requires a daemon restart to take effect (the federation client is built once at startup).
+  - menu_bar_app: opt-in (default false) for the macOS menu-bar Threads app. Persisted to disk but takes effect on the next daemon start (the shim supervisor is wired at startup). The Threads daemon API — mnemo_thread_* tools, the "mnemo thread" CLI, the HTTP thread routes — stays available regardless of this flag.
 
 Response includes which fields changed, which were adopted live, and which require a restart.`),
 			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),
