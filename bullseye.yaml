@@ -3156,3 +3156,20 @@ targets:
     origin: manual
     discovered: 2026-06-29
     achieved: 2026-06-29
+  T96:
+    name: mnemo_config patch validation is drift-proof — every Config field is patchable without a hand-maintained allowlist
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The mnemo_config patch key-allowlist is derived from store.Config's json tags via reflection, not a hand-maintained map, so adding a Config field automatically makes it patchable.
+    - 'mnemo_config op=write with {menu_bar_app: ...} (and threads_root, todo_globs, backup, etc.) is accepted, not rejected as an unknown config key; genuine typos still error.'
+    - A regression test asserts the previously-broken keys are in the derived allowlist and that a menu_bar_app patch merges and applies; go test -tags sqlite_fts5 ./... is green.
+    context: 'Bug found during the v0.57.0 live-toggle demo: mnemo_config rejected {menu_bar_app: false} with ''unknown config keys''. The config tool validated patch keys against a hand-maintained knownConfigKeys map that was never updated when menu_bar_app (v0.56.0), threads_root, todo_globs, disable_health_notifications, and the nested backup/cost_reconciliation/connection_sweep fields were added — so those keys were unpatchable and read-modify-write of the config failed. The opt-in/live-toggle features shipped in v0.56.0/v0.57.0 were therefore only settable by editing ~/.mnemo/config.json directly. Fixed by deriving the allowlist from the struct so it can never drift again. Ships as v0.58.0.'
+    tags:
+    - config
+    - bugfix
+    - mnemo_config
+    - robustness
+    origin: manual
+    discovered: 2026-06-29
