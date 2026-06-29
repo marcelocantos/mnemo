@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,38 +18,82 @@ import (
 // menu-bar shim is still running.
 const threadsShimCheckInterval = 30 * time.Second
 
-// superviseThreadsShim launches and keeps alive the Mnemo menu-bar app
-// (🎯T85.5, Integration §0.1). The shim is its own signed .app — for a stable
-// Accessibility TCC identity — but the daemon launches it (via `open -g`, so it
-// never steals focus) and relaunches it if it exits, so there is no separate
-// install step or second LaunchAgent.
+// shimSupervisor launches and keeps alive the Mnemo menu-bar app (🎯T85.5,
+// Integration §0.1), gated on the menu_bar_app config flag — which is
+// hot-reloadable: SetEnabled wires the running daemon to the live config so
+// toggling menu_bar_app via mnemo_config takes effect immediately, no
+// restart. The shim is its own signed .app (a stable Accessibility TCC
+// identity) but the daemon launches it (via `open -g`, so it never steals
+// focus) and relaunches it if it exits, so there is no separate install step
+// or second LaunchAgent.
 //
-// It is best-effort and conservative: it only does anything on macOS and only
-// when a Mnemo.app is actually found (at $MNEMO_THREADS_APP or a known
-// install location). A daemon without the app installed is a silent no-op, so
-// pulling this code never makes a menu-bar item appear unexpectedly.
-func superviseThreadsShim(ctx context.Context) {
-	if runtime.GOOS != "darwin" {
-		return
-	}
-	app := resolveThreadsApp()
-	if app == "" {
-		slog.Debug("threads shim: no Mnemo.app found; menu-bar app not launched")
-		return
-	}
-	slog.Info("threads shim: supervising menu-bar app", "app", app)
+// It is best-effort and conservative: it only does anything on macOS and
+// only when a Mnemo.app is actually found (at $MNEMO_THREADS_APP or a known
+// install location). A daemon without the app installed is a silent no-op,
+// so pulling this code never makes a menu-bar item appear unexpectedly.
+type shimSupervisor struct {
+	app     string      // resolved Mnemo.app path; "" disables the supervisor entirely
+	enabled atomic.Bool // mirrors menu_bar_app from live config
+	wake    chan struct{}
+}
 
-	launchThreadsShimIfNeeded(app)
+// newShimSupervisor resolves Mnemo.app once. The supervisor is inert (a
+// permanent no-op) off macOS or when no app is found.
+func newShimSupervisor() *shimSupervisor {
+	s := &shimSupervisor{wake: make(chan struct{}, 1)}
+	if runtime.GOOS == "darwin" {
+		s.app = resolveThreadsApp()
+	}
+	return s
+}
+
+// SetEnabled records the desired state (menu_bar_app) and pokes the
+// supervisor to reconcile immediately. Called at startup with the initial
+// config and from configController.Put on every live config change.
+func (s *shimSupervisor) SetEnabled(on bool) {
+	s.enabled.Store(on)
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// run reconciles the menu-bar app against the desired state on a ticker and
+// on demand (SetEnabled). When enabled it keeps Mnemo.app running; when
+// disabled it stops launching it (a running instance is left alone rather
+// than force-quit, so a manually-launched app is never killed out from
+// under the user — it simply won't be relaunched). Returns immediately when
+// there is nothing to supervise.
+func (s *shimSupervisor) run(ctx context.Context) {
+	if s.app == "" {
+		if runtime.GOOS == "darwin" {
+			slog.Debug("threads shim: no Mnemo.app found; menu-bar supervision disabled")
+		}
+		return
+	}
+	slog.Info("threads shim: supervisor started", "app", s.app)
 	ticker := time.NewTicker(threadsShimCheckInterval)
 	defer ticker.Stop()
+	s.reconcile()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			launchThreadsShimIfNeeded(app)
+			s.reconcile()
+		case <-s.wake:
+			s.reconcile()
 		}
 	}
+}
+
+func (s *shimSupervisor) reconcile() {
+	if s.enabled.Load() {
+		launchThreadsShimIfNeeded(s.app)
+	}
+	// Disabled: do nothing. We deliberately don't force-quit a running app —
+	// it may have been launched manually, and killing it on every tick would
+	// be hostile. It just won't be relaunched once it exits.
 }
 
 // resolveThreadsApp returns the path to Mnemo.app, or "" when none is

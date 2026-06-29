@@ -69,7 +69,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.56.0"
+	version              = "0.57.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 )
@@ -694,7 +694,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// disk via store.WriteConfig (which re-runs the same validation as
 	// LoadConfig) and asks the Registry to adopt it across every
 	// already-initialised per-user Store.
-	handler.SetConfigController(configController{reg: reg})
+	// The menu-bar shim supervisor (🎯T85.5) honours the menu_bar_app flag and
+	// is hot-reloadable: configController.Put pokes it on every config change,
+	// so toggling menu_bar_app via mnemo_config takes effect immediately, with
+	// no daemon restart.
+	shimSup := newShimSupervisor()
+	shimSup.SetEnabled(cfg.MenuBarApp)
+	handler.SetConfigController(configController{reg: reg, shim: shimSup})
 
 	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
 	// same registry that backs the /health endpoint and the scheduler.
@@ -792,15 +798,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
 
-	// Launch and supervise the Threads menu-bar shim (🎯T85.5) only when the
-	// user has opted in via `menu_bar_app: true` in ~/.mnemo/config.json. The
-	// Threads daemon API (mnemo_thread_* tools, the `mnemo thread` CLI, the
-	// HTTP thread routes) stays available unconditionally; only the menu-bar
-	// app auto-launch is opt-in. Best-effort, macOS-only; a no-op when no
-	// Mnemo.app is installed.
-	if cfg.MenuBarApp {
-		go superviseThreadsShim(ctx)
-	}
+	// Start the menu-bar shim supervisor (🎯T85.5). It honours menu_bar_app
+	// (initial value set above) and reacts to live toggles via Put, so the
+	// menu-bar app is opt-in and the toggle needs no restart. The Threads
+	// daemon API (mnemo_thread_* tools, the `mnemo thread` CLI, the HTTP
+	// thread routes) stays available unconditionally; only the menu-bar app
+	// is gated. Best-effort, macOS-only; a no-op when no Mnemo.app is found.
+	go shimSup.run(ctx)
 
 	// Optionally start the federated mTLS server in parallel
 	// (🎯T15.3). A startup failure here is non-fatal — we log and
@@ -877,7 +881,8 @@ func (a compactorAdapter) Health() tools.CompactorHealth {
 // importing the tools package (a cycle we already avoid for
 // dependency hygiene).
 type configController struct {
-	reg *registry.Registry
+	reg  *registry.Registry
+	shim *shimSupervisor
 }
 
 func (c configController) Get() store.Config {
@@ -889,6 +894,11 @@ func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
 		return tools.ConfigReport{}, err
 	}
 	rep := c.reg.Reload(newCfg)
+	// Adopt menu_bar_app live: start/stop supervising the menu-bar app
+	// without a daemon restart (🎯T85.5).
+	if c.shim != nil {
+		c.shim.SetEnabled(newCfg.MenuBarApp)
+	}
 	return tools.ConfigReport{
 		Changed:         rep.Changed,
 		Adopted:         rep.Adopted,

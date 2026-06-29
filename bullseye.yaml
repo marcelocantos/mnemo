@@ -3135,3 +3135,24 @@ targets:
     origin: manual
     discovered: 2026-06-28
     achieved: 2026-06-28
+  T95:
+    name: menu_bar_app toggles live — opting the menu-bar app in/out takes effect with no daemon restart
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    actual_cost: 2.0
+    acceptance:
+    - The menu-bar shim runs under a supervisor goroutine that reconciles against the live menu_bar_app flag on a ticker and on demand, rather than being gated once at startup.
+    - configController.Put pokes the supervisor on every config change, so setting menu_bar_app via mnemo_config starts (true) or stops (false) supervising Mnemo.app immediately, with no daemon restart.
+    - Disabling does not force-quit a running app (a manually-launched instance is never killed); it simply stops relaunching. Off-darwin / no-app-found stays a clean no-op.
+    - config.go and the mnemo_config tool docs describe menu_bar_app as applied-live; go test -tags sqlite_fts5 ./... is green incl. a supervisor unit test.
+    context: Follow-up to the v0.56.0 threads release, which made the macOS menu-bar app opt-in via menu_bar_app but gated it at daemon startup — so toggling required a restart. The user asked for the toggle to take effect immediately. The hot-reload machinery already exists for vault_path/workspace_roots (registry.Reload via configController.Put); this extends it to menu_bar_app by introducing a shimSupervisor that SetEnabled can poke live.
+    tags:
+    - threads
+    - ui
+    - config
+    - macos
+    - hot-reload
+    origin: manual
+    discovered: 2026-06-29
+    achieved: 2026-06-29
