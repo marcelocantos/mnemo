@@ -36,6 +36,7 @@ type Handler struct {
 	resolve   func(string) (store.Backend, error)
 	diags     DiagRunner // optional; nil until wired by SetDiagRunner
 	analytics *respCache // 🎯T92: TTL cache for heavy read-only endpoints
+	events    *EventHub  // optional; nil until wired by SetEventHub (🎯T86)
 }
 
 // analyticsCacheTTL is how long a heavy analytics response is reused. The
@@ -79,7 +80,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/messages", getOnly(h.messages))
 	mux.HandleFunc("/api/dbstats", getOnly(cache(h.dbstats)))
 	mux.HandleFunc("/api/active", getOnly(h.active))
+	mux.HandleFunc("/api/events", getOnly(h.eventStream))
 	mux.HandleFunc("/health", getOnly(h.health))
+	h.registerThreadRoutes(mux)
 }
 
 // getOnly rejects non-GET requests with 405 Method Not Allowed.

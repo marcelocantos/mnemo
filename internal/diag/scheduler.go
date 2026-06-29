@@ -29,6 +29,9 @@ type Scheduler struct {
 	fast     time.Duration
 	full     time.Duration
 	now      func() time.Time
+	// onReport, when set, receives every report the scheduler produces, so the
+	// live dashboard panel and status glyph can update via the SSE hub (🎯T86).
+	onReport func(Report)
 }
 
 // NewScheduler builds a scheduler. A zero interval uses the default;
@@ -42,6 +45,11 @@ func NewScheduler(reg *Registry, notifier *Notifier, fast, full time.Duration) *
 	}
 	return &Scheduler{reg: reg, notifier: notifier, fast: fast, full: full, now: time.Now}
 }
+
+// OnReport registers a sink for every report the scheduler produces (startup,
+// each fast tick, and each hourly full pass). The daemon wires this to the SSE
+// hub so the native dashboard panel and status glyph update live. (🎯T86)
+func (s *Scheduler) OnReport(fn func(Report)) { s.onReport = fn }
 
 // Run executes the full suite once, then loops until ctx is cancelled,
 // running the Fast tier each FastInterval and the full suite each
@@ -73,6 +81,9 @@ func (s *Scheduler) runOnce(ctx context.Context, full bool) {
 	rep := s.reg.Run(ctx, full, s.now())
 	if s.notifier != nil {
 		s.notifier.Observe(rep, s.now())
+	}
+	if s.onReport != nil {
+		s.onReport(rep)
 	}
 	if rep.Fail > 0 || rep.Warn > 0 {
 		slog.Warn("diag: health degraded",

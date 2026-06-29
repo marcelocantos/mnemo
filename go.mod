@@ -15,6 +15,8 @@ require gopkg.in/yaml.v3 v3.0.1
 
 require github.com/marcelocantos/sqlift/go/sqlift v0.17.0
 
+require github.com/yuin/goldmark v1.8.2
+
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/marcelocantos/sqldeep/go/sqldeep v0.23.0

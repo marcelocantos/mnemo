@@ -719,6 +719,7 @@ Hot-reload coverage:
   - vault_path: applied live. The existing vault workers stop, a fresh exporter is built at the new path, and an initial sync starts in the background. Set vault_path to "" to disable vault export entirely.
   - workspace_roots, extra_project_dirs, synthesis_roots: applied live; subsequent ingest passes pick up the new roots.
   - linked_instances: persisted to disk but requires a daemon restart to take effect (the federation client is built once at startup).
+  - menu_bar_app: opt-in (default false) for the macOS menu-bar Threads app. Persisted to disk but takes effect on the next daemon start (the shim supervisor is wired at startup). The Threads daemon API — mnemo_thread_* tools, the "mnemo thread" CLI, the HTTP thread routes — stays available regardless of this flag.
 
 Response includes which fields changed, which were adopted live, and which require a restart.`),
 			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),
@@ -752,6 +753,26 @@ By default returns only unread notes and marks them read (mark-read is idempoten
 Omitting "inbox" lists every inbox touched within the window (default 30 days), newest first — useful to see which inboxes have traffic. Supplying "inbox" restricts to that directory (canonicalized as in mnemo_note_post). Read state is preserved; this never marks notes read.`),
 			mcp.WithString("inbox", mcp.Description("Restrict to one inbox directory (absolute, or relative to your session's initial cwd). Omit to list all inboxes.")),
 			mcp.WithNumber("days", mcp.Description("Look-back window in days (default 30).")),
+		),
+		mcp.NewTool("mnemo_thread_list",
+			mcp.WithDescription(`List Threads (🎯T85): per-initiative directories under the configured threads root (default ~/think/threads), each scoping a Claude Code session via its CLAUDE.md. Returns JSON sorted by newest activity (active threads first, then inactive), with per-thread state (from the ## Status first word), current focus, working-file count, and activity timestamp.`),
+		),
+		mcp.NewTool("mnemo_thread_show",
+			mcp.WithDescription("Show one thread: its CLAUDE.md context and a listing of its non-hidden working files (newest first). Returns JSON."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (kebab-case directory name under the threads root).")),
+		),
+		mcp.NewTool("mnemo_thread_new",
+			mcp.WithDescription("Create a new thread: validate the kebab-case name, reject reserved/existing names, scaffold CLAUDE.md from the _template (substituting {{NAME}}). Does not open a terminal tab — that is mnemo_thread_go's job. Returns the created thread as JSON."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("New thread name. Must match ^[a-z0-9][a-z0-9-]*$ and not be reserved (_template, _archived).")),
+		),
+		mcp.NewTool("mnemo_thread_archive",
+			mcp.WithDescription("Archive a thread by moving it into _archived/ under the threads root. Refuses reserved names and existing destinations."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name to archive.")),
+		),
+		mcp.NewTool("mnemo_thread_go",
+			mcp.WithDescription("Open a thread's iTerm2 tab: focus the existing tab tagged for the thread, or spawn and tag a new one running `claude` in the thread's directory (🎯T85.2). Requires iTerm2 and the daemon's Automation permission. Returns {action: focused|spawned, path}."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (resolved under the threads root) or an absolute/~ path.")),
+			mcp.WithBoolean("no_resume", mcp.Description("Always spawn a fresh, untagged, ephemeral tab (plain `claude`) instead of focus-or-spawn.")),
 		),
 	}
 }
@@ -890,6 +911,16 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultGC(args)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
+	case "mnemo_thread_list":
+		return ch.threadList(args)
+	case "mnemo_thread_show":
+		return ch.threadShow(args)
+	case "mnemo_thread_new":
+		return ch.threadNew(args)
+	case "mnemo_thread_archive":
+		return ch.threadArchive(args)
+	case "mnemo_thread_go":
+		return ch.threadGo(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
