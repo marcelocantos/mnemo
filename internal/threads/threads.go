@@ -396,16 +396,28 @@ func (m *Manager) activity(dir string) (time.Time, bool) {
 }
 
 // transcriptDir returns the Claude Code transcript directory for a thread
-// path: ~/.claude/projects/<encoded>, where <encoded> replaces "/" with "-".
-// This mirrors mnemo's store.cwdToTranscripts encoding (thread paths are
-// kebab-case with no "." components, so slash-replacement is sufficient).
-// Returns "" when Home is unset.
+// path: <home>/.claude/projects/<encoded>, where <encoded> flattens the
+// absolute path into a single directory-name component. On macOS that is
+// just "/"→"-"; on Windows the backslash separators and the drive colon
+// are flattened too, so the result is always a valid single path
+// component rather than a path that re-introduces separators. (Exact
+// correlation with Claude Code's Windows transcript-dir naming is a 🎯T89
+// concern; here it only needs to be a valid path so activity detection
+// degrades to "none" off macOS rather than erroring.) Returns "" when
+// Home is unset.
 func (m *Manager) transcriptDir(absThreadPath string) string {
 	if m.Home == "" {
 		return ""
 	}
-	encoded := strings.ReplaceAll(absThreadPath, "/", "-")
+	encoded := encodeTranscriptDir(absThreadPath)
 	return filepath.Join(m.Home, ".claude", "projects", encoded)
+}
+
+// encodeTranscriptDir flattens an absolute path into a single Claude Code
+// projects/ directory-name component. Separators ("/" and, on Windows,
+// "\") and the Windows drive colon all map to "-".
+func encodeTranscriptDir(absPath string) string {
+	return strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(absPath)
 }
 
 // FileEntry is one entry in a thread's working-file listing (used by

@@ -482,12 +482,18 @@ func TestSearch(t *testing.T) {
 
 func TestResolve(t *testing.T) {
 	m := newManager(t)
+	// Absolute-path cases use a genuinely-absolute base (m.Home is absolute
+	// on every OS — "/abs/path" is NOT absolute on Windows, where
+	// filepath.IsAbs needs a volume). The unclean variant exercises the
+	// ".." collapse; build it by hand so filepath.Join doesn't pre-clean it.
+	absBase := filepath.Join(m.Home, "abs", "path")
+	absDotdot := absBase + string(filepath.Separator) + ".." + string(filepath.Separator) + "p2"
 	cases := map[string]string{
-		"project-a":       filepath.Join(m.Root, "project-a"),
-		"~":               m.Home,
-		"~/work/x":        filepath.Join(m.Home, "work", "x"),
-		"/abs/path":       "/abs/path",
-		"/abs/path/../p2": "/abs/p2",
+		"project-a": filepath.Join(m.Root, "project-a"),
+		"~":         m.Home,
+		"~/work/x":  filepath.Join(m.Home, "work", "x"),
+		absBase:     absBase,
+		absDotdot:   filepath.Join(m.Home, "abs", "p2"),
 	}
 	for in, want := range cases {
 		got, err := m.Resolve(in)
@@ -536,13 +542,7 @@ func names(ts []Thread) []string {
 // encodeForTest mirrors Manager.transcriptDir's encoding so the test can
 // place a transcript file where the code will look for it.
 func encodeForTest(absPath string) string {
-	out := make([]rune, 0, len(absPath))
-	for _, c := range absPath {
-		if c == '/' {
-			out = append(out, '-')
-		} else {
-			out = append(out, c)
-		}
-	}
-	return string(out)
+	// Delegate to the production encoder so the test and runtime agree on
+	// the projects/ directory-name flattening (incl. Windows separators).
+	return encodeTranscriptDir(absPath)
 }

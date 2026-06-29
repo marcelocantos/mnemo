@@ -35,8 +35,14 @@ func setupThreadsHome(t *testing.T) *http.ServeMux {
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"threads_root": "` + filepath.Join(home, "think", "threads") + `"}`
-	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(cfg), 0o644); err != nil {
+	// Marshal the config rather than hand-building the JSON: a Windows
+	// threads_root (C:\Users\…) contains backslashes that are invalid JSON
+	// string escapes (\U, \A) when concatenated raw, which 500s LoadConfig.
+	cfg, err := json.Marshal(map[string]string{"threads_root": filepath.Join(home, "think", "threads")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), cfg, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
