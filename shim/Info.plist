@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Mnemo</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mnemo</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.marcelocantos.mnemo.threadsbar</string>
+	<key>CFBundleExecutable</key>
+	<string>Mnemo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<!-- Accessory app: no Dock icon, no menu bar; lives in the status bar. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright 2026 Marcelo Cantos. Apache-2.0.</string>
+	<!-- The shim's only TCC need is Accessibility, and only when the user
+	     opts into the global hotkey (it is requested at that point, not at
+	     launch). No other privacy-sensitive entitlements are used. -->
+</dict>
+</plist>

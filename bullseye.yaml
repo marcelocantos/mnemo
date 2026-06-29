@@ -2711,6 +2711,193 @@ targets:
     origin: manual
     discovered: 2026-06-18
     achieved: 2026-06-18
+  T85:
+    name: Threads — a menu-bar navigator for one-Claude-session-per-initiative — ships end-to-end on macOS
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The design doc docs/design/threads-navigator.md is merged and reflects the as-built architecture.
+    - A human uses the feature for real work across at least 2 threads over a day and confirms create -> navigate -> preview -> resume all work without falling back to the terminal.
+    - 'No new SQLite tables/columns were added: threads remain a live filesystem projection (schema policy preserved).'
+    - 'Installation friction is minimal (hard requirement): a single brew install + brew services start brings up both the daemon and the menu-bar app, and the default experience requires zero TCC grants — Accessibility is opt-in (only the global hotkey needs it) and the user sees just one iTerm2 Automation prompt, on first go.'
+    context: 'Umbrella for the Threads feature. Design: docs/design/threads-navigator.md. A user keeps one Claude Code session per initiative, each pinned to its own dir + iTerm2 tab, and navigates them from a menu-bar popup with live CLAUDE.md previews — backed entirely by the mnemo daemon. The original was a standalone macOS PoC; this delivers the mnemo-integrated design (daemon-owned iTerm2, shared Go core behind dual MCP+/api surfaces, a decoupled .app LaunchAgent shim, config + search riding existing mnemo machinery, zero new schema). Decomposed as a diamond: Go core (T85.1) → {iTerm2 RPC (T85.2), render pipeline (T85.3)} → AppKit shim (T85.4) → packaging/TCC (T85.5). Each leaf carries a live human-verification gate because GUI/iTerm2/TCC behaviour is not unit-testable.'
+    depends_on:
+    - T85.5
+    tags:
+    - macos
+    - ui
+    - iterm2
+    - threads
+    origin: docs/design/threads-navigator.md proposal (emailed rich-text spec, ingested 2026-06-18)
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T85.1:
+    name: Thread model + CLI + MCP/HTTP surfaces exist in the mnemo daemon (no iTerm2)
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - threads_root is a config field defaulting to ~/think/threads/, hot-reloaded via mnemo_config like synthesis_roots (no daemon restart).
+    - mnemo thread list / list -v print the documented columns; new validates kebab-case ^[a-z0-9][a-z0-9-]*$, rejects reserved/existing names, and scaffolds from _template/CLAUDE.md substituting {{NAME}}; show renders CLAUDE.md + the --- Files --- listing; archive moves into _archived/ with reserved-name + collision guards.
+    - The same capabilities are reachable as mnemo_thread_* MCP tools (structured JSON) and as /api/thread/* endpoints, both over the one shared core.
+    - Status/focus parsing, the activity timestamp (max of thread-dir newest mtime excluding hidden+CLAUDE.md, and the cwdToTranscripts result), and file-count are unit-tested; go test -tags sqlite_fts5 ./... passes.
+    - No new SQLite tables or columns were introduced.
+    - 'HUMAN GATE: a human spot-checks mnemo thread list and show <name> against a real ~/think/threads and confirms the output matches the spec in §2.'
+    context: The shared Go core (Integration §0.4–0.7). A reusable thread model behind the `mnemo thread {list,new,show,archive}` CLI subcommand (attaches at main.go's os.Args[1] switch, alongside `diagnose`), the `mnemo_thread_*` MCP tools (internal/tools/tools.go Definitions()+Call()), and `/api/thread/*` endpoints (internal/api/api.go) — one core, three thin adapters. Adds the `threads_root` config field with hot-reload (Integration §0.5) and computes activity timestamps reusing the existing cwdToTranscripts() helper (Integration §0.6). No iTerm2 here; `go`'s tab action is T85.2.
+    tags:
+    - go
+    - cli
+    - mcp
+    - config
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T85.2:
+    name: 'The daemon drives iTerm2: tagged-tab go/find-or-spawn works over the Unix-socket API'
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'internal/iterm drives iTerm2 via osascript: a find script walks sessions of tabs of windows comparing user.thread to base64(path) and selects+activates on a match; a spawn script creates a tab (or window) with the Thread profile (falling back to default), tags it, and writes the cd + SetBadgeFormat (🪡 <name>) + `exec /bin/zsh -ilc ''claude --continue 2>/dev/null || claude''` command.'
+    - go resolves a bare kebab name (under root) or an absolute/~ path; focus-or-spawn for the tagged case, and --no-resume spawns a fresh UNTAGGED tab running plain claude that a later go cannot re-match.
+    - 'The daemon owns the iTerm2 Automation grant: POST /api/thread/go and the mnemo_thread_go MCP tool run in-daemon; the CLI `mnemo thread go` delegates to the daemon over HTTP (failing with a clear ''start the daemon'' message when it is unreachable).'
+    - Script generation, shell/AppleScript escaping, and the find/spawn/no-resume control flow are unit-tested with a mocked osascript runner; go test passes. (Live tab behaviour is the human gate, deferred.)
+    context: 'iTerm2 driving for the `go` verb (Integration §0.2–0.3, spec §4). Implemented over AppleScript/osascript rather than the proposal''s protobuf Python API: iTerm2 3.3+ exposes `variable named` / `set variable named` (session vars), `create tab/window with profile`, `write`, and `select` — exactly what find-or-spawn needs. This drops the protobuf+WebSocket+cookie stack, uses the same Automation TCC grant, and removes the iTerm2 Python-API enablement step (a friction win). Tab tagging via the user.thread session variable = base64(abs path). The daemon (internal/iterm) owns the single Automation identity; the CLI delegates over POST /api/thread/go and the mnemo_thread_go MCP tool runs in-daemon.'
+    depends_on:
+    - T85.1
+    tags:
+    - go
+    - iterm2
+    - macos
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T85.3:
+    name: Markdown→HTML preview pipeline (goldmark) feeds both the CLI and the GUI
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - goldmark renders GFM (tables, strikethrough, autolinks, task lists); raw HTML in the source is NOT emitted into the output (WithUnsafe off) — the tag-filtering requirement is met.
+    - Preview-skip regions (<!-- preview-skip --> ... <!-- /preview-skip -->) are stripped before rendering; a synthetic H1 (the dir name) is prepended for thread previews only; the light/dark palette is injected as inline CSS chosen by the appearance argument.
+    - thread show pipes through glow -w <cols> (width from TIOCGWINSZ, fallback $COLUMNS, then 100) when stdout is a TTY and glow is on PATH, else prints raw markdown.
+    - /api/thread/preview returns self-contained inline-styled HTML for a given thread + theme.
+    - The render rules (skip-region stripping, synthetic-H1, tag-filter, palette selection) are unit-tested; go test -tags sqlite_fts5 ./... passes.
+    - 'HUMAN GATE: a human confirms thread show output is correctly formatted under glow for a representative CLAUDE.md.'
+    context: 'Integration §0.8, spec §5. Add github.com/yuin/goldmark + the GFM extension (pure Go, no new CGO). One renderer feeds two paths: the CLI `thread show` (glow when TTY) and the GUI preview (/api/thread/preview returns self-contained inline-styled HTML, since it lands in NSAttributedString(html:) not a web view). Tag-filtering is satisfied for free by leaving WithUnsafe() off. Light/dark palette mirrors the dashboard tokens in ui/dashboard.html.'
+    depends_on:
+    - T85.1
+    tags:
+    - go
+    - rendering
+    - goldmark
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T85.4:
+    name: The menu-bar shim (.app) presents the popup, list, hover preview and search, driven by the daemon
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The shim is a no-Dock-icon (LSUIElement) bundled, signed .app launched and supervised by the daemon (not fork-exec); it owns a status item (fixed-square list.bullet template image), an NSPopover (.transient) with the §6 left-preview / right-sidebar layout, and an OPT-IN global ⌥-double-tap NSEvent monitor — the default activation is the status-item click, which requires no TCC.
+    - The thread list is an NSTableView sorted by newest activity (master gets a 🔸 prefix) with compact age buckets, populated from /api/thread/list; hovering a row renders its preview from /api/thread/preview; clicking a row invokes /api/thread/go and dismisses the popup.
+    - Search filters instantly on name and broadens via a ~200ms-debounced /api/thread/search (FTS), generation-counted to drop stale replies; ↑/↓/Enter/Esc navigation and the footer rows (New thread…, New session, Open, Quit) all work.
+    - 'The documented AppKit traps are handled: TextKit-2 text view, responsive scrolling disabled, flipped clip view, NSTextList de-duplication, no post-show setFrame, loadViewIfNeeded before setRows, non-key copy/paste routing, and a zero-interval Timer for deferred work.'
+    - 'HUMAN GATE: with no permissions granted, a human confirms the status-item click opens the popup and the hover preview is instant with exactly one row highlighted, scrolling works inside the popover, Cmd-C copies from the preview, and keyboard nav + footer actions behave per §6; separately, after opting into the hotkey, ⌥-double-tap toggles it.'
+    context: Integration §0.1, §0.9, spec §6. A bundled, signed LSUIElement .app launched and supervised by the daemon (via open -g; not fork-exec, not a separate install) and an HTTP client of /api/thread/*. It holds only an Accessibility grant, and only when the user opts into the global hotkey — the default activation is the status-item click, which needs no TCC at all. NSPopover substrate (not NSMenu / not .nonactivatingPanel), NSTableView list, single-tracking-area hover, footer action rows, two-channel (instant + debounced-FTS) search, opt-in ⌥-double-tap NSEvent monitor, non-key Cmd-C/V/X/A routing, zero-interval Timer for deferred main-thread work, shim-side render cache keyed on (path, theme). All the §5–§6 AppKit traps live here; the shim contains no business logic.
+    depends_on:
+    - T85.2
+    - T85.3
+    tags:
+    - swift
+    - appkit
+    - ui
+    - macos
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T85.5:
+    name: A single brew install brings up daemon + menu-bar app, and a default install needs zero TCC grants
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A single brew install ships the mnemo daemon binary and the bundled, notarized .app; brew services start mnemo starts the daemon, which auto-launches and supervises the menu-bar .app (no separate brew services unit, no manual launch).
+    - Default activation (status-item click) and the full popup/list/preview/search experience work with ZERO TCC grants. The global hotkey is opt-in and only its enable-toggle triggers the Accessibility prompt; the daemon's iTerm2 Automation grant is prompted exactly once, on first go.
+    - When iTerm2's Python API is disabled, the daemon detects it and emits a one-line enable instruction rather than failing opaquely.
+    - 'HUMAN GATE: on a clean machine or fresh login profile, a human confirms — after brew install + brew services start the menu-bar icon appears and the popup/list/preview work with no permission grants at all; the first go prompts once for iTerm2 Automation and then works; enabling the global hotkey prompts once for Accessibility and then works; nothing fails silently.'
+    context: 'Integration §0.1–0.3, §0.9 (the hard installation-friction requirement). A single Homebrew formula ships the daemon binary AND the bundled, notarized .app; brew services start mnemo starts the daemon, which auto-launches and supervises the menu-bar .app via open -g (no second brew services unit, no manual launch). The two-identity TCC split holds (TCC binds to code signature, never inherited): the daemon holds Automation->iTerm2 because it runs the RPC + osascript; the shim holds Accessibility ONLY for the opt-in global hotkey. So the default experience grants nothing; the only prompts are one Automation grant on first go and (optionally) one Accessibility grant when the hotkey is enabled. The daemon also detects a disabled iTerm2 Python API and instructs rather than failing opaquely. The ship gate; closes the umbrella T85.'
+    depends_on:
+    - T85.4
+    tags:
+    - packaging
+    - tcc
+    - homebrew
+    - macos
+    - install-friction
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T85.6:
+    name: Threads can be pinned as important via a marker column; pinned threads sort to the top
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A thread's importance is persisted (hidden .important marker file) and exposed as `important` on the thread view; POST /api/thread/set_important toggles it.
+    - SortByActivity pins important and master threads above the activity-ordered rest (master first), even when they have no recent activity.
+    - The shim shows a leftmost marker column (🔸 master / ❗️ important / 🪡 normal), a right-click menu toggles important and refreshes, and the popover grows by the column width.
+    - Go unit tests cover the marker-file round-trip and the pinned sort order; the shim builds.
+    context: Generalizes the master always-top behaviour into a per-thread importance flag. A new leftmost marker column shows 🔸 for master, ❗️ for important, 🪡 otherwise; right-click toggles important. Importance persists as a hidden .important marker file in the thread dir (filesystem projection, no schema). Important + master threads pin to the top of the activity sort even when stale. The popover widens to fit the new column.
+    tags:
+    - go
+    - swift
+    - ui
+    - macos
+    origin: manual
+    discovered: 2026-06-18
+    achieved: 2026-06-18
+  T86:
+    name: The Threads popup surfaces a curated set of high-value mnemo-backed signals and actions beyond the basics
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A catalog of candidate popup use cases backed by mnemo data is written down (e.g. in docs/design/threads-navigator.md or a follow-up doc), each with the mnemo source, the affordance (column / hover / footer / context menu), and a rough value/cost.
+    - The catalog is triaged and the top few are selected with rationale.
+    - At least the highest-value selected use case is implemented in the popup end to end (daemon + shim).
+    - 'HUMAN GATE: the user confirms the selected set is the right direction before broad implementation.'
+    context: 'Now that the menu-bar popup exists (T85) and already surfaces per-thread state, activity, marker, and active/overdue TODO counts, it''s a ready-made surface for more of mnemo''s data. This target is to think broadly about what else the popup could show or do — pulling from mnemo''s indexes — then triage by value and implement the best. Candidate ideas to evaluate (non-exhaustive): per-thread last-session summary / compaction excerpt (mnemo_compacted_session); recent decisions (mnemo_decisions); token/cost for the thread (mnemo_usage); open PRs/CI status for the thread''s repo (mnemo_prs/mnemo_ci); due-soon (not just overdue) and next-due-date; quick TODO add/toggle inline (mnemo_todo_add/set); jump-to-search across the thread''s transcripts (mnemo_search); a global "what''s hot across all threads" rollup; staleness/nudge indicators; one-click /cv or target status for a thread that''s a repo; surfacing mnemo_doctor health. The popup''s hover-preview + columns + footer are the available affordances; the daemon already has store access. Deliver a triaged catalog, then implement the top few.'
+    tags:
+    - threads
+    - ui
+    - mnemo
+    - discovery
+    origin: manual
+    discovered: 2026-06-18
+  T89:
+    name: mnemo's native head runs on Windows — a system-tray app over the same daemon API
+    status: converging
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A native Windows system-tray app (.NET + WebView2, ARM64) builds via dotnet and runs on the hms-vm.
+    - It lists threads from GET /api/thread/list and renders a thread's preview in a WebView2 pointed at GET /api/thread/preview (theme-aware), reusing the daemon's HTML with no client-side markdown/rendering.
+    - New-thread, set-marker (data-driven from GET /api/thread/markers), and search work against the daemon endpoints.
+    - The app subscribes to GET /api/events and surfaces health (the SSE spine's first consumer), mirroring the macOS dashboard/notification path on Windows-native affordances.
+    - The 'go' verb opens the thread in Windows Terminal (wt.exe) in the thread directory.
+    - A current mnemo daemon runs natively on Windows ARM64 (full cgo build) so the head talks to a local daemon, not only the Mac's over the network.
+    - 'HUMAN GATE: the user confirms the Windows head is the right shape before broad build-out.'
+    context: 'T85/T86 shipped the macOS menu-bar app (Mnemo.app) as mnemo''s native head, deliberately thinned (A: daemon marker catalog; B'': WebView preview) so a second head reuses the daemon and reimplements only presentation. This target brings that head to Windows: a native system-tray app (.NET + WebView2 chosen over WinUI 3 for buildability/testability on the hms-vm via dotnet) that is a thin view over the daemon''s /api/thread/* + /api/events SSE, with WebView2 rendering /api/thread/preview (same URL as macOS). Build/test loop uses the hms-vm (Parallels Win11 ARM64) per [[reference_hms_vm_windows_testing]]. Two tracks: (1) the head GUI, developed against the Mac''s daemon exposed over the Parallels network for fast iteration; (2) a current Windows daemon (the heavier cgo cross-build — llvm-mingw + sqldeep per release.yml) for a fully native deployment. The ''go'' verb is macOS-specific (iTerm2); the Windows analog launches Windows Terminal (wt.exe) in the thread dir.'
+    tags:
+    - windows
+    - ui
+    - threads
+    - native-head
+    origin: manual
+    discovered: 2026-06-20
   T9:
     name: Full-fidelity ingest and observability tools
     status: achieved

@@ -45,6 +45,16 @@ type Config struct {
 	// still indexed via WorkspaceRoots + IngestDocs).
 	SynthesisRoots []string `json:"synthesis_roots,omitempty"`
 
+	// ThreadsRoot is the root directory of the Threads feature (🎯T85):
+	// a flat collection of per-initiative thread directories, each with a
+	// CLAUDE.md context file. Supports ~ for the user's home. Empty
+	// resolves to ~/think/threads via ResolvedThreadsRoot. Hot-reloaded
+	// like the other discovery roots, so `mnemo_config` can repoint it
+	// without a daemon restart. Adding it to SynthesisRoots (or living
+	// under one, as the default does beneath ~/think) is what makes thread
+	// content searchable via mnemo's existing FTS index.
+	ThreadsRoot string `json:"threads_root,omitempty"`
+
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
 	// that the TODO indexer matches when discovering TODO files (🎯T78),
 	// beyond the default TODO.md / todos.md names found at any depth.
@@ -684,6 +694,34 @@ func (c Config) ResolvedVaultIndexingIgnoreFile() string {
 		return c.VaultIndexingIgnoreFile
 	}
 	return defaultVaultIgnoreFile
+}
+
+// DefaultThreadsRoot returns the default Threads root: ~/think/threads.
+func DefaultThreadsRoot() string {
+	home, err := EffectiveHome()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "think", "threads")
+}
+
+// ResolvedThreadsRoot returns ThreadsRoot with ~ expanded, or
+// DefaultThreadsRoot (~/think/threads) when unset.
+func (c Config) ResolvedThreadsRoot() string {
+	p := c.ThreadsRoot
+	if p == "" {
+		return DefaultThreadsRoot()
+	}
+	home, _ := EffectiveHome()
+	if home != "" {
+		switch {
+		case p == "~":
+			return home
+		case strings.HasPrefix(p, "~/"):
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
 }
 
 // ResolvedSynthesisRoots returns SynthesisRoots with ~ expanded to the

@@ -35,8 +35,31 @@ type Notifier struct {
 	dashboardURL string
 	send         func(title, body string)
 
+	// onAlert, when set, receives structured alerts so a richer consumer (the
+	// native menu-bar shim) can format them itself. shimPresent gates it: an
+	// alert routes to onAlert only when a shim is actually connected, else it
+	// falls back to send (osascript/notify-send). Both nil → today's behaviour
+	// (always send), which the tests rely on. (🎯T86)
+	onAlert     func(Alert)
+	shimPresent func() bool
+
 	lastSeverity map[string]Severity
 	lastNotified map[string]time.Time
+}
+
+// Alert is a health transition worth surfacing: a check that newly crossed the
+// threshold ("fail") or a previously-failing check that recovered ("recovery").
+// It carries everything the shim needs to render a native notification without
+// calling back to the daemon.
+type Alert struct {
+	Name        string `json:"name"`
+	Severity    string `json:"severity"` // ok / warn / fail
+	Detail      string `json:"detail,omitempty"`
+	Remediation string `json:"remediation,omitempty"`
+	Kind        string `json:"kind"` // "fail" | "recovery"
+	// DashboardURL deep-links the dashboard health page (the shim may open its
+	// native panel instead).
+	DashboardURL string `json:"dashboard_url,omitempty"`
 }
 
 // NotifierConfig configures a Notifier. The zero value is a disabled
@@ -77,11 +100,30 @@ func NewNotifier(cfg NotifierConfig) *Notifier {
 	return n
 }
 
-// SetSender overrides the delivery function (for tests).
+// SetSender overrides the OS delivery function (for tests, and the headless
+// fallback).
 func (n *Notifier) SetSender(send func(title, body string)) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.send = send
+}
+
+// OnAlert registers a structured-alert consumer (the native shim path). When
+// set and a shim is connected (see SetShimPresent), alerts route here instead
+// of to the OS sender. (🎯T86)
+func (n *Notifier) OnAlert(fn func(Alert)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.onAlert = fn
+}
+
+// SetShimPresent supplies the predicate that decides whether a native shim is
+// connected. An alert routes to OnAlert only when this returns true; otherwise
+// it falls back to the OS sender. (🎯T86)
+func (n *Notifier) SetShimPresent(fn func() bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.shimPresent = fn
 }
 
 // Observe folds a report into the notifier, emitting notifications for
@@ -104,32 +146,54 @@ func (n *Notifier) Observe(report Report, now time.Time) {
 			// Newly failing, or still failing past the cooldown.
 			last, seen := n.lastNotified[res.Name]
 			if prev < n.threshold || !seen || now.Sub(last) >= n.cooldown {
-				n.send(
-					fmt.Sprintf("mnemo: %s %s", res.Name, sev),
-					n.body(res),
-				)
+				n.emit(Alert{
+					Name:         res.Name,
+					Severity:     sev.String(),
+					Detail:       res.Detail,
+					Remediation:  res.Remediation,
+					Kind:         "fail",
+					DashboardURL: n.dashboardURL,
+				})
 				n.lastNotified[res.Name] = now
 			}
 		case prev >= n.threshold:
 			// Recovered.
-			n.send(
-				fmt.Sprintf("mnemo: %s recovered", res.Name),
-				"This check is healthy again.",
-			)
+			n.emit(Alert{
+				Name:         res.Name,
+				Severity:     OK.String(),
+				Kind:         "recovery",
+				DashboardURL: n.dashboardURL,
+			})
 			delete(n.lastNotified, res.Name)
 		}
 	}
 }
 
-// body composes the notification text: the detail plus a remediation hint
-// and a deep-link to the dashboard health page.
-func (n *Notifier) body(res Result) string {
-	var b strings.Builder
-	if res.Detail != "" {
-		b.WriteString(res.Detail)
+// emit routes a decided alert (the threshold/dedup/cooldown gate has already
+// passed): to the native shim when one is connected, else to the OS sender. The
+// OS title/body are preserved verbatim from the pre-T86 behaviour so headless
+// notifications (and the notifier tests) are unchanged.
+func (n *Notifier) emit(a Alert) {
+	if n.onAlert != nil && n.shimPresent != nil && n.shimPresent() {
+		n.onAlert(a)
+		return
 	}
-	if res.Remediation != "" {
-		fmt.Fprintf(&b, "\nFix: %s", res.Remediation)
+	if a.Kind == "recovery" {
+		n.send(fmt.Sprintf("mnemo: %s recovered", a.Name), "This check is healthy again.")
+		return
+	}
+	n.send(fmt.Sprintf("mnemo: %s %s", a.Name, a.Severity), n.alertBody(a))
+}
+
+// alertBody composes the OS notification text: the detail plus a remediation
+// hint and a deep-link to the dashboard health page.
+func (n *Notifier) alertBody(a Alert) string {
+	var b strings.Builder
+	if a.Detail != "" {
+		b.WriteString(a.Detail)
+	}
+	if a.Remediation != "" {
+		fmt.Fprintf(&b, "\nFix: %s", a.Remediation)
 	}
 	if n.dashboardURL != "" {
 		fmt.Fprintf(&b, "\n%s", n.dashboardURL)

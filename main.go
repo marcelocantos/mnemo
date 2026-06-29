@@ -125,6 +125,9 @@ func main() {
 		case "ping-peer":
 			cmdPingPeer(os.Args[2:])
 			return
+		case "thread":
+			cmdThread(os.Args[2:])
+			return
 		}
 	}
 
@@ -590,7 +593,23 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}
-	diagScheduler := diag.NewScheduler(diagReg, diag.NewNotifier(notifyCfg), 0, 0)
+	// The SSE hub (🎯T86) fans diagnostics out to the native menu-bar shim. The
+	// notifier routes alerts to the shim when one is connected (a richer native
+	// notification) and falls back to osascript/notify-send when headless; the
+	// scheduler streams every report so the shim's dashboard panel and status
+	// glyph stay live. The hub is also handed to the api handler below.
+	eventHub := api.NewEventHub()
+	notifier := diag.NewNotifier(notifyCfg)
+	notifier.OnAlert(func(a diag.Alert) {
+		eventHub.Publish(api.Event{Type: "alert", Data: a})
+	})
+	notifier.SetShimPresent(eventHub.HasSubscribers)
+	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)
+	diagScheduler.OnReport(func(rep diag.Report) {
+		// Retained: a shim connecting between scheduler ticks gets the current
+		// health snapshot immediately rather than waiting for the next tick.
+		eventHub.PublishRetained(api.Event{Type: "health", Data: rep})
+	})
 	go diagScheduler.Run(ctx)
 
 	// Resolver threaded into tools.Handler. If the inbound request
@@ -735,6 +754,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	mux.Handle("/mcp/", httpSrv) // catch sub-paths used by the MCP transport
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
+	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
 	apiHandler.RegisterRoutes(mux)
 
 	// 🎯T92: opt-in pprof on the local listener. Diagnosing the CPU burn
@@ -771,6 +791,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Stop, or never triggered in the foreground case).
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
+
+	// Launch and supervise the Threads menu-bar shim (🎯T85.5). Best-effort
+	// and macOS-only; a no-op when no Mnemo.app is installed.
+	go superviseThreadsShim(ctx)
 
 	// Optionally start the federated mTLS server in parallel
 	// (🎯T15.3). A startup failure here is non-fatal — we log and
