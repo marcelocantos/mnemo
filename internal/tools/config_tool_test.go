@@ -76,6 +76,29 @@ func TestMergeConfigPatchRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestMergeConfigPatchAcceptsStructKeys(t *testing.T) {
+	// Regression: menu_bar_app and threads_root were added to store.Config but
+	// not to the (formerly hand-maintained) allowlist, so mnemo_config rejected
+	// them as "unknown config keys". The allowlist is now derived from the
+	// struct, so every top-level config key is patchable.
+	for _, key := range []string{
+		"menu_bar_app", "threads_root", "todo_globs",
+		"disable_health_notifications", "backup", "cost_reconciliation",
+	} {
+		if _, ok := knownConfigKeys[key]; !ok {
+			t.Errorf("config key %q missing from the derived allowlist", key)
+		}
+	}
+	// The formerly-rejected key must now merge and apply.
+	merged, err := mergeConfigPatch(store.Config{}, map[string]any{"menu_bar_app": true})
+	if err != nil {
+		t.Fatalf("mergeConfigPatch(menu_bar_app): %v", err)
+	}
+	if !merged.MenuBarApp {
+		t.Errorf("menu_bar_app not applied after merge: %+v", merged)
+	}
+}
+
 func TestConfigToolReadReturnsJSON(t *testing.T) {
 	ctl := &fakeCtl{cur: store.Config{VaultPath: "/v"}}
 	ch := &callHandler{}

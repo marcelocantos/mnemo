@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -3009,15 +3010,33 @@ func (h *callHandler) callerHome() string {
 // in a patch. Anything else is rejected up-front so a typo like
 // "vaultpath" produces an error rather than being silently dropped by
 // json.Unmarshal's unknown-field handling.
-var knownConfigKeys = map[string]struct{}{
-	"workspace_roots":            {},
-	"extra_project_dirs":         {},
-	"synthesis_roots":            {},
-	"vault_path":                 {},
-	"vault_indexing_scope":       {},
-	"vault_indexing_includes":    {},
-	"vault_indexing_ignore_file": {},
-	"linked_instances":           {},
+// knownConfigKeys is the set of top-level keys a mnemo_config patch may
+// set. It is derived from store.Config's json tags via reflection so it can
+// never drift from the struct: adding a Config field automatically makes it
+// patchable. A hand-maintained parallel list silently left menu_bar_app and
+// threads_root unpatchable (the tool rejected them as "unknown config keys")
+// after they were added to the struct but not the list — reflection removes
+// that failure mode entirely.
+var knownConfigKeys = configKeySet()
+
+// configKeySet reflects over store.Config's exported fields and collects
+// their json key names (the part before any comma; "-" and untagged fields
+// are skipped).
+func configKeySet() map[string]struct{} {
+	keys := make(map[string]struct{})
+	t := reflect.TypeOf(store.Config{})
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		if tag == "" {
+			continue
+		}
+		name := strings.SplitN(tag, ",", 2)[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		keys[name] = struct{}{}
+	}
+	return keys
 }
 
 // mergeConfigPatch round-trips current through JSON so the patch's
