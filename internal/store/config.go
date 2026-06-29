@@ -60,10 +60,10 @@ type Config struct {
 	// Mnemo.app. The Threads feature itself stays fully available
 	// regardless — via the mnemo_thread_* MCP tools, the `mnemo thread`
 	// CLI, and the HTTP thread routes; only the menu-bar button is gated.
-	// Set true to have the daemon launch and supervise the app. The shim
-	// supervisor is wired at startup, so toggling this via mnemo_config
-	// takes effect on the next daemon start (or just launch Mnemo.app
-	// yourself).
+	// Set true to have the daemon launch and supervise the app. Applied
+	// live: toggling this via mnemo_config starts/stops supervising the app
+	// immediately, with no daemon restart. (Disabling won't force-quit a
+	// running app — it just won't be relaunched.)
 	MenuBarApp bool `json:"menu_bar_app,omitempty"`
 
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
