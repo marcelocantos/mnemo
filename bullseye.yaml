@@ -3175,3 +3175,159 @@ targets:
     origin: manual
     discovered: 2026-06-29
     achieved: 2026-06-29
+  T97:
+    name: mnemo upgrades its own binary without dropping live MCP connections
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A backend version change while Claude Code sessions are connected invalidates no session: none needs /mcp, no in-flight tool call is lost beyond the swap instant.'
+    - Detection + notification of a new release works with auto-apply disabled; enabling auto_upgrade.enabled performs the full swap at a quiescent window.
+    - Non-Homebrew and Windows installs degrade to notify-only; edge upgrades are the only documented connection-dropping case.
+    - docs/design/connection-preserving-upgrade.md is the design of record.
+    context: 'mnemo should self-upgrade with live agents surviving the swap. The blocker is not byte-swapping but that Claude Code caches Mcp-Session-Id and does not re-initialize on server restart (claude-code#27142). Design: a thin transparent edge proxy owns client connections and routes by Mcp-Session-Id to a swappable backend, with session-affinity draining and a single-holder lease on singleton background work. See docs/design/connection-preserving-upgrade.md. Revisits T27''s literal "no proxy" while preserving its real invariants (no custom protocol; identity via Mcp-Session-Id). Note: T95/T96 were taken by merged work; this objective is T97.'
+    tags:
+    - upgrade
+    - daemon
+    - proxy
+    - mcp
+    - ops
+    origin: manual
+    discovered: 2026-06-30
+  T97.1:
+    name: The backend daemon drains gracefully on SIGTERM/SIGINT and leaves a checkpointed WAL
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A foreground SIGTERM/SIGINT triggers the existing drain path (httpSrv.Shutdown + httpServer.Shutdown) instead of an immediate kill — main.go installs a signal-driven cancellable context (today main.go:189 passes a never-cancelled context).
+    - 'Drain order: stop intake -> release background lease -> stop workers -> quiesce read pool -> PRAGMA wal_checkpoint(TRUNCATE) on the writer.'
+    - The checkpoint result (busy, log, ckpt) is logged; busy != 0 is surfaced as a warning.
+    - A drain exceeding the deadline (~5-10s) falls back to a hard exit, which is safe given the crash-only durability guarantees.
+    context: Foundation, independently valuable. Today there is no signal.Notify anywhere; the graceful-shutdown block at main.go:827-848 is only reachable under the Windows SCM path. brew services restart sends SIGTERM, which currently hard-kills the daemon mid-request on macOS/Linux.
+    tags:
+    - upgrade
+    - shutdown
+    - sqlite
+    - wal
+    origin: manual
+    discovered: 2026-06-30
+  T97.2:
+    name: A newer mnemo release is detected and surfaced via the T83 health pipeline
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A low-frequency worker queries `gh release list --repo marcelocantos/mnemo` and caches the latest tag versus the version constant.
+    - A diag.Check named upgrade.available reports warn when a newer version exists, flowing to mnemo_doctor + OS notification + dashboard /health via the existing T83 path.
+    - The check is on by default and disabled by disable_upgrade_check in ~/.mnemo/config.json.
+    - No outbound call occurs when the check is disabled.
+    context: Independent of the proxy work and shippable first. Reuses the gh-shell pattern from the PR/CI backfill (store.go) and the T83 health/notify/dashboard pipeline verbatim — no new notification plumbing. On-by-default opt-out matches the always-on GitHub egress and health notifications precedent.
+    tags:
+    - upgrade
+    - github
+    - diagnostics
+    - notification
+    origin: manual
+    discovered: 2026-06-30
+  T97.3:
+    name: A transparent edge proxy owns client connections and routes by Mcp-Session-Id to a backend
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The edge process owns the :19419 listener and all client connections; the backend listens on loopback/UDS.
+    - Requests route to a backend by Mcp-Session-Id; edge<->backend traffic is standard MCP-over-HTTP (no custom protocol).
+    - A session is pinned to the backend that handled its initialize; new initializes can be directed to a different backend.
+    - The long-lived GET/SSE stream proxies cleanly across the edge.
+    context: 'The connection-owner that routes around claude-code#27142: because the edge keeps running the old binary across a backend swap, the client''s TCP connection and Mcp-Session-Id stay valid, so the client never sees a session invalidation. Preserves T27''s invariants (no custom protocol; identity via Mcp-Session-Id). Spike mark3labs v0.47 transport reuse for the client side + SSE splicing before locking.'
+    depends_on:
+    - T97.1
+    tags:
+    - upgrade
+    - proxy
+    - mcp
+    - edge
+    origin: manual
+    discovered: 2026-06-30
+  T97.4:
+    name: Singleton background work is guarded by a single-holder lease
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Exactly one backend holds the lease and runs ingest/compaction/mirrors/image pools.
+    - Lease handoff between two live backends completes in under ~1s with no double-ingest.
+    - A crashed lease-holder's lease is released (OS-released file lock or heartbeat expiry) and reacquired by a live backend.
+    - Lease ownership is observable via mnemo_doctor.
+    context: Connection-preserving upgrade overlaps two backend processes during drain; the singleton background role (ingest/compaction/mirrors/image pools) must run in exactly one of them. The lease is the seam between momentarily-multi-process serving and singleton background work. Also prevents accidental double-daemon independent of upgrades.
+    tags:
+    - upgrade
+    - daemon
+    - lease
+    - background
+    origin: manual
+    discovered: 2026-06-30
+  T97.5:
+    name: Opt-in auto-apply upgrades the backend at a quiescent window with connections preserved
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - auto_upgrade.enabled gates the apply path; default off (detection/notification stay on).
+    - When enabled and a newer release is detected, after 30 min of MCP traffic quiescence the daemon runs a detached `brew upgrade mnemo`, spawns the new backend, routes new sessions to it, and drains+checkpoints+reaps the old backend.
+    - Throughout the swap an existing connected session keeps working without /mcp.
+    - Installs not managed by Homebrew degrade to notify-only.
+    context: Integration node tying detection, the edge proxy, the lease, and graceful drain into the orchestrated swap. Detached brew helper outlives the backend it replaces; the edge keeps running. opt-in because auto-restarting a backend many sessions depend on is too big a default to flip silently.
+    depends_on:
+    - T97.1
+    - T97.2
+    - T97.3
+    - T97.4
+    tags:
+    - upgrade
+    - orchestration
+    - homebrew
+    - auto-apply
+    origin: manual
+    discovered: 2026-06-30
+  T97.6:
+    name: Sessions spanning a backend swap are told they were upgraded
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A session routed to a newer backend than the one it initialized under receives a one-time `mnemo upgraded vN -> vN+1` notice in its next tool result.
+    - tools/list_changed is pushed best-effort after a version change (or the client re-lists on reconnect).
+    - The banner fires at most once per session per upgrade.
+    context: Tool-result text is the only reliably model-visible channel (notifications/message is received but not displayed by Claude Code). Under the affinity-drain model most sessions live entirely within one backend version, so the banner is mostly an edge-case courtesy plus a hook for any future forced-migration path.
+    depends_on:
+    - T97.3
+    tags:
+    - upgrade
+    - mcp
+    - notification
+    - agent
+    origin: manual
+    discovered: 2026-06-30
+  T99:
+    name: mnemo ingests Codex CLI session transcripts into the existing searchable index
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo discovers and watches Codex rollout files under ~/.codex/sessions/** and ~/.codex/archived_sessions/ recursively; Codex roots are a configured Store field so New-based tests stay hermetic.
+    - 'A rollout is transformed into mnemo''s content model via parseCodexFile: response_item/message -> role+text, function_call/custom_tool_call/tool_search_call -> tool_use, *_output -> tool_result (paired by call_id), reasoning -> placeholder; session_meta/turn_context/event_msg/developer turns skipped.'
+    - Each Codex record gets a deterministic synthetic (session_id, line-offset) uuid injected into raw so re-ingest is idempotent via INSERT OR IGNORE; ingest resumes from the ingest_state byte offset.
+    - session_meta carries an additive `source` column (default 'claude'); Codex sessions are source='codex' and existing mnemo_search/mnemo_sessions surface them; the batch and watcher paths share one writeParsedFile writer.
+    - The parser tolerates unknown envelope/payload types and junk lines rather than failing, surviving codex-rs format churn.
+    - Unit + end-to-end tests pass (parse, search, source tagging, repo attribution, dedup); go test -tags sqlite_fts5 ./... is green. docs/design/codex-ingest.md is the design of record.
+    context: 'MVP: capture Codex transcripts. Codex records OpenAI Responses API items in a {timestamp,type,payload} envelope under ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl — not Claude''s schema. Implemented as a parseCodexFile transform into the shared parsedFile intermediate (codex.go), reusing the watcher/ingest_state/repo-attribution/search spine via a factored writeParsedFile writer. session_meta.source discriminates corpora. Codex roots configured via registry.ForUser (Store.SetCodexRoots) for test hermeticity. Out of scope: the ~/.codex/*.sqlite DBs, history.jsonl, decrypting reasoning, chain/compaction modeling, Codex-specific tooling. Design: docs/design/codex-ingest.md.'
+    tags:
+    - codex
+    - ingest
+    - multi-agent
+    - parser
+    - mvp
+    origin: manual
+    discovered: 2026-06-30
