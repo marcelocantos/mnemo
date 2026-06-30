@@ -238,6 +238,27 @@ targets are invisible to it. If you want a cross-project target
 search that includes mnemo, use `bullseye_list(cwd)` directly until
 the indexer is taught to read `bullseye.yaml`.
 
+## Gates
+
+profile: mnemo
+
+The `mnemo` gate profile (`~/.claude/gates/mnemo.yaml`, merged over
+`base.yaml`) adds a **`windows-vm-validated`** pre-merge gate: the
+Windows build + test suite is validated on the local Parallels VM
+(`ssh hms-vm`, Win11 ARM64) by `scripts/win-validate.sh`, not by the
+cloud CI Windows job. Cloud `test (windows-latest …)` still runs on
+every PR but is **non-required** (removed from the master ruleset's
+required checks) — it's the slow ~15-18 min CGO/SQLite long pole, so
+it no longer gates the merge.
+
+Flow is **push-first**: push the branch, then run
+`scripts/win-validate.sh` (it validates the *pushed* commit), which
+builds mnemo + sqldeep with the clang/ARM64 CGO toolchain on the VM
+and runs `go test -tags sqlite_fts5 ./...` — far faster than the cloud
+job (native ARM64, ~1-2 min). One-time VM provisioning: Go, MSYS2
+CLANGARM64 toolchain (`clang`/`llvm-ar`), and
+`mingw-w64-clang-aarch64-sqlite3`.
+
 ## Delivery
 
 Merged to master via squash PR.
