@@ -3175,3 +3175,16 @@ targets:
     origin: manual
     discovered: 2026-06-29
     achieved: 2026-06-29
+  T98:
+    name: mnemo surfaces when a tracked automation has silently stalled
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A per-automation liveness signal + expected cadence can be registered (heartbeat file / log mtime / launchd LastExitStatus+PID / newest-artifact or last-commit timestamp)
+    - mnemo reports automations stale past their cadence-plus-grace via mnemo_status or a dedicated mnemo_health tool
+    - Optionally pages proactively (e.g. Slack DM via the RemoteTrigger path) rather than waiting to be discovered by a human
+    - The poll-vs-push design fork is resolved and the chosen mechanism documented (see docs/design/automation-liveness-plugin.md)
+    context: Exploration, not yet committed. Surfaced while fixing a 9-day silent stall in the marcelocantos/ytt playlist-ingest automation (a wedged run suppressed every daily launchd tick, noticed only by a human). The acute fix was bespoke and in-process (per-call timeouts + a run-level watchdog in ytt v0.7.0/v0.8.0); this target generalises "an automation went quiet and nobody noticed" as a cross-cutting capability mnemo is positioned to own, since it already aggregates cross-repo activity. Full sketch + design fork in docs/design/automation-liveness-plugin.md.
+    origin: manual
+    discovered: 2026-06-30
