@@ -3310,3 +3310,24 @@ targets:
     - agent
     origin: manual
     discovered: 2026-06-30
+  T99:
+    name: mnemo ingests Codex CLI session transcripts into the existing searchable index
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo discovers and watches Codex rollout files under ~/.codex/sessions/** and ~/.codex/archived_sessions/ recursively; Codex roots are a configured Store field so New-based tests stay hermetic.
+    - 'A rollout is transformed into mnemo''s content model via parseCodexFile: response_item/message -> role+text, function_call/custom_tool_call/tool_search_call -> tool_use, *_output -> tool_result (paired by call_id), reasoning -> placeholder; session_meta/turn_context/event_msg/developer turns skipped.'
+    - Each Codex record gets a deterministic synthetic (session_id, line-offset) uuid injected into raw so re-ingest is idempotent via INSERT OR IGNORE; ingest resumes from the ingest_state byte offset.
+    - session_meta carries an additive `source` column (default 'claude'); Codex sessions are source='codex' and existing mnemo_search/mnemo_sessions surface them; the batch and watcher paths share one writeParsedFile writer.
+    - The parser tolerates unknown envelope/payload types and junk lines rather than failing, surviving codex-rs format churn.
+    - Unit + end-to-end tests pass (parse, search, source tagging, repo attribution, dedup); go test -tags sqlite_fts5 ./... is green. docs/design/codex-ingest.md is the design of record.
+    context: 'MVP: capture Codex transcripts. Codex records OpenAI Responses API items in a {timestamp,type,payload} envelope under ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl — not Claude''s schema. Implemented as a parseCodexFile transform into the shared parsedFile intermediate (codex.go), reusing the watcher/ingest_state/repo-attribution/search spine via a factored writeParsedFile writer. session_meta.source discriminates corpora. Codex roots configured via registry.ForUser (Store.SetCodexRoots) for test hermeticity. Out of scope: the ~/.codex/*.sqlite DBs, history.jsonl, decrypting reasoning, chain/compaction modeling, Codex-specific tooling. Design: docs/design/codex-ingest.md.'
+    tags:
+    - codex
+    - ingest
+    - multi-agent
+    - parser
+    - mvp
+    origin: manual
+    discovered: 2026-06-30
