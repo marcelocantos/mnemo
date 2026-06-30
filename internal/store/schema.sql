@@ -476,7 +476,12 @@ CREATE TABLE session_meta (
 			-- over-broad excludeCWD prefix check that wrongly skipped real
 			-- dev sessions sharing the mnemo repo cwd. Additive, defaulted:
 			-- old rows read as 0 (eligible) until re-ingest tags a marker.
-			compactor_internal INTEGER NOT NULL DEFAULT 0
+			compactor_internal INTEGER NOT NULL DEFAULT 0,
+			-- 🎯T99 multi-agent provenance: which coding agent produced
+			-- this session's transcript. 'claude' for ~/.claude/projects
+			-- rollouts (the default, so existing rows read correctly),
+			-- 'codex' for ~/.codex/sessions rollouts. Additive, defaulted.
+			source TEXT NOT NULL DEFAULT 'claude'
 		);
 
 CREATE TABLE session_nonces (

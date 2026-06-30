@@ -99,6 +99,14 @@ type Store struct {
 	// non-repo planning spaces. Mutated only via SetSynthesisRoots.
 	synthesisRoots []string
 
+	// codexRoots are the candidate Codex rollout roots (~/.codex/sessions,
+	// ~/.codex/archived_sessions) ingested alongside the Claude project
+	// dirs (🎯T99). Configured at construction (registry.ForUser) rather
+	// than discovered globally, so New-based tests stay hermetic and
+	// don't pull in the developer's real ~/.codex. Mutated only via
+	// SetCodexRoots; existence is checked lazily in codexDirs.
+	codexRoots []string
+
 	// todoGlobs are extra repo-relative globs that IngestTodos matches
 	// when discovering TODO files, beyond the default TODO.md / todos.md
 	// names (🎯T78). Mutated only via SetTodoGlobs, read under
@@ -188,6 +196,37 @@ func (s *Store) SetExtraProjectDirs(dirs []string) {
 		return
 	}
 	s.extraProjectDirs = append(s.extraProjectDirs[:0:0], dirs...)
+}
+
+// SetCodexRoots configures the Codex rollout roots ingested alongside
+// the Claude project dirs (🎯T99). Pass the candidate directories
+// (CodexRootsFor); existence is checked lazily by codexDirs so roots
+// created after startup (Codex installed later) are still picked up.
+// Call once after Store.New.
+func (s *Store) SetCodexRoots(roots []string) {
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	if len(roots) == 0 {
+		s.codexRoots = nil
+		return
+	}
+	s.codexRoots = append(s.codexRoots[:0:0], roots...)
+}
+
+// codexDirs returns the configured Codex rollout roots that currently
+// exist on disk. Empty when Codex roots weren't configured (e.g. New-
+// based tests) or ~/.codex isn't present, making the feature a no-op.
+func (s *Store) codexDirs() []string {
+	s.rootsMu.RLock()
+	roots := append([]string(nil), s.codexRoots...)
+	s.rootsMu.RUnlock()
+	var out []string
+	for _, d := range roots {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // SetSynthesisRoots configures the filesystem roots walked by
@@ -2711,6 +2750,9 @@ type parsedFile struct {
 	branch    string
 	topic     string
 	newOffset int64
+	// source is the producing agent ('claude' or 'codex'). Empty means
+	// 'claude' (the default for ~/.claude/projects transcripts).
+	source string
 }
 
 // IngestAll scans the project directory and ingests all JSONL files
@@ -2729,7 +2771,10 @@ func (s *Store) IngestAll() error {
 		offset int64 // already-ingested offset
 	}
 	var files []fileEntry
-	for _, dir := range s.projectDirs() {
+	// Codex rollout roots (~/.codex/sessions, archived_sessions) are
+	// walked alongside the Claude project dirs; the worker routes each
+	// file to the right parser by path (🎯T99).
+	for _, dir := range append(s.projectDirs(), s.codexDirs()...) {
 		if _, err := os.Stat(dir); err != nil {
 			if os.IsNotExist(err) {
 				slog.Warn("project dir unavailable, skipping", "dir", dir)
@@ -2781,7 +2826,11 @@ func (s *Store) IngestAll() error {
 		go func() {
 			defer wg.Done()
 			for fe := range pathCh {
-				if pf, err := parseFile(fe.path, fe.offset); err == nil {
+				parse := parseFile
+				if isCodexRollout(fe.path) {
+					parse = parseCodexFile
+				}
+				if pf, err := parse(fe.path, fe.offset); err == nil {
 					parsedCh <- pf
 				} else {
 					slog.Warn("parse failed", "file", filepath.Base(fe.path), "err", err)
@@ -2921,78 +2970,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				"rate", fmt.Sprintf("%.1f files/s", rate),
 				"eta", eta.Round(time.Second))
 		}
-		// Insert all raw entries and build entryIdx→entryID map.
-		// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
-		// only record the entry ID when a row was actually inserted.
-		entryIDs := make(map[int]int64, len(pf.entries))
-		for i, e := range pf.entries {
-			result, err := ws.entryStmt.Exec(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
-			if err != nil {
-				slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
-				continue
-			}
-			n, _ := result.RowsAffected()
-			if n > 0 {
-				if id, err := result.LastInsertId(); err == nil {
-					entryIDs[i] = id
-				}
-			}
-		}
-
-		// Insert content block messages linked to their entries.
-		// Skip messages whose entry was a duplicate (INSERT OR IGNORE, entryID == 0).
-		compactorInternal := 0
-		for _, m := range pf.messages {
-			entryID := entryIDs[m.entryIdx]
-			if entryID == 0 {
-				continue // entry was duplicate — skip associated messages
-			}
-			var toolInput any
-			if m.toolInput != nil {
-				toolInput = string(m.toolInput)
-			}
-			ws.msgStmt.Exec(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
-				m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
-
-			// Detect self-identification nonces.
-			if m.contentType == "text" && strings.HasPrefix(m.text, NoncePrefix) {
-				ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
-					strings.TrimSpace(m.text), pf.sessionID)
-			}
-
-			// 🎯T72 recursion guard: flag claudia-spawned compaction runs
-			// by the marker on their opening prompt.
-			if m.contentType == "text" && IsCompactorMarker(m.text) {
-				compactorInternal = 1
-			}
-		}
-
-		// Upsert session metadata.
-		if pf.cwd != "" || pf.branch != "" || pf.topic != "" || compactorInternal == 1 {
-			repo := extractRepo(pf.cwd)
-			workType := classifyWorkType(pf.branch)
-			ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(session_id) DO UPDATE SET
-					repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
-					cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
-					git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
-					work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
-					topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END,
-					compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal)`,
-				pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal)
-		}
-
-		// Update ingest offset + fingerprint (🎯T68.6 same-size
-		// rewrite detection). recordedSize/Mtime is nullable; an
-		// os.Stat error just records NULL — detection falls back to
-		// offset-vs-size on the next pass.
-		recSize, recMtime := statFingerprint(pf.path)
-		ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-			VALUES (?, ?, ?, ?)`, pf.path, pf.newOffset, recSize, recMtime)
-		s.mu.Lock()
-		s.offsets[pf.path] = pf.newOffset
-		s.mu.Unlock()
+		s.writeParsedFile(ws, pf)
 
 		// Commit periodically.
 		if time.Since(lastCommit) >= commitInterval {
@@ -3005,6 +2983,92 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	// Final commit.
 	ws.Close()
 	return ws.tx.Commit()
+}
+
+// writeParsedFile inserts one parsed transcript file (entries, content
+// messages, session metadata, and the ingest offset) into the open
+// writer transaction. Shared by the parallel batch writer (runWriter)
+// and the single-file Codex path (ingestCodexFile), so both sources go
+// through identical insert logic. Best-effort: individual insert
+// failures are logged, not propagated, matching the original loop.
+func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
+	// Insert all raw entries and build entryIdx→entryID map.
+	// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
+	// only record the entry ID when a row was actually inserted.
+	entryIDs := make(map[int]int64, len(pf.entries))
+	for i, e := range pf.entries {
+		result, err := ws.entryStmt.Exec(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
+		if err != nil {
+			slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
+			continue
+		}
+		n, _ := result.RowsAffected()
+		if n > 0 {
+			if id, err := result.LastInsertId(); err == nil {
+				entryIDs[i] = id
+			}
+		}
+	}
+
+	// Insert content block messages linked to their entries.
+	// Skip messages whose entry was a duplicate (INSERT OR IGNORE, entryID == 0).
+	compactorInternal := 0
+	for _, m := range pf.messages {
+		entryID := entryIDs[m.entryIdx]
+		if entryID == 0 {
+			continue // entry was duplicate — skip associated messages
+		}
+		var toolInput any
+		if m.toolInput != nil {
+			toolInput = string(m.toolInput)
+		}
+		ws.msgStmt.Exec(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+			m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
+
+		// Detect self-identification nonces.
+		if m.contentType == "text" && strings.HasPrefix(m.text, NoncePrefix) {
+			ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
+				strings.TrimSpace(m.text), pf.sessionID)
+		}
+
+		// 🎯T72 recursion guard: flag claudia-spawned compaction runs
+		// by the marker on their opening prompt.
+		if m.contentType == "text" && IsCompactorMarker(m.text) {
+			compactorInternal = 1
+		}
+	}
+
+	// Upsert session metadata.
+	if pf.cwd != "" || pf.branch != "" || pf.topic != "" || compactorInternal == 1 || pf.source != "" {
+		repo := extractRepo(pf.cwd)
+		workType := classifyWorkType(pf.branch)
+		source := pf.source
+		if source == "" {
+			source = "claude"
+		}
+		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal, source)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
+				cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
+				git_branch = CASE WHEN excluded.git_branch != '' THEN excluded.git_branch ELSE session_meta.git_branch END,
+				work_type = CASE WHEN excluded.work_type != '' THEN excluded.work_type ELSE session_meta.work_type END,
+				topic = CASE WHEN excluded.topic != '' AND session_meta.topic = '' THEN excluded.topic ELSE session_meta.topic END,
+				compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal),
+				source = CASE WHEN excluded.source != '' THEN excluded.source ELSE session_meta.source END`,
+			pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal, source)
+	}
+
+	// Update ingest offset + fingerprint (🎯T68.6 same-size
+	// rewrite detection). recordedSize/Mtime is nullable; an
+	// os.Stat error just records NULL — detection falls back to
+	// offset-vs-size on the next pass.
+	recSize, recMtime := statFingerprint(pf.path)
+	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+		VALUES (?, ?, ?, ?)`, pf.path, pf.newOffset, recSize, recMtime)
+	s.mu.Lock()
+	s.offsets[pf.path] = pf.newOffset
+	s.mu.Unlock()
 }
 
 // parseFile reads and parses a JSONL transcript file, returning all
@@ -3140,6 +3204,19 @@ func (s *Store) Watch() error {
 		})
 	}
 
+	// Watch Codex rollout roots (🎯T99). Date-nested subdirs created
+	// later are picked up by the fsnotify Create→watcher.Add path below.
+	for _, dir := range s.codexDirs() {
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				if wErr := watcher.Add(path); wErr != nil {
+					slog.Warn("failed to watch codex directory", "path", path, "err", wErr)
+				}
+			}
+			return nil
+		})
+	}
+
 	// Also watch the skills directory for .md changes.
 	if sdir, err := skillsDir(); err == nil {
 		if wErr := watcher.Add(sdir); wErr != nil {
@@ -3199,6 +3276,12 @@ func (s *Store) Watch() error {
 			if strings.HasSuffix(name, ".jsonl") &&
 				(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
 				db.enqueue(name, func() {
+					if isCodexRollout(name) {
+						if err := s.ingestCodexFile(name); err != nil {
+							slog.Error("ingest codex failed", "file", name, "err", err)
+						}
+						return
+					}
 					if err := s.ingestFile(name); err != nil {
 						slog.Error("ingest failed", "file", name, "err", err)
 					}
