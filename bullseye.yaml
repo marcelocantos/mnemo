@@ -63,6 +63,45 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-15
+  T101:
+    name: mnemo's release binaries are code-signed with a stable Apple Developer ID so macOS TCC grants persist across version upgrades
+    status: set_aside
+    value: 0.0
+    cost: 0.0
+    set_aside_reason: 'Parked 2026-06-30 — engineering done, activation deferred as not worth it now. release.yml Developer ID signing is merged (PR #138, baeb7e8), gated/no-op on MACOS_CERT_P12/MACOS_CERT_PASSWORD/MACOS_SIGN_IDENTITY. Remaining is purely ops: obtain a Developer ID Application cert. The personal Apple ID team is FREE (Apple Development only); Developer ID requires the paid Squz Pty Ltd (SWA3H3N7TW) membership and only its Account Holder can mint one. Resume: Xcode → Squz team → Manage Certificates → + → Developer ID Application, export .p12, set the 3 secrets; next release then signs and a TCC grant should survive `brew upgrade` (acceptance). No-cert interim: exclude ~/Library/CloudStorage/GoogleDrive-* from ingest to stop the prompts.'
+    acceptance:
+    - The darwin/arm64 release binary is signed with a Developer ID Application certificate (stable Team ID), not the default ad-hoc/linker signature (codesign -dvv shows a Developer ID authority + TeamIdentifier).
+    - release.yml imports the cert into a temp keychain and codesigns (--options runtime --timestamp) before packaging, gated on MACOS_CERT_P12 / MACOS_CERT_PASSWORD / MACOS_SIGN_IDENTITY secrets.
+    - 'Acceptance test: a macOS TCC grant (Google Drive / Full Disk Access) granted once survives a `brew upgrade mnemo` to a new version without re-prompting.'
+    - Done via Apple CLI directly (no fastlane). Gatekeeper notarization + the Mnemo.app menu-bar shim are a separate optional follow-on.
+    context: 'Root cause (2026-06-30): mnemo is ad-hoc/linker-signed (TeamIdentifier=not set) so macOS TCC keys privacy grants on the per-build cdhash; every release is a new cdhash so each `brew upgrade` re-prompts (e.g. Google Drive, since ~/Library/CloudStorage/GoogleDrive-* is walked by ingest). A stable Developer ID Team ID anchors grants to the Designated Requirement. ENGINEERING DONE: release.yml signing step merged (PR #138, baeb7e8) — build -> codesign --options runtime --timestamp (Apple CLI; fastlane ruled out as Xcode/App-Store-shaped) -> package, no-op until the 3 secrets exist. REMAINING (ops): get a Developer ID Application cert — the personal Apple ID team (marcelo.cantos@gmail.com) is FREE (Xcode + only offers Apple Development); Developer ID needs the paid membership = Squz Pty Ltd (SWA3H3N7TW), creatable only by the org Account Holder. Then export .p12 + set secrets; identity "Developer ID Application: Squz Pty Ltd (SWA3H3N7TW)" is functionally fine. No-cert workaround if prompts annoy: exclude the Google Drive tree from ingest.'
+    tags:
+    - macos
+    - code-signing
+    - tcc
+    - release
+    - developer-id
+    origin: manual
+    discovered: 2026-06-30
+  T102:
+    name: mnemo has a plugin system — capabilities are added through a uniform extension surface, not bespoke core edits
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A defined set of capability contracts (Go interfaces) + a central plugin registry exist for the main extension points: ingest source, MCP tool, reconciler/derived stream, diag/health check, notifier/output sink, and a reusable signal-source primitive (file mtime / log / launchd status / last-commit / newest-artifact).'
+    - A plugin declares a config schema and is enabled/disabled + parameterised via ~/.mnemo/config.json, hot-reloaded like existing config; plugins hook the single scheduler (T68.7) and the health/diag surface (T83) uniformly rather than threading bespoke code through main.go/store/tools/diag.
+    - 'The mechanism fork is resolved and documented in docs/design/plugin-system.md: compiled-in registry of composable primitives (internal modularity) vs external/out-of-process plugins (MCP-federated or go-plugin/gRPC, third-party) vs config-declarative wiring — with the chosen first cut and the upgrade path.'
+    - 'Proof-of-surface: at least one existing capability is re-expressed as a plugin with no behaviour change (e.g. a diag check, or the Codex ingest source from T99), AND the automation-liveness idea (former T98) is implementable as a plugin with zero core edits.'
+    - 'Boundaries preserved: loop-safety exclusion fence (T52), opt-in external egress, additive-only schema policy, and the single-scheduler/reconciler model are all honoured by the plugin lifecycle.'
+    context: 'The user wants the extensibility *mechanism* raised as its own objective; a prior session misread the intent and filed the automation-liveness feature (former T98, ''mnemo surfaces when a tracked automation has silently stalled'' — born from a 9-day silent ytt stall) as a one-off, even though its design doc already sketched a ''liveness plugin'' with a registry. That use-case is the inspiration because it exercises nearly every extension point: a signal source (heartbeat/log-mtime/launchd/last-commit), a periodic reconciler under the scheduler, a health-check surface (mnemo_status / a new mnemo_health tool), a notifier (Slack DM via RemoteTrigger), and config (declare automations + cadences) — and it needs almost NO new code, just config wiring + reuse of facilities mnemo already has bespoke (scheduler T68.7, diag/health T83, notifier, ingest, MCP tools, SSE dashboard, config hot-reload). So the plugin system = generalise those bespoke subsystems into one registrable, config-wireable extension surface (fits the project''s ''general facilities + feedback loops'' philosophy). Likely first cut: a uniform compiled-in registry of composable primitives wired by config-declaration; external/MCP-federated third-party plugins are a heavier later evolution. Sequence per the user: build the plugin system FIRST, then re-raise automation-liveness as the first downstream plugin. Note: id T98 can''t be reused (git-history collision), so the automation-liveness plugin will be re-raised under a fresh id, depending on this target. Old sketch: docs/design/automation-liveness-plugin.md (in history, commit 5fbb6a1).'
+    tags:
+    - plugins
+    - architecture
+    - extensibility
+    - design
+    origin: manual
+    discovered: 2026-06-30
   T11:
     name: Git history indexed cross-repo with FTS and session correlation
     status: achieved
