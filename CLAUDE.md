@@ -11,6 +11,12 @@ a SQLite FTS5 index, and exposes search/query tools via MCP. Watches
 for new transcripts in realtime. Indexes all content block types:
 text, tool_use, tool_result, and thinking.
 
+Also ingests OpenAI **Codex CLI** rollout transcripts from
+`~/.codex/sessions/` (and `archived_sessions/`) — its OpenAI
+Responses-API records are transformed into the same content model and
+flow through the same search/session machinery, tagged
+`session_meta.source = 'codex'`. See `docs/design/codex-ingest.md`.
+
 ## Build & Run
 
 ```bash
