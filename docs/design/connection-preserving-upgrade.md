@@ -4,8 +4,47 @@
 "single daemon / no proxy" framing of 🎯T27 while preserving its real
 invariants (see "Relationship to T27").*
 
-**Tracking.** Design source for 🎯T97 and its sub-targets. Written
-before any process-model code so the architecture argument is on record.
+**Tracking.** Design source for 🎯T97.
+
+> ⚠️ **Superseded in large part by a 2026-06-30 spike — read "Spike
+> outcome" first.** The edge proxy and background-work lease below are
+> dropped; the sections are retained as original rationale + fallback.
+
+---
+
+## Spike outcome (2026-06-30) — the proxy and lease are dropped
+
+A mark3labs v0.47 spike collapsed most of this design. The #27142 break
+is a **configuration choice**: mnemo's `WithStateful(true)` selects
+`InsecureStatefulSessionIdManager`, which validates session-id
+*existence* against an in-memory map that's empty after a restart → 404.
+The library default `StatelessGeneratingSessionIdManager` validates
+**format only** (*"allows cross-instance operation"*). Proven
+empirically — stateful → **404**, stateless-generating → **200 + `pong`**
+— a fresh process accepts a prior session id, so the MCP session survives
+an in-place restart. POST sessions are also ephemeral (no re-`initialize`
+needed) and `SendNotificationToAllClients(tools/list_changed)` is built
+in and automatic.
+
+**Therefore the edge proxy ("The shape") and the background-work lease
+("The background-work lease") below are DROPPED.** The live design is:
+
+- a **cross-instance session-id manager** (ideally SQLite-backed, so
+  explicit `Terminate` survives a restart and an *adopted* id flags a
+  pre-upgrade session — the T97.6 banner hook),
+- **graceful drain + `wal_checkpoint(TRUNCATE)`** (unchanged),
+- **fast in-place restart** (no proxy, no overlap, no lease),
+- **detect + notify** via the T83 pipeline, and **opt-in apply**.
+
+**One open unknown:** whether Claude Code's client cleanly rides out the
+brief restart *gap* (connection-refused → backoff retry → resume on the
+cached id). Verifiable only with a **live** session once the id-manager
+change lands; with the accepting manager there's no 404, so #27142's
+trigger never fires. **Zero-gap fallback** if the live test disappoints:
+`SO_REUSEPORT` dual-bind + the bg-lease — still **not** an L7 proxy,
+since both processes honor any format-valid id.
+
+Read everything below through this lens.
 
 ---
 
