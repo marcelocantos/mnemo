@@ -63,6 +63,28 @@ targets:
     origin: targets.md bootstrap
     discovered: 2026-04-07
     achieved: 2026-04-15
+  T100:
+    name: mnemo's Windows build is validated on the local Parallels VM as an informal pre-merge gate, not a required cloud CI check
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The hms-vm Parallels VM (Win11 ARM64) is provisioned to build+test mnemo: Go + MSYS2 CLANGARM64 toolchain (clang/llvm-ar) + mingw-w64-clang-aarch64-sqlite3; `go test -tags sqlite_fts5 ./...` runs green (22 packages, store ~48s).'
+    - scripts/win-validate.sh syncs the pushed commit to hms-vm, builds mnemo+sqldeep with clang, runs the tagged suite, exits non-zero on failure — verified PASS end-to-end.
+    - 'windows-vm-validated automated pre-merge gate declared in CLAUDE.md (## Gates profile: mnemo) + ~/.claude/gates/mnemo.yaml; /push and /release read it, no skill-code change.'
+    - 'master ruleset no longer requires test (windows-latest, ...); ci.yml still runs windows on PRs as a non-required cross-check (proven: PRs #137/#138 merged on ubuntu-green while windows ran).'
+    - 'Flow is push-first: the gate validates the pushed commit pre-merge, concurrent with the cloud ubuntu check.'
+    context: 'Shipped in PR #137 (squash f33f5b3). Replaces the ~15-18 min required Windows CGO/SQLite cloud CI gate with native-ARM64 clang validation on the Parallels VM (~1-2 min). Toolchain hurdles solved: PowerShell -I arg quoting for sqldeep, CXX=clang++ (Go CGO defaults CXX to absent g++). Gate uses the declarative gates framework (automated check runs scripts/win-validate.sh). Cloud windows stays non-required as amd64/gcc cross-check. Note: ~/.claude/gates/mnemo.yaml is a local gate profile, not version-controlled.'
+    tags:
+    - ci
+    - windows
+    - vm
+    - gates
+    - release-process
+    - infra
+    origin: manual
+    discovered: 2026-06-30
+    achieved: 2026-06-30
   T101:
     name: mnemo's release binaries are code-signed with a stable Apple Developer ID so macOS TCC grants persist across version upgrades
     status: set_aside
