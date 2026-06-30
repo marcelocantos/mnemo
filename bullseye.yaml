@@ -3196,3 +3196,24 @@ targets:
     - wal
     origin: manual
     discovered: 2026-06-30
+  T99:
+    name: mnemo ingests Codex CLI session transcripts into the existing searchable index
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo discovers and watches Codex rollout files under ~/.codex/sessions/** and ~/.codex/archived_sessions/ recursively, tolerant of compressed rollouts and legacy single-document .json files (skip-with-log, never crash the watcher).
+    - 'A rollout is transformed into mnemo''s content model: response_item/message -> role+text, function_call/custom_tool_call/tool_search_call -> tool_use, *_output -> tool_result (paired by call_id), reasoning -> non-indexable placeholder; session_meta supplies session id/cwd/git/started_at and turn_context the per-turn model.'
+    - Each Codex record gets a deterministic synthetic id (session_id + line ordinal) so re-ingest is idempotent via INSERT OR IGNORE, resuming from the ingest_state byte offset.
+    - Entries carry a nullable `source` column (default 'claude', additive/append-only-compliant); Codex entries are source='codex' and existing mnemo_search/mnemo_sessions surface them, filterable by source.
+    - The parser ignores unknown envelope/payload types rather than failing, so it survives codex-rs format churn.
+    - docs/design/codex-ingest.md is the design of record.
+    context: 'MVP: capture Codex transcripts and not much else. Codex does NOT follow Claude''s schema — it records OpenAI Responses API items wrapped in a thin {timestamp,type,payload} Codex envelope under ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (first line session_meta; conversation in response_item lines; reasoning encrypted; no per-record uuid/parentUuid). Grounded in real on-disk files (cli_version 0.140) and source-verified against openai/codex codex-rs HEAD (rust-v0.142.4). The work is one defensive parser + one new watched root (compression/legacy-aware) + one synthetic-id rule + one nullable source discriminator; the existing watcher/ingest_state/repo-attribution/search/usage spine is reused. Explicitly out of scope: the ~/.codex/*.sqlite DBs, history.jsonl, decrypting reasoning, chain/fork/compaction modeling, event_msg richness beyond optional token_count, and any Codex-specific MCP/threads/decisions/images plumbing. Full design in docs/design/codex-ingest.md.'
+    tags:
+    - codex
+    - ingest
+    - multi-agent
+    - parser
+    - mvp
+    origin: manual
+    discovered: 2026-06-30
