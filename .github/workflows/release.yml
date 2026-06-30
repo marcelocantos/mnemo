@@ -65,6 +65,13 @@ jobs:
             cxx: aarch64-w64-mingw32-clang++
             ar: aarch64-w64-mingw32-ar
     runs-on: ${{ matrix.os }}
+    env:
+      # Developer ID signing secrets (🎯T101). Absent → empty → the Sign
+      # step below is skipped, so this is a no-op until the secrets are
+      # added. Set at job level so the step's `if:` gate can read them.
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
     defaults:
       run:
         shell: bash
@@ -146,10 +153,42 @@ jobs:
           AR: ${{ matrix.ar }}
         working-directory: mnemo
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           go build -tags "sqlite_fts5" \
             -ldflags "-s -w ${LDFLAGS_EXTRA}" \
             -o "mnemo${{ matrix.ext }}" .
+
+      - name: Sign macOS binary (Developer ID)
+        # Sign with a stable Team ID so macOS TCC grants (Full Disk
+        # Access, "files managed by Google Drive", …) persist across
+        # `brew upgrade` (🎯T101). The default Go binary is only
+        # ad-hoc/linker-signed (no Team ID), so TCC keys grants on the
+        # cdhash and re-prompts on every new build. Apple CLI directly —
+        # fastlane isn't warranted for a single Homebrew-distributed
+        # binary. No-op until the signing secrets exist.
+        if: matrix.goos == 'darwin' && env.MACOS_CERT_P12 != ''
+        working-directory: mnemo
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KC_PWD="$(uuidgen)"
+          security create-keychain -p "$KC_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PWD" "$KEYCHAIN"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" \
+            -t cert -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PWD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          codesign --force --options runtime --timestamp \
+            --sign "$MACOS_SIGN_IDENTITY" "mnemo${{ matrix.ext }}"
+          codesign --verify --strict --verbose=2 "mnemo${{ matrix.ext }}"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security delete-keychain "$KEYCHAIN"
+
+      - name: Package
+        working-directory: mnemo
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
           case "${{ matrix.archive }}" in
             tar.gz)
               tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "mnemo${{ matrix.ext }}"
