@@ -107,16 +107,46 @@ targets:
     discovered: 2026-06-30
   T102:
     name: mnemo has a plugin system — capabilities are added through a uniform extension surface, not bespoke core edits
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - 'A defined set of capability contracts (Go interfaces) + a central plugin registry exist for the main extension points: ingest source, MCP tool, reconciler/derived stream, diag/health check, notifier/output sink, and a reusable signal-source primitive (file mtime / log / launchd status / last-commit / newest-artifact).'
-    - A plugin declares a config schema and is enabled/disabled + parameterised via ~/.mnemo/config.json, hot-reloaded like existing config; plugins hook the single scheduler (T68.7) and the health/diag surface (T83) uniformly rather than threading bespoke code through main.go/store/tools/diag.
-    - 'The mechanism fork is resolved and documented in docs/design/plugin-system.md: compiled-in registry of composable primitives (internal modularity) vs external/out-of-process plugins (MCP-federated or go-plugin/gRPC, third-party) vs config-declarative wiring — with the chosen first cut and the upgrade path.'
-    - 'Proof-of-surface: at least one existing capability is re-expressed as a plugin with no behaviour change (e.g. a diag check, or the Codex ingest source from T99), AND the automation-liveness idea (former T98) is implementable as a plugin with zero core edits.'
-    - 'Boundaries preserved: loop-safety exclusion fence (T52), opt-in external egress, additive-only schema policy, and the single-scheduler/reconciler model are all honoured by the plugin lifecycle.'
-    context: 'The user wants the extensibility *mechanism* raised as its own objective; a prior session misread the intent and filed the automation-liveness feature (former T98, ''mnemo surfaces when a tracked automation has silently stalled'' — born from a 9-day silent ytt stall) as a one-off, even though its design doc already sketched a ''liveness plugin'' with a registry. That use-case is the inspiration because it exercises nearly every extension point: a signal source (heartbeat/log-mtime/launchd/last-commit), a periodic reconciler under the scheduler, a health-check surface (mnemo_status / a new mnemo_health tool), a notifier (Slack DM via RemoteTrigger), and config (declare automations + cadences) — and it needs almost NO new code, just config wiring + reuse of facilities mnemo already has bespoke (scheduler T68.7, diag/health T83, notifier, ingest, MCP tools, SSE dashboard, config hot-reload). So the plugin system = generalise those bespoke subsystems into one registrable, config-wireable extension surface (fits the project''s ''general facilities + feedback loops'' philosophy). Likely first cut: a uniform compiled-in registry of composable primitives wired by config-declaration; external/MCP-federated third-party plugins are a heavier later evolution. Sequence per the user: build the plugin system FIRST, then re-raise automation-liveness as the first downstream plugin. Note: id T98 can''t be reused (git-history collision), so the automation-liveness plugin will be re-raised under a fresh id, depending on this target. Old sketch: docs/design/automation-liveness-plugin.md (in history, commit 5fbb6a1).'
+    - Plugins are added, enabled/disabled, and parameterised entirely through ~/.mnemo/config.json (hot-reloaded), never by rebuilding mnemo; no plugin type is compiled into the mnemo binary.
+    - 'One HTTP plugin protocol serves every host uniformly: an mnemo-launched child process (random port via a stdout handshake), a connect-mode already-running server (configured URL), or an in-process interpreted (Lua/goja) component — all conforming to the same manifest + facet + UI contract and addressable under /plugins/<name>/.'
+    - 'Every extension point is reachable via the protocol with zero core edits: derived-stream reconciler, diag/health check, notifier/output sink, a reusable signal-source primitive, MCP tool, and a UI surface (a reverse-proxied website that appears as a popup menu item with a live WKWebView preview, WebSocket/SSE streaming, and force-reload).'
+    - Backend facets ride the existing single scheduler (T68.7), diag registry (T83) and notifier via HTTP-delegating adapters — no plugin introduces its own scheduler or bespoke core wiring.
+    - 'Proof-of-surface: at least one existing capability is re-expressed as a plugin with no behaviour change, and the automation-liveness use-case maps entirely onto the surface with zero core edits.'
+    - 'Boundaries preserved: loop-safety exclusion fence (T52), opt-in external egress, additive-only schema, and the single-scheduler/reconciler model are honoured; disable/hot-reload tears a plugin down cleanly; the keep-open trust posture (plugin pages share the local origin) is an explicit, documented decision.'
+    context: |-
+      The user wants the extensibility *mechanism* raised as its own objective, decomposed into a target graph with T102 as the single final target driven by /goal.
+
+      MECHANISM (decided in the 2026-07-01 design discussion, superseding the earlier 'likely compiled-in first cut' framing):
+      - Plugins are OUT-OF-PROCESS by default and must never require rebuilding mnemo. Go -buildmode=plugin (.so) and compiled-in Go registries are rejected: no Windows support, CGO/sqlite_fts5 ABI lock-step, exact-version lock, no unload.
+      - One HTTP protocol is the whole contract (the UI requirement already forces every plugin to run an HTTP server, so backend facets reuse the same server rather than adding gRPC/MCP). A plugin exposes a required manifest/describe endpoint + facet endpoints (signal/reconcile/check/notify) + its own UI routes and custom APIs, all under /plugins/<name>/.
+      - Two transports, MCP-style, both available: LAUNCH (mnemo spawns an executable and learns its random port from the child's stdout handshake; mnemo owns lifecycle — preferred) and CONNECT (mnemo attaches to an already-running server at a configured URL). Plus an in-process interpreted (Lua/goja) host that presents via the same HTTP protocol, for lightweight no-process plugins.
+      - mnemo reverse-proxies /plugins/<name>/* to the instance (WS/SSE upgrades forwarded), keeping the plugin same-origin with :19419 so there is no CORS.
+      - Backend facets are thin HTTP-delegating adapters over the EXISTING machinery: StreamReconciler (T68.7), diag.Registry/Check (T83), Notifier. The scheduler/diag/notifier are reused, not replaced. Prior art for supervision: shimSupervisor + the claudia broker.
+      - UI: GET /api/plugins enumerates menu contributions; the Swift shim renders them data-driven (footer rows and/or a tab); the popup preview loads a live URL in the existing WKWebView (URLRequest, not static loadHTMLString) so JS/WS work; force-reload rides a plugin.reload event on the T86 SSE hub.
+      - Config: declared in ~/.mnemo/config.json (transport, enable, params), hot-reloaded like vault_path; metadata discovered via the plugin's manifest endpoint; ~/.mnemo/plugins/<name>/ is an optional default home.
+      - Trust: keep-open — plugin pages may reach the auth-less /api/* on the shared localhost origin (conscious single-user decision, documented).
+      - MCP-tool plugins fall out nearly for free: a plugin that declares an MCP endpoint has its tools bridged in via the T15 federation machinery.
+
+      MOTIVATING CONSUMER: automation-liveness (former T98, born from a 9-day silent ytt stall) exercises nearly every extension point (signal-source + reconciler + check + notifier + UI + config) and needs almost no new code. Per the user's sequencing it is NOT part of this objective: T102 proves implementability (proof-of-surface + a written zero-core-edit walkthrough), and automation-liveness is re-raised afterward as a separate downstream target under a fresh id depending on T102 (id T98 is unusable — git-history collision). Old sketch: docs/design/automation-liveness-plugin.md (history, commit 62dc4b4).
+
+      SHAPE: contract-first — T102.1 pins the protocol; transports (T102.3 connect, T102.4 launch), serving (T102.5 proxy, T102.6 interp), facets (T102.7, T102.8 signals), UI (T102.9) and MCP (T102.10) fan out; T102.11 (proof) and T102.12 (boundaries) converge. T102 is the aggregate umbrella.
+    depends_on:
+    - T102.1
+    - T102.2
+    - T102.3
+    - T102.4
+    - T102.5
+    - T102.6
+    - T102.7
+    - T102.8
+    - T102.9
+    - T102.10
+    - T102.11
+    - T102.12
     tags:
     - plugins
     - architecture
@@ -124,6 +154,278 @@ targets:
     - design
     origin: manual
     discovered: 2026-06-30
+  T102.1:
+    name: The plugin protocol and mechanism are specified and documented in docs/design/plugin-system.md
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The mechanism fork is resolved in writing: out-of-process is the model (plugins never require rebuilding mnemo); Go -buildmode=plugin and compiled-in Go registries are explicitly rejected with reasons (no Windows support, CGO/sqlite_fts5 ABI lock-step, exact-version lock, no unload).'
+    - 'One HTTP wire contract is specified: a required manifest/describe endpoint (name, version, facets provided, UI-surface metadata, config schema), facet-endpoint conventions (signal/reconcile/check/notify), and a readiness probe.'
+    - 'The URL contract is fixed: every plugin is addressable under /plugins/<name>/, transport-agnostic (identical whether served by a launched child, a connected server, or an in-process interpreter).'
+    - 'The keep-open trust posture is documented: plugin pages share the local origin and may reach /api/*, recorded as an explicit decision rather than an oversight.'
+    tags:
+    - plugins
+    - design
+    - contract
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.10:
+    name: 'MCP-tool plugins: a plugin''s MCP tools are surfaced to mnemo''s clients'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A plugin whose manifest declares an MCP endpoint (stdio-launched or HTTP-connected) has its tools bridged into mnemo's tool list and callable by Claude Code clients, reusing the T15 federation machinery.
+    - Bridged tools are namespaced/attributed to their plugin and appear or disappear with enable/disable and hot-reload.
+    depends_on:
+    - T102.4
+    tags:
+    - plugins
+    - mcp
+    - federation
+    - tools
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.11:
+    name: 'Proof-of-surface: an existing capability is re-expressed as a plugin with no behaviour change'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - At least one existing capability (e.g. a diag/health check, or the thread-preview UI) is re-implemented as a plugin (launched or in-process) and produces identical behaviour, with the bespoke core path removed or shown redundant.
+    - A written walkthrough demonstrates the automation-liveness use-case maps entirely onto the surface (signal-source + reconciler + check + notifier + UI) with zero core edits, establishing implementability without shipping that feature here.
+    depends_on:
+    - T102.4
+    - T102.7
+    - T102.9
+    tags:
+    - plugins
+    - proof-of-surface
+    - validation
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.12:
+    name: The plugin lifecycle honours mnemo's safety and architectural boundaries
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Plugin-served and plugin-generated content is inside the loop-safety exclusion fence (T52) — ingest never indexes a plugin's own output into a feedback loop.
+    - Additive-only schema policy holds (any plugin-related persistence is new tables/columns); external egress stays opt-in; the single-scheduler/reconciler model is not bypassed.
+    - Disable/hot-reload fully tears down a plugin (process reaped, routes unmounted, facets deregistered, menu entry removed) with no leaked goroutines or orphaned children.
+    depends_on:
+    - T102.4
+    - T102.5
+    - T102.7
+    - T102.9
+    tags:
+    - plugins
+    - safety
+    - boundaries
+    - lifecycle
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.2:
+    name: Plugins are declared, enabled/disabled, and parameterised via ~/.mnemo/config.json, hot-reloaded like existing config
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Config gains a plugins list; each entry names a plugin, its transport (launch exec path / connect url / in-process script), an enable flag, and params, validated with no hand-maintained allowlist (per T96).
+    - A plugin registry instantiates enabled plugins and reconciles the set on config hot-reload — enable starts an instance, disable tears one down — mirroring the vault-path hot-swap in userEntry, needing no daemon restart.
+    - Plugin metadata (facets, UI surface, config schema) is discovered from the plugin's manifest endpoint, not duplicated in config.
+    - ~/.mnemo/plugins/<name>/ works as an optional default home; a plugin may live anywhere its config entry points.
+    depends_on:
+    - T102.1
+    tags:
+    - plugins
+    - config
+    - hot-reload
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.3:
+    name: 'Connect-mode: mnemo attaches to an already-running plugin server and drives it via the protocol'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Given a configured base URL, mnemo fetches the manifest, validates the protocol version, and marks the instance ready — or surfaces a clear diag failure when unreachable/incompatible.
+    - A uniform plugin-instance abstraction (base URL + manifest) is established that the launch and in-process transports later produce identically.
+    - Instance readiness/health is observable via the T83 diag surface.
+    depends_on:
+    - T102.2
+    tags:
+    - plugins
+    - transport
+    - connect
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.4:
+    name: 'Launch-mode: mnemo spawns a plugin executable, learns its port via a stdout handshake, and owns its lifecycle'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo starts the configured executable, reads the child-chosen random port from the child's stdout handshake, and produces the same instance abstraction as connect-mode.
+    - The supervisor restarts a crashed plugin with backoff, stops it on disable/shutdown, and reaps it cleanly — reusing the shimSupervisor/claudia subprocess pattern; a persistently-crashing plugin trips the T84 circuit-breaker instead of hammering.
+    - 'Both transports coexist MCP-style: launch (executable, mnemo-owned lifecycle) is the default; connect (external URL) is the alternative.'
+    depends_on:
+    - T102.3
+    tags:
+    - plugins
+    - transport
+    - launch
+    - supervisor
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.5:
+    name: mnemo reverse-proxies /plugins/<name>/* to the plugin, same-origin, with WebSocket/SSE forwarding
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Requests to /plugins/<name>/* are proxied to the instance's base URL; the plugin serves its own HTML/JS plus custom and plugin-conforming APIs under that subtree.
+    - WebSocket and SSE upgrades are forwarded so streaming plugin UIs work; because the browser only ever talks to :19419, there is no CORS.
+    - An unknown or disabled plugin name returns a clean 404, not a proxy/panic error.
+    depends_on:
+    - T102.3
+    tags:
+    - plugins
+    - proxy
+    - websocket
+    - sse
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.6:
+    name: In-process interpreted (Lua/goja) plugins present via the same HTTP protocol
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A plugin may be an embedded goja (JS) or Lua script that mnemo hosts as an in-process http.Handler mounted at /plugins/<name>/, conforming to the same manifest + facet + UI contract as an external server — with no rebuild to add or change one.
+    - The proxy/UI/facet machinery treats an in-process interpreted plugin identically to an external one; only the mount source differs (local handler vs proxied URL).
+    depends_on:
+    - T102.5
+    tags:
+    - plugins
+    - in-process
+    - lua
+    - goja
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.7:
+    name: Backend facets ride the existing scheduler/diag/notifier via HTTP-delegating adapters
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A plugin's reconciler facet registers a StreamReconciler (T68.7) whose Reconcile() POSTs the plugin's /reconcile; a check facet registers a diag.Check (T83) that GETs /check; a notifier facet POSTs /notify — all driven by the existing single scheduler and diag registry, not a new loop.
+    - 'Facet failures are isolated: a slow or broken plugin degrades to a diag warning/failure and honours the T84 circuit-breaker; it never wedges the scheduler or the reconciler dispatcher.'
+    depends_on:
+    - T102.3
+    tags:
+    - plugins
+    - facets
+    - scheduler
+    - diag
+    - notifier
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.8:
+    name: Reusable declarative signal-source primitives exist as config, needing no plugin process
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The common liveness signals — file/log mtime, launchd LastExitStatus+PID, newest-artifact timestamp, last-commit — are expressible as pure config stanzas with an expected cadence and grace multiple, evaluated by mnemo and feeding the same scheduler/health/notifier surface.
+    - No external process is required to watch a signal; a signal breaching its staleness threshold surfaces as a health degradation and optional notification.
+    depends_on:
+    - T102.7
+    tags:
+    - plugins
+    - signal-source
+    - liveness
+    - config
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T102.9:
+    name: Plugin UI surfaces appear as popup menu items with a live, interactive WKWebView preview
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - GET /api/plugins enumerates each enabled plugin's UI contribution (label, icon, preview URL, page URL); the Swift shim renders these as menu entries (footer rows and/or a tab) built from the endpoint, not hardcoded.
+    - The popup preview loads the plugin's live URL in a WKWebView (URLRequest, not static loadHTMLString) so JS, custom APIs, and WS/SSE streaming work; external links still open in the default browser.
+    - 'mnemo can force a page reload: a plugin.reload event on the existing T86 SSE hub makes the shim reload the plugin''s WKWebView.'
+    depends_on:
+    - T102.5
+    - T102.2
+    tags:
+    - plugins
+    - ui
+    - swift
+    - wkwebview
+    - dashboard
+    origin: subdivide(🎯T102)
+    discovered: 2026-07-01
+  T103:
+    name: mnemo's read-only query surface cannot execute writes — user SQL cannot turn PRAGMA query_only back off
+    status: identified
+    value: 13.0
+    cost: 3.0
+    acceptance:
+    - mnemo_query rejects or neutralizes any attempt to run PRAGMA query_only=0 (or otherwise write) within a submitted statement or batch
+    - A submitted 'PRAGMA query_only=0; <write>' does not mutate the database
+    - The guarantee also holds on the federation-exposed query path
+    context: 'CRITICAL. internal/store/store.go:5535: the read-only guard sets PRAGMA query_only=1, but a submitted ''PRAGMA query_only=0; <write>'' turns it back off and executes writes (DB wipe/corruption) — also reachable over federation. Unverified Fable-5 finder-stage candidate (adversarial verification interrupted by an API spend limit); verify before implementing. See docs/audit/fable-2026-07.md.'
+    origin: manual
+    discovered: 2026-07-02
+  T104:
+    name: mnemo ingest never advances its offset past unread content — an oversized/unreadable JSONL line is surfaced, not silently skipped
+    status: identified
+    value: 13.0
+    cost: 3.0
+    acceptance:
+    - scanner.Err() is checked at every ingest site; a token-too-long error aborts without advancing the persisted offset past the unread line
+    - Oversized lines are handled (larger buffer or explicit logged skip) rather than silently dropping subsequent content
+    - Regression test with an over-limit line asserts no offset overshoot and no lost content
+    context: 'CRITICAL data loss. internal/store/store.go:3175: an oversized JSONL line silently aborts ingest and permanently advances the offset past unread content (scanner.Err() is never checked at any ingest site). Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
+    origin: manual
+    discovered: 2026-07-02
+  T105:
+    name: mnemo bounds image-sidecar work at spawn time so startup cannot blow up goroutines or memory
+    status: identified
+    value: 8.0
+    cost: 3.0
+    acceptance:
+    - triggerImageSidecars bounds the number of spawned goroutines (a worker pool), not only concurrent execution
+    - A large backlog at startup does not pin full image bytes across thousands of goroutines
+    context: 'HIGH. internal/store/images.go:203: triggerImageSidecars spawns unbounded goroutines that each pin full image bytes; the semaphore gates execution, not spawn count, so startup can blow up goroutines/memory. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
+    origin: manual
+    discovered: 2026-07-02
+  T106:
+    name: mnemo's read-only query surface forbids ATTACH DATABASE so it cannot read arbitrary files or create files
+    status: identified
+    value: 8.0
+    cost: 3.0
+    acceptance:
+    - ATTACH DATABASE is rejected on the mnemo_query path (statement inspection or authorizer)
+    - A query attempting ATTACH cannot read arbitrary local SQLite files or create files at chosen paths
+    context: 'HIGH. internal/store/store.go:5531: ATTACH DATABASE is permitted under query_only=1, allowing reads of arbitrary local SQLite files (info disclosure) and file creation at attacker-chosen paths. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
+    origin: manual
+    discovered: 2026-07-02
+  T107:
+    name: mnemo persists an ingest offset only at a true processed-line boundary so a crash never skips buffered lines
+    status: identified
+    value: 8.0
+    cost: 3.0
+    acceptance:
+    - Mid-stream commits persist an offset matching the last fully-processed line, not a Seek(0,1) that overshoots buffered input
+    - A crash or kill between a mid-stream commit and completion does not permanently skip lines; regression test covers it
+    context: 'HIGH data loss. internal/store/store.go:6042: a mid-stream commit persists f.Seek(0,1), which overshoots the last processed line, so a crash between a mid-stream commit and completion permanently skips buffered-but-unwritten lines. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
+    origin: manual
+    discovered: 2026-07-02
   T11:
     name: Git history indexed cross-repo with FTS and session correlation
     status: achieved
@@ -1840,6 +2142,32 @@ targets:
     origin: PR
     discovered: 2026-05-22
     achieved: 2026-05-23
+  T64.10:
+    name: Sessions are segmented into hierarchical, overlapping topic spans that feed the clustering engine as a message-level corpus, so a search hit expands to its enclosing conversation and a theme resolves to its spans across sessions
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A segmentation pass produces topic_segments rows with nested (parent_id/level) and, where warranted, overlapping intervals; Tier 1 (structural) is the default and runs with zero egress and no stored vectors.
+    - Segments participate in clustering as doc_kind='segment' and appear as theme_members; each segment has exactly one primary theme and zero-or-more secondary themes above the similarity threshold.
+    - themes.parent_theme_id/depth are populated from the retained dendrogram; a theme's ancestors/descendants are navigable (flat-themes non-goal reversed).
+    - mnemo_search expand="segment" returns the smallest enclosing sealed segment and expand="segment:coarse" the top-level span; expand="none" is byte-identical to today.
+    - mnemo_segments answers by-session, by-theme, by-containing-message, by-FTS, and overlaps_theme (intersection) queries; a theme resolves to its segments time-ordered across sessions/repos.
+    - Incremental re-ingest never rewrites a sealed segment; segment_scan_state advances only past sealed spans (seal-on-lookahead).
+    - Embedding-drift and LLM labelling are each opt-in per T63 (never active on API-key presence alone); with both off the pass makes zero outbound calls.
+    - Boundary quality clears a Pk/WindowDiff bar on a golden hand-segmented set before expand="segment" is enabled by default.
+    - All schema changes pass under sqlift AllowNone (pure CREATE + nullable ADD COLUMN).
+    context: 'The message-level extent dual of T64.8''s document-level clustering. Motivated by the code-search analogy: a hit should expand to its enclosing topic-coherent span (function → class → file), not ±N lines. Design: docs/design/topic-segmentation.md. Adds a new corpus kind `segment` produced by an upstream segmentation stage; segments cluster into themes via the same Engine A/B pipeline (one engine, two extents). Extent hierarchy from multi-scale boundary detection; theme hierarchy by RETAINING the agglomerative dendrogram — explicitly reversing T64.8''s "themes are flat" non-goal (vault-clustering.md:81). Overlap is native: arbitrary intervals + primary/secondary theme membership. All schema changes are additive under sqlift AllowNone (new topic_segments/FTS/watermark tables + nullable columns on themes/theme_members; message vectors ride existing cluster_embeddings). Tiers mirror the parent egress posture: structural (always on) → lexical/embedding drift (opt-in) → LLM label (opt-in).'
+    depends_on:
+    - T64.8
+    tags:
+    - segmentation
+    - themes
+    - search
+    - hierarchy
+    - clustering
+    origin: manual
+    discovered: 2026-07-01
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: identified
