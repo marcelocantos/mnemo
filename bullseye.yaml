@@ -426,6 +426,47 @@ targets:
     context: 'HIGH data loss. internal/store/store.go:6042: a mid-stream commit persists f.Seek(0,1), which overshoots the last processed line, so a crash between a mid-stream commit and completion permanently skips buffered-but-unwritten lines. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
     origin: manual
     discovered: 2026-07-02
+  T108:
+    name: The menubar popup and dashboard surface p — the fraction of output requiring Marcelo personally — per repo, decomposed by cost term
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Popup/dashboard show per-repo p over a recent window (e.g. 30 days), decomposed by the four oracle-first cost terms: harness / generation / verification-friction / verification-judgment'
+    - 'The derivation is documented: which transcript signals proxy ''required Marcelo personally'' (interrupts, manual user turns, corrective messages) vs autonomous completion (oracle-green retirements, uninterrupted agent runs)'
+    - 'p trend over time is visible, so the multiplier J-curve prediction (memory: prediction_multiplier_jcurve) can be evaluated from the dashboard'
+    context: 'oracle-first doctrine (~/.claude/skills/oracle-first/): the productivity multiplier ∝ 1/p, and p tracks oracle availability, not difficulty — but p is currently unmeasured. mnemo holds the raw signals. Filed from the 2026-07-03 ~think discussion (session 1cf2248b). [Re-filed 2026-07-05 after local-master reset to origin discarded the original unpushed entry; discovered date was originally 2026-07-03.]'
+    tags:
+    - oracle-first
+    - dashboard
+    origin: manual
+    discovered: 2026-07-05
+  T109:
+    name: The Fable-5 audit's critical/high findings are all resolved — each of T103–T107 is adversarially verified, then fixed-with-regression-test or refuted-and-retired
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Each of T103–T107 has been adversarially verified against the real code: a finding that reproduces is fixed with a regression test that fails on the pre-fix code and passes after; a finding that does not reproduce is retired with the refutation recorded in its target.'
+    - 'Query surface (T103, T106): mnemo_query cannot execute writes (no PRAGMA query_only=0 re-enable) and rejects ATTACH DATABASE, on the federation-exposed path too.'
+    - 'Ingest durability (T104, T107): oversized/unreadable JSONL lines are surfaced not silently skipped, and ingest offsets persist only at a true processed-line boundary so a crash never skips buffered content.'
+    - 'Resource safety (T105): image-sidecar work is bounded at spawn time so a startup backlog cannot blow up goroutines or memory.'
+    - All five sub-findings are retired in bullseye (achieved or refuted); this umbrella is achieved only when none remain open.
+    context: 'Umbrella goal for the Fable-5 deep-audit findings filed via #139 (docs/audit/fable-2026-07.md) on 2026-07-02. All five were finder-stage candidates whose adversarial verification was interrupted by an API spend limit, so each must be verified before implementing. Two themed clusters — query-surface hardening (T103 write-guard bypass + T106 ATTACH) and ingest durability (T104 oversized-line offset overshoot + T107 mid-stream Seek(0,1) overshoot) — plus T105 (unbounded image-sidecar goroutines). Set this as the goal to drive the whole batch; the five findings are the parallelisable frontier beneath it.'
+    depends_on:
+    - T103
+    - T104
+    - T105
+    - T106
+    - T107
+    tags:
+    - security
+    - data-loss
+    - audit
+    - fable-5
+    - hardening
+    origin: manual
+    discovered: 2026-07-05
   T11:
     name: Git history indexed cross-repo with FTS and session correlation
     status: achieved
