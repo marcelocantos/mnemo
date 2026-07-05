@@ -190,27 +190,35 @@ func ingestImageFromPath(s *Store, path string, entryID int64, messageID int64, 
 	s.triggerImageSidecars(imageID, data, mimeType)
 }
 
-// triggerImageSidecars spawns one goroutine per sidecar pipeline (OCR,
-// description, embedding) for a single image. All three share a single
-// store-wide semaphore (sized at runtime.NumCPU()) so the total amount
-// of image-processing work in flight is bounded regardless of arrival
-// pattern. Each helper is idempotent and a cheap no-op if its backend
-// is unavailable.
+// triggerImageSidecars runs the three sidecar pipelines (OCR,
+// description, embedding) for a single image. runSidecar acquires a slot
+// on the store-wide semaphore (sized at runtime.NumCPU()) BEFORE spawning
+// each goroutine, so both the number of in-flight goroutines and the
+// image bytes their closures pin are bounded no matter how large a
+// backlog backfillImages feeds in (🎯T105); the caller back-pressures
+// rather than launching thousands of parked goroutines. Each helper is
+// idempotent and a cheap no-op if its backend is unavailable.
 func (s *Store) triggerImageSidecars(imageID int64, data []byte, mimeType string) {
 	if s == nil || s.writeDB == nil || s.imageSem == nil {
 		return
 	}
-	go s.runSidecar(func() { ocrOneImage(s.writeDB, imageID, data) })
-	go s.runSidecar(func() { describeOneImage(s.writeDB, imageID, data, mimeType) })
-	go s.runSidecar(func() { embedOneImage(s.writeDB, imageID, data, mimeType) })
+	s.runSidecar(func() { ocrOneImage(s.writeDB, imageID, data) })
+	s.runSidecar(func() { describeOneImage(s.writeDB, imageID, data, mimeType) })
+	s.runSidecar(func() { embedOneImage(s.writeDB, imageID, data, mimeType) })
 }
 
-// runSidecar acquires a slot on the shared image semaphore, runs fn,
-// then releases.
+// runSidecar acquires a slot on the shared image semaphore, then spawns a
+// goroutine that runs fn and releases the slot. Acquiring BEFORE the `go`
+// (rather than as the goroutine's first statement) is what bounds the
+// spawn count and the memory fn's closure pins: the caller blocks here
+// once NumCPU slots are taken instead of queueing unbounded goroutines
+// (🎯T105).
 func (s *Store) runSidecar(fn func()) {
 	s.imageSem <- struct{}{}
-	defer func() { <-s.imageSem }()
-	fn()
+	go func() {
+		defer func() { <-s.imageSem }()
+		fn()
+	}()
 }
 
 // extToMime maps common image extensions to MIME types.

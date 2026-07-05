@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -550,7 +551,15 @@ func relaxQuery(q string) string {
 }
 
 func openDB(dbPath string, writer bool) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	// The read pool uses a driver that installs a read-only authorizer
+	// (see rodriver.go): mnemo_query runs arbitrary client SQL, and
+	// PRAGMA query_only=1 alone is bypassable (🎯T103) and does not gate
+	// ATTACH (🎯T106). The writer keeps the stock driver.
+	driver := "sqlite3"
+	if !writer {
+		driver = readOnlyDriverName
+	}
+	db, err := sql.Open(driver, dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -3071,6 +3080,19 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 	s.mu.Unlock()
 }
 
+// trimLineEnding strips a single trailing "\n" (and a preceding "\r"),
+// matching bufio.ScanLines semantics for a line read via
+// bufio.Reader.ReadBytes('\n').
+func trimLineEnding(b []byte) []byte {
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+		if n = len(b); n > 0 && b[n-1] == '\r' {
+			b = b[:n-1]
+		}
+	}
+	return b
+}
+
 // parseFile reads and parses a JSONL transcript file, returning all
 // extracted messages and metadata. Pure computation — no DB access.
 func parseFile(path string, offset int64) (parsedFile, error) {
@@ -3087,8 +3109,7 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	reader := bufio.NewReader(f)
 
 	pf := parsedFile{
 		path:      path,
@@ -3096,15 +3117,13 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 		project:   project,
 	}
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
+	// handleLine extracts one JSONL line into pf. Its guard clauses skip a
+	// line by returning, which — unlike a bare loop `continue` — cannot
+	// bypass the read-error / EOF handling in the read loop below.
+	handleLine := func(line []byte) {
 		var entry jsonlEntry
 		if json.Unmarshal(line, &entry) != nil {
-			continue
+			return
 		}
 
 		if entry.Cwd != "" && pf.cwd == "" {
@@ -3131,12 +3150,12 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 
 		// Only extract content blocks for user/assistant messages.
 		if entry.Type != "user" && entry.Type != "assistant" {
-			continue
+			return
 		}
 
 		blocks := extractBlocks(entry.Message)
 		if len(blocks) == 0 {
-			continue
+			return
 		}
 
 		for _, b := range blocks {
@@ -3172,7 +3191,28 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	pf.newOffset, _ = f.Seek(0, 1)
+	// bufio.Reader.ReadBytes has no per-line size cap, so oversized lines
+	// (e.g. inline base64 images) are ingested rather than silently
+	// dropped as they were under bufio.Scanner's token limit (🎯T104). The
+	// offset is the running count of bytes consumed — always a true line
+	// boundary — so a resume never overshoots unread content; a non-EOF
+	// read error aborts without advancing it.
+	consumed := offset
+	for {
+		raw, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
+		}
+		consumed += int64(len(raw))
+		if line := trimLineEnding(raw); len(line) > 0 {
+			handleLine(line)
+		}
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	pf.newOffset = consumed
 	return pf, nil
 }
 
@@ -5520,14 +5560,11 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		// Reset before releasing so the next user of the (single-pool)
-		// connection isn't accidentally read-only. Use a background
-		// context so cancellation of the caller's query doesn't also
-		// cancel the reset.
-		_, _ = conn.ExecContext(context.Background(), "PRAGMA query_only = 0")
-		conn.Close()
-	}()
+	defer conn.Close()
+	// query_only=1 is the write boundary; the read pool's authorizer
+	// (rodriver.go) both prevents this being turned back off and denies
+	// ATTACH, so there is deliberately no reset to query_only=0 on
+	// release — every read-pool connection stays read-only for its life.
 	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = 1"); err != nil {
 		return nil, fmt.Errorf("set query_only: %w", err)
 	}
@@ -5906,6 +5943,18 @@ func isBoilerplate(text string) bool {
 		strings.HasPrefix(text, "<system-reminder>")
 }
 
+// Ingest commit cadence for the realtime watcher path (ingestFile).
+// Vars, not consts, so a test can force a mid-stream commit.
+var (
+	ingestCommitInterval    = 200 * time.Millisecond
+	ingestLineCheckInterval = 50
+)
+
+// testMidStreamCommitOffset, when non-nil, is invoked with the offset
+// persisted at each mid-stream commit — a test seam for asserting that
+// offset lands on a true line boundary (🎯T107).
+var testMidStreamCommitOffset func(int64)
+
 func (s *Store) ingestFile(path string) error {
 	s.mu.Lock()
 	offset := s.offsets[path]
@@ -5927,15 +5976,11 @@ func (s *Store) ingestFile(path string) error {
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	reader := bufio.NewReader(f)
 
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
 	metaCompactorInternal := 0 // 🎯T72: set when a compactor-run marker is seen
-
-	const commitInterval = 200 * time.Millisecond
-	const lineCheckInterval = 50
 
 	ws, err := newWriterState(s.writeDB)
 	if err != nil {
@@ -5944,18 +5989,14 @@ func (s *Store) ingestFile(path string) error {
 	defer func() { ws.tx.Rollback() }()
 	defer ws.Close()
 
-	lastCommit := time.Now()
-	linesSinceLockCheck := 0
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
+	// handleLine writes one JSONL line into the current transaction. Its
+	// guard clauses skip a line by returning rather than a loop `continue`,
+	// so the periodic-commit and EOF handling in the read loop always run.
+	// It closes over ws, which is reassigned after each mid-stream commit.
+	handleLine := func(line []byte) {
 		var entry jsonlEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
+			return
 		}
 
 		// Extract session metadata from any entry.
@@ -5985,64 +6026,82 @@ func (s *Store) ingestFile(path string) error {
 		// Only extract content blocks for user/assistant messages.
 		// Skip if the entry was a duplicate (INSERT OR IGNORE, entryID == 0).
 		if entry.Type != "user" && entry.Type != "assistant" || entryID == 0 {
-			goto yieldCheck
+			return
 		}
 
-		{
-			blocks := extractBlocks(entry.Message)
-			for _, b := range blocks {
-				noise := 0
-				if b.ContentType == "text" && isNoise(b.Text) {
-					noise = 1
-				}
-				// Capture first substantive user text message as topic.
-				if metaTopic == "" && entry.Type == "user" && b.ContentType == "text" && noise == 0 && len(b.Text) >= 10 && !isBoilerplate(b.Text) {
-					metaTopic = b.Text
-					if len(metaTopic) > 200 {
-						metaTopic = metaTopic[:197] + "..."
-					}
-				}
-
-				// tool_input: pass raw JSON or nil.
-				var toolInput any
-				if b.ToolInput != nil {
-					toolInput = string(b.ToolInput)
-				}
-
-				isErr := 0
-				if b.IsError {
-					isErr = 1
-				}
-
-				ws.msgStmt.Exec(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
-					b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
-				count++
-
-				// Detect self-identification nonces.
-				if b.ContentType == "text" && strings.HasPrefix(b.Text, NoncePrefix) {
-					nonce := strings.TrimSpace(b.Text)
-					ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
-				}
-
-				// 🎯T72 recursion guard: flag claudia-spawned compaction
-				// runs by the marker on their opening prompt.
-				if b.ContentType == "text" && IsCompactorMarker(b.Text) {
-					metaCompactorInternal = 1
+		blocks := extractBlocks(entry.Message)
+		for _, b := range blocks {
+			noise := 0
+			if b.ContentType == "text" && isNoise(b.Text) {
+				noise = 1
+			}
+			// Capture first substantive user text message as topic.
+			if metaTopic == "" && entry.Type == "user" && b.ContentType == "text" && noise == 0 && len(b.Text) >= 10 && !isBoilerplate(b.Text) {
+				metaTopic = b.Text
+				if len(metaTopic) > 200 {
+					metaTopic = metaTopic[:197] + "..."
 				}
 			}
+
+			// tool_input: pass raw JSON or nil.
+			var toolInput any
+			if b.ToolInput != nil {
+				toolInput = string(b.ToolInput)
+			}
+
+			isErr := 0
+			if b.IsError {
+				isErr = 1
+			}
+
+			ws.msgStmt.Exec(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
+			count++
+
+			// Detect self-identification nonces.
+			if b.ContentType == "text" && strings.HasPrefix(b.Text, NoncePrefix) {
+				nonce := strings.TrimSpace(b.Text)
+				ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
+			}
+
+			// 🎯T72 recursion guard: flag claudia-spawned compaction
+			// runs by the marker on their opening prompt.
+			if b.ContentType == "text" && IsCompactorMarker(b.Text) {
+				metaCompactorInternal = 1
+			}
+		}
+	}
+
+	lastCommit := time.Now()
+	linesSinceLockCheck := 0
+
+	// bufio.Reader.ReadBytes has no per-line size cap, so oversized lines
+	// are ingested rather than silently dropped (🎯T104). The committed
+	// offset is the running count of bytes consumed — a true line boundary
+	// — not f.Seek(0,1), which reads ahead of the last processed line and
+	// at a mid-stream commit would persist an offset past not-yet-written
+	// content, so a crash would skip it (🎯T107). A non-EOF read error
+	// aborts without advancing the offset.
+	consumed := offset
+	for {
+		raw, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return fmt.Errorf("read %s: %w", path, readErr)
+		}
+		consumed += int64(len(raw))
+		if line := trimLineEnding(raw); len(line) > 0 {
+			handleLine(line)
 		}
 
-	yieldCheck:
 		// Periodically commit to avoid long-running transactions.
 		linesSinceLockCheck++
-		if linesSinceLockCheck >= lineCheckInterval {
+		if linesSinceLockCheck >= ingestLineCheckInterval {
 			linesSinceLockCheck = 0
-			if time.Since(lastCommit) >= commitInterval {
+			if time.Since(lastCommit) >= ingestCommitInterval {
 				// Commit current transaction with offset update.
-				curOffset, _ := f.Seek(0, 1)
 				recSize, recMtime := statFingerprint(path)
 				ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-					VALUES (?, ?, ?, ?)`, path, curOffset, recSize, recMtime)
+					VALUES (?, ?, ?, ?)`, path, consumed, recSize, recMtime)
 
 				ws.Close()
 				if err := ws.tx.Commit(); err != nil {
@@ -6050,8 +6109,12 @@ func (s *Store) ingestFile(path string) error {
 				}
 
 				s.mu.Lock()
-				s.offsets[path] = curOffset
+				s.offsets[path] = consumed
 				s.mu.Unlock()
+
+				if testMidStreamCommitOffset != nil {
+					testMidStreamCommitOffset(consumed)
+				}
 
 				// Start a new transaction.
 				ws, err = newWriterState(s.writeDB)
@@ -6060,6 +6123,10 @@ func (s *Store) ingestFile(path string) error {
 				}
 				lastCommit = time.Now()
 			}
+		}
+
+		if readErr == io.EOF {
+			break
 		}
 	}
 
@@ -6079,10 +6146,9 @@ func (s *Store) ingestFile(path string) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
-	newOffset, _ := f.Seek(0, 1)
 	recSize, recMtime := statFingerprint(path)
 	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-		VALUES (?, ?, ?, ?)`, path, newOffset, recSize, recMtime)
+		VALUES (?, ?, ?, ?)`, path, consumed, recSize, recMtime)
 
 	ws.Close()
 	if err := ws.tx.Commit(); err != nil {
@@ -6090,7 +6156,7 @@ func (s *Store) ingestFile(path string) error {
 	}
 
 	s.mu.Lock()
-	s.offsets[path] = newOffset
+	s.offsets[path] = consumed
 	s.mu.Unlock()
 
 	if count > 0 {
