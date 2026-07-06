@@ -4,6 +4,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -425,6 +426,10 @@ func TestQuery(t *testing.T) {
 		"DROP TABLE messages",
 		"INSERT INTO messages (session_id, project, role, text) VALUES ('x','y','user','z')",
 		"UPDATE messages SET text = 'x'",
+		// 🎯T103: the guard must not be defeatable by turning
+		// PRAGMA query_only back off within the same submission.
+		"PRAGMA query_only=0; DELETE FROM messages",
+		"PRAGMA query_only=0; DROP TABLE messages",
 	} {
 		if _, err := s.Query(q); err == nil {
 			t.Errorf("expected error for write query %q", q)
@@ -453,6 +458,54 @@ func TestQuery(t *testing.T) {
 	// must still work — query_only must not leak into the shared pool.
 	if _, err := s.writeDB.Exec("CREATE TEMP TABLE _t (x INT)"); err != nil {
 		t.Errorf("query_only leaked into shared connection: %v", err)
+	}
+}
+
+// TestQueryRejectsAttach verifies the read-only query surface cannot
+// ATTACH a database — neither to read an arbitrary local SQLite file
+// (info disclosure) nor to create a file at a chosen path (🎯T106).
+func TestQueryRejectsAttach(t *testing.T) {
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "myproject", "sess-attach", []map[string]any{
+		msg("user", "hello", "2026-04-01T10:00:00Z"),
+		msg("assistant", "hi there", "2026-04-01T10:00:05Z"),
+	})
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A victim database holding a secret, distinct from mnemo's own DB.
+	victim := filepath.Join(t.TempDir(), "victim.db")
+	vdb, err := sql.Open("sqlite3", victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vdb.Exec("CREATE TABLE secret(v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vdb.Exec("INSERT INTO secret VALUES ('TOPSECRET')"); err != nil {
+		t.Fatal(err)
+	}
+	vdb.Close()
+
+	// ATTACH-for-read must be denied, and nothing must leak even if a
+	// follow-up query tries to read the alias.
+	if _, err := s.Query("ATTACH DATABASE '" + victim + "' AS v"); err == nil {
+		t.Error("expected ATTACH to be rejected")
+	}
+	if rows, err := s.Query("SELECT v FROM v.secret"); err == nil && len(rows) > 0 {
+		t.Errorf("read an arbitrary attached DB through the read-only surface: %v", rows)
+	}
+
+	// ATTACH against a nonexistent path must be denied and must not
+	// create a file.
+	newPath := filepath.Join(t.TempDir(), "created.db")
+	if _, err := s.Query("ATTACH DATABASE '" + newPath + "' AS c"); err == nil {
+		t.Error("expected ATTACH (create) to be rejected")
+	}
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Errorf("ATTACH created a file at %s (stat err=%v)", newPath, err)
 	}
 }
 

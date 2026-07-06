@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -138,21 +139,16 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 		source:    "codex",
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 8<<20) // Codex tool outputs can be large
+	reader := bufio.NewReader(f)
 
-	lineStart := offset
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		thisStart := lineStart
-		lineStart += int64(len(line)) + 1 // +1 for the stripped '\n'
-		if len(line) == 0 {
-			continue
-		}
-
+	// handleLine parses one rollout envelope into pf. Guard clauses skip a
+	// line by returning rather than a loop `continue`, so the EOF / read-
+	// error handling in the read loop always runs. thisStart is the line's
+	// starting byte offset — the synthetic-uuid discriminator.
+	handleLine := func(line []byte, thisStart int64) {
 		var cl codexLine
 		if json.Unmarshal(line, &cl) != nil {
-			continue // tolerate junk / unknown lines, never fail the file
+			return // tolerate junk / unknown lines, never fail the file
 		}
 
 		switch cl.Type {
@@ -168,21 +164,21 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 					pf.branch = p.Git.Branch
 				}
 			}
-			continue
+			return
 		case "response_item":
 			// conversation content — handled below
 		default:
-			continue // event_msg, compacted, world_state, inter_agent_* …
+			return // event_msg, compacted, world_state, inter_agent_* …
 		}
 
 		var p codexPayload
 		if json.Unmarshal(cl.Payload, &p) != nil {
-			continue
+			return
 		}
 
 		entryType, msgs, ok := codexRecord(&p)
 		if !ok {
-			continue
+			return
 		}
 
 		ts := cl.Timestamp
@@ -218,7 +214,27 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	pf.newOffset, _ = f.Seek(0, 1)
+	// bufio.Reader.ReadBytes has no per-line size cap, so oversized Codex
+	// tool outputs are ingested rather than silently dropped (🎯T104). The
+	// offset is the running count of bytes consumed (a true line boundary),
+	// and a non-EOF read error aborts without advancing it.
+	consumed := offset
+	for {
+		raw, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
+		}
+		thisStart := consumed
+		consumed += int64(len(raw))
+		if line := trimLineEnding(raw); len(line) > 0 {
+			handleLine(line, thisStart)
+		}
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	pf.newOffset = consumed
 	pf.project = codexProject(pf.cwd)
 	return pf, nil
 }

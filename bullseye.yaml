@@ -371,9 +371,10 @@ targets:
     discovered: 2026-07-01
   T103:
     name: mnemo's read-only query surface cannot execute writes — user SQL cannot turn PRAGMA query_only back off
-    status: identified
+    status: achieved
     value: 13.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - mnemo_query rejects or neutralizes any attempt to run PRAGMA query_only=0 (or otherwise write) within a submitted statement or batch
     - A submitted 'PRAGMA query_only=0; <write>' does not mutate the database
@@ -381,11 +382,13 @@ targets:
     context: 'CRITICAL. internal/store/store.go:5535: the read-only guard sets PRAGMA query_only=1, but a submitted ''PRAGMA query_only=0; <write>'' turns it back off and executes writes (DB wipe/corruption) — also reachable over federation. Unverified Fable-5 finder-stage candidate (adversarial verification interrupted by an API spend limit); verify before implementing. See docs/audit/fable-2026-07.md.'
     origin: manual
     discovered: 2026-07-02
+    achieved: 2026-07-05
   T104:
     name: mnemo ingest never advances its offset past unread content — an oversized/unreadable JSONL line is surfaced, not silently skipped
-    status: identified
+    status: achieved
     value: 13.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - scanner.Err() is checked at every ingest site; a token-too-long error aborts without advancing the persisted offset past the unread line
     - Oversized lines are handled (larger buffer or explicit logged skip) rather than silently dropping subsequent content
@@ -393,39 +396,88 @@ targets:
     context: 'CRITICAL data loss. internal/store/store.go:3175: an oversized JSONL line silently aborts ingest and permanently advances the offset past unread content (scanner.Err() is never checked at any ingest site). Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
     origin: manual
     discovered: 2026-07-02
+    achieved: 2026-07-05
   T105:
     name: mnemo bounds image-sidecar work at spawn time so startup cannot blow up goroutines or memory
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - triggerImageSidecars bounds the number of spawned goroutines (a worker pool), not only concurrent execution
     - A large backlog at startup does not pin full image bytes across thousands of goroutines
     context: 'HIGH. internal/store/images.go:203: triggerImageSidecars spawns unbounded goroutines that each pin full image bytes; the semaphore gates execution, not spawn count, so startup can blow up goroutines/memory. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
     origin: manual
     discovered: 2026-07-02
+    achieved: 2026-07-05
   T106:
     name: mnemo's read-only query surface forbids ATTACH DATABASE so it cannot read arbitrary files or create files
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - ATTACH DATABASE is rejected on the mnemo_query path (statement inspection or authorizer)
     - A query attempting ATTACH cannot read arbitrary local SQLite files or create files at chosen paths
     context: 'HIGH. internal/store/store.go:5531: ATTACH DATABASE is permitted under query_only=1, allowing reads of arbitrary local SQLite files (info disclosure) and file creation at attacker-chosen paths. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
     origin: manual
     discovered: 2026-07-02
+    achieved: 2026-07-05
   T107:
     name: mnemo persists an ingest offset only at a true processed-line boundary so a crash never skips buffered lines
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
+    actual_cost: 2.0
     acceptance:
     - Mid-stream commits persist an offset matching the last fully-processed line, not a Seek(0,1) that overshoots buffered input
     - A crash or kill between a mid-stream commit and completion does not permanently skip lines; regression test covers it
     context: 'HIGH data loss. internal/store/store.go:6042: a mid-stream commit persists f.Seek(0,1), which overshoots the last processed line, so a crash between a mid-stream commit and completion permanently skips buffered-but-unwritten lines. Unverified Fable-5 finder-stage candidate; verify before implementing. See docs/audit/fable-2026-07.md.'
     origin: manual
     discovered: 2026-07-02
+    achieved: 2026-07-05
+  T108:
+    name: The menubar popup and dashboard surface p — the fraction of output requiring Marcelo personally — per repo, decomposed by cost term
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Popup/dashboard show per-repo p over a recent window (e.g. 30 days), decomposed by the four oracle-first cost terms: harness / generation / verification-friction / verification-judgment'
+    - 'The derivation is documented: which transcript signals proxy ''required Marcelo personally'' (interrupts, manual user turns, corrective messages) vs autonomous completion (oracle-green retirements, uninterrupted agent runs)'
+    - 'p trend over time is visible, so the multiplier J-curve prediction (memory: prediction_multiplier_jcurve) can be evaluated from the dashboard'
+    context: 'oracle-first doctrine (~/.claude/skills/oracle-first/): the productivity multiplier ∝ 1/p, and p tracks oracle availability, not difficulty — but p is currently unmeasured. mnemo holds the raw signals. Filed from the 2026-07-03 ~think discussion (session 1cf2248b). [Re-filed 2026-07-05 after local-master reset to origin discarded the original unpushed entry; discovered date was originally 2026-07-03.]'
+    tags:
+    - oracle-first
+    - dashboard
+    origin: manual
+    discovered: 2026-07-05
+  T109:
+    name: The Fable-5 audit's critical/high findings are all resolved — each of T103–T107 is adversarially verified, then fixed-with-regression-test or refuted-and-retired
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Each of T103–T107 has been adversarially verified against the real code: a finding that reproduces is fixed with a regression test that fails on the pre-fix code and passes after; a finding that does not reproduce is retired with the refutation recorded in its target.'
+    - 'Query surface (T103, T106): mnemo_query cannot execute writes (no PRAGMA query_only=0 re-enable) and rejects ATTACH DATABASE, on the federation-exposed path too.'
+    - 'Ingest durability (T104, T107): oversized/unreadable JSONL lines are surfaced not silently skipped, and ingest offsets persist only at a true processed-line boundary so a crash never skips buffered content.'
+    - 'Resource safety (T105): image-sidecar work is bounded at spawn time so a startup backlog cannot blow up goroutines or memory.'
+    - All five sub-findings are retired in bullseye (achieved or refuted); this umbrella is achieved only when none remain open.
+    context: 'Umbrella goal for the Fable-5 deep-audit findings filed via #139 (docs/audit/fable-2026-07.md) on 2026-07-02. All five were finder-stage candidates whose adversarial verification was interrupted by an API spend limit, so each must be verified before implementing. Two themed clusters — query-surface hardening (T103 write-guard bypass + T106 ATTACH) and ingest durability (T104 oversized-line offset overshoot + T107 mid-stream Seek(0,1) overshoot) — plus T105 (unbounded image-sidecar goroutines). Set this as the goal to drive the whole batch; the five findings are the parallelisable frontier beneath it.'
+    depends_on:
+    - T103
+    - T104
+    - T105
+    - T106
+    - T107
+    tags:
+    - security
+    - data-loss
+    - audit
+    - fable-5
+    - hardening
+    origin: manual
+    discovered: 2026-07-05
+    achieved: 2026-07-05
   T11:
     name: Git history indexed cross-repo with FTS and session correlation
     status: achieved
