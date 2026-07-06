@@ -290,7 +290,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				}
 			}()
 		}
-		if err := e.store.Watch(); err != nil {
+		if err := e.store.Watch(r.baseCtx); err != nil {
 			logger.Error("watcher failed", "err", err)
 		}
 	}()

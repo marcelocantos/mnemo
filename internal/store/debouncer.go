@@ -48,6 +48,19 @@ func (d *debouncer) enqueue(key string, fn func()) {
 	})
 }
 
+// stop cancels every pending timer so no debounced callback fires after the
+// caller has begun shutting down (🎯T97.1). A callback already executing is
+// unaffected; this only prevents not-yet-fired ingest work from racing the
+// store's Close/checkpoint. Safe to call once on the watcher's exit path.
+func (d *debouncer) stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key, t := range d.timers {
+		t.Stop()
+		delete(d.timers, key)
+	}
+}
+
 // invocations returns the number of callbacks that have fired.
 // Intended for testing only.
 func (d *debouncer) invocations() int64 {
