@@ -215,7 +215,17 @@ func (r *Registry) CompactWatcherFor(username string) *compact.Watcher {
 func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	logger := slog.Default().With("user", username)
 
-	// Ingest + watcher + image workers + repo-level ingest streams.
+	// Realtime transcript watcher. Start this before the cold catch-up
+	// backlog so new appends are indexed with stack-like priority.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		if err := e.store.Watch(r.baseCtx); err != nil {
+			logger.Error("watcher failed", "err", err)
+		}
+	}()
+
+	// Ingest + image workers + repo-level ingest streams.
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
@@ -289,9 +299,6 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 					logger.Warn("vault: initial sync failed", "err", err)
 				}
 			}()
-		}
-		if err := e.store.Watch(r.baseCtx); err != nil {
-			logger.Error("watcher failed", "err", err)
 		}
 	}()
 
