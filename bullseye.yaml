@@ -3635,6 +3635,8 @@ targets:
       mnemo should self-upgrade with live agents surviving the swap. The blocker is not byte-swapping but that Claude Code caches Mcp-Session-Id and does not re-initialize on server restart (claude-code#27142). Design: a thin transparent edge proxy owns client connections and routes by Mcp-Session-Id to a swappable backend, with session-affinity draining and a single-holder lease on singleton background work. See docs/design/connection-preserving-upgrade.md. Revisits T27's literal "no proxy" while preserving its real invariants (no custom protocol; identity via Mcp-Session-Id). Note: T95/T96 were taken by merged work; this objective is T97.
 
       Reverted 2026-07-10: Parent depends on T97.5 connection-preserving edge swap which was prematurely marked achieved.
+
+      Reverted 2026-07-10: Parent blocked on T97.5 affinity-drain invariant for connection-preserving upgrade.
     tags:
     - upgrade
     - daemon
@@ -3729,7 +3731,7 @@ targets:
     status: converging
     value: 0.0
     cost: 0.0
-    actual_cost: 5.0
+    actual_cost: 8.0
     acceptance:
     - auto_upgrade.enabled gates the apply path; default off (detection/notification stay on).
     - When enabled and a newer release is detected, after 30 min of MCP traffic quiescence the daemon runs a detached `brew upgrade mnemo`, spawns the new backend, routes new sessions to it, and drains+checkpoints+reaps the old backend.
@@ -3739,6 +3741,8 @@ targets:
       Integration node tying detection, the edge proxy, the lease, and graceful drain into the orchestrated swap. Detached brew helper outlives the backend it replaces; the edge keeps running. opt-in because auto-restarting a backend many sessions depend on is too big a default to flip silently.
 
       Reverted 2026-07-10: Edge auto-apply cannot register new backends, notices miss sibling process, and immediate SIGTERM breaks pinned sessions — connection-preserving path not yet real.
+
+      Reverted 2026-07-10: Affinity drain required: repin+SIGTERM invalidates mcp-go stateful sessions; must keep old backend until pin count is zero.
     depends_on:
     - T97.1
     - T97.2
