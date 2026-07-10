@@ -17,6 +17,7 @@
 //	mnemo print-endpoint        # print this host's mTLS public cert (for federated peer trust)
 //	mnemo print-federated-addr  # print the URL peers paste into linked_instances
 //	mnemo ping-peer <name>      # call mnemo_stats on a configured peer (smoke-test federation)
+//	mnemo edge                  # transparent MCP edge proxy (🎯T97.3)
 //	claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<name>"
 package main
 
@@ -44,6 +45,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/api"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
+	"github.com/marcelocantos/mnemo/internal/edgeproxy"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
@@ -136,6 +138,9 @@ func main() {
 			return
 		case "thread":
 			cmdThread(os.Args[2:])
+			return
+		case "edge":
+			cmdEdge(os.Args[2:])
 			return
 		}
 	}
@@ -452,6 +457,81 @@ func cmdUninstallService(args []string) {
 	if err := uninstallService(args); err != nil {
 		fmt.Fprintf(os.Stderr, "uninstall-service: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// stringList is a repeatable flag.Value for multi --backend flags.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// cmdEdge runs the transparent MCP edge proxy (🎯T97.3). The edge owns
+// the public listener and all client connections; backends serve on
+// loopback HTTP or a Unix domain socket. Session affinity is by
+// Mcp-Session-Id — standard MCP-over-HTTP, no custom protocol.
+func cmdEdge(args []string) {
+	fs := flag.NewFlagSet("edge", flag.ExitOnError)
+	listen := fs.String("listen", defaultAddr,
+		"public listen address (edge owns client TCP connections)")
+	primary := fs.Int("primary", 0,
+		"index of the backend that receives new initialize requests")
+	var backends stringList
+	fs.Var(&backends, "backend",
+		"backend base URL (repeatable). http://host:port or unix:///path")
+	_ = fs.Parse(args)
+
+	if len(backends) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: mnemo edge --backend URL [--backend URL ...] [--listen :19419] [--primary 0]")
+		fmt.Fprintln(os.Stderr, "edge: at least one --backend is required")
+		os.Exit(2)
+	}
+
+	router, err := edgeproxy.NewRouter(backends, *primary)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "edge: %v\n", err)
+		os.Exit(1)
+	}
+	proxy := edgeproxy.NewProxy(router)
+
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           proxy,
+		ReadHeaderTimeout: 10 * time.Second,
+		// No Read/WriteTimeout — GET/SSE streams are long-lived.
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("edge listening",
+			"listen", *listen,
+			"backends", len(backends),
+			"primary", *primary,
+			"version", version,
+		)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "edge: shutdown: %v\n", err)
+			os.Exit(1)
+		}
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "edge: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 

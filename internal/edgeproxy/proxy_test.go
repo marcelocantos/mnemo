@@ -1,0 +1,268 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package edgeproxy
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestNewRouterRejectsEmptyAndBadPrimary(t *testing.T) {
+	t.Parallel()
+	if _, err := NewRouter(nil, 0); err == nil {
+		t.Fatal("expected error for empty backends")
+	}
+	if _, err := NewRouter([]string{"http://127.0.0.1:1"}, 1); err == nil {
+		t.Fatal("expected error for out-of-range primary")
+	}
+	if _, err := NewRouter([]string{"ftp://x"}, 0); err == nil {
+		t.Fatal("expected error for unsupported scheme")
+	}
+}
+
+func TestRouterPinAndSetPrimary(t *testing.T) {
+	t.Parallel()
+	r, err := NewRouter([]string{
+		"http://127.0.0.1:19421",
+		"http://127.0.0.1:19422",
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.PrimaryIndex() != 0 {
+		t.Fatalf("primary=%d want 0", r.PrimaryIndex())
+	}
+	r.Pin("sess-a", 0)
+	if idx, ok := r.BackendForSession("sess-a"); !ok || idx != 0 {
+		t.Fatalf("pin sess-a: idx=%d ok=%v", idx, ok)
+	}
+	if err := r.SetPrimary(1); err != nil {
+		t.Fatal(err)
+	}
+	// New initializes (no pin) go to primary 1; existing pin stays.
+	if idx, ok := r.BackendForSession(""); ok || idx != 1 {
+		t.Fatalf("unpinned: idx=%d ok=%v want primary 1", idx, ok)
+	}
+	if idx, ok := r.BackendForSession("sess-a"); !ok || idx != 0 {
+		t.Fatalf("pinned after primary flip: idx=%d ok=%v", idx, ok)
+	}
+}
+
+func TestRouterUnixBackendURL(t *testing.T) {
+	t.Parallel()
+	r, err := NewRouter([]string{"unix:///tmp/mnemo-backend.sock"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.backends[0].Scheme != "unix" || r.backends[0].Path != "/tmp/mnemo-backend.sock" {
+		t.Fatalf("unix url: %+v", r.backends[0])
+	}
+}
+
+func TestProxyInitializePinsSession(t *testing.T) {
+	t.Parallel()
+	var hits [2]atomic.Int32
+	backends := make([]*httptest.Server, 2)
+	for i := range backends {
+		i := i
+		backends[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits[i].Add(1)
+			if r.Method == http.MethodPost && r.Header.Get(SessionIDHeader) == "" {
+				w.Header().Set(SessionIDHeader, fmt.Sprintf("sid-%d", i))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf("backend-%d", i)))
+		}))
+		t.Cleanup(backends[i].Close)
+	}
+
+	router, err := NewRouter([]string{backends[0].URL, backends[1].URL}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy(router)
+
+	// initialize → primary 0, pin session
+	req := httptest.NewRequest(http.MethodPost, "http://edge/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initialize status %d", rec.Code)
+	}
+	sid := rec.Header().Get(SessionIDHeader)
+	if sid != "sid-0" {
+		t.Fatalf("session id %q", sid)
+	}
+	if hits[0].Load() != 1 || hits[1].Load() != 0 {
+		t.Fatalf("hits after init: %d %d", hits[0].Load(), hits[1].Load())
+	}
+
+	// Flip primary; pinned session still hits backend 0
+	if err := router.SetPrimary(1); err != nil {
+		t.Fatal(err)
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "http://edge/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	req2.Header.Set(SessionIDHeader, sid)
+	rec2 := httptest.NewRecorder()
+	proxy.ServeHTTP(rec2, req2)
+	if body := rec2.Body.String(); body != "backend-0" {
+		t.Fatalf("pinned body %q", body)
+	}
+	if hits[0].Load() != 2 || hits[1].Load() != 0 {
+		t.Fatalf("hits after pinned call: %d %d", hits[0].Load(), hits[1].Load())
+	}
+
+	// New initialize goes to primary 1
+	req3 := httptest.NewRequest(http.MethodPost, "http://edge/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}`))
+	rec3 := httptest.NewRecorder()
+	proxy.ServeHTTP(rec3, req3)
+	if rec3.Header().Get(SessionIDHeader) != "sid-1" {
+		t.Fatalf("new init session %q", rec3.Header().Get(SessionIDHeader))
+	}
+	if hits[1].Load() != 1 {
+		t.Fatalf("backend 1 hits %d want 1", hits[1].Load())
+	}
+}
+
+func TestProxySSEFlushThrough(t *testing.T) {
+	t.Parallel()
+	// Real TCP servers so streaming + flush is exercised end-to-end.
+	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backendLn.Close() })
+
+	// Gate: first event is written immediately; second waits until the
+	// test has observed the first (proves edge flushes hop-by-hop).
+	firstSeen := make(chan struct{})
+	go func() {
+		_ = http.Serve(backendLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "no flush", 500)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "data: one\n\n")
+			flusher.Flush()
+			select {
+			case <-firstSeen:
+			case <-r.Context().Done():
+				return
+			case <-time.After(5 * time.Second):
+				return
+			}
+			fmt.Fprint(w, "data: two\n\n")
+			flusher.Flush()
+		}))
+	}()
+
+	router, err := NewRouter([]string{"http://" + backendLn.Addr().String()}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = edgeLn.Close() })
+	go func() { _ = http.Serve(edgeLn, NewProxy(router)) }()
+
+	resp, err := http.Get("http://" + edgeLn.Addr().String() + "/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	gotFirst := make(chan string, 1)
+	go func() {
+		var buf strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			buf.WriteString(line)
+			if strings.Contains(buf.String(), "data: one") {
+				gotFirst <- buf.String()
+				return
+			}
+			if err != nil {
+				gotFirst <- buf.String() + "\nerr:" + err.Error()
+				return
+			}
+		}
+	}()
+
+	select {
+	case first := <-gotFirst:
+		if !strings.Contains(first, "data: one") {
+			t.Fatalf("first SSE event missing (flush broken?): %q", first)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first SSE event through edge")
+	}
+	close(firstSeen)
+
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rest), "data: two") {
+		t.Fatalf("second SSE event missing: %q", string(rest))
+	}
+}
+
+func TestProxyUnixBackend(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sock := dir + "/backend.sock"
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var once sync.Once
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() {})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("unix-ok"))
+	}))
+
+	router, err := NewRouter([]string{"unix://" + sock}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://edge/api/health", nil)
+	NewProxy(router).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "unix-ok" {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIsInitializeRequest(t *testing.T) {
+	t.Parallel()
+	if !isInitializeRequest([]byte(`{"method":"initialize"}`)) {
+		t.Fatal("want initialize true")
+	}
+	if isInitializeRequest([]byte(`{"method":"tools/list"}`)) {
+		t.Fatal("want tools/list false")
+	}
+	if isInitializeRequest([]byte(`not-json`)) {
+		t.Fatal("want garbage false")
+	}
+}
