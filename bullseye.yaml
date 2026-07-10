@@ -3622,7 +3622,7 @@ targets:
     achieved: 2026-06-29
   T97:
     name: mnemo upgrades its own binary without dropping live MCP connections
-    status: achieved
+    status: converging
     value: 0.0
     cost: 0.0
     actual_cost: 13.0
@@ -3631,7 +3631,10 @@ targets:
     - Detection + notification of a new release works with auto-apply disabled; enabling auto_upgrade.enabled performs the full swap at a quiescent window.
     - Non-Homebrew and Windows installs degrade to notify-only; edge upgrades are the only documented connection-dropping case.
     - docs/design/connection-preserving-upgrade.md is the design of record.
-    context: 'mnemo should self-upgrade with live agents surviving the swap. The blocker is not byte-swapping but that Claude Code caches Mcp-Session-Id and does not re-initialize on server restart (claude-code#27142). Design: a thin transparent edge proxy owns client connections and routes by Mcp-Session-Id to a swappable backend, with session-affinity draining and a single-holder lease on singleton background work. See docs/design/connection-preserving-upgrade.md. Revisits T27''s literal "no proxy" while preserving its real invariants (no custom protocol; identity via Mcp-Session-Id). Note: T95/T96 were taken by merged work; this objective is T97.'
+    context: |-
+      mnemo should self-upgrade with live agents surviving the swap. The blocker is not byte-swapping but that Claude Code caches Mcp-Session-Id and does not re-initialize on server restart (claude-code#27142). Design: a thin transparent edge proxy owns client connections and routes by Mcp-Session-Id to a swappable backend, with session-affinity draining and a single-holder lease on singleton background work. See docs/design/connection-preserving-upgrade.md. Revisits T27's literal "no proxy" while preserving its real invariants (no custom protocol; identity via Mcp-Session-Id). Note: T95/T96 were taken by merged work; this objective is T97.
+
+      Reverted 2026-07-10: Parent depends on T97.5 connection-preserving edge swap which was prematurely marked achieved.
     tags:
     - upgrade
     - daemon
@@ -3640,7 +3643,6 @@ targets:
     - ops
     origin: manual
     discovered: 2026-06-30
-    achieved: 2026-07-10
   T97.1:
     name: The backend daemon drains gracefully on SIGTERM/SIGINT and leaves a checkpointed WAL
     status: achieved
@@ -3724,7 +3726,7 @@ targets:
     achieved: 2026-07-10
   T97.5:
     name: Opt-in auto-apply upgrades the backend at a quiescent window with connections preserved
-    status: achieved
+    status: converging
     value: 0.0
     cost: 0.0
     actual_cost: 5.0
@@ -3733,7 +3735,10 @@ targets:
     - When enabled and a newer release is detected, after 30 min of MCP traffic quiescence the daemon runs a detached `brew upgrade mnemo`, spawns the new backend, routes new sessions to it, and drains+checkpoints+reaps the old backend.
     - Throughout the swap an existing connected session keeps working without /mcp.
     - Installs not managed by Homebrew degrade to notify-only.
-    context: Integration node tying detection, the edge proxy, the lease, and graceful drain into the orchestrated swap. Detached brew helper outlives the backend it replaces; the edge keeps running. opt-in because auto-restarting a backend many sessions depend on is too big a default to flip silently.
+    context: |-
+      Integration node tying detection, the edge proxy, the lease, and graceful drain into the orchestrated swap. Detached brew helper outlives the backend it replaces; the edge keeps running. opt-in because auto-restarting a backend many sessions depend on is too big a default to flip silently.
+
+      Reverted 2026-07-10: Edge auto-apply cannot register new backends, notices miss sibling process, and immediate SIGTERM breaks pinned sessions — connection-preserving path not yet real.
     depends_on:
     - T97.1
     - T97.2
@@ -3746,7 +3751,6 @@ targets:
     - auto-apply
     origin: manual
     discovered: 2026-06-30
-    achieved: 2026-07-10
   T97.6:
     name: Sessions spanning a backend swap are told they were upgraded
     status: achieved
