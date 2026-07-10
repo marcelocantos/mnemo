@@ -72,6 +72,38 @@ func newTestStore(t *testing.T, projectDir string) *Store {
 	return s
 }
 
+func TestWriteParsedFileDoesNotRegressOffset(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	path := filepath.Join(t.TempDir(), "sess.jsonl")
+
+	writeParsed := func(off int64) {
+		t.Helper()
+		ws, err := newWriterState(s.writeDB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.writeParsedFile(ws, parsedFile{path: path, sessionID: "sess", project: "proj", newOffset: off})
+		ws.Close()
+		if err := ws.tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeParsed(200)
+	writeParsed(100)
+
+	var got int64
+	if err := s.readDB.QueryRow("SELECT offset FROM ingest_state WHERE path = ?", path).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 200 {
+		t.Fatalf("ingest_state offset regressed to %d, want 200", got)
+	}
+	if got := s.offsets[path]; got != 200 {
+		t.Fatalf("in-memory offset regressed to %d, want 200", got)
+	}
+}
+
 func TestIngestAndSearch(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -2556,4 +2588,70 @@ func writeBenchJSONL(b *testing.B, dir, project, sessionID string, entries []map
 		}
 	}
 	return path
+}
+
+// TestCheckpointTruncatesWAL proves Store.Checkpoint runs a TRUNCATE
+// checkpoint (🎯T97.1): after writes grow the -wal, Checkpoint flushes the
+// frames into the main database and truncates the -wal to zero bytes while
+// the store is still open. This is the durability guarantee a clean drain
+// relies on — the default PASSIVE checkpoint on last-connection-close would
+// not reset the -wal mid-life.
+func TestCheckpointTruncatesWAL(t *testing.T) {
+	projectDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "ckpt.db")
+	s, err := New(dbPath, projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Disable autocheckpoint so the seed writes below stay resident in the
+	// WAL until our explicit Checkpoint flushes them — otherwise SQLite's
+	// 1000-page automatic checkpoint may reset the log first, making the
+	// moved-frame count non-deterministic.
+	if _, err := s.writeDB.Exec("PRAGMA wal_autocheckpoint = 0"); err != nil {
+		t.Fatalf("disable autocheckpoint: %v", err)
+	}
+
+	// Grow the write-ahead log with a batch of autocommitted writes.
+	for i := 0; i < 50; i++ {
+		if _, err := s.writeDB.Exec(
+			"INSERT INTO ingest_state(path, offset) VALUES(?, ?)",
+			fmt.Sprintf("/fake/path/%d", i), int64(i),
+		); err != nil {
+			t.Fatalf("seed write %d: %v", i, err)
+		}
+	}
+
+	walPath := dbPath + "-wal"
+	if fi, err := os.Stat(walPath); err != nil {
+		t.Fatalf("stat -wal before checkpoint: %v", err)
+	} else if fi.Size() == 0 {
+		t.Fatal("expected a non-empty -wal before checkpoint, got 0 bytes")
+	}
+
+	res, err := s.Checkpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if res.Busy != 0 {
+		t.Errorf("checkpoint busy = %d, want 0 (idle read pool must not block TRUNCATE)", res.Busy)
+	}
+	// NOTE: on a successful TRUNCATE this SQLite build reports the log/
+	// checkpointed frame counters as 0 rather than the frames actually moved,
+	// so the reliable success signal is Busy == 0 plus a -wal reset to zero
+	// bytes below — not res.Checkpointed. (A PASSIVE checkpoint on the same
+	// state reports the true 100-frame count; TRUNCATE flushes those frames
+	// and truncates, then zeroes the counters.)
+
+	// TRUNCATE resets the -wal to zero bytes (a missing file is an equally
+	// valid truncation outcome on some platforms/driver builds). The -wal
+	// was non-empty above, so a zero here proves the flush+truncate ran.
+	if fi, err := os.Stat(walPath); err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("stat -wal after checkpoint: %v", err)
+		}
+	} else if fi.Size() != 0 {
+		t.Errorf("-wal not truncated: size = %d bytes, want 0", fi.Size())
+	}
 }

@@ -32,8 +32,10 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -69,9 +71,16 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.60.0"
+	version              = "0.61.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
+
+	// drainDeadline caps the graceful shutdown sequence (🎯T97.1). Stopping
+	// HTTP intake, stopping workers, quiescing the read pool, and truncating
+	// the WAL should complete well within this; if it overruns we hard-exit,
+	// which is safe under mnemo's crash-only durability (the next start
+	// recovers any un-checkpointed WAL frames).
+	drainDeadline = 10 * time.Second
 )
 
 // summariserWorkDir returns a dedicated, always-present working
@@ -186,7 +195,15 @@ func main() {
 		autoMigrateStdioAndExit(*addr)
 	}
 
-	if err := runServe(context.Background(), *addr, *federatedAddr); err != nil {
+	// Install a signal-driven cancellable context so a foreground
+	// SIGTERM/SIGINT (Ctrl+C, `brew services restart`, systemd stop) drives
+	// the graceful drain in runServe instead of hard-killing the daemon
+	// mid-request (🎯T97.1). The Windows-Service path handled its own
+	// SCM-driven cancellation above and never reaches here.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := runServe(ctx, *addr, *federatedAddr); err != nil {
 		os.Exit(1)
 	}
 }
@@ -829,22 +846,53 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		slog.Error("HTTP MCP server failed", "err", err)
 		return err
 	case <-ctx.Done():
-		slog.Info("mnemo serve shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// Drain MCP sessions first, then close the TCP listener.
-		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("HTTP shutdown error", "err", err)
-		}
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("HTTP server shutdown error", "err", err)
-		}
-		if fedSrv != nil {
-			if err := fedSrv.Shutdown(shutdownCtx); err != nil {
-				slog.Warn("federated HTTP shutdown error", "err", err)
+		slog.Info("mnemo serve draining", "deadline", drainDeadline)
+		// Ordered graceful drain (🎯T97.1), bounded by drainDeadline:
+		//   1. stop intake      — refuse new MCP/HTTP/federated requests,
+		//                          let in-flight ones finish
+		//   2. release lease     — seam for 🎯T97.4 (no-op until it exists)
+		//   3. stop workers      — cancel per-user worker contexts
+		//   4. quiesce read pool — close each readDB
+		//   5. checkpoint writer — PRAGMA wal_checkpoint(TRUNCATE)
+		// Steps 3–5 are driven by reg.Close(), which is idempotent, so the
+		// deferred reg.Close() above is a harmless second call. If the whole
+		// sequence overruns drainDeadline we hard-exit — safe under crash-only
+		// durability (residual WAL frames replay on the next start).
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), drainDeadline)
+		defer cancelDrain()
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			// 1. Stop intake, draining in-flight requests within the deadline.
+			slog.Info("drain: stopping HTTP MCP intake")
+			if err := httpSrv.Shutdown(drainCtx); err != nil {
+				slog.Warn("HTTP MCP shutdown error", "err", err)
 			}
+			slog.Info("drain: stopping HTTP server intake")
+			if err := httpServer.Shutdown(drainCtx); err != nil {
+				slog.Warn("HTTP server shutdown error", "err", err)
+			}
+			if fedSrv != nil {
+				slog.Info("drain: stopping federated intake")
+				if err := fedSrv.Shutdown(drainCtx); err != nil {
+					slog.Warn("federated HTTP shutdown error", "err", err)
+				}
+			}
+			// 2. (release singleton background lease — 🎯T97.4)
+			// 3–5. Stop workers, quiesce read pools, checkpoint each writer.
+			slog.Info("drain: stopping workers + checkpointing stores")
+			reg.Close()
+		}()
+		select {
+		case <-drained:
+			slog.Info("mnemo serve drained cleanly")
+			return nil
+		case <-drainCtx.Done():
+			slog.Warn("drain exceeded deadline; forcing exit (crash-only recovery on next start)",
+				"deadline", drainDeadline)
+			os.Exit(0)
+			return nil // unreachable; os.Exit does not return
 		}
-		return nil
 	}
 }
 

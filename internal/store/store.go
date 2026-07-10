@@ -832,12 +832,62 @@ func New(dbPath, projectDir string) (*Store, error) {
 
 // Close closes the store.
 func (s *Store) Close() error {
+	// Drain order matters (🎯T97.1): quiesce the read pool first, then
+	// checkpoint the writer, then close the writer. TRUNCATE only fully
+	// resets the -wal when no other connection holds a WAL read lock, so
+	// closing readDB before checkpointing gives the truncate the best
+	// chance to leave a zero-length -wal behind. A busy or failed
+	// checkpoint is logged but never fails Close — the DB still closes
+	// cleanly and crash-only recovery replays any residual frames.
 	rerr := s.readDB.Close()
+
+	if res, err := s.Checkpoint(); err != nil {
+		slog.Warn("wal checkpoint on close failed", "db", s.dbPath, "err", err)
+	} else if res.Busy != 0 {
+		slog.Warn("wal checkpoint on close busy; -wal left for crash recovery",
+			"db", s.dbPath, "busy", res.Busy, "log", res.Log, "checkpointed", res.Checkpointed)
+	} else {
+		slog.Info("wal checkpoint on close",
+			"db", s.dbPath, "busy", res.Busy, "log", res.Log, "checkpointed", res.Checkpointed)
+	}
+
 	werr := s.writeDB.Close()
 	if rerr != nil {
 		return rerr
 	}
 	return werr
+}
+
+// CheckpointResult holds the three integers PRAGMA wal_checkpoint returns.
+// Busy is 1 when the checkpoint could not run to completion because another
+// connection held a read lock on the WAL; Log is the number of frames in the
+// write-ahead log; Checkpointed is the number of frames moved back into the
+// main database. After a successful TRUNCATE (Busy == 0) the -wal file has
+// been flushed into the db and truncated to zero bytes.
+type CheckpointResult struct {
+	Busy         int
+	Log          int
+	Checkpointed int
+}
+
+// Checkpoint runs PRAGMA wal_checkpoint(TRUNCATE) on the writer connection,
+// flushing the write-ahead log into the main database file and truncating the
+// -wal to zero. It is the durable-shutdown primitive for 🎯T97.1: after a
+// clean drain the next startup replays no WAL. Because TRUNCATE only resets
+// the WAL when no other connection holds a read lock, callers that want a
+// zero-length -wal should quiesce the read pool (close readDB) first; a
+// non-zero Busy signals the reset was blocked and the WAL was left in place
+// for crash recovery.
+func (s *Store) Checkpoint() (CheckpointResult, error) {
+	var r CheckpointResult
+	if s.writeDB == nil {
+		return r, nil
+	}
+	row := s.writeDB.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)")
+	if err := row.Scan(&r.Busy, &r.Log, &r.Checkpointed); err != nil {
+		return r, fmt.Errorf("wal_checkpoint(TRUNCATE): %w", err)
+	}
+	return r, nil
 }
 
 // MemoryInfo holds a single memory record from the index.
@@ -3073,10 +3123,23 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 	// os.Stat error just records NULL — detection falls back to
 	// offset-vs-size on the next pass.
 	recSize, recMtime := statFingerprint(pf.path)
-	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-		VALUES (?, ?, ?, ?)`, pf.path, pf.newOffset, recSize, recMtime)
+	ws.tx.Exec(`INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET
+			offset = MAX(ingest_state.offset, excluded.offset),
+			recorded_size = CASE
+				WHEN excluded.offset >= ingest_state.offset THEN excluded.recorded_size
+				ELSE ingest_state.recorded_size
+			END,
+			recorded_mtime = CASE
+				WHEN excluded.offset >= ingest_state.offset THEN excluded.recorded_mtime
+				ELSE ingest_state.recorded_mtime
+			END`,
+		pf.path, pf.newOffset, recSize, recMtime)
 	s.mu.Lock()
-	s.offsets[pf.path] = pf.newOffset
+	if pf.newOffset > s.offsets[pf.path] {
+		s.offsets[pf.path] = pf.newOffset
+	}
 	s.mu.Unlock()
 }
 
@@ -3217,7 +3280,12 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 }
 
 // Watch watches for new/modified JSONL files and ingests them in realtime.
-func (s *Store) Watch() error {
+// It runs until ctx is cancelled (graceful drain, 🎯T97.1) or the fsnotify
+// backend closes its channels. Returning promptly on cancellation is what
+// lets Registry.Close finish stopping workers and reach the WAL checkpoint;
+// before ctx observance the kqueue/inotify read blocked shutdown until the
+// drain deadline forced a hard exit.
+func (s *Store) Watch(ctx context.Context) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -3305,9 +3373,14 @@ func (s *Store) Watch() error {
 	// operations) for the same path into a single re-index after 300ms of quiet.
 	// Heavy ingest work runs in the timer goroutine, not on the event goroutine.
 	db := newDebouncer(300 * time.Millisecond)
+	// On drain, cancel pending debounced ingests so none races the store's
+	// Close/checkpoint (🎯T97.1).
+	defer db.stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return nil
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
