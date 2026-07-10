@@ -19,6 +19,10 @@ const RouteFileName = "edge-route.json"
 type RouteFile struct {
 	Backends []string `json:"backends"`
 	Primary  int      `json:"primary"`
+	// RepinAll when true tells the edge to move every session pin onto
+	// primary before the old backend is reaped (connection-preserving
+	// handoff). Cleared by the edge after applying.
+	RepinAll bool `json:"repin_all,omitempty"`
 }
 
 // RoutePath returns ~/.mnemo/edge-route.json.

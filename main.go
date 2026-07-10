@@ -540,9 +540,9 @@ func cmdEdge(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Poll route file for primary flips (and appended backends).
+	// Poll route file for backend growth + primary flips + repin.
 	if routePath != "" {
-		go watchEdgeRoute(ctx, routePath, router)
+		go watchEdgeRoute(ctx, routePath, router, proxy)
 	}
 
 	errCh := make(chan error, 1)
@@ -573,13 +573,14 @@ func cmdEdge(args []string) {
 	}
 }
 
-// watchEdgeRoute reloads primary (and rebuilds router backends when the
-// list grows) from edge-route.json so auto-apply can flip without
-// restarting the edge process.
-func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router) {
-	ticker := time.NewTicker(time.Second)
+// watchEdgeRoute applies edge-route.json: grows the backend list, flips
+// primary, and optionally repins all sessions to primary so a draining
+// backend can be reaped without orphaning client sessions (🎯T97.5).
+func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router, proxy *edgeproxy.Proxy) {
+	_ = proxy // clients grow lazily via Proxy.clientAt → syncClients
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	var lastPrimary = router.PrimaryIndex()
+	var lastRaw string
 	for {
 		select {
 		case <-ctx.Done():
@@ -589,27 +590,32 @@ func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router) 
 			if err != nil {
 				continue
 			}
+			raw := string(data)
+			if raw == lastRaw {
+				continue
+			}
 			var rf upgrade.RouteFile
 			if err := json.Unmarshal(data, &rf); err != nil {
 				continue
 			}
-			if rf.Primary != lastPrimary {
-				if err := router.SetPrimary(rf.Primary); err != nil {
-					slog.Warn("edge: set primary from route file", "err", err)
-					continue
-				}
-				slog.Info("edge: primary flipped from route file", "primary", rf.Primary)
-				lastPrimary = rf.Primary
+			prim, err := router.ApplyRoute(rf.Backends, rf.Primary)
+			if err != nil {
+				slog.Warn("edge: apply route file", "err", err)
+				continue
 			}
-			// Note: adding backends requires router rebuild; AppendBackend
-			// always sets primary to the new index — SetPrimary works when
-			// the backend was already listed on the CLI. For newly appended
-			// URLs beyond initial BackendCount, log a warning (edge restart
-			// or initial multi --backend list still covers the swap case
-			// when both ports are predeclared).
-			if rf.Primary >= router.BackendCount() {
-				slog.Warn("edge: route primary exceeds configured backends; restart edge with updated --backend list",
-					"primary", rf.Primary, "configured", router.BackendCount())
+			if rf.RepinAll {
+				n := router.RepinAllToPrimary()
+				slog.Info("edge: repinned sessions to primary", "moved", n, "primary", prim)
+				rf.RepinAll = false
+				if b, mErr := json.MarshalIndent(rf, "", "  "); mErr == nil {
+					_ = os.WriteFile(path, append(b, '\n'), 0o600)
+				}
+			}
+			slog.Info("edge: route applied", "backends", router.BackendCount(), "primary", prim)
+			if b, err := os.ReadFile(path); err == nil {
+				lastRaw = string(b)
+			} else {
+				lastRaw = raw
 			}
 		}
 	}
@@ -800,9 +806,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	go runUpgradeDetectorLoop(ctx, upgradeDetector)
 
 	// Auto-apply (🎯T97.5). Homebrew-only. Sequence:
-	//   apply (brew upgrade) → spawn (new backend if edge-route) →
-	//   flip primary → OnUpgrade (session allowlist file) →
-	//   drain (SIGTERM self / brew services restart).
+	//   apply → OnUpgrade (pending file + in-process marks) →
+	//   spawn (sibling loads pending) → flip (edge-route grow+primary) →
+	//   drain (repin, release lease, grace wait, then exit/restart).
 	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
 	var spawnedBackendURL string
 	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
@@ -818,7 +824,6 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		},
 		SpawnBackend: func(ctx context.Context) error {
 			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
-				// Single-daemon: brew already replaced the binary on disk.
 				slog.Info("auto-upgrade: single-daemon mode (no edge-route); new binary ready")
 				return nil
 			}
@@ -845,28 +850,51 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			return nil
 		},
 		DrainOld: func(ctx context.Context) error {
-			// Release lease before exit so the new backend can take it.
+			// Release lease first so the new backend can take singleton work.
 			reg.ReleaseLease()
 			if homeForLease != "" && upgrade.RouteConfigured(homeForLease) {
-				// Edge owns client connections; this backend drains via SIGTERM.
-				slog.Info("auto-upgrade: signaling self for graceful drain (edge preserves clients)")
-				p, _ := os.FindProcess(os.Getpid())
+				// Ask edge to repin all sessions onto the new primary before
+				// we die, so client TCP stays valid and traffic moves.
+				if rf, err := upgrade.ReadRoute(homeForLease); err == nil {
+					rf.RepinAll = true
+					_ = upgrade.WriteRoute(homeForLease, rf)
+				}
+				// Grace window: let edge apply repin and in-flight RPCs finish.
+				grace := 2 * time.Second
+				if d := os.Getenv("MNEMO_DRAIN_GRACE"); d != "" {
+					if parsed, err := time.ParseDuration(d); err == nil {
+						grace = parsed
+					}
+				}
+				slog.Info("auto-upgrade: edge drain grace", "grace", grace)
+				select {
+				case <-ctx.Done():
+				case <-time.After(grace):
+				}
+				// Trigger the same graceful drain path as SIGTERM (WAL etc.).
+				slog.Info("auto-upgrade: signaling self after repin grace")
+				p, err := os.FindProcess(os.Getpid())
+				if err != nil {
+					return err
+				}
 				return p.Signal(syscall.SIGTERM)
 			}
-			// Single-daemon: brew services restart reaps us and starts the new binary.
 			slog.Info("auto-upgrade: brew services restart mnemo")
 			return runBrewServicesRestart(ctx)
 		},
 		OnUpgrade: func(from, to string) {
 			slog.Info("auto-upgrade: writing pending notices", "from", from, "to", to)
+			sessions := activeSessions.Snapshot()
+			// In-process banners for sessions this backend still serves.
+			upgradeNotices.MarkSessions(sessions, from, to)
 			if homeForLease == "" {
 				return
 			}
-			// Only sessions that were live before the swap get banners.
+			// Sibling loads this at startup (must be written before spawn).
 			if err := upgrade.WritePendingNotice(homeForLease, upgrade.PendingNotice{
 				From:     from,
 				To:       to,
-				Sessions: activeSessions.Snapshot(),
+				Sessions: sessions,
 			}); err != nil {
 				slog.Warn("auto-upgrade: write pending notice", "err", err)
 			}

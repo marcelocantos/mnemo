@@ -26,8 +26,9 @@ import (
 const SessionIDHeader = "Mcp-Session-Id"
 
 // Router maps MCP session IDs to backends and picks the primary backend
-// for new initialize requests.
+// for new initialize requests. Backends may grow at runtime (🎯T97.5).
 type Router struct {
+	mu       sync.RWMutex
 	backends []*url.URL
 	primary  atomic.Uint32
 	pins     sync.Map // sessionID string -> uint32 backend index
@@ -56,26 +57,116 @@ func NewRouter(backendURLs []string, primary int) (*Router, error) {
 }
 
 // BackendCount returns the number of configured backends.
-func (r *Router) BackendCount() int { return len(r.backends) }
+func (r *Router) BackendCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.backends)
+}
 
 // PrimaryIndex returns the backend index used for new initialize requests.
 func (r *Router) PrimaryIndex() int { return int(r.primary.Load()) }
 
+// BackendURL returns the string form of backend i, or "" if out of range.
+func (r *Router) BackendURL(i int) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if i < 0 || i >= len(r.backends) {
+		return ""
+	}
+	return r.backends[i].String()
+}
+
+// BackendURLs returns a copy of all backend URL strings.
+func (r *Router) BackendURLs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, len(r.backends))
+	for i, u := range r.backends {
+		out[i] = u.String()
+	}
+	return out
+}
+
 // SetPrimary changes which backend receives new initialize requests.
 func (r *Router) SetPrimary(idx int) error {
-	if idx < 0 || idx >= len(r.backends) {
-		return fmt.Errorf("edgeproxy: primary index %d out of range [0,%d)", idx, len(r.backends))
+	r.mu.RLock()
+	n := len(r.backends)
+	r.mu.RUnlock()
+	if idx < 0 || idx >= n {
+		return fmt.Errorf("edgeproxy: primary index %d out of range [0,%d)", idx, n)
 	}
 	r.primary.Store(uint32(idx))
 	return nil
 }
 
+// AddBackend appends a backend URL if not already present and returns
+// its index. Safe for concurrent use with routing (🎯T97.5 edge grow).
+func (r *Router) AddBackend(raw string) (int, error) {
+	u, err := parseBackendURL(raw)
+	if err != nil {
+		return -1, err
+	}
+	key := u.String()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, b := range r.backends {
+		if b.String() == key {
+			return i, nil
+		}
+	}
+	r.backends = append(r.backends, u)
+	return len(r.backends) - 1, nil
+}
+
+// ApplyRoute ensures every URL in backends is registered, then sets
+// primary. Returns the resolved primary index.
+func (r *Router) ApplyRoute(backends []string, primary int) (int, error) {
+	if len(backends) == 0 {
+		return -1, fmt.Errorf("edgeproxy: empty backend list")
+	}
+	for _, b := range backends {
+		if _, err := r.AddBackend(b); err != nil {
+			return -1, err
+		}
+	}
+	// Map primary by URL when possible (indices may have shifted if
+	// order differed); prefer the primary-th entry of the file list.
+	if primary < 0 || primary >= len(backends) {
+		return -1, fmt.Errorf("edgeproxy: primary %d out of range for route list", primary)
+	}
+	idx, err := r.AddBackend(backends[primary])
+	if err != nil {
+		return -1, err
+	}
+	if err := r.SetPrimary(idx); err != nil {
+		return -1, err
+	}
+	return idx, nil
+}
+
 // Pin records session affinity for a session ID.
 func (r *Router) Pin(sessionID string, backendIdx int) {
-	if sessionID == "" || backendIdx < 0 || backendIdx >= len(r.backends) {
+	r.mu.RLock()
+	n := len(r.backends)
+	r.mu.RUnlock()
+	if sessionID == "" || backendIdx < 0 || backendIdx >= n {
 		return
 	}
 	r.pins.Store(sessionID, uint32(backendIdx))
+}
+
+// RepinAllToPrimary moves every pin onto the current primary so a
+// draining backend can be reaped without orphaning sessions.
+func (r *Router) RepinAllToPrimary() (moved int) {
+	prim := r.PrimaryIndex()
+	r.pins.Range(func(key, value any) bool {
+		if int(value.(uint32)) != prim {
+			r.pins.Store(key, uint32(prim))
+			moved++
+		}
+		return true
+	})
+	return moved
 }
 
 // BackendForSession returns the pinned backend index and whether a pin
@@ -90,20 +181,52 @@ func (r *Router) BackendForSession(sessionID string) (idx int, pinned bool) {
 	return int(r.primary.Load()), false
 }
 
+func (r *Router) backendAt(i int) (*url.URL, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if i < 0 || i >= len(r.backends) {
+		return nil, false
+	}
+	return r.backends[i], true
+}
+
 // Proxy is an http.Handler that forwards MCP and ancillary HTTP traffic
 // to backends with session-aware routing on /mcp paths.
 type Proxy struct {
 	router  *Router
+	mu      sync.Mutex
 	clients []*http.Client
 }
 
 // NewProxy builds a Proxy for the given router.
 func NewProxy(router *Router) *Proxy {
-	clients := make([]*http.Client, len(router.backends))
-	for i, u := range router.backends {
-		clients[i] = newBackendClient(u)
+	p := &Proxy{router: router}
+	p.syncClients()
+	return p
+}
+
+// syncClients grows the client pool to match router backends.
+func (p *Proxy) syncClients() {
+	n := p.router.BackendCount()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for len(p.clients) < n {
+		u, ok := p.router.backendAt(len(p.clients))
+		if !ok {
+			break
+		}
+		p.clients = append(p.clients, newBackendClient(u))
 	}
-	return &Proxy{router: router, clients: clients}
+}
+
+func (p *Proxy) clientAt(i int) *http.Client {
+	p.syncClients()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i < 0 || i >= len(p.clients) {
+		return nil
+	}
+	return p.clients[i]
 }
 
 // ServeHTTP implements http.Handler.
@@ -113,7 +236,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	p.forward(backendIdx, w, r, body, pinOnResponse)
+	p.forward(backendIdx, w, r, body, pinOnResponse, true)
 }
 
 func (p *Proxy) routeRequest(r *http.Request) (backendIdx int, pinOnResponse bool, body []byte, err error) {
@@ -140,8 +263,17 @@ func (p *Proxy) routeRequest(r *http.Request) (backendIdx int, pinOnResponse boo
 	return backendIdx, false, body, nil
 }
 
-func (p *Proxy) forward(backendIdx int, w http.ResponseWriter, r *http.Request, body []byte, pinOnResponse bool) {
-	backend := p.router.backends[backendIdx]
+func (p *Proxy) forward(backendIdx int, w http.ResponseWriter, r *http.Request, body []byte, pinOnResponse bool, allowFailover bool) {
+	backend, ok := p.router.backendAt(backendIdx)
+	if !ok {
+		http.Error(w, "backend index out of range", http.StatusBadGateway)
+		return
+	}
+	client := p.clientAt(backendIdx)
+	if client == nil {
+		http.Error(w, "no client for backend", http.StatusBadGateway)
+		return
+	}
 	outURL := cloneRequestURL(r.URL, backend)
 
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL, nil)
@@ -159,8 +291,24 @@ func (p *Proxy) forward(backendIdx int, w http.ResponseWriter, r *http.Request, 
 		outReq.ContentLength = r.ContentLength
 	}
 
-	resp, err := p.clients[backendIdx].Do(outReq)
+	resp, err := client.Do(outReq)
 	if err != nil {
+		// Fail over pinned sessions to primary when a backend dies mid-drain.
+		if allowFailover {
+			prim := p.router.PrimaryIndex()
+			if prim != backendIdx {
+				if sid := r.Header.Get(SessionIDHeader); sid != "" {
+					p.router.Pin(sid, prim)
+				}
+				// Retry once on primary with a fresh body reader.
+				var retryBody []byte
+				if body != nil {
+					retryBody = body
+				}
+				p.forward(prim, w, r, retryBody, false, false)
+				return
+			}
+		}
 		http.Error(w, fmt.Sprintf("backend unreachable: %v", err), http.StatusBadGateway)
 		return
 	}

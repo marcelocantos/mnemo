@@ -233,6 +233,7 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 		apply := o.apply
 		spawn := o.spawn
 		from, to := o.fromVer, o.toVer
+		onUp := o.onUpgrade
 		o.mu.Unlock()
 		if apply != nil {
 			if err := apply(ctx); err != nil {
@@ -241,6 +242,12 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 				o.mu.Unlock()
 				return fmt.Errorf("apply: %w", err)
 			}
+		}
+		// Write pending notices BEFORE spawn so the sibling loads them
+		// at startup (LoadAndConsumePending). Also lets the old process
+		// mark in-process banners for sessions it still serves.
+		if onUp != nil {
+			onUp(from, to)
 		}
 		if spawn != nil {
 			if err := spawn(ctx); err != nil {
@@ -261,14 +268,6 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 				o.mu.Unlock()
 				return fmt.Errorf("flip primary: %w", err)
 			}
-		}
-		// OnUpgrade runs before drain so a restarting process can still
-		// persist session banners / route state while this process lives.
-		o.mu.Lock()
-		onUp := o.onUpgrade
-		o.mu.Unlock()
-		if onUp != nil {
-			onUp(from, to)
 		}
 		o.mu.Lock()
 		o.enter(PhaseDraining)

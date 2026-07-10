@@ -80,20 +80,22 @@ work; the apply state machine enters `notify_only` and never runs brew.
 1. Detector reports newer tag → phase `available`
 2. No MCP traffic for `quiescence` → phase `quiescent`
 3. **Apply:** `brew upgrade mnemo` (new binary on disk)
-4. **Spawn:** if `~/.mnemo/edge-route.json` exists, start a sibling
-   `mnemo --addr 127.0.0.1:<free>`; else single-daemon no-op (binary ready)
-5. **Flip:** append spawned URL to `edge-route.json` and set `primary`
-   (edge polls this file every second). Single-daemon: no-op
-6. **OnUpgrade (before drain):** write `~/.mnemo/upgrade-pending` with
-   `from`, `to`, and the **allowlist of live Mcp-Session-Id values**
-   seen by this process — only those sessions get a banner
-7. **Drain:** edge mode → `SIGTERM` self (graceful drain; edge keeps
-   client TCP). Single-daemon → `brew services restart mnemo`
-8. New process **loads and deletes** `upgrade-pending` once, queues
-   banners for allowlisted sessions only: `mnemo upgraded vN -> vN+1`
+4. **OnUpgrade (before spawn):** write `~/.mnemo/upgrade-pending` with
+   `from`/`to` + **allowlisted live session IDs**; also mark those
+   sessions in-process on the old backend for banners while it still
+   serves them
+5. **Spawn:** if `edge-route.json` exists, start sibling
+   `mnemo --addr 127.0.0.1:<free>` (loads + deletes pending at boot);
+   else single-daemon no-op
+6. **Flip:** `AppendBackend` grows `edge-route.json` and sets `primary`
+   to the new URL. Edge `watchEdgeRoute` calls `Router.ApplyRoute`
+   which **AddBackend**s missing URLs then `SetPrimary` (no restart)
+7. **Drain:** edge mode → set `repin_all` on the route file (edge moves
+   pins to primary), grace wait, then `SIGTERM` self. Edge also fails
+   over unreachable pinned backends to primary. Single-daemon →
+   `brew services restart mnemo`
 
-Non-Homebrew and Windows: phase stays `notify_only` — detection still
-runs; no brew/spawn/drain.
+Non-Homebrew and Windows: phase stays `notify_only`.
 
 ## Running edge + backend (T97.3 slice)
 

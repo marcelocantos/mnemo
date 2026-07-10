@@ -64,8 +64,131 @@ func TestRouterUnixBackendURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.backends[0].Scheme != "unix" || r.backends[0].Path != "/tmp/mnemo-backend.sock" {
-		t.Fatalf("unix url: %+v", r.backends[0])
+	u, ok := r.backendAt(0)
+	if !ok || u.Scheme != "unix" || u.Path != "/tmp/mnemo-backend.sock" {
+		t.Fatalf("unix url: %+v ok=%v", u, ok)
+	}
+}
+
+func TestRouterAddBackendAndApplyRoute(t *testing.T) {
+	t.Parallel()
+	r, err := NewRouter([]string{"http://127.0.0.1:1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := r.AddBackend("http://127.0.0.1:2")
+	if err != nil || idx != 1 {
+		t.Fatalf("add: idx=%d err=%v", idx, err)
+	}
+	// Idempotent
+	idx2, err := r.AddBackend("http://127.0.0.1:2")
+	if err != nil || idx2 != 1 {
+		t.Fatalf("add again: idx=%d err=%v", idx2, err)
+	}
+	prim, err := r.ApplyRoute([]string{"http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3"}, 2)
+	if err != nil || prim != 2 {
+		t.Fatalf("apply: prim=%d err=%v count=%d", prim, err, r.BackendCount())
+	}
+	if r.BackendCount() != 3 {
+		t.Fatalf("count %d", r.BackendCount())
+	}
+	if r.PrimaryIndex() != 2 {
+		t.Fatalf("primary %d", r.PrimaryIndex())
+	}
+}
+
+func TestProxyFailoverRepinsToPrimary(t *testing.T) {
+	t.Parallel()
+	// Backend 0 dies; backend 1 is primary and healthy.
+	alive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("alive"))
+	}))
+	t.Cleanup(alive.Close)
+
+	// Dead listener: close immediately so dial fails.
+	deadLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := deadLn.Addr().String()
+	_ = deadLn.Close()
+
+	router, err := NewRouter([]string{
+		"http://" + deadAddr,
+		alive.URL,
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router.Pin("sess-x", 0) // pinned to dead
+	proxy := NewProxy(router)
+
+	req := httptest.NewRequest(http.MethodGet, "http://edge/mcp", nil)
+	req.Header.Set(SessionIDHeader, "sess-x")
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "alive" {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	idx, pinned := router.BackendForSession("sess-x")
+	if !pinned || idx != 1 {
+		t.Fatalf("expected repin to primary 1, got idx=%d pinned=%v", idx, pinned)
+	}
+}
+
+func TestRepinAllToPrimary(t *testing.T) {
+	t.Parallel()
+	r, _ := NewRouter([]string{"http://127.0.0.1:1", "http://127.0.0.1:2"}, 1)
+	r.Pin("a", 0)
+	r.Pin("b", 0)
+	if n := r.RepinAllToPrimary(); n != 2 {
+		t.Fatalf("moved %d", n)
+	}
+	if idx, _ := r.BackendForSession("a"); idx != 1 {
+		t.Fatalf("a idx %d", idx)
+	}
+}
+
+// Proves 🎯T97.5 edge grow: start with one backend, ApplyRoute adds a
+// second URL as primary, and new initialize traffic hits the new one.
+func TestProxyGrowsBackendAndRoutesNewInitToPrimary(t *testing.T) {
+	t.Parallel()
+	var hits [2]atomic.Int32
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits[0].Add(1)
+		w.Header().Set(SessionIDHeader, "sid-old")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("b0"))
+	}))
+	t.Cleanup(b0.Close)
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits[1].Add(1)
+		w.Header().Set(SessionIDHeader, "sid-new")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("b1"))
+	}))
+	t.Cleanup(b1.Close)
+
+	router, err := NewRouter([]string{b0.URL}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy(router)
+
+	// Grow + flip as edge-route would after spawn.
+	if _, err := router.ApplyRoute([]string{b0.URL, b1.URL}, 1); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://edge/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Body.String() != "b1" || rec.Header().Get(SessionIDHeader) != "sid-new" {
+		t.Fatalf("body=%q sid=%q hits=%d/%d", rec.Body.String(), rec.Header().Get(SessionIDHeader), hits[0].Load(), hits[1].Load())
+	}
+	if hits[1].Load() != 1 || hits[0].Load() != 0 {
+		t.Fatalf("hits b0=%d b1=%d", hits[0].Load(), hits[1].Load())
 	}
 }
 
