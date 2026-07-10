@@ -3637,6 +3637,8 @@ targets:
       Reverted 2026-07-10: Parent depends on T97.5 connection-preserving edge swap which was prematurely marked achieved.
 
       Reverted 2026-07-10: Parent blocked on T97.5 affinity-drain invariant for connection-preserving upgrade.
+
+      Reverted 2026-07-10: Blocked on T97.5 pin lifecycle (DELETE unpin + safe pin_counts reads).
     tags:
     - upgrade
     - daemon
@@ -3743,6 +3745,8 @@ targets:
       Reverted 2026-07-10: Edge auto-apply cannot register new backends, notices miss sibling process, and immediate SIGTERM breaks pinned sessions — connection-preserving path not yet real.
 
       Reverted 2026-07-10: Affinity drain required: repin+SIGTERM invalidates mcp-go stateful sessions; must keep old backend until pin count is zero.
+
+      Reverted 2026-07-10: Pin lifecycle incomplete: Unpin never called from Proxy; ReadRoute errors treated as 0 pins force-reap live sessions.
     depends_on:
     - T97.1
     - T97.2
