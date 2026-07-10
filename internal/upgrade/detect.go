@@ -72,17 +72,17 @@ type DetectorArgs struct {
 // Detector caches the latest known release tag and compares it to the
 // running binary version (🎯T97.2).
 type Detector struct {
-	mu             sync.Mutex
-	current        string
-	fetch          TagFetcher
-	disabled       bool
-	minInterval    time.Duration
-	now            func() time.Time
-	latest         string
-	checkedAt      time.Time
-	lastErr        string
-	fetchCount     int // for tests: how many times Fetch was invoked
-	upgradeAvail   bool
+	mu           sync.Mutex
+	current      string
+	fetch        TagFetcher
+	disabled     bool
+	minInterval  time.Duration
+	now          func() time.Time
+	latest       string
+	checkedAt    time.Time
+	lastErr      string
+	fetchCount   int // for tests: how many times Fetch was invoked
+	upgradeAvail bool
 }
 
 // NewDetector builds a Detector from args.
@@ -123,13 +123,13 @@ func (d *Detector) FetchCount() int {
 
 // Snapshot is a point-in-time view of detection state for diagnostics.
 type Snapshot struct {
-	Current        string
-	Latest         string
-	CheckedAt      time.Time
-	Disabled       bool
-	UpgradeAvail   bool
-	LastError      string
-	FetchCount     int
+	Current      string
+	Latest       string
+	CheckedAt    time.Time
+	Disabled     bool
+	UpgradeAvail bool
+	LastError    string
+	FetchCount   int
 }
 
 // Snapshot returns the current detection state.

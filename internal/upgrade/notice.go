@@ -11,7 +11,7 @@ import (
 // NoticeTracker records per-session upgrade banners so each session
 // sees `mnemo upgraded vN -> vN+1` at most once (🎯T97.6).
 type NoticeTracker struct {
-	mu    sync.Mutex
+	mu      sync.Mutex
 	pending map[string]string // sessionID -> message
 	shown   map[string]string // sessionID -> last delivered message (dedupe)
 }

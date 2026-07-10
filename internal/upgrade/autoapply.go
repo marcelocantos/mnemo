@@ -52,10 +52,10 @@ const (
 
 // OrchestratorArgs configures auto-apply orchestration (🎯T97.5).
 type OrchestratorArgs struct {
-	Enabled     bool
-	Env         ApplyEnv
-	Quiescence  time.Duration
-	Detector    *Detector
+	Enabled    bool
+	Env        ApplyEnv
+	Quiescence time.Duration
+	Detector   *Detector
 	// LastActivity returns the time of the most recent MCP traffic.
 	LastActivity func() time.Time
 	// Apply installs the new binary (e.g. brew upgrade mnemo). Optional

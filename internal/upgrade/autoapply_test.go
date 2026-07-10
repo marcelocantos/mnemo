@@ -69,10 +69,10 @@ func TestOrchestratorFullStateMachine(t *testing.T) {
 	var steps []string
 	var noticeFrom, noticeTo string
 	o := NewOrchestrator(&OrchestratorArgs{
-		Enabled:     true,
-		Env:         ApplyEnv{Homebrew: true, GOOS: "darwin"},
-		Quiescence:  30 * time.Minute,
-		Detector:    d,
+		Enabled:      true,
+		Env:          ApplyEnv{Homebrew: true, GOOS: "darwin"},
+		Quiescence:   30 * time.Minute,
+		Detector:     d,
 		LastActivity: func() time.Time { return lastAct },
 		Apply: func(ctx context.Context) error {
 			steps = append(steps, "apply")

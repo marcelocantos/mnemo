@@ -208,14 +208,14 @@ func (l *Lease) RunningBackground() bool {
 
 // Status is a diagnostic view of the lease file + local hold state.
 type Status struct {
-	Path           string
-	HeldLocally    bool
-	RunningBG      bool
-	FileHolder     string
-	FileHeartbeat  time.Time
-	FilePresent    bool
-	Expired        bool
-	LocalHolderID  string
+	Path          string
+	HeldLocally   bool
+	RunningBG     bool
+	FileHolder    string
+	FileHeartbeat time.Time
+	FilePresent   bool
+	Expired       bool
+	LocalHolderID string
 }
 
 // Status inspects the lease file and local state for mnemo_doctor.
