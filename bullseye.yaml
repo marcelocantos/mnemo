@@ -3622,7 +3622,7 @@ targets:
     achieved: 2026-06-29
   T97:
     name: mnemo upgrades its own binary without dropping live MCP connections
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     actual_cost: 13.0
@@ -3647,6 +3647,7 @@ targets:
     - ops
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.1:
     name: The backend daemon drains gracefully on SIGTERM/SIGINT and leaves a checkpointed WAL
     status: achieved
@@ -3730,7 +3731,7 @@ targets:
     achieved: 2026-07-10
   T97.5:
     name: Opt-in auto-apply upgrades the backend at a quiescent window with connections preserved
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     actual_cost: 8.0
@@ -3759,6 +3760,7 @@ targets:
     - auto-apply
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.6:
     name: Sessions spanning a backend swap are told they were upgraded
     status: achieved
