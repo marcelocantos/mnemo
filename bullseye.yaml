@@ -3622,9 +3622,10 @@ targets:
     achieved: 2026-06-29
   T97:
     name: mnemo upgrades its own binary without dropping live MCP connections
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 13.0
     acceptance:
     - 'A backend version change while Claude Code sessions are connected invalidates no session: none needs /mcp, no in-flight tool call is lost beyond the swap instant.'
     - Detection + notification of a new release works with auto-apply disabled; enabling auto_upgrade.enabled performs the full swap at a quiescent window.
@@ -3639,6 +3640,7 @@ targets:
     - ops
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.1:
     name: The backend daemon drains gracefully on SIGTERM/SIGINT and leaves a checkpointed WAL
     status: achieved
@@ -3660,9 +3662,10 @@ targets:
     achieved: 2026-07-06
   T97.2:
     name: A newer mnemo release is detected and surfaced via the T83 health pipeline
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - A low-frequency worker queries `gh release list --repo marcelocantos/mnemo` and caches the latest tag versus the version constant.
     - A diag.Check named upgrade.available reports warn when a newer version exists, flowing to mnemo_doctor + OS notification + dashboard /health via the existing T83 path.
@@ -3676,11 +3679,13 @@ targets:
     - notification
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.3:
     name: A transparent edge proxy owns client connections and routes by Mcp-Session-Id to a backend
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - The edge process owns the :19419 listener and all client connections; the backend listens on loopback/UDS.
     - Requests route to a backend by Mcp-Session-Id; edge<->backend traffic is standard MCP-over-HTTP (no custom protocol).
@@ -3696,11 +3701,13 @@ targets:
     - edge
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.4:
     name: Singleton background work is guarded by a single-holder lease
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - Exactly one backend holds the lease and runs ingest/compaction/mirrors/image pools.
     - Lease handoff between two live backends completes in under ~1s with no double-ingest.
@@ -3714,11 +3721,13 @@ targets:
     - background
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.5:
     name: Opt-in auto-apply upgrades the backend at a quiescent window with connections preserved
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - auto_upgrade.enabled gates the apply path; default off (detection/notification stay on).
     - When enabled and a newer release is detected, after 30 min of MCP traffic quiescence the daemon runs a detached `brew upgrade mnemo`, spawns the new backend, routes new sessions to it, and drains+checkpoints+reaps the old backend.
@@ -3737,11 +3746,13 @@ targets:
     - auto-apply
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T97.6:
     name: Sessions spanning a backend swap are told they were upgraded
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - A session routed to a newer backend than the one it initialized under receives a one-time `mnemo upgraded vN -> vN+1` notice in its next tool result.
     - tools/list_changed is pushed best-effort after a version change (or the client re-lists on reconnect).
@@ -3756,6 +3767,7 @@ targets:
     - agent
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-10
   T99:
     name: mnemo ingests Codex CLI session transcripts into the existing searchable index
     status: achieved
