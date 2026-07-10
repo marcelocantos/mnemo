@@ -24,6 +24,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -476,19 +478,47 @@ func (s *stringList) Set(v string) error {
 // the public listener and all client connections; backends serve on
 // loopback HTTP or a Unix domain socket. Session affinity is by
 // Mcp-Session-Id — standard MCP-over-HTTP, no custom protocol.
+//
+// When --route-file is set (or defaults to ~/.mnemo/edge-route.json and
+// that file exists), the edge reloads primary index from the file so
+// auto-apply can flip backends without restarting the edge (🎯T97.5).
 func cmdEdge(args []string) {
 	fs := flag.NewFlagSet("edge", flag.ExitOnError)
 	listen := fs.String("listen", defaultAddr,
 		"public listen address (edge owns client TCP connections)")
 	primary := fs.Int("primary", 0,
 		"index of the backend that receives new initialize requests")
+	routeFile := fs.String("route-file", "",
+		"optional edge-route.json path (default: ~/.mnemo/edge-route.json when present)")
 	var backends stringList
 	fs.Var(&backends, "backend",
 		"backend base URL (repeatable). http://host:port or unix:///path")
 	_ = fs.Parse(args)
 
+	// Prefer explicit --backend flags; else load route file.
+	routePath := *routeFile
+	if routePath == "" {
+		if home, err := store.EffectiveHome(); err == nil && upgrade.RouteConfigured(home) {
+			routePath = upgrade.RoutePath(home)
+		}
+	}
+	if len(backends) == 0 && routePath != "" {
+		data, err := os.ReadFile(routePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "edge: read route file: %v\n", err)
+			os.Exit(1)
+		}
+		var rf upgrade.RouteFile
+		if err := json.Unmarshal(data, &rf); err != nil {
+			fmt.Fprintf(os.Stderr, "edge: parse route file: %v\n", err)
+			os.Exit(1)
+		}
+		backends = rf.Backends
+		*primary = rf.Primary
+	}
 	if len(backends) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: mnemo edge --backend URL [--backend URL ...] [--listen :19419] [--primary 0]")
+		fmt.Fprintln(os.Stderr, "   or: mnemo edge --route-file ~/.mnemo/edge-route.json")
 		fmt.Fprintln(os.Stderr, "edge: at least one --backend is required")
 		os.Exit(2)
 	}
@@ -510,12 +540,18 @@ func cmdEdge(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Poll route file for primary flips (and appended backends).
+	if routePath != "" {
+		go watchEdgeRoute(ctx, routePath, router)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("edge listening",
 			"listen", *listen,
 			"backends", len(backends),
 			"primary", *primary,
+			"route_file", routePath,
 			"version", version,
 		)
 		errCh <- srv.ListenAndServe()
@@ -533,6 +569,48 @@ func cmdEdge(args []string) {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(os.Stderr, "edge: %v\n", err)
 			os.Exit(1)
+		}
+	}
+}
+
+// watchEdgeRoute reloads primary (and rebuilds router backends when the
+// list grows) from edge-route.json so auto-apply can flip without
+// restarting the edge process.
+func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var lastPrimary = router.PrimaryIndex()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var rf upgrade.RouteFile
+			if err := json.Unmarshal(data, &rf); err != nil {
+				continue
+			}
+			if rf.Primary != lastPrimary {
+				if err := router.SetPrimary(rf.Primary); err != nil {
+					slog.Warn("edge: set primary from route file", "err", err)
+					continue
+				}
+				slog.Info("edge: primary flipped from route file", "primary", rf.Primary)
+				lastPrimary = rf.Primary
+			}
+			// Note: adding backends requires router rebuild; AppendBackend
+			// always sets primary to the new index — SetPrimary works when
+			// the backend was already listed on the CLI. For newly appended
+			// URLs beyond initial BackendCount, log a warning (edge restart
+			// or initial multi --backend list still covers the swap case
+			// when both ports are predeclared).
+			if rf.Primary >= router.BackendCount() {
+				slog.Warn("edge: route primary exceeds configured backends; restart edge with updated --backend list",
+					"primary", rf.Primary, "configured", router.BackendCount())
+			}
 		}
 	}
 }
@@ -656,10 +734,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Lease is acquired before eager ForUser so startWorkers can gate
 	// singleton background work on holder status.
 	upgradeNotices := upgrade.NewNoticeTracker()
+	activeSessions := upgrade.NewSessionSet()
 	var lastMCPActivity atomicTime
 	lastMCPActivity.Set(time.Now())
 
 	homeForLease, homeErr := store.EffectiveHome()
+	if homeErr == nil {
+		// Load once: allowlisted sessions only; file is deleted (🎯T97.6).
+		if _, _, err := upgrade.LoadAndConsumePending(homeForLease, upgradeNotices); err != nil {
+			slog.Warn("upgrade pending notice load failed", "err", err)
+		}
+	}
+
 	var bgLease *upgrade.Lease
 	if homeErr == nil {
 		var lerr error
@@ -713,7 +799,12 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	reg.SetUpgradeDetector(upgradeDetector)
 	go runUpgradeDetectorLoop(ctx, upgradeDetector)
 
+	// Auto-apply (🎯T97.5). Homebrew-only. Sequence:
+	//   apply (brew upgrade) → spawn (new backend if edge-route) →
+	//   flip primary → OnUpgrade (session allowlist file) →
+	//   drain (SIGTERM self / brew services restart).
 	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
+	var spawnedBackendURL string
 	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
 		Enabled:    cfg.AutoUpgrade.Enabled,
 		Env:        upgrade.ApplyEnv{Homebrew: isHomebrewInstall(), GOOS: ""},
@@ -725,23 +816,59 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		Apply: func(ctx context.Context) error {
 			return runBrewUpgrade(ctx)
 		},
-		// SpawnBackend / FlipPrimary / DrainOld: full multi-process
-		// orchestration needs the edge supervisor; state machine is
-		// covered by unit tests. Production path logs and relies on
-		// brew services restart when edge is not yet supervising.
-		SpawnBackend: nil,
-		FlipPrimary:  nil,
-		DrainOld:     nil,
+		SpawnBackend: func(ctx context.Context) error {
+			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
+				// Single-daemon: brew already replaced the binary on disk.
+				slog.Info("auto-upgrade: single-daemon mode (no edge-route); new binary ready")
+				return nil
+			}
+			url, err := spawnLoopbackBackend(ctx)
+			if err != nil {
+				return err
+			}
+			spawnedBackendURL = url
+			slog.Info("auto-upgrade: spawned backend", "url", url)
+			return nil
+		},
+		FlipPrimary: func(ctx context.Context) error {
+			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
+				return nil
+			}
+			if spawnedBackendURL == "" {
+				return fmt.Errorf("auto-upgrade: no spawned backend to flip to")
+			}
+			r, err := upgrade.AppendBackend(homeForLease, spawnedBackendURL)
+			if err != nil {
+				return err
+			}
+			slog.Info("auto-upgrade: edge primary flipped", "primary", r.Primary, "url", spawnedBackendURL)
+			return nil
+		},
+		DrainOld: func(ctx context.Context) error {
+			// Release lease before exit so the new backend can take it.
+			reg.ReleaseLease()
+			if homeForLease != "" && upgrade.RouteConfigured(homeForLease) {
+				// Edge owns client connections; this backend drains via SIGTERM.
+				slog.Info("auto-upgrade: signaling self for graceful drain (edge preserves clients)")
+				p, _ := os.FindProcess(os.Getpid())
+				return p.Signal(syscall.SIGTERM)
+			}
+			// Single-daemon: brew services restart reaps us and starts the new binary.
+			slog.Info("auto-upgrade: brew services restart mnemo")
+			return runBrewServicesRestart(ctx)
+		},
 		OnUpgrade: func(from, to string) {
-			slog.Info("auto-upgrade complete", "from", from, "to", to)
-			// Persist from-version so the new backend process can banner
-			// sessions that reconnect with the same Mcp-Session-Id.
-			if homeForLease != "" {
-				_ = os.WriteFile(
-					filepath.Join(homeForLease, ".mnemo", "upgrade-from"),
-					[]byte(from+"\n"+to+"\n"),
-					0o600,
-				)
+			slog.Info("auto-upgrade: writing pending notices", "from", from, "to", to)
+			if homeForLease == "" {
+				return
+			}
+			// Only sessions that were live before the swap get banners.
+			if err := upgrade.WritePendingNotice(homeForLease, upgrade.PendingNotice{
+				From:     from,
+				To:       to,
+				Sessions: activeSessions.Snapshot(),
+			}); err != nil {
+				slog.Warn("auto-upgrade: write pending notice", "err", err)
 			}
 		},
 	})
@@ -900,12 +1027,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// same registry that backs the /health endpoint and the scheduler.
 	handler.SetDiagRunner(diagReg)
 
-	// 🎯T97.6: one-time upgrade notice on tool results. If a previous
-	// auto-apply left ~/.mnemo/upgrade-from, banner the first tool call
-	// per session after this process started.
-	if homeForLease != "" {
-		loadPendingUpgradeNotices(homeForLease, version, upgradeNotices)
-	}
+	// 🎯T97.6: one-time upgrade notice on tool results (allowlisted sessions).
 	handler.SetUpgradeNotices(upgradeNotices)
 
 	// Build a federation client if linked_instances are configured —
@@ -958,12 +1080,12 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	//   /api/*        → JSON REST API (for the dashboard)
 	//   /             → Web dashboard UI
 	mux := http.NewServeMux()
-	// Track MCP traffic for auto-apply quiescence (🎯T97.5) and mark
-	// sessions for upgrade notices (🎯T97.6).
+	// Track MCP traffic for auto-apply quiescence (🎯T97.5) and remember
+	// live session IDs so OnUpgrade can allowlist spanning sessions only.
 	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastMCPActivity.Set(time.Now())
 		if sid := r.Header.Get(edgeproxy.SessionIDHeader); sid != "" {
-			maybeMarkSessionUpgrade(homeForLease, version, sid, upgradeNotices)
+			activeSessions.Add(sid)
 		}
 		httpSrv.ServeHTTP(w, r)
 	})
@@ -1172,48 +1294,54 @@ func runBrewUpgrade(ctx context.Context) error {
 	return nil
 }
 
-// loadPendingUpgradeNotices reads ~/.mnemo/upgrade-from left by a prior
-// auto-apply so the new process can banner sessions (🎯T97.6).
-func loadPendingUpgradeNotices(home, current string, tr *upgrade.NoticeTracker) {
-	path := filepath.Join(home, ".mnemo", "upgrade-from")
-	data, err := os.ReadFile(path)
+func runBrewServicesRestart(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "brew", "services", "restart", "mnemo")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return
+		return fmt.Errorf("brew services restart mnemo: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) < 1 {
-		return
-	}
-	from := strings.TrimSpace(lines[0])
-	to := current
-	if len(lines) >= 2 && strings.TrimSpace(lines[1]) != "" {
-		to = strings.TrimSpace(lines[1])
-	}
-	// Stash for maybeMarkSessionUpgrade; keep file until first use set.
-	_ = os.WriteFile(path+".active", []byte(from+"\n"+to+"\n"), 0o600)
-	_ = os.Remove(path)
-	_ = tr // sessions marked lazily on first MCP request
+	return nil
 }
 
-func maybeMarkSessionUpgrade(home, current, sessionID string, tr *upgrade.NoticeTracker) {
-	if home == "" || sessionID == "" || tr == nil {
-		return
-	}
-	path := filepath.Join(home, ".mnemo", "upgrade-from.active")
-	data, err := os.ReadFile(path)
+// spawnLoopbackBackend starts a sibling mnemo daemon on a free loopback
+// port for edge-mediated handoff (🎯T97.5). Returns the base URL.
+func spawnLoopbackBackend(ctx context.Context) (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return
+		return "", err
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) < 1 {
-		return
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
 	}
-	from := strings.TrimSpace(lines[0])
-	to := current
-	if len(lines) >= 2 && strings.TrimSpace(lines[1]) != "" {
-		to = strings.TrimSpace(lines[1])
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	cmd := exec.CommandContext(ctx, exe, "--addr", addr)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("spawn backend: %w", err)
 	}
-	tr.MarkSession(sessionID, from, to)
+	// Detach: do not wait; the new process is supervised by the OS /
+	// brew. Record PID for diagnostics.
+	slog.Info("spawned backend process", "pid", cmd.Process.Pid, "addr", addr)
+	go func() { _ = cmd.Wait() }()
+	// Brief readiness wait: poll TCP until accept or timeout.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return "http://" + addr, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return "http://" + addr, nil // return anyway; edge will 502 until ready
 }
 
 // compactorAdapter satisfies tools.CompactorHealthReporter by

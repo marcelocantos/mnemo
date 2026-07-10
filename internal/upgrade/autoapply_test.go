@@ -129,7 +129,9 @@ func TestOrchestratorFullStateMachine(t *testing.T) {
 	if o.Phase() != PhaseDone {
 		t.Fatalf("want done, got %s hist=%v", o.Phase(), o.History())
 	}
-	wantSteps := "apply,spawn,flip,drain,notice"
+	// OnUpgrade must run before drain so a restarting process can
+	// persist banners/route state while still alive.
+	wantSteps := "apply,spawn,flip,notice,drain"
 	if got := strings.Join(steps, ","); got != wantSteps {
 		t.Fatalf("steps %s want %s", got, wantSteps)
 	}

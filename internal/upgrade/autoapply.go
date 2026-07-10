@@ -262,18 +262,22 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 				return fmt.Errorf("flip primary: %w", err)
 			}
 		}
+		// OnUpgrade runs before drain so a restarting process can still
+		// persist session banners / route state while this process lives.
+		o.mu.Lock()
+		onUp := o.onUpgrade
+		o.mu.Unlock()
+		if onUp != nil {
+			onUp(from, to)
+		}
 		o.mu.Lock()
 		o.enter(PhaseDraining)
 		drain := o.drain
-		onUp := o.onUpgrade
 		o.mu.Unlock()
 		if drain != nil {
 			if err := drain(ctx); err != nil {
 				return fmt.Errorf("drain old: %w", err)
 			}
-		}
-		if onUp != nil {
-			onUp(from, to)
 		}
 		o.mu.Lock()
 		o.enter(PhaseDone)

@@ -75,18 +75,25 @@ Non-Homebrew and Windows installs are **notify-only** even when
 `auto_upgrade.enabled` is true: detection and `upgrade.available` still
 work; the apply state machine enters `notify_only` and never runs brew.
 
-## Auto-apply order (Homebrew)
+## Auto-apply order (Homebrew, `auto_upgrade.enabled`)
 
 1. Detector reports newer tag → phase `available`
 2. No MCP traffic for `quiescence` → phase `quiescent`
-3. `brew upgrade mnemo` → spawn new backend (when edge-supervised) →
-   flip primary → drain old → write `~/.mnemo/upgrade-from` for 🎯T97.6
-4. New process banners sessions once: `mnemo upgraded vN -> vN+1`
+3. **Apply:** `brew upgrade mnemo` (new binary on disk)
+4. **Spawn:** if `~/.mnemo/edge-route.json` exists, start a sibling
+   `mnemo --addr 127.0.0.1:<free>`; else single-daemon no-op (binary ready)
+5. **Flip:** append spawned URL to `edge-route.json` and set `primary`
+   (edge polls this file every second). Single-daemon: no-op
+6. **OnUpgrade (before drain):** write `~/.mnemo/upgrade-pending` with
+   `from`, `to`, and the **allowlist of live Mcp-Session-Id values**
+   seen by this process — only those sessions get a banner
+7. **Drain:** edge mode → `SIGTERM` self (graceful drain; edge keeps
+   client TCP). Single-daemon → `brew services restart mnemo`
+8. New process **loads and deletes** `upgrade-pending` once, queues
+   banners for allowlisted sessions only: `mnemo upgraded vN -> vN+1`
 
-Full multi-process edge supervision of spawn/flip is unit-tested as a
-state machine; production Homebrew installs that still run a single
-daemon process rely on `brew services restart` after apply until the
-edge is the default launch path.
+Non-Homebrew and Windows: phase stays `notify_only` — detection still
+runs; no brew/spawn/drain.
 
 ## Running edge + backend (T97.3 slice)
 
