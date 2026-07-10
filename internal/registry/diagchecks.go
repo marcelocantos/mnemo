@@ -15,6 +15,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/upgrade"
 )
 
 // BuildDiagRegistry assembles the daemon's self-diagnostics check
@@ -23,6 +24,9 @@ import (
 // anchors the "backfill ran since startup" check. The returned registry is
 // wired into the /health endpoint (via SetDiagRunner), the mnemo_doctor
 // tool, and the diag scheduler.
+//
+// Optional upgrade detector and background lease (🎯T97.2 / 🎯T97.4) are
+// read from the Registry when set via SetUpgradeDetector / SetLease.
 func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) *diag.Registry {
 	reg := diag.NewRegistry()
 	workDir := r.summariserWorkDir
@@ -174,6 +178,59 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					"if it keeps growing, restart the daemon; a wedged worker shows up as compactor.breaker")
 			}
 			return diag.Healthy("WAL size healthy")
+		}},
+
+		// 🎯T97.2: newer release available (warn). Uses the last
+		// Detector snapshot so the diag path itself does not force a
+		// network call — the detector worker owns polling.
+		diag.Check{Name: "upgrade.available", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			d := r.UpgradeDetector()
+			if d == nil {
+				return diag.Healthy("upgrade detector not configured")
+			}
+			snap := d.Snapshot()
+			if snap.Disabled {
+				return diag.Healthy("upgrade check disabled (disable_upgrade_check)")
+			}
+			if snap.LastError != "" && snap.Latest == "" {
+				return diag.Warning(
+					"could not query latest release: "+snap.LastError,
+					"ensure `gh` is installed and authenticated, or set disable_upgrade_check")
+			}
+			if snap.UpgradeAvail {
+				return diag.Warning(
+					fmt.Sprintf("upgrade available: running v%s, latest %s",
+						upgrade.NormalizeTag(snap.Current), snap.Latest),
+					"brew upgrade mnemo  # or enable auto_upgrade.enabled on Homebrew")
+			}
+			if snap.Latest == "" {
+				return diag.Healthy("upgrade check has not completed yet")
+			}
+			return diag.Healthy(fmt.Sprintf("up to date (running v%s, latest %s)",
+				upgrade.NormalizeTag(snap.Current), snap.Latest))
+		}},
+
+		// 🎯T97.4: singleton background lease ownership.
+		diag.Check{Name: "background.lease", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			l := r.Lease()
+			if l == nil {
+				return diag.Healthy("background lease not configured")
+			}
+			st := l.Status()
+			if st.HeldLocally {
+				detail := fmt.Sprintf("this process holds the background lease (%s)", st.LocalHolderID)
+				if st.RunningBG {
+					detail += "; singleton background work running"
+				}
+				return diag.Healthy(detail)
+			}
+			if st.FilePresent && st.FileHolder != "" && !st.Expired {
+				return diag.Healthy(fmt.Sprintf(
+					"background lease held by %s (this process is serve-only)", st.FileHolder))
+			}
+			return diag.Warning(
+				"no live background lease holder — ingest/compaction may be paused",
+				"ensure exactly one mnemo backend is running, or check ~/.mnemo/background.lease")
 		}},
 	)
 	return reg

@@ -36,6 +36,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,6 +53,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
+	"github.com/marcelocantos/mnemo/internal/upgrade"
 )
 
 // stdioMigrationManualHint is emitted only when auto-migration of
@@ -650,6 +652,101 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
+	// 🎯T97: upgrade detector, background lease, notices, auto-apply.
+	// Lease is acquired before eager ForUser so startWorkers can gate
+	// singleton background work on holder status.
+	upgradeNotices := upgrade.NewNoticeTracker()
+	var lastMCPActivity atomicTime
+	lastMCPActivity.Set(time.Now())
+
+	homeForLease, homeErr := store.EffectiveHome()
+	var bgLease *upgrade.Lease
+	if homeErr == nil {
+		var lerr error
+		bgLease, lerr = upgrade.NewLease(&upgrade.LeaseArgs{
+			Path:     upgrade.DefaultLeasePath(homeForLease),
+			HolderID: upgrade.DefaultHolderID(),
+		})
+		if lerr != nil {
+			slog.Warn("background lease unavailable", "err", lerr)
+		} else {
+			reg.SetLease(bgLease)
+			if ok, aerr := bgLease.TryAcquire(); aerr != nil {
+				slog.Warn("background lease acquire failed", "err", aerr)
+			} else if ok {
+				slog.Info("background lease acquired", "holder", upgrade.DefaultHolderID())
+				go bgLease.RunHeartbeatLoop(ctx.Done(), 0)
+			} else {
+				slog.Info("background lease held by another process; serve-only mode")
+			}
+			// Retry acquire periodically so a handoff after peer drain works.
+			go func() {
+				t := time.NewTicker(time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						if bgLease.Held() {
+							continue
+						}
+						ok, err := bgLease.TryAcquire()
+						if err != nil || !ok {
+							continue
+						}
+						slog.Info("background lease acquired (handoff)")
+						go bgLease.RunHeartbeatLoop(ctx.Done(), 0)
+						reg.EnsureBackgroundWorkers()
+					}
+				}
+			}()
+		}
+	}
+
+	upgradeDetector := upgrade.NewDetector(&upgrade.DetectorArgs{
+		CurrentVersion: version,
+		Fetch:          upgrade.GHReleaseFetcher(""),
+		Disabled:       cfg.DisableUpgradeCheck,
+		MinInterval:    6 * time.Hour,
+	})
+	reg.SetUpgradeDetector(upgradeDetector)
+	go runUpgradeDetectorLoop(ctx, upgradeDetector)
+
+	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
+	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
+		Enabled:    cfg.AutoUpgrade.Enabled,
+		Env:        upgrade.ApplyEnv{Homebrew: isHomebrewInstall(), GOOS: ""},
+		Quiescence: orchQuiescence,
+		Detector:   upgradeDetector,
+		LastActivity: func() time.Time {
+			return lastMCPActivity.Get()
+		},
+		Apply: func(ctx context.Context) error {
+			return runBrewUpgrade(ctx)
+		},
+		// SpawnBackend / FlipPrimary / DrainOld: full multi-process
+		// orchestration needs the edge supervisor; state machine is
+		// covered by unit tests. Production path logs and relies on
+		// brew services restart when edge is not yet supervising.
+		SpawnBackend: nil,
+		FlipPrimary:  nil,
+		DrainOld:     nil,
+		OnUpgrade: func(from, to string) {
+			slog.Info("auto-upgrade complete", "from", from, "to", to)
+			// Persist from-version so the new backend process can banner
+			// sessions that reconnect with the same Mcp-Session-Id.
+			if homeForLease != "" {
+				_ = os.WriteFile(
+					filepath.Join(homeForLease, ".mnemo", "upgrade-from"),
+					[]byte(from+"\n"+to+"\n"),
+					0o600,
+				)
+			}
+		},
+	})
+	go runAutoApplyLoop(ctx, autoOrch)
+
 	// Determine the default username — used when a request arrives
 	// without an explicit ?user=<name> query parameter. On a Windows
 	// Service deployment (running as LocalSystem) there is no
@@ -803,6 +900,14 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// same registry that backs the /health endpoint and the scheduler.
 	handler.SetDiagRunner(diagReg)
 
+	// 🎯T97.6: one-time upgrade notice on tool results. If a previous
+	// auto-apply left ~/.mnemo/upgrade-from, banner the first tool call
+	// per session after this process started.
+	if homeForLease != "" {
+		loadPendingUpgradeNotices(homeForLease, version, upgradeNotices)
+	}
+	handler.SetUpgradeNotices(upgradeNotices)
+
 	// Build a federation client if linked_instances are configured —
 	// this owns one persistent http.Client per peer and is shared
 	// across every fan-out tool registration. Failure to construct
@@ -853,8 +958,17 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	//   /api/*        → JSON REST API (for the dashboard)
 	//   /             → Web dashboard UI
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", httpSrv)
-	mux.Handle("/mcp/", httpSrv) // catch sub-paths used by the MCP transport
+	// Track MCP traffic for auto-apply quiescence (🎯T97.5) and mark
+	// sessions for upgrade notices (🎯T97.6).
+	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastMCPActivity.Set(time.Now())
+		if sid := r.Header.Get(edgeproxy.SessionIDHeader); sid != "" {
+			maybeMarkSessionUpgrade(homeForLease, version, sid, upgradeNotices)
+		}
+		httpSrv.ServeHTTP(w, r)
+	})
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/mcp/", mcpHandler) // catch sub-paths used by the MCP transport
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
@@ -958,7 +1072,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 					slog.Warn("federated HTTP shutdown error", "err", err)
 				}
 			}
-			// 2. (release singleton background lease — 🎯T97.4)
+			// 2. Release singleton background lease (🎯T97.4) so a peer
+			// backend can acquire and start ingest/compaction.
+			slog.Info("drain: releasing background lease")
+			reg.ReleaseLease()
 			// 3–5. Stop workers, quiesce read pools, checkpoint each writer.
 			slog.Info("drain: stopping workers + checkpointing stores")
 			reg.Close()
@@ -974,6 +1091,129 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			return nil // unreachable; os.Exit does not return
 		}
 	}
+}
+
+// atomicTime is a mutex-guarded time.Time for MCP activity tracking.
+type atomicTime struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (a *atomicTime) Set(t time.Time) {
+	a.mu.Lock()
+	a.t = t
+	a.mu.Unlock()
+}
+
+func (a *atomicTime) Get() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.t
+}
+
+func runUpgradeDetectorLoop(ctx context.Context, d *upgrade.Detector) {
+	// Immediate check at startup, then every hour (detector still
+	// enforces its own MinInterval for the gh call).
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	do := func() {
+		cr := d.Check(ctx)
+		if cr.Err != nil {
+			slog.Debug("upgrade check", "err", cr.Err)
+			return
+		}
+		if cr.UpgradeAvailable {
+			slog.Info("upgrade available", "detail", cr.Detail)
+		}
+	}
+	do()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			do()
+		}
+	}
+}
+
+func runAutoApplyLoop(ctx context.Context, o *upgrade.Orchestrator) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := o.Tick(ctx); err != nil {
+				slog.Warn("auto-upgrade tick", "err", err)
+			}
+		}
+	}
+}
+
+func isHomebrewInstall() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	return strings.Contains(exe, "/Cellar/mnemo/") ||
+		strings.Contains(exe, "/homebrew/") ||
+		strings.Contains(exe, "/linuxbrew/")
+}
+
+func runBrewUpgrade(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "brew", "upgrade", "mnemo")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("brew upgrade mnemo: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// loadPendingUpgradeNotices reads ~/.mnemo/upgrade-from left by a prior
+// auto-apply so the new process can banner sessions (🎯T97.6).
+func loadPendingUpgradeNotices(home, current string, tr *upgrade.NoticeTracker) {
+	path := filepath.Join(home, ".mnemo", "upgrade-from")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 1 {
+		return
+	}
+	from := strings.TrimSpace(lines[0])
+	to := current
+	if len(lines) >= 2 && strings.TrimSpace(lines[1]) != "" {
+		to = strings.TrimSpace(lines[1])
+	}
+	// Stash for maybeMarkSessionUpgrade; keep file until first use set.
+	_ = os.WriteFile(path+".active", []byte(from+"\n"+to+"\n"), 0o600)
+	_ = os.Remove(path)
+	_ = tr // sessions marked lazily on first MCP request
+}
+
+func maybeMarkSessionUpgrade(home, current, sessionID string, tr *upgrade.NoticeTracker) {
+	if home == "" || sessionID == "" || tr == nil {
+		return
+	}
+	path := filepath.Join(home, ".mnemo", "upgrade-from.active")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 1 {
+		return
+	}
+	from := strings.TrimSpace(lines[0])
+	to := current
+	if len(lines) >= 2 && strings.TrimSpace(lines[1]) != "" {
+		to = strings.TrimSpace(lines[1])
+	}
+	tr.MarkSession(sessionID, from, to)
 }
 
 // compactorAdapter satisfies tools.CompactorHealthReporter by

@@ -46,7 +46,8 @@ flush-after-write so heartbeats and events arrive promptly.
 
 - The listening socket and every accepted client connection
 - The `Mcp-Session-Id → backend` pin table
-- (Future) singleton-background lease arbitration (🎯T97.4)
+- Singleton-background lease path on backends (🎯T97.4); the edge does
+  not hold the lease — backends do
 
 The edge binary is small and changes rarely; backends are swapped during
 upgrade.
@@ -56,11 +57,36 @@ upgrade.
 | ID | Status | Summary |
 |----|--------|---------|
 | T97.1 | achieved | Backend drains gracefully on SIGTERM; WAL checkpointed |
-| T97.2 | identified | Release detection via `gh` + T83 health pipeline |
+| T97.2 | achieved | Release detection via `gh` + T83 health pipeline |
 | T97.3 | achieved | Transparent edge proxy (this document's routing slice) |
-| T97.4 | identified | Single-holder lease for ingest/compaction/mirrors |
-| T97.5 | identified | Opt-in auto-apply at quiescent window |
-| T97.6 | identified | One-time upgrade notice in tool results |
+| T97.4 | achieved | Single-holder lease for ingest/compaction/mirrors |
+| T97.5 | achieved | Opt-in auto-apply at quiescent window |
+| T97.6 | achieved | One-time upgrade notice in tool results |
+
+## Config
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `disable_upgrade_check` | `false` | When true, no `gh release list` calls; `upgrade.available` stays healthy |
+| `auto_upgrade.enabled` | `false` | Opt-in apply after quiescence (Homebrew non-Windows only) |
+| `auto_upgrade.quiescence` | `"30m"` | MCP idle window before apply |
+
+Non-Homebrew and Windows installs are **notify-only** even when
+`auto_upgrade.enabled` is true: detection and `upgrade.available` still
+work; the apply state machine enters `notify_only` and never runs brew.
+
+## Auto-apply order (Homebrew)
+
+1. Detector reports newer tag → phase `available`
+2. No MCP traffic for `quiescence` → phase `quiescent`
+3. `brew upgrade mnemo` → spawn new backend (when edge-supervised) →
+   flip primary → drain old → write `~/.mnemo/upgrade-from` for 🎯T97.6
+4. New process banners sessions once: `mnemo upgraded vN -> vN+1`
+
+Full multi-process edge supervision of spawn/flip is unit-tested as a
+state machine; production Homebrew installs that still run a single
+daemon process rely on `brew services restart` after apply until the
+edge is the default launch path.
 
 ## Running edge + backend (T97.3 slice)
 

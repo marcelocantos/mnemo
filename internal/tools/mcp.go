@@ -105,6 +105,12 @@ func (h *Handler) LocalHandler(name string) func(ctx context.Context, req mcp.Ca
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("%s failed: %v", name, err)), nil
 		}
+		// 🎯T97.6: one-time upgrade banner when this session spanned a backend swap.
+		if h.upgradeNotices != nil && cc.MCPSessionID != "" {
+			if notice, ok := h.upgradeNotices.Consume(cc.MCPSessionID); ok {
+				text = notice + "\n\n" + text
+			}
+		}
 		if isError {
 			return mcp.NewToolResultError(text), nil
 		}
