@@ -81,9 +81,9 @@ work; the apply state machine enters `notify_only` and never runs brew.
 2. No MCP traffic for `quiescence` → phase `quiescent`
 3. **Apply:** `brew upgrade mnemo` (new binary on disk)
 4. **OnUpgrade (before spawn):** write `~/.mnemo/upgrade-pending` with
-   `from`/`to` + **allowlisted live session IDs**; also mark those
-   sessions in-process on the old backend for banners while it still
-   serves them
+   `from`/`to` + **allowlisted live session IDs**; mark those sessions
+   in-process for banners; **best-effort** `notifications/tools/list_changed`
+   to all connected MCP clients (`SendNotificationToAllClients`)
 5. **Spawn:** if `edge-route.json` exists, start sibling
    `mnemo --addr 127.0.0.1:<free>` (loads + deletes pending at boot);
    else single-daemon no-op

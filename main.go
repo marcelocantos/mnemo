@@ -742,14 +742,26 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// singleton background work on holder status.
 	upgradeNotices := upgrade.NewNoticeTracker()
 	activeSessions := upgrade.NewSessionSet()
+	// listChanged is registered after mcpSrv is built (orchestrator is
+	// wired earlier). Best-effort tools/list_changed on version change.
+	var listChangedHolder upgrade.ListChangedHolder
+	upgradeFX := &upgrade.SideEffects{
+		Notices: upgradeNotices,
+		ListChanged: func(from, to string) {
+			listChangedHolder.Send(from, to)
+		},
+	}
 	var lastMCPActivity atomicTime
 	lastMCPActivity.Set(time.Now())
 
 	homeForLease, homeErr := store.EffectiveHome()
+	var pendingUpgradeFrom, pendingUpgradeTo string
 	if homeErr == nil {
 		// Load once: allowlisted sessions only; file is deleted (🎯T97.6).
-		if _, _, err := upgrade.LoadAndConsumePending(homeForLease, upgradeNotices); err != nil {
+		if p, ok, err := upgrade.LoadAndConsumePending(homeForLease, upgradeNotices); err != nil {
 			slog.Warn("upgrade pending notice load failed", "err", err)
+		} else if ok {
+			pendingUpgradeFrom, pendingUpgradeTo = p.From, p.To
 		}
 	}
 
@@ -901,9 +913,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			})
 		},
 		OnUpgrade: func(from, to string) {
-			slog.Info("auto-upgrade: writing pending notices", "from", from, "to", to)
+			slog.Info("auto-upgrade: version change side effects", "from", from, "to", to)
 			sessions := activeSessions.Snapshot()
-			upgradeNotices.MarkSessions(sessions, from, to)
+			// Banners + best-effort tools/list_changed (🎯T97.6 / criterion 4).
+			upgradeFX.OnVersionChange(sessions, from, to)
 			if homeForLease == "" {
 				return
 			}
@@ -1021,6 +1034,17 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		version,
 		server.WithToolCapabilities(true),
 	)
+	// Best-effort tools/list_changed after upgrade (🎯T97.6). listChanged
+	// is void-safe when no clients are connected.
+	listChangedHolder.Set(func(from, to string) {
+		upgrade.BroadcastListChanged(mcpSrv, from, to)
+		slog.Info("auto-upgrade: tools/list_changed notified", "from", from, "to", to)
+	})
+	// Sibling process that loaded upgrade-pending: notify any clients that
+	// attach to this new backend (best-effort).
+	if pendingUpgradeFrom != "" {
+		listChangedHolder.Send(pendingUpgradeFrom, pendingUpgradeTo)
+	}
 	handler := tools.NewHandler(resolve)
 
 	// Wire the per-user vault syncer resolver so mnemo_vault_sync and
