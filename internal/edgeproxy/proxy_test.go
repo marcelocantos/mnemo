@@ -150,6 +150,43 @@ func TestRepinAllToPrimary(t *testing.T) {
 	}
 }
 
+// TestDELETEUnpinsSession proves pin lifecycle for AffinityDrain:
+// initialize pins, DELETE with Mcp-Session-Id clears the pin so
+// pin_counts can reach zero without MaxWait force-reap.
+func TestDELETEUnpinsSession(t *testing.T) {
+	t.Parallel()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set(SessionIDHeader, "sess-del")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(backend.Close)
+
+	router, err := NewRouter([]string{backend.URL}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy(router)
+
+	initReq := httptest.NewRequest(http.MethodPost, "http://edge/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	initRec := httptest.NewRecorder()
+	proxy.ServeHTTP(initRec, initReq)
+	if router.PinCountForBackend(0) != 1 {
+		t.Fatalf("after init pins=%v", router.PinCounts())
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "http://edge/mcp", nil)
+	delReq.Header.Set(SessionIDHeader, "sess-del")
+	delRec := httptest.NewRecorder()
+	proxy.ServeHTTP(delRec, delReq)
+	if router.PinCountForBackend(0) != 0 {
+		t.Fatalf("after DELETE pins=%v want 0", router.PinCounts())
+	}
+}
+
 // TestAffinityDrainKeepsPinOnOldBackend is the 🎯T97.5 acceptance bar:
 // initialize on B0 → flip primary to B1 without repin → tool call with
 // the same Mcp-Session-Id still hits B0 while B0 is up. Repin would

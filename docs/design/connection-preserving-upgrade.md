@@ -91,11 +91,12 @@ work; the apply state machine enters `notify_only` and never runs brew.
    to the new URL. Edge `watchEdgeRoute` calls `Router.ApplyRoute`
    which **AddBackend**s missing URLs then `SetPrimary` (no restart)
 7. **Drain (affinity, not repin):** release lease; **keep pins on this
-   backend** so mcp-go stateful sessions stay valid; edge writes
-   `pin_counts` into `edge-route.json`; old backend polls until
-   `pin_counts[self]==0` (or max wait), then `SIGTERM` self. New
-   initializes already use the flipped primary. Crash-only path may set
-   `repin_all` (FailoverRepin) — never the happy path. Single-daemon
+   backend** so mcp-go stateful sessions stay valid; edge atomically
+   writes `pin_counts` into `edge-route.json`; old backend polls until
+   `pin_counts[self]==0` (or max wait), then `SIGTERM` self. **DELETE**
+   with `Mcp-Session-Id` unpins so counts can reach zero. Route-file
+   read errors are `PinUnknown` (not zero) so torn JSON cannot force-reap.
+   Crash-only path may set `repin_all` (FailoverRepin). Single-daemon
    without edge → `brew services restart mnemo`.
 
 Non-Homebrew and Windows: phase stays `notify_only`.

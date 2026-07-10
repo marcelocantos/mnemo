@@ -275,7 +275,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	sessionID := r.Header.Get(SessionIDHeader)
 	p.forward(backendIdx, w, r, body, pinOnResponse, true)
+	// MCP streamable-HTTP session teardown is DELETE with Mcp-Session-Id.
+	// Drop the pin so AffinityDrain can observe pin_counts[self]==0 (🎯T97.5).
+	if r.Method == http.MethodDelete && sessionID != "" {
+		p.router.Unpin(sessionID)
+	}
 }
 
 func (p *Proxy) routeRequest(r *http.Request) (backendIdx int, pinOnResponse bool, body []byte, err error) {

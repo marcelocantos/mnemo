@@ -611,11 +611,12 @@ func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router, 
 				lastControl = controlKey
 			}
 			// Always refresh pin_counts for AffinityDrain observers.
+			// Atomic write so concurrent ReadRoute never sees partial JSON.
 			rf.PinCounts = router.PinCounts()
 			rf.Backends = router.BackendURLs()
 			rf.Primary = router.PrimaryIndex()
-			if b, mErr := json.MarshalIndent(rf, "", "  "); mErr == nil {
-				_ = os.WriteFile(path, append(b, '\n'), 0o600)
+			if err := upgrade.WriteRouteFile(path, rf); err != nil {
+				slog.Warn("edge: write pin_counts", "err", err)
 			}
 		}
 	}
@@ -885,7 +886,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 				Pins: func(idx int) int {
 					rf, err := upgrade.ReadRoute(homeForLease)
 					if err != nil {
-						return 0
+						// Never treat I/O/parse failure as zero pins —
+						// that would SIGTERM with live sessions.
+						return upgrade.PinUnknown
 					}
 					return rf.PinCountAt(idx)
 				},

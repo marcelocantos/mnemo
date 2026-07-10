@@ -79,17 +79,25 @@ func ReadRoute(home string) (RouteFile, error) {
 	return r, nil
 }
 
-// WriteRoute atomically persists the route file.
+// WriteRoute atomically persists the route file under home.
 func WriteRoute(home string, r RouteFile) error {
 	if err := os.MkdirAll(filepath.Join(home, ".mnemo"), 0o755); err != nil {
+		return err
+	}
+	return WriteRouteFile(RoutePath(home), r)
+}
+
+// WriteRouteFile atomically writes r to path (tmp + rename) so concurrent
+// readers never see a partial JSON document.
+func WriteRouteFile(path string, r RouteFile) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := RoutePath(home)
-	tmp := path + ".tmp"
+	tmp := path + ".tmp." + fmt.Sprintf("%d", os.Getpid())
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
