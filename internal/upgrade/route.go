@@ -19,10 +19,31 @@ const RouteFileName = "edge-route.json"
 type RouteFile struct {
 	Backends []string `json:"backends"`
 	Primary  int      `json:"primary"`
-	// RepinAll when true tells the edge to move every session pin onto
-	// primary before the old backend is reaped (connection-preserving
-	// handoff). Cleared by the edge after applying.
+	// PinCounts is written by the edge (length == len(Backends)) so a
+	// draining backend can AffinityDrain until its index is zero.
+	// Backends must not treat this as an input control plane field.
+	PinCounts []int `json:"pin_counts,omitempty"`
+	// RepinAll is crash-failover only (FailoverRepin). Happy-path
+	// upgrade drain must leave pins on the old backend.
 	RepinAll bool `json:"repin_all,omitempty"`
+}
+
+// PinCountAt returns PinCounts[i] or 0 if missing.
+func (r RouteFile) PinCountAt(i int) int {
+	if i < 0 || i >= len(r.PinCounts) {
+		return 0
+	}
+	return r.PinCounts[i]
+}
+
+// IndexOfBackend returns the index of backendURL or -1.
+func (r RouteFile) IndexOfBackend(backendURL string) int {
+	for i, b := range r.Backends {
+		if b == backendURL {
+			return i
+		}
+	}
+	return -1
 }
 
 // RoutePath returns ~/.mnemo/edge-route.json.

@@ -573,14 +573,14 @@ func cmdEdge(args []string) {
 	}
 }
 
-// watchEdgeRoute applies edge-route.json: grows the backend list, flips
-// primary, and optionally repins all sessions to primary so a draining
-// backend can be reaped without orphaning client sessions (🎯T97.5).
+// watchEdgeRoute applies edge-route.json (grow backends + primary flip)
+// and writes pin_counts so a draining backend can AffinityDrain until
+// its pin count is zero (🎯T97.5). repin_all is crash-failover only.
 func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router, proxy *edgeproxy.Proxy) {
 	_ = proxy // clients grow lazily via Proxy.clientAt → syncClients
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	var lastRaw string
+	var lastControl string // backends+primary+repin (not pin_counts)
 	for {
 		select {
 		case <-ctx.Done():
@@ -590,32 +590,32 @@ func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router, 
 			if err != nil {
 				continue
 			}
-			raw := string(data)
-			if raw == lastRaw {
-				continue
-			}
 			var rf upgrade.RouteFile
 			if err := json.Unmarshal(data, &rf); err != nil {
 				continue
 			}
-			prim, err := router.ApplyRoute(rf.Backends, rf.Primary)
-			if err != nil {
-				slog.Warn("edge: apply route file", "err", err)
-				continue
-			}
-			if rf.RepinAll {
-				n := router.RepinAllToPrimary()
-				slog.Info("edge: repinned sessions to primary", "moved", n, "primary", prim)
-				rf.RepinAll = false
-				if b, mErr := json.MarshalIndent(rf, "", "  "); mErr == nil {
-					_ = os.WriteFile(path, append(b, '\n'), 0o600)
+			controlKey := fmt.Sprintf("%v|%d|%v", rf.Backends, rf.Primary, rf.RepinAll)
+			if controlKey != lastControl {
+				prim, err := router.ApplyRoute(rf.Backends, rf.Primary)
+				if err != nil {
+					slog.Warn("edge: apply route file", "err", err)
+					continue
 				}
+				if rf.RepinAll {
+					// Crash-failover only — not happy-path upgrade drain.
+					n := upgrade.FailoverRepin(router.RepinAllToPrimary)
+					slog.Info("edge: failover repin to primary", "moved", n, "primary", prim)
+					rf.RepinAll = false
+				}
+				slog.Info("edge: route applied", "backends", router.BackendCount(), "primary", prim)
+				lastControl = controlKey
 			}
-			slog.Info("edge: route applied", "backends", router.BackendCount(), "primary", prim)
-			if b, err := os.ReadFile(path); err == nil {
-				lastRaw = string(b)
-			} else {
-				lastRaw = raw
+			// Always refresh pin_counts for AffinityDrain observers.
+			rf.PinCounts = router.PinCounts()
+			rf.Backends = router.BackendURLs()
+			rf.Primary = router.PrimaryIndex()
+			if b, mErr := json.MarshalIndent(rf, "", "  "); mErr == nil {
+				_ = os.WriteFile(path, append(b, '\n'), 0o600)
 			}
 		}
 	}
@@ -806,11 +806,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	go runUpgradeDetectorLoop(ctx, upgradeDetector)
 
 	// Auto-apply (🎯T97.5). Homebrew-only. Sequence:
-	//   apply → OnUpgrade (pending file + in-process marks) →
-	//   spawn (sibling loads pending) → flip (edge-route grow+primary) →
-	//   drain (repin, release lease, grace wait, then exit/restart).
+	//   apply → OnUpgrade (pending + in-process marks) →
+	//   spawn (sibling loads pending) → flip primary (pins stay) →
+	//   AffinityDrain (wait pin_counts[self]==0, then SIGTERM).
+	// Never repin_all on this path — that invalidates mcp-go sessions.
 	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
 	var spawnedBackendURL string
+	selfBackendURL := backendSelfURL(addr)
 	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
 		Enabled:    cfg.AutoUpgrade.Enabled,
 		Env:        upgrade.ApplyEnv{Homebrew: isHomebrewInstall(), GOOS: ""},
@@ -846,51 +848,62 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			if err != nil {
 				return err
 			}
-			slog.Info("auto-upgrade: edge primary flipped", "primary", r.Primary, "url", spawnedBackendURL)
+			slog.Info("auto-upgrade: edge primary flipped (affinity pins unchanged)",
+				"primary", r.Primary, "url", spawnedBackendURL)
 			return nil
 		},
 		DrainOld: func(ctx context.Context) error {
-			// Release lease first so the new backend can take singleton work.
 			reg.ReleaseLease()
-			if homeForLease != "" && upgrade.RouteConfigured(homeForLease) {
-				// Ask edge to repin all sessions onto the new primary before
-				// we die, so client TCP stays valid and traffic moves.
-				if rf, err := upgrade.ReadRoute(homeForLease); err == nil {
-					rf.RepinAll = true
-					_ = upgrade.WriteRoute(homeForLease, rf)
-				}
-				// Grace window: let edge apply repin and in-flight RPCs finish.
-				grace := 2 * time.Second
-				if d := os.Getenv("MNEMO_DRAIN_GRACE"); d != "" {
-					if parsed, err := time.ParseDuration(d); err == nil {
-						grace = parsed
-					}
-				}
-				slog.Info("auto-upgrade: edge drain grace", "grace", grace)
-				select {
-				case <-ctx.Done():
-				case <-time.After(grace):
-				}
-				// Trigger the same graceful drain path as SIGTERM (WAL etc.).
-				slog.Info("auto-upgrade: signaling self after repin grace")
-				p, err := os.FindProcess(os.Getpid())
-				if err != nil {
-					return err
-				}
-				return p.Signal(syscall.SIGTERM)
+			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
+				slog.Info("auto-upgrade: brew services restart mnemo")
+				return runBrewServicesRestart(ctx)
 			}
-			slog.Info("auto-upgrade: brew services restart mnemo")
-			return runBrewServicesRestart(ctx)
+			// Affinity drain: keep serving pinned sessions until edge
+			// reports pin_counts[self]==0, then graceful SIGTERM.
+			selfIdx := -1
+			if rf, err := upgrade.ReadRoute(homeForLease); err == nil {
+				selfIdx = rf.IndexOfBackend(selfBackendURL)
+			}
+			if selfIdx < 0 {
+				slog.Warn("auto-upgrade: self not in edge-route; signaling immediately",
+					"self", selfBackendURL)
+				return signalSelfSIGTERM()
+			}
+			maxWait := orchQuiescence
+			if maxWait <= 0 {
+				maxWait = upgrade.DefaultDrainMaxWait
+			}
+			if d := os.Getenv("MNEMO_DRAIN_MAX_WAIT"); d != "" {
+				if parsed, err := time.ParseDuration(d); err == nil {
+					maxWait = parsed
+				}
+			}
+			slog.Info("auto-upgrade: affinity drain waiting for pins to clear",
+				"self_idx", selfIdx, "max_wait", maxWait)
+			return upgrade.AffinityDrain(ctx, &upgrade.AffinityDrainArgs{
+				BackendIdx: selfIdx,
+				Pins: func(idx int) int {
+					rf, err := upgrade.ReadRoute(homeForLease)
+					if err != nil {
+						return 0
+					}
+					return rf.PinCountAt(idx)
+				},
+				MaxWait:      maxWait,
+				PollInterval: upgrade.DefaultDrainPoll,
+				Reap: func(ctx context.Context) error {
+					slog.Info("auto-upgrade: pins clear (or max wait); SIGTERM self")
+					return signalSelfSIGTERM()
+				},
+			})
 		},
 		OnUpgrade: func(from, to string) {
 			slog.Info("auto-upgrade: writing pending notices", "from", from, "to", to)
 			sessions := activeSessions.Snapshot()
-			// In-process banners for sessions this backend still serves.
 			upgradeNotices.MarkSessions(sessions, from, to)
 			if homeForLease == "" {
 				return
 			}
-			// Sibling loads this at startup (must be written before spawn).
 			if err := upgrade.WritePendingNotice(homeForLease, upgrade.PendingNotice{
 				From:     from,
 				To:       to,
@@ -1329,6 +1342,31 @@ func runBrewServicesRestart(ctx context.Context) error {
 		return fmt.Errorf("brew services restart mnemo: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func signalSelfSIGTERM() error {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return err
+	}
+	return p.Signal(syscall.SIGTERM)
+}
+
+// backendSelfURL is the loopback base URL peers/edge use for this
+// process when it listens on addr (e.g. ":19421" → "http://127.0.0.1:19421").
+func backendSelfURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// addr may be ":19421"
+		if strings.HasPrefix(addr, ":") {
+			return "http://127.0.0.1" + addr
+		}
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // spawnLoopbackBackend starts a sibling mnemo daemon on a free loopback

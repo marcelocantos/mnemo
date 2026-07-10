@@ -155,8 +155,10 @@ func (r *Router) Pin(sessionID string, backendIdx int) {
 	r.pins.Store(sessionID, uint32(backendIdx))
 }
 
-// RepinAllToPrimary moves every pin onto the current primary so a
-// draining backend can be reaped without orphaning sessions.
+// RepinAllToPrimary moves every pin onto the current primary.
+// Crash-failover only (🎯T97.5 FailoverRepin) — do NOT use on the
+// happy-path upgrade drain; that must keep pins on the old backend
+// until they clear so mcp-go stateful sessions stay valid.
 func (r *Router) RepinAllToPrimary() (moved int) {
 	prim := r.PrimaryIndex()
 	r.pins.Range(func(key, value any) bool {
@@ -167,6 +169,43 @@ func (r *Router) RepinAllToPrimary() (moved int) {
 		return true
 	})
 	return moved
+}
+
+// Unpin removes session affinity (session closed / DELETE).
+func (r *Router) Unpin(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	r.pins.Delete(sessionID)
+}
+
+// PinCountForBackend returns how many sessions are pinned to idx.
+func (r *Router) PinCountForBackend(idx int) int {
+	if idx < 0 {
+		return 0
+	}
+	n := 0
+	r.pins.Range(func(_, value any) bool {
+		if int(value.(uint32)) == idx {
+			n++
+		}
+		return true
+	})
+	return n
+}
+
+// PinCounts returns per-backend pin counts (length == BackendCount).
+func (r *Router) PinCounts() []int {
+	n := r.BackendCount()
+	out := make([]int, n)
+	r.pins.Range(func(_, value any) bool {
+		i := int(value.(uint32))
+		if i >= 0 && i < n {
+			out[i]++
+		}
+		return true
+	})
+	return out
 }
 
 // BackendForSession returns the pinned backend index and whether a pin

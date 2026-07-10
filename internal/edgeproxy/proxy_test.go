@@ -150,6 +150,86 @@ func TestRepinAllToPrimary(t *testing.T) {
 	}
 }
 
+// TestAffinityDrainKeepsPinOnOldBackend is the 🎯T97.5 acceptance bar:
+// initialize on B0 → flip primary to B1 without repin → tool call with
+// the same Mcp-Session-Id still hits B0 while B0 is up. Repin would
+// break mcp-go stateful sessions.
+func TestAffinityDrainKeepsPinOnOldBackend(t *testing.T) {
+	t.Parallel()
+	var hits [2]atomic.Int32
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits[0].Add(1)
+		if r.Header.Get(SessionIDHeader) == "" {
+			w.Header().Set(SessionIDHeader, "sess-aff")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("old-backend"))
+	}))
+	t.Cleanup(b0.Close)
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits[1].Add(1)
+		w.Header().Set(SessionIDHeader, "sess-new")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("new-backend"))
+	}))
+	t.Cleanup(b1.Close)
+
+	router, err := NewRouter([]string{b0.URL, b1.URL}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := NewProxy(router)
+
+	// initialize → B0, pin sess-aff
+	initReq := httptest.NewRequest(http.MethodPost, "http://edge/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	initRec := httptest.NewRecorder()
+	proxy.ServeHTTP(initRec, initReq)
+	sid := initRec.Header().Get(SessionIDHeader)
+	if sid != "sess-aff" {
+		t.Fatalf("sid %q", sid)
+	}
+	if hits[0].Load() != 1 || hits[1].Load() != 0 {
+		t.Fatalf("after init hits %d/%d", hits[0].Load(), hits[1].Load())
+	}
+
+	// Flip primary to B1 — NO repin (affinity drain).
+	if err := router.SetPrimary(1); err != nil {
+		t.Fatal(err)
+	}
+	if router.PinCountForBackend(0) != 1 || router.PinCountForBackend(1) != 0 {
+		t.Fatalf("pins after flip: %v", router.PinCounts())
+	}
+
+	// Tool call with same session must still hit B0.
+	toolReq := httptest.NewRequest(http.MethodPost, "http://edge/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	toolReq.Header.Set(SessionIDHeader, sid)
+	toolRec := httptest.NewRecorder()
+	proxy.ServeHTTP(toolRec, toolReq)
+	if toolRec.Body.String() != "old-backend" {
+		t.Fatalf("body %q want old-backend (repin would break stateful MCP)", toolRec.Body.String())
+	}
+	if hits[0].Load() != 2 || hits[1].Load() != 0 {
+		t.Fatalf("after tool hits %d/%d — pin must stay on B0", hits[0].Load(), hits[1].Load())
+	}
+
+	// New initialize goes to B1.
+	init2 := httptest.NewRequest(http.MethodPost, "http://edge/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}`))
+	init2Rec := httptest.NewRecorder()
+	proxy.ServeHTTP(init2Rec, init2)
+	if init2Rec.Body.String() != "new-backend" {
+		t.Fatalf("new init body %q", init2Rec.Body.String())
+	}
+
+	// After unpin, B0 pin count is 0 (safe to affinity-drain reap).
+	router.Unpin(sid)
+	if router.PinCountForBackend(0) != 0 {
+		t.Fatalf("after unpin pins %v", router.PinCounts())
+	}
+}
+
 // Proves 🎯T97.5 edge grow: start with one backend, ApplyRoute adds a
 // second URL as primary, and new initialize traffic hits the new one.
 func TestProxyGrowsBackendAndRoutesNewInitToPrimary(t *testing.T) {
