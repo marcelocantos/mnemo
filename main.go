@@ -826,9 +826,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
 	var spawnedBackendURL string
 	selfBackendURL := backendSelfURL(addr)
+	homebrewInstall := isHomebrewInstall()
 	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
 		Enabled:    cfg.AutoUpgrade.Enabled,
-		Env:        upgrade.ApplyEnv{Homebrew: isHomebrewInstall(), GOOS: ""},
+		Env:        upgrade.ApplyEnv{Homebrew: homebrewInstall, GOOS: ""},
 		Quiescence: orchQuiescence,
 		Detector:   upgradeDetector,
 		LastActivity: func() time.Time {
@@ -929,6 +930,17 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			}
 		},
 	})
+	if cfg.AutoUpgrade.Enabled {
+		mode := "notify_only"
+		if homebrewInstall {
+			mode = "brew_upgrade+services_restart"
+			if homeForLease != "" && upgrade.RouteConfigured(homeForLease) {
+				mode = "edge_affinity_drain"
+			}
+		}
+		slog.Info("auto-upgrade: armed",
+			"quiescence", orchQuiescence, "mode", mode, "phase", autoOrch.Phase())
+	}
 	go runAutoApplyLoop(ctx, autoOrch)
 
 	// Determine the default username — used when a request arrives
@@ -1089,7 +1101,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// no daemon restart.
 	shimSup := newShimSupervisor()
 	shimSup.SetEnabled(cfg.MenuBarApp)
-	handler.SetConfigController(configController{reg: reg, shim: shimSup})
+	handler.SetConfigController(configController{reg: reg, shim: shimSup, autoOrch: autoOrch})
 
 	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
 	// same registry that backs the /health endpoint and the scheduler.
@@ -1470,8 +1482,9 @@ func (a compactorAdapter) Health() tools.CompactorHealth {
 // importing the tools package (a cycle we already avoid for
 // dependency hygiene).
 type configController struct {
-	reg  *registry.Registry
-	shim *shimSupervisor
+	reg      *registry.Registry
+	shim     *shimSupervisor
+	autoOrch *upgrade.Orchestrator
 }
 
 func (c configController) Get() store.Config {
@@ -1479,6 +1492,7 @@ func (c configController) Get() store.Config {
 }
 
 func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
+	old := c.reg.CurrentConfig()
 	if err := store.WriteConfig(newCfg); err != nil {
 		return tools.ConfigReport{}, err
 	}
@@ -1487,6 +1501,20 @@ func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
 	// without a daemon restart (🎯T85.5).
 	if c.shim != nil {
 		c.shim.SetEnabled(newCfg.MenuBarApp)
+	}
+	// Adopt auto_upgrade live (enabled + quiescence). Apply still only
+	// runs on Homebrew non-Windows installs (orchestrator NotifyOnly).
+	if c.autoOrch != nil {
+		auChanged := old.AutoUpgrade.Enabled != newCfg.AutoUpgrade.Enabled ||
+			old.AutoUpgrade.Quiescence != newCfg.AutoUpgrade.Quiescence
+		if auChanged {
+			rep.Changed = append(rep.Changed, "auto_upgrade")
+			c.autoOrch.SetEnabled(newCfg.AutoUpgrade.Enabled)
+			if q, err := newCfg.AutoUpgrade.EffectiveQuiescence(); err == nil {
+				c.autoOrch.SetQuiescence(q)
+			}
+			rep.Adopted = append(rep.Adopted, "auto_upgrade")
+		}
 	}
 	return tools.ConfigReport{
 		Changed:         rep.Changed,

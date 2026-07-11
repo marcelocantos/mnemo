@@ -148,6 +148,17 @@ func (o *Orchestrator) SetEnabled(enabled bool) {
 	}
 }
 
+// SetQuiescence updates the MCP-idle window (config hot-reload).
+// Non-positive values keep the current setting.
+func (o *Orchestrator) SetQuiescence(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.quiescence = d
+}
+
 // Phase returns the current state machine phase.
 func (o *Orchestrator) Phase() Phase {
 	o.mu.Lock()
