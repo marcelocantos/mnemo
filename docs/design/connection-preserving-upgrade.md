@@ -69,7 +69,7 @@ upgrade.
 |-----|---------|---------|
 | `disable_upgrade_check` | `false` | When true, no `gh release list` calls; `upgrade.available` stays healthy |
 | `auto_upgrade.enabled` | `false` | Opt-in apply after quiescence (Homebrew non-Windows only) |
-| `auto_upgrade.quiescence` | `"30m"` | MCP idle window before apply |
+| `auto_upgrade.quiescence` | `"5m"` | MCP idle window before apply |
 
 Non-Homebrew and Windows installs are **notify-only** even when
 `auto_upgrade.enabled` is true: detection and `upgrade.available` still

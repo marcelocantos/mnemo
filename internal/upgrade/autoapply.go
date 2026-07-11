@@ -12,7 +12,10 @@ import (
 )
 
 // DefaultQuiescence is the MCP-idle window before auto-apply (🎯T97.5).
-const DefaultQuiescence = 30 * time.Minute
+// Short on purpose: clients (Claude sticky sessions, Grok reconnect)
+// recover quickly from a brew services restart, so waiting half an
+// hour mainly delays the upgrade without much benefit.
+const DefaultQuiescence = 5 * time.Minute
 
 // ApplyEnv describes install environment constraints for auto-apply.
 type ApplyEnv struct {
