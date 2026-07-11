@@ -518,6 +518,29 @@ targets:
     origin: 'conversation: user started using Grok and needs mnemo support; research 2026-07-11'
     discovered: 2026-07-11
     achieved: 2026-07-11
+  T111:
+    name: Grok (and shared non-Claude) transcript fidelity matches Claude's searchable metadata density where the format allows
+    status: achieved
+    value: 8.0
+    cost: 5.0
+    actual_cost: 5.0
+    acceptance:
+    - Grok tool inputs normalise target_file/path → file_path so tool_file_path is populated; command alias works for who_ran
+    - Grok summary.session_kind=subagent yields session_summary.session_type=subagent; parent_session_id yields session_chains edge
+    - Grok entries carry message.model from summary/signals; signals.json context tokens appear as input_tokens on a refreshable usage row
+    - session_recap, plan, goal_updated, subagent_spawned/finished, and task_completed are searchable text (or chains)
+    - normalizeAgentToolInput is shared and used from Codex tool-input path
+    - Unit tests cover aliases, model, usage, session_type, chains, recap/plan/goal
+    - docs/design/grok-ingest.md documents the fidelity layer
+    context: T110 shipped MVP conversation+tools. T111 deepens mapping of summary.json, signals.json, and x.ai ACP extensions into Claude-equivalent columns and indexes Grok-only signals (goals, recaps, plans, subagent graph).
+    tags:
+    - ingest
+    - grok
+    - codex
+    - multi-source
+    origin: 'conversation: deepen Grok beyond MVP; keep Codex in mind; prefer Grok-beyond-Claude signals'
+    discovered: 2026-07-11
+    achieved: 2026-07-11
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
