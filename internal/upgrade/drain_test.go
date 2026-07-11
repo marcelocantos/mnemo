@@ -150,12 +150,24 @@ func TestWriteRouteFileAtomicReadable(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Concurrent readers must always get valid JSON.
+	// Concurrent readers must always get valid JSON when a read succeeds.
+	// On Windows, os.Rename of the destination can briefly deny ReadFile
+	// with a sharing violation; retry that — the invariant is "no partial
+	// JSON", not "every open succeeds mid-replace".
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 50; i++ {
-			data, err := os.ReadFile(path)
+			var data []byte
+			var err error
+			for attempt := 0; attempt < 20; attempt++ {
+				data, err = os.ReadFile(path)
+				if err == nil {
+					break
+				}
+				// Sharing violation / exclusive lock during replace.
+				time.Sleep(time.Millisecond)
+			}
 			if err != nil {
 				t.Errorf("read: %v", err)
 				return
