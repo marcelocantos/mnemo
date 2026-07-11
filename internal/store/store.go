@@ -2847,6 +2847,13 @@ type parsedFile struct {
 	// source is the producing agent ('claude', 'codex', or 'grok').
 	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
+	// parentSessionID + chainMechanism, when set, cause writeParsedFile
+	// to record a session_chains edge (Grok forks/subagents, 🎯T111).
+	parentSessionID string
+	chainMechanism  string
+	// model is the primary model stamp (Grok summary / signals); also
+	// embedded in entry raw for generated columns.
+	model string
 }
 
 // IngestAll scans the project directory and ingests all JSONL files
@@ -3119,6 +3126,18 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 // through identical insert logic. Best-effort: individual insert
 // failures are logged, not propagated, matching the original loop.
 func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
+	// Grok session-level usage rows use a stable uuid and must refresh when
+	// signals.json grows; delete any prior copy so INSERT OR IGNORE can land.
+	if pf.source == "grok" {
+		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
+		_, _ = ws.tx.Exec(`
+			DELETE FROM messages WHERE session_id = ? AND text LIKE '[grok signals]%'`,
+			pf.sessionID)
+		_, _ = ws.tx.Exec(`
+			DELETE FROM entries WHERE session_id = ? AND raw->>'$.uuid' = ?`,
+			pf.sessionID, usageUUID)
+	}
+
 	// Insert all raw entries and build entryIdx→entryID map.
 	// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 	// only record the entry ID when a row was actually inserted.
@@ -3168,6 +3187,11 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 	// Upsert session metadata.
 	if pf.cwd != "" || pf.branch != "" || pf.topic != "" || compactorInternal == 1 || pf.source != "" {
 		repo := extractRepo(pf.cwd)
+		// Grok may set project to org/repo from git remotes when cwd is opaque.
+		if repo == "" && pf.project != "" && pf.project != "subagents" &&
+			pf.project != "grok" && strings.Contains(pf.project, "/") {
+			repo = pf.project
+		}
 		workType := classifyWorkType(pf.branch)
 		source := pf.source
 		if source == "" {
@@ -3184,6 +3208,33 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 				compactor_internal = MAX(session_meta.compactor_internal, excluded.compactor_internal),
 				source = CASE WHEN excluded.source != '' THEN excluded.source ELSE session_meta.source END`,
 			pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal, source)
+
+	// Parent/fork and subagent edges (Grok summary + spawn events, 🎯T111).
+	if pf.parentSessionID != "" && pf.sessionID != "" {
+		mech := pf.chainMechanism
+		if mech == "" {
+			mech = "grok_parent"
+		}
+		_, _ = ws.tx.Exec(`
+			INSERT OR IGNORE INTO session_chains
+				(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
+			VALUES (?, ?, 'fork', 0, 'high', ?)`,
+			pf.sessionID, pf.parentSessionID, mech)
+	}
+	for _, m := range pf.messages {
+		if m.contentType != "text" || !strings.HasPrefix(m.text, "[grok subagent spawned]") {
+			continue
+		}
+		child := fieldAfter(m.text, "child=")
+		if child == "" || pf.sessionID == "" {
+			continue
+		}
+		_, _ = ws.tx.Exec(`
+			INSERT OR IGNORE INTO session_chains
+				(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
+			VALUES (?, ?, 'subagent', 0, 'high', 'grok_subagent')`,
+			child, pf.sessionID)
+	}
 	}
 
 	// Update ingest offset + fingerprint (🎯T68.6 same-size

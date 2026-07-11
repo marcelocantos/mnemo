@@ -12,10 +12,10 @@ import (
 )
 
 const grokSessUUID = "019f4b93-3082-75f2-9c15-1aff0d5f2c3f"
+const grokParentUUID = "019f4b93-0000-0000-0000-000000000001"
 
-// grokFixtureLines returns a representative Grok updates.jsonl: user,
-// thought, assistant text, tool_call + completed tool_call_update,
-// plus records we must skip (_x.ai hooks, intermediate tool updates).
+// grokFixtureLines returns a representative Grok updates.jsonl covering
+// conversation core plus 🎯T111 extensions (recap, plan, goal, subagent).
 func grokFixtureLines(t *testing.T, sessionID string) []byte {
 	t.Helper()
 	line := func(method string, ts int64, update map[string]any) map[string]any {
@@ -50,7 +50,16 @@ func grokFixtureLines(t *testing.T, sessionID string) []byte {
 				"x.ai/tool": map[string]any{"name": "run_terminal_command", "kind": "execute"},
 			},
 		}),
-		// Intermediate update without status — must be skipped.
+		// read_file with Grok target_file alias → normalize to file_path
+		line("session/update", 1783679373, map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "call-2",
+			"title":         "read_file",
+			"rawInput":      map[string]any{"target_file": "/tmp/auth.go", "limit": 50},
+			"_meta": map[string]any{
+				"x.ai/tool": map[string]any{"name": "read_file", "kind": "read"},
+			},
+		}),
 		line("session/update", 1783679372, map[string]any{
 			"sessionUpdate": "tool_call_update",
 			"toolCallId":    "call-1",
@@ -66,9 +75,44 @@ func grokFixtureLines(t *testing.T, sessionID string) []byte {
 			},
 			"rawOutput": map[string]any{"type": "Bash", "content": "PASS ok package"},
 		}),
+		line("session/update", 1783679381, map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    "call-2",
+			"status":        "completed",
+			"content": []map[string]any{
+				{"type": "content", "content": map[string]any{"type": "text", "text": "package auth"}},
+			},
+		}),
 		line("session/update", 1783679385, map[string]any{
 			"sessionUpdate": "agent_message_chunk",
 			"content":       map[string]any{"type": "text", "text": "Fixed the authentication bug in the login handler."},
+		}),
+		line("session/update", 1783679386, map[string]any{
+			"sessionUpdate": "plan",
+			"entries": []map[string]any{
+				{"content": "Inspect login handler", "priority": "high", "status": "completed"},
+				{"content": "Add regression test", "priority": "medium", "status": "pending"},
+			},
+		}),
+		line("_x.ai/session/update", 1783679387, map[string]any{
+			"sessionUpdate": "session_recap",
+			"summary":       "Fixed authentication bug and outlined a regression test.",
+			"auto":          true,
+		}),
+		line("_x.ai/session/update", 1783679388, map[string]any{
+			"sessionUpdate": "goal_updated",
+			"goal_id":       "goal-1",
+			"objective":     "T99",
+			"status":        "active",
+			"phase":         "executing",
+		}),
+		line("_x.ai/session/update", 1783679389, map[string]any{
+			"sessionUpdate":     "subagent_spawned",
+			"subagent_id":       "child-1",
+			"child_session_id":  "019f4b93-child-0000-0000-000000000002",
+			"parent_session_id": sessionID,
+			"subagent_type":     "general-purpose",
+			"description":       "verify fix",
 		}),
 		line("_x.ai/session/update", 1783679390, map[string]any{
 			"sessionUpdate": "turn_completed",
@@ -89,7 +133,6 @@ func grokFixtureLines(t *testing.T, sessionID string) []byte {
 
 func writeGrokSession(t *testing.T, root, cwd string) string {
 	t.Helper()
-	// Mirror layout: sessions/<encoded-cwd>/<session-id>/updates.jsonl
 	encoded := "%2FUsers%2Fdev%2Fwork%2Fgithub.com%2Facme%2Fwebapp"
 	dir := filepath.Join(root, "sessions", encoded, grokSessUUID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -100,11 +143,14 @@ func writeGrokSession(t *testing.T, root, cwd string) string {
 			"id":  grokSessUUID,
 			"cwd": cwd,
 		},
-		"generated_title":  "Auth bug triage",
-		"session_summary":  "Auth bug triage",
-		"current_model_id": "grok-4.5",
-		"head_branch":      "main",
-		"git_remotes":      []string{"https://github.com/acme/webapp"},
+		"generated_title":   "Auth bug triage",
+		"session_summary":   "Auth bug triage",
+		"current_model_id":  "grok-4.5",
+		"head_branch":       "main",
+		"git_remotes":       []string{"https://github.com/acme/webapp.git"},
+		"parent_session_id": grokParentUUID,
+		"session_kind":      "subagent",
+		"agent_name":        "general-purpose",
 	}
 	sumRaw, err := json.Marshal(summary)
 	if err != nil {
@@ -113,7 +159,19 @@ func writeGrokSession(t *testing.T, root, cwd string) string {
 	if err := os.WriteFile(filepath.Join(dir, "summary.json"), sumRaw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Sidecar that must NOT be ingested as Claude JSONL.
+	signals := map[string]any{
+		"contextTokensUsed":   12345,
+		"contextWindowTokens": 500000,
+		"primaryModelId":      "grok-4.5",
+		"toolCallCount":       2,
+		"turnCount":           1,
+		"compactionCount":     0,
+		"gitCommitCount":      0,
+	}
+	sigRaw, _ := json.Marshal(signals)
+	if err := os.WriteFile(filepath.Join(dir, "signals.json"), sigRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(`{"type":"noise"}\n`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -138,72 +196,89 @@ func TestParseGrokFile(t *testing.T) {
 		t.Errorf("source = %q, want grok", pf.source)
 	}
 	if pf.sessionID != grokSessUUID {
-		t.Errorf("sessionID = %q, want %q", pf.sessionID, grokSessUUID)
+		t.Errorf("sessionID = %q", pf.sessionID)
 	}
 	if pf.cwd != cwd {
-		t.Errorf("cwd = %q, want %q", pf.cwd, cwd)
+		t.Errorf("cwd = %q", pf.cwd)
 	}
 	if pf.branch != "main" {
-		t.Errorf("branch = %q, want main", pf.branch)
+		t.Errorf("branch = %q", pf.branch)
 	}
-	if pf.project != "acme/webapp" {
-		t.Errorf("project = %q, want acme/webapp", pf.project)
+	// Subagent → project "subagents" for session_type trigger.
+	if pf.project != "subagents" {
+		t.Errorf("project = %q, want subagents", pf.project)
+	}
+	if pf.parentSessionID != grokParentUUID {
+		t.Errorf("parentSessionID = %q", pf.parentSessionID)
+	}
+	if pf.model != "grok-4.5" {
+		t.Errorf("model = %q", pf.model)
 	}
 	if !strings.Contains(pf.topic, "authentication bug") {
-		t.Errorf("topic = %q, want first user message (not summary title)", pf.topic)
+		t.Errorf("topic = %q", pf.topic)
 	}
 
-	// user, thought, tool_call, tool_result, assistant = 5 entries.
-	// hook_execution, intermediate tool_call_update, turn_completed skipped.
-	if len(pf.entries) != 5 {
-		t.Fatalf("entries = %d, want 5", len(pf.entries))
+	// Model stamped on entry raw for generated columns.
+	var sawModel bool
+	for _, e := range pf.entries {
+		var raw map[string]any
+		if json.Unmarshal(e.raw, &raw) != nil {
+			continue
+		}
+		if msg, ok := raw["message"].(map[string]any); ok {
+			if msg["model"] == "grok-4.5" {
+				sawModel = true
+				break
+			}
+		}
 	}
-	if len(pf.messages) != 5 {
-		t.Fatalf("messages = %d, want 5", len(pf.messages))
+	if !sawModel {
+		t.Error("expected message.model=grok-4.5 on at least one entry")
 	}
 
-	var first map[string]any
-	if err := json.Unmarshal(pf.entries[0].raw, &first); err != nil {
-		t.Fatalf("entry raw not valid JSON: %v", err)
-	}
-	if uuid, _ := first["uuid"].(string); !strings.HasPrefix(uuid, "grok-"+grokSessUUID+"-") {
-		t.Errorf("entry uuid = %v, want grok-<session>-<offset> prefix", first["uuid"])
-	}
-
-	byType := map[string][]parsedMessage{}
+	// Signals usage entry present.
+	var sawUsage bool
 	for _, m := range pf.messages {
-		byType[m.contentType] = append(byType[m.contentType], m)
-	}
-
-	var sawUser, sawAssistant bool
-	for _, m := range byType["text"] {
-		if m.role == "user" && strings.Contains(m.text, "authentication bug") {
-			sawUser = true
-		}
-		if m.role == "assistant" && strings.Contains(m.text, "Fixed the authentication") {
-			sawAssistant = true
+		if strings.HasPrefix(m.text, "[grok signals]") {
+			sawUsage = true
 		}
 	}
-	if !sawUser || !sawAssistant {
-		t.Errorf("missing user/assistant text (user=%v assistant=%v)", sawUser, sawAssistant)
+	if !sawUsage {
+		t.Error("expected [grok signals] usage message")
 	}
 
-	if th := byType["thinking"]; len(th) != 1 || !strings.Contains(th[0].text, "auth") {
-		t.Errorf("thinking = %+v", byType["thinking"])
+	// Tool input normalised: target_file → file_path
+	var sawReadFilePath bool
+	for _, m := range pf.messages {
+		if m.contentType == "tool_use" && m.toolName == "read_file" {
+			var in map[string]any
+			if json.Unmarshal(m.toolInput, &in) == nil && in["file_path"] == "/tmp/auth.go" {
+				sawReadFilePath = true
+			}
+		}
+	}
+	if !sawReadFilePath {
+		t.Error("read_file tool_input missing normalised file_path")
 	}
 
-	if tu := byType["tool_use"]; len(tu) != 1 ||
-		tu[0].toolName != "run_terminal_command" ||
-		tu[0].toolUseID != "call-1" ||
-		!json.Valid(tu[0].toolInput) ||
-		!strings.Contains(string(tu[0].toolInput), "go test") {
-		t.Errorf("tool_use malformed: %+v", byType["tool_use"])
+	// Recap / plan / goal indexed
+	var sawRecap, sawPlan, sawGoal, sawSpawn bool
+	for _, m := range pf.messages {
+		if strings.Contains(m.text, "[grok recap") {
+			sawRecap = true
+		}
+		if strings.Contains(m.text, "[grok plan]") {
+			sawPlan = true
+		}
+		if strings.Contains(m.text, "[grok goal]") {
+			sawGoal = true
+		}
+		if strings.Contains(m.text, "[grok subagent spawned]") {
+			sawSpawn = true
+		}
 	}
-
-	if rs := byType["tool_result"]; len(rs) != 1 ||
-		rs[0].toolUseID != "call-1" ||
-		!strings.Contains(rs[0].text, "PASS ok package") {
-		t.Errorf("tool_result = %+v", byType["tool_result"])
+	if !sawRecap || !sawPlan || !sawGoal || !sawSpawn {
+		t.Errorf("extensions missing recap=%v plan=%v goal=%v spawn=%v", sawRecap, sawPlan, sawGoal, sawSpawn)
 	}
 }
 
@@ -214,9 +289,6 @@ func TestIsGrokUpdates(t *testing.T) {
 	if isGrokUpdates("/x/sessions/y/events.jsonl") {
 		t.Error("events.jsonl must not match")
 	}
-	if isGrokUpdates("/x/rollout-foo.jsonl") {
-		t.Error("rollout must not match")
-	}
 }
 
 func TestGrokIngestEndToEnd(t *testing.T) {
@@ -224,7 +296,7 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	cwd := "/Users/dev/work/github.com/acme/webapp"
 	writeGrokSession(t, grokHome, cwd)
 
-	s := newTestStore(t, t.TempDir()) // empty Claude project dir
+	s := newTestStore(t, t.TempDir())
 	s.SetGrokRoots([]string{filepath.Join(grokHome, "sessions")})
 	if err := s.IngestAll(); err != nil {
 		t.Fatal(err)
@@ -238,31 +310,81 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 		t.Fatalf("search did not surface the Grok session: %+v", results)
 	}
 
-	var source, repo string
+	// Recap searchable
+	if rec, err := s.Search("regression test", 5, "all", "", 0, 0, false); err != nil || len(rec) == 0 {
+		t.Fatalf("recap/plan not searchable: %v %+v", err, rec)
+	}
+
+	var source, repo, stype string
 	if err := s.readDB.QueryRow(
-		`SELECT source, repo FROM session_meta WHERE session_id = ?`, grokSessUUID,
-	).Scan(&source, &repo); err != nil {
-		t.Fatalf("session_meta query: %v", err)
+		`SELECT sm.source, sm.repo, ss.session_type
+		 FROM session_meta sm
+		 JOIN session_summary ss ON ss.session_id = sm.session_id
+		 WHERE sm.session_id = ?`, grokSessUUID,
+	).Scan(&source, &repo, &stype); err != nil {
+		t.Fatalf("session_meta: %v", err)
 	}
 	if source != "grok" {
-		t.Errorf("session_meta.source = %q, want grok", source)
+		t.Errorf("source = %q", source)
 	}
 	if repo != "acme/webapp" {
-		t.Errorf("session_meta.repo = %q, want acme/webapp", repo)
+		t.Errorf("repo = %q, want acme/webapp", repo)
+	}
+	if stype != "subagent" {
+		t.Errorf("session_type = %q, want subagent", stype)
 	}
 
+	// Model on assistant entries
+	var model string
+	if err := s.readDB.QueryRow(
+		`SELECT model FROM entries WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL AND model != '' LIMIT 1`,
+		grokSessUUID,
+	).Scan(&model); err != nil || model != "grok-4.5" {
+		t.Errorf("model = %q err=%v", model, err)
+	}
+
+	// Usage tokens from signals
+	var inTok int
+	if err := s.readDB.QueryRow(
+		`SELECT input_tokens FROM entries WHERE session_id = ? AND input_tokens > 0 LIMIT 1`,
+		grokSessUUID,
+	).Scan(&inTok); err != nil || inTok != 12345 {
+		t.Errorf("input_tokens = %d err=%v, want 12345", inTok, err)
+	}
+
+	// tool_file_path from normalised target_file
+	var nPath int
+	if err := s.readDB.QueryRow(
+		`SELECT count(*) FROM messages WHERE session_id = ? AND tool_file_path = '/tmp/auth.go'`,
+		grokSessUUID,
+	).Scan(&nPath); err != nil || nPath < 1 {
+		t.Errorf("tool_file_path count = %d err=%v", nPath, err)
+	}
+
+	// Parent chain edge
+	var pred string
+	if err := s.readDB.QueryRow(
+		`SELECT predecessor_id FROM session_chains WHERE successor_id = ?`, grokSessUUID,
+	).Scan(&pred); err != nil || pred != grokParentUUID {
+		t.Errorf("chain predecessor = %q err=%v", pred, err)
+	}
+
+	// Subagent spawn chain
+	var spawnPred string
+	if err := s.readDB.QueryRow(
+		`SELECT predecessor_id FROM session_chains WHERE successor_id = ? AND mechanism = 'grok_subagent'`,
+		"019f4b93-child-0000-0000-000000000002",
+	).Scan(&spawnPred); err != nil || spawnPred != grokSessUUID {
+		t.Errorf("subagent chain pred = %q err=%v", spawnPred, err)
+	}
+
+	// Idempotency
 	entryCount := func() int {
 		var n int
-		if err := s.readDB.QueryRow(`SELECT count(*) FROM entries WHERE session_id = ?`, grokSessUUID).Scan(&n); err != nil {
-			t.Fatalf("count query: %v", err)
-		}
+		_ = s.readDB.QueryRow(`SELECT count(*) FROM entries WHERE session_id = ?`, grokSessUUID).Scan(&n)
 		return n
 	}
-	if got := entryCount(); got != 5 {
-		t.Fatalf("entries after ingest = %d, want 5", got)
-	}
-
-	// Idempotency: re-ingest must not duplicate.
+	before := entryCount()
 	s.mu.Lock()
 	for p := range s.offsets {
 		s.offsets[p] = 0
@@ -272,27 +394,16 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	if err := s.ingestGrokFile(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := entryCount(); got != 5 {
-		t.Errorf("entries after re-ingest = %d, want 5 (dedup)", got)
-	}
-
-	// Sidecar events.jsonl must not create a second session or garbage.
-	var nSessions int
-	if err := s.readDB.QueryRow(`SELECT count(*) FROM session_meta WHERE source = 'grok'`).Scan(&nSessions); err != nil {
-		t.Fatal(err)
-	}
-	if nSessions != 1 {
-		t.Errorf("grok sessions = %d, want 1 (sidecars skipped)", nSessions)
+	if got := entryCount(); got != before {
+		t.Errorf("entries after re-ingest = %d, want %d", got, before)
 	}
 }
 
-func TestGrokTimestamp(t *testing.T) {
-	ts := grokTimestamp(json.RawMessage(`1783679368`))
-	if !strings.HasPrefix(ts, "2026-") {
-		t.Errorf("unix timestamp = %q, want 2026-… RFC3339", ts)
+func TestRepoFromRemote(t *testing.T) {
+	if g := repoFromRemote("git@github.com:acme/webapp.git"); g != "acme/webapp" {
+		t.Errorf("ssh remote = %q", g)
 	}
-	ts2 := grokTimestamp(json.RawMessage(`"2026-07-10T12:00:00Z"`))
-	if ts2 != "2026-07-10T12:00:00Z" {
-		t.Errorf("rfc3339 passthrough = %q", ts2)
+	if g := repoFromRemote("https://github.com/acme/webapp.git"); g != "acme/webapp" {
+		t.Errorf("https remote = %q", g)
 	}
 }

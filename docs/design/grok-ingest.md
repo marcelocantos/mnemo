@@ -1,13 +1,9 @@
-# Grok Transcript Ingest (MVP)
+# Grok Transcript Ingest
 
-*Status: design note — 2026-07-11. Anchors 🎯T110. Scope is deliberately
-narrow: capture Grok CLI session transcripts into the existing index,
-and not much else.*
-
-**Tracking.** Design source for 🎯T110. Grounded in real session trees
-on disk (`~/.grok`, Grok CLI 0.2.93) and the shipped user guide
-(`~/.grok/docs/user-guide/17-sessions.md`). Sibling of 🎯T99 /
-`docs/design/codex-ingest.md`.
+*Status: design note — 2026-07-11. Anchors 🎯T110 (MVP) + 🎯T111
+(fidelity). Grounded in real session trees on disk (`~/.grok`, Grok CLI
+0.2.93+) and the shipped user guide (`17-sessions.md`). Sibling of
+🎯T99 / `docs/design/codex-ingest.md`.*
 
 ---
 
@@ -132,22 +128,42 @@ variant. Unknown → skip-and-continue, never fail the file.
 
 ---
 
-## Explicitly out of scope (MVP)
+## Fidelity layer (🎯T111)
 
-`events.jsonl` telemetry; rewind snapshots; images; Grok's own
-`session_search.sqlite`; decryption of anything; modelling forks /
-subagents as mnemo chains (subagent child sessions are normal sibling
-session dirs and get indexed independently); `mnemo_whatsup` live-PID
-for `grok` processes; Grok-native memory; usage/token streams from
-`signals.json`.
+Beyond the MVP conversation core, Grok often carries **richer** session
+metadata than Claude's per-line envelope. We map those into the same
+columns/tables Claude already uses where possible, and index the rest
+as searchable text.
 
-**Just text + tool calls + tool results, attributed to a session / repo
-/ timestamp, searchable.**
+| Grok signal | Mapping | Beyond Claude? |
+|-------------|---------|----------------|
+| `summary.current_model_id` | `entries.raw.message.model` → generated `entries.model` | fills same column |
+| `summary.session_kind=subagent` | `project=subagents` → `session_summary.session_type` | same classification path |
+| `summary.parent_session_id` | `session_chains` edge (`mechanism=grok_parent`) | explicit parent without MCP identity |
+| `summary.git_remotes` | `session_meta.repo` fallback when cwd is opaque/worktree | Claude usually has path-based cwd |
+| `signals.json` context tokens | synthetic assistant entry with `input_tokens` + `[grok signals]` text | session-level occupancy (no Anthropic turn split) |
+| tool `target_file` / `path` | normalised to `file_path` for `tool_file_path` gen-col | shared `normalizeAgentToolInput` (Codex too) |
+| `session_recap` | assistant text `[grok recap]` | durable prose summary without mnemo compact |
+| `plan` ACP updates | assistant text `[grok plan]` checklist | first-class plan stream |
+| `goal_updated` | assistant text `[grok goal]` | no Claude analogue |
+| `subagent_spawned/finished` | text + `session_chains` (`grok_subagent`) | parent→child graph |
+| `task_completed` | tool_result-shaped text with exit/cmd/output | bg task completion |
+| `auto_compact_*` | thinking noise with token before/after | Grok-native compact markers |
+
+Codex reuses tool-input normalisation; session_type/model/usage adapters
+are the same extension points when Codex corpus grows.
+
+## Still out of scope
+
+`events.jsonl` raw telemetry flood; rewind snapshots; image pipeline
+(assets/images dirs → OCR/describe); `mnemo_whatsup` for `grok` PIDs;
+Grok-native memory store; decrypting reasoning beyond visible summaries.
 
 ---
 
 ## Cross-check references
 
 - `~/.grok/docs/user-guide/17-sessions.md` (storage layout, resume)
-- Live corpus under `~/.grok/sessions/` (CLI 0.2.93)
-- Implementation mirror: `internal/store/codex.go` (🎯T99)
+- Live corpus under `~/.grok/sessions/` (CLI 0.2.93+)
+- Implementation: `internal/store/grok.go`, `tool_input.go`
+- Mirror: `internal/store/codex.go` (🎯T99)

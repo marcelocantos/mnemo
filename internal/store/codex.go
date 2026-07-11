@@ -345,13 +345,13 @@ func codexToolInput(p *codexPayload) (toolInput []byte, text string) {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		if isJSONObject([]byte(s)) {
-			return []byte(s), ""
+			return normalizeAgentToolInput([]byte(s)), ""
 		}
 		return nil, s
 	}
 	// A bare JSON value (object/array), e.g. tool_search_call args.
 	if isJSONObject(raw) {
-		return append([]byte(nil), raw...), ""
+		return normalizeAgentToolInput(append([]byte(nil), raw...)), ""
 	}
 	return nil, string(raw)
 }
