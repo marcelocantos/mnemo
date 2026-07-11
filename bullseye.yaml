@@ -156,7 +156,7 @@ targets:
     discovered: 2026-06-30
   T102.1:
     name: The plugin protocol and mechanism are specified and documented in docs/design/plugin-system.md
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -170,6 +170,7 @@ targets:
     - contract
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-10
   T102.10:
     name: 'MCP-tool plugins: a plugin''s MCP tools are surfaced to mnemo''s clients'
     status: identified
