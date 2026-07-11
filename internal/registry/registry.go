@@ -30,6 +30,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/upgrade"
 	"github.com/marcelocantos/mnemo/internal/vault"
 )
 
@@ -78,6 +79,11 @@ type Registry struct {
 	cfg               store.Config
 	summariserWorkDir string
 	compactorModel    string
+	// upgradeDetector and lease are optional 🎯T97 wiring; set from main
+	// after construction. nil means the corresponding diag checks report
+	// "not configured" and background workers always start.
+	upgradeDetector *upgrade.Detector
+	lease           *upgrade.Lease
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -100,6 +106,8 @@ type userEntry struct {
 	reconcilerCancel  context.CancelFunc // cancels the reconciler sub-context; nil when disabled
 	reconcilerWorkers sync.WaitGroup     // tracks reconciler goroutine for hot-reload
 	homeDir           string             // remembered for Reload's ~/ expansion
+	bgStarted         bool               // true after startWorkers launched singleton bg work
+	projectDir        string             // transcript root for deferred startWorkers
 }
 
 // NewRegistry builds an empty Registry. The baseCtx is cancelled on
@@ -156,6 +164,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
 	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
 	s.SetCodexRoots(store.CodexRootsFor(home)) // 🎯T99: index ~/.codex rollouts
+	s.SetGrokRoots(store.GrokRootsFor(home))   // 🎯T110: index ~/.grok sessions
 	s.SetTodoGlobs(r.cfg.TodoGlobs)
 
 	synthRoots := r.cfg.ResolvedSynthesisRoots()
@@ -177,10 +186,64 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	}
 	s.SetSynthesisRoots(synthRoots)
 
-	e := &userEntry{store: s, vault: vaultExp, homeDir: home}
+	e := &userEntry{store: s, vault: vaultExp, homeDir: home, projectDir: projectDir}
 	r.stores[username] = e
 	r.startWorkers(username, projectDir, e)
 	return s, nil
+}
+
+// SetUpgradeDetector wires the 🎯T97.2 release detector for diag checks.
+func (r *Registry) SetUpgradeDetector(d *upgrade.Detector) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.upgradeDetector = d
+}
+
+// UpgradeDetector returns the detector set via SetUpgradeDetector.
+func (r *Registry) UpgradeDetector() *upgrade.Detector {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.upgradeDetector
+}
+
+// SetLease wires the 🎯T97.4 singleton background lease.
+func (r *Registry) SetLease(l *upgrade.Lease) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lease = l
+}
+
+// Lease returns the lease set via SetLease.
+func (r *Registry) Lease() *upgrade.Lease {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lease
+}
+
+// ReleaseLease drops the background lease if held (drain path 🎯T97.4).
+func (r *Registry) ReleaseLease() {
+	r.mu.Lock()
+	l := r.lease
+	r.mu.Unlock()
+	if l != nil {
+		_ = l.Release()
+	}
+}
+
+// EnsureBackgroundWorkers starts deferred per-user workers when this
+// process holds the lease (handoff after another backend released).
+func (r *Registry) EnsureBackgroundWorkers() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lease != nil && !r.lease.Held() {
+		return
+	}
+	for username, e := range r.stores {
+		if e.bgStarted {
+			continue
+		}
+		r.startWorkers(username, e.projectDir, e)
+	}
 }
 
 // VaultFor returns the vault Exporter for username, or nil when vault is
@@ -212,8 +275,25 @@ func (r *Registry) CompactWatcherFor(username string) *compact.Watcher {
 // startWorkers kicks off the per-user ingest / watcher / compactor /
 // CI-poll goroutines. Each goroutine runs until r.baseCtx is
 // cancelled (Registry.Close) or until it hits a terminal error.
+//
+// When a background lease is configured and this process does not hold
+// it, workers are deferred (🎯T97.4) so a second backend during upgrade
+// cannot double-ingest. EnsureBackgroundWorkers starts them after
+// lease acquisition.
 func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	logger := slog.Default().With("user", username)
+
+	if e.bgStarted {
+		return
+	}
+	if r.lease != nil && !r.lease.Held() {
+		logger.Info("deferring background workers: not lease holder")
+		return
+	}
+	e.bgStarted = true
+	if r.lease != nil {
+		r.lease.SetRunningBackground(true)
+	}
 
 	// Realtime transcript watcher. Start this before the cold catch-up
 	// backlog so new appends are indexed with stack-like priority.

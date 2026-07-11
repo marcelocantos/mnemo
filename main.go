@@ -17,12 +17,14 @@
 //	mnemo print-endpoint        # print this host's mTLS public cert (for federated peer trust)
 //	mnemo print-federated-addr  # print the URL peers paste into linked_instances
 //	mnemo ping-peer <name>      # call mnemo_stats on a configured peer (smoke-test federation)
+//	mnemo edge                  # transparent MCP edge proxy (🎯T97.3)
 //	claude mcp add --scope user --transport http mnemo "http://localhost:19419/mcp?user=<name>"
 package main
 
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,7 +36,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,12 +48,14 @@ import (
 	"github.com/marcelocantos/mnemo/internal/api"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
+	"github.com/marcelocantos/mnemo/internal/edgeproxy"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
+	"github.com/marcelocantos/mnemo/internal/upgrade"
 )
 
 // stdioMigrationManualHint is emitted only when auto-migration of
@@ -136,6 +142,9 @@ func main() {
 			return
 		case "thread":
 			cmdThread(os.Args[2:])
+			return
+		case "edge":
+			cmdEdge(os.Args[2:])
 			return
 		}
 	}
@@ -455,6 +464,164 @@ func cmdUninstallService(args []string) {
 	}
 }
 
+// stringList is a repeatable flag.Value for multi --backend flags.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// cmdEdge runs the transparent MCP edge proxy (🎯T97.3). The edge owns
+// the public listener and all client connections; backends serve on
+// loopback HTTP or a Unix domain socket. Session affinity is by
+// Mcp-Session-Id — standard MCP-over-HTTP, no custom protocol.
+//
+// When --route-file is set (or defaults to ~/.mnemo/edge-route.json and
+// that file exists), the edge reloads primary index from the file so
+// auto-apply can flip backends without restarting the edge (🎯T97.5).
+func cmdEdge(args []string) {
+	fs := flag.NewFlagSet("edge", flag.ExitOnError)
+	listen := fs.String("listen", defaultAddr,
+		"public listen address (edge owns client TCP connections)")
+	primary := fs.Int("primary", 0,
+		"index of the backend that receives new initialize requests")
+	routeFile := fs.String("route-file", "",
+		"optional edge-route.json path (default: ~/.mnemo/edge-route.json when present)")
+	var backends stringList
+	fs.Var(&backends, "backend",
+		"backend base URL (repeatable). http://host:port or unix:///path")
+	_ = fs.Parse(args)
+
+	// Prefer explicit --backend flags; else load route file.
+	routePath := *routeFile
+	if routePath == "" {
+		if home, err := store.EffectiveHome(); err == nil && upgrade.RouteConfigured(home) {
+			routePath = upgrade.RoutePath(home)
+		}
+	}
+	if len(backends) == 0 && routePath != "" {
+		data, err := os.ReadFile(routePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "edge: read route file: %v\n", err)
+			os.Exit(1)
+		}
+		var rf upgrade.RouteFile
+		if err := json.Unmarshal(data, &rf); err != nil {
+			fmt.Fprintf(os.Stderr, "edge: parse route file: %v\n", err)
+			os.Exit(1)
+		}
+		backends = rf.Backends
+		*primary = rf.Primary
+	}
+	if len(backends) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: mnemo edge --backend URL [--backend URL ...] [--listen :19419] [--primary 0]")
+		fmt.Fprintln(os.Stderr, "   or: mnemo edge --route-file ~/.mnemo/edge-route.json")
+		fmt.Fprintln(os.Stderr, "edge: at least one --backend is required")
+		os.Exit(2)
+	}
+
+	router, err := edgeproxy.NewRouter(backends, *primary)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "edge: %v\n", err)
+		os.Exit(1)
+	}
+	proxy := edgeproxy.NewProxy(router)
+
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           proxy,
+		ReadHeaderTimeout: 10 * time.Second,
+		// No Read/WriteTimeout — GET/SSE streams are long-lived.
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Poll route file for backend growth + primary flips + repin.
+	if routePath != "" {
+		go watchEdgeRoute(ctx, routePath, router, proxy)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("edge listening",
+			"listen", *listen,
+			"backends", len(backends),
+			"primary", *primary,
+			"route_file", routePath,
+			"version", version,
+		)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "edge: shutdown: %v\n", err)
+			os.Exit(1)
+		}
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "edge: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+// watchEdgeRoute applies edge-route.json (grow backends + primary flip)
+// and writes pin_counts so a draining backend can AffinityDrain until
+// its pin count is zero (🎯T97.5). repin_all is crash-failover only.
+func watchEdgeRoute(ctx context.Context, path string, router *edgeproxy.Router, proxy *edgeproxy.Proxy) {
+	_ = proxy // clients grow lazily via Proxy.clientAt → syncClients
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	var lastControl string // backends+primary+repin (not pin_counts)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var rf upgrade.RouteFile
+			if err := json.Unmarshal(data, &rf); err != nil {
+				continue
+			}
+			controlKey := fmt.Sprintf("%v|%d|%v", rf.Backends, rf.Primary, rf.RepinAll)
+			if controlKey != lastControl {
+				prim, err := router.ApplyRoute(rf.Backends, rf.Primary)
+				if err != nil {
+					slog.Warn("edge: apply route file", "err", err)
+					continue
+				}
+				if rf.RepinAll {
+					// Crash-failover only — not happy-path upgrade drain.
+					n := upgrade.FailoverRepin(router.RepinAllToPrimary)
+					slog.Info("edge: failover repin to primary", "moved", n, "primary", prim)
+					rf.RepinAll = false
+				}
+				slog.Info("edge: route applied", "backends", router.BackendCount(), "primary", prim)
+				lastControl = controlKey
+			}
+			// Always refresh pin_counts for AffinityDrain observers.
+			// Atomic write so concurrent ReadRoute never sees partial JSON.
+			rf.PinCounts = router.PinCounts()
+			rf.Backends = router.BackendURLs()
+			rf.Primary = router.PrimaryIndex()
+			if err := upgrade.WriteRouteFile(path, rf); err != nil {
+				slog.Warn("edge: write pin_counts", "err", err)
+			}
+		}
+	}
+}
+
 // stdinPiped reports whether stdin is a pipe or file (i.e. not a tty),
 // which is the case when an MCP client launches mnemo as a stdio
 // server. Returns false on stat errors so terminal-interactive users
@@ -570,6 +737,200 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
+	// 🎯T97: upgrade detector, background lease, notices, auto-apply.
+	// Lease is acquired before eager ForUser so startWorkers can gate
+	// singleton background work on holder status.
+	upgradeNotices := upgrade.NewNoticeTracker()
+	activeSessions := upgrade.NewSessionSet()
+	// listChanged is registered after mcpSrv is built (orchestrator is
+	// wired earlier). Best-effort tools/list_changed on version change.
+	var listChangedHolder upgrade.ListChangedHolder
+	upgradeFX := &upgrade.SideEffects{
+		Notices: upgradeNotices,
+		ListChanged: func(from, to string) {
+			listChangedHolder.Send(from, to)
+		},
+	}
+	var lastMCPActivity atomicTime
+	lastMCPActivity.Set(time.Now())
+
+	homeForLease, homeErr := store.EffectiveHome()
+	var pendingUpgradeFrom, pendingUpgradeTo string
+	if homeErr == nil {
+		// Load once: allowlisted sessions only; file is deleted (🎯T97.6).
+		if p, ok, err := upgrade.LoadAndConsumePending(homeForLease, upgradeNotices); err != nil {
+			slog.Warn("upgrade pending notice load failed", "err", err)
+		} else if ok {
+			pendingUpgradeFrom, pendingUpgradeTo = p.From, p.To
+		}
+	}
+
+	var bgLease *upgrade.Lease
+	if homeErr == nil {
+		var lerr error
+		bgLease, lerr = upgrade.NewLease(&upgrade.LeaseArgs{
+			Path:     upgrade.DefaultLeasePath(homeForLease),
+			HolderID: upgrade.DefaultHolderID(),
+		})
+		if lerr != nil {
+			slog.Warn("background lease unavailable", "err", lerr)
+		} else {
+			reg.SetLease(bgLease)
+			if ok, aerr := bgLease.TryAcquire(); aerr != nil {
+				slog.Warn("background lease acquire failed", "err", aerr)
+			} else if ok {
+				slog.Info("background lease acquired", "holder", upgrade.DefaultHolderID())
+				go bgLease.RunHeartbeatLoop(ctx.Done(), 0)
+			} else {
+				slog.Info("background lease held by another process; serve-only mode")
+			}
+			// Retry acquire periodically so a handoff after peer drain works.
+			go func() {
+				t := time.NewTicker(time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						if bgLease.Held() {
+							continue
+						}
+						ok, err := bgLease.TryAcquire()
+						if err != nil || !ok {
+							continue
+						}
+						slog.Info("background lease acquired (handoff)")
+						go bgLease.RunHeartbeatLoop(ctx.Done(), 0)
+						reg.EnsureBackgroundWorkers()
+					}
+				}
+			}()
+		}
+	}
+
+	upgradeDetector := upgrade.NewDetector(&upgrade.DetectorArgs{
+		CurrentVersion: version,
+		Fetch:          upgrade.GHReleaseFetcher(""),
+		Disabled:       cfg.DisableUpgradeCheck,
+		MinInterval:    6 * time.Hour,
+	})
+	reg.SetUpgradeDetector(upgradeDetector)
+	go runUpgradeDetectorLoop(ctx, upgradeDetector)
+
+	// Auto-apply (🎯T97.5). Homebrew-only. Sequence:
+	//   apply → OnUpgrade (pending + in-process marks) →
+	//   spawn (sibling loads pending) → flip primary (pins stay) →
+	//   AffinityDrain (wait pin_counts[self]==0, then SIGTERM).
+	// Never repin_all on this path — that invalidates mcp-go sessions.
+	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
+	var spawnedBackendURL string
+	selfBackendURL := backendSelfURL(addr)
+	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
+		Enabled:    cfg.AutoUpgrade.Enabled,
+		Env:        upgrade.ApplyEnv{Homebrew: isHomebrewInstall(), GOOS: ""},
+		Quiescence: orchQuiescence,
+		Detector:   upgradeDetector,
+		LastActivity: func() time.Time {
+			return lastMCPActivity.Get()
+		},
+		Apply: func(ctx context.Context) error {
+			return runBrewUpgrade(ctx)
+		},
+		SpawnBackend: func(ctx context.Context) error {
+			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
+				slog.Info("auto-upgrade: single-daemon mode (no edge-route); new binary ready")
+				return nil
+			}
+			url, err := spawnLoopbackBackend(ctx)
+			if err != nil {
+				return err
+			}
+			spawnedBackendURL = url
+			slog.Info("auto-upgrade: spawned backend", "url", url)
+			return nil
+		},
+		FlipPrimary: func(ctx context.Context) error {
+			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
+				return nil
+			}
+			if spawnedBackendURL == "" {
+				return fmt.Errorf("auto-upgrade: no spawned backend to flip to")
+			}
+			r, err := upgrade.AppendBackend(homeForLease, spawnedBackendURL)
+			if err != nil {
+				return err
+			}
+			slog.Info("auto-upgrade: edge primary flipped (affinity pins unchanged)",
+				"primary", r.Primary, "url", spawnedBackendURL)
+			return nil
+		},
+		DrainOld: func(ctx context.Context) error {
+			reg.ReleaseLease()
+			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
+				slog.Info("auto-upgrade: brew services restart mnemo")
+				return runBrewServicesRestart(ctx)
+			}
+			// Affinity drain: keep serving pinned sessions until edge
+			// reports pin_counts[self]==0, then graceful SIGTERM.
+			selfIdx := -1
+			if rf, err := upgrade.ReadRoute(homeForLease); err == nil {
+				selfIdx = rf.IndexOfBackend(selfBackendURL)
+			}
+			if selfIdx < 0 {
+				slog.Warn("auto-upgrade: self not in edge-route; signaling immediately",
+					"self", selfBackendURL)
+				return signalSelfSIGTERM()
+			}
+			maxWait := orchQuiescence
+			if maxWait <= 0 {
+				maxWait = upgrade.DefaultDrainMaxWait
+			}
+			if d := os.Getenv("MNEMO_DRAIN_MAX_WAIT"); d != "" {
+				if parsed, err := time.ParseDuration(d); err == nil {
+					maxWait = parsed
+				}
+			}
+			slog.Info("auto-upgrade: affinity drain waiting for pins to clear",
+				"self_idx", selfIdx, "max_wait", maxWait)
+			return upgrade.AffinityDrain(ctx, &upgrade.AffinityDrainArgs{
+				BackendIdx: selfIdx,
+				Pins: func(idx int) int {
+					rf, err := upgrade.ReadRoute(homeForLease)
+					if err != nil {
+						// Never treat I/O/parse failure as zero pins —
+						// that would SIGTERM with live sessions.
+						return upgrade.PinUnknown
+					}
+					return rf.PinCountAt(idx)
+				},
+				MaxWait:      maxWait,
+				PollInterval: upgrade.DefaultDrainPoll,
+				Reap: func(ctx context.Context) error {
+					slog.Info("auto-upgrade: pins clear (or max wait); SIGTERM self")
+					return signalSelfSIGTERM()
+				},
+			})
+		},
+		OnUpgrade: func(from, to string) {
+			slog.Info("auto-upgrade: version change side effects", "from", from, "to", to)
+			sessions := activeSessions.Snapshot()
+			// Banners + best-effort tools/list_changed (🎯T97.6 / criterion 4).
+			upgradeFX.OnVersionChange(sessions, from, to)
+			if homeForLease == "" {
+				return
+			}
+			if err := upgrade.WritePendingNotice(homeForLease, upgrade.PendingNotice{
+				From:     from,
+				To:       to,
+				Sessions: sessions,
+			}); err != nil {
+				slog.Warn("auto-upgrade: write pending notice", "err", err)
+			}
+		},
+	})
+	go runAutoApplyLoop(ctx, autoOrch)
+
 	// Determine the default username — used when a request arrives
 	// without an explicit ?user=<name> query parameter. On a Windows
 	// Service deployment (running as LocalSystem) there is no
@@ -673,6 +1034,17 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		version,
 		server.WithToolCapabilities(true),
 	)
+	// Best-effort tools/list_changed after upgrade (🎯T97.6). listChanged
+	// is void-safe when no clients are connected.
+	listChangedHolder.Set(func(from, to string) {
+		upgrade.BroadcastListChanged(mcpSrv, from, to)
+		slog.Info("auto-upgrade: tools/list_changed notified", "from", from, "to", to)
+	})
+	// Sibling process that loaded upgrade-pending: notify any clients that
+	// attach to this new backend (best-effort).
+	if pendingUpgradeFrom != "" {
+		listChangedHolder.Send(pendingUpgradeFrom, pendingUpgradeTo)
+	}
 	handler := tools.NewHandler(resolve)
 
 	// Wire the per-user vault syncer resolver so mnemo_vault_sync and
@@ -722,6 +1094,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
 	// same registry that backs the /health endpoint and the scheduler.
 	handler.SetDiagRunner(diagReg)
+
+	// 🎯T97.6: one-time upgrade notice on tool results (allowlisted sessions).
+	handler.SetUpgradeNotices(upgradeNotices)
 
 	// Build a federation client if linked_instances are configured —
 	// this owns one persistent http.Client per peer and is shared
@@ -773,8 +1148,17 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	//   /api/*        → JSON REST API (for the dashboard)
 	//   /             → Web dashboard UI
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", httpSrv)
-	mux.Handle("/mcp/", httpSrv) // catch sub-paths used by the MCP transport
+	// Track MCP traffic for auto-apply quiescence (🎯T97.5) and remember
+	// live session IDs so OnUpgrade can allowlist spanning sessions only.
+	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastMCPActivity.Set(time.Now())
+		if sid := r.Header.Get(edgeproxy.SessionIDHeader); sid != "" {
+			activeSessions.Add(sid)
+		}
+		httpSrv.ServeHTTP(w, r)
+	})
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/mcp/", mcpHandler) // catch sub-paths used by the MCP transport
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
@@ -878,7 +1262,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 					slog.Warn("federated HTTP shutdown error", "err", err)
 				}
 			}
-			// 2. (release singleton background lease — 🎯T97.4)
+			// 2. Release singleton background lease (🎯T97.4) so a peer
+			// backend can acquire and start ingest/compaction.
+			slog.Info("drain: releasing background lease")
+			reg.ReleaseLease()
 			// 3–5. Stop workers, quiesce read pools, checkpoint each writer.
 			slog.Info("drain: stopping workers + checkpointing stores")
 			reg.Close()
@@ -894,6 +1281,160 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			return nil // unreachable; os.Exit does not return
 		}
 	}
+}
+
+// atomicTime is a mutex-guarded time.Time for MCP activity tracking.
+type atomicTime struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (a *atomicTime) Set(t time.Time) {
+	a.mu.Lock()
+	a.t = t
+	a.mu.Unlock()
+}
+
+func (a *atomicTime) Get() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.t
+}
+
+func runUpgradeDetectorLoop(ctx context.Context, d *upgrade.Detector) {
+	// Immediate check at startup, then every hour (detector still
+	// enforces its own MinInterval for the gh call).
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	do := func() {
+		cr := d.Check(ctx)
+		if cr.Err != nil {
+			slog.Debug("upgrade check", "err", cr.Err)
+			return
+		}
+		if cr.UpgradeAvailable {
+			slog.Info("upgrade available", "detail", cr.Detail)
+		}
+	}
+	do()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			do()
+		}
+	}
+}
+
+func runAutoApplyLoop(ctx context.Context, o *upgrade.Orchestrator) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := o.Tick(ctx); err != nil {
+				slog.Warn("auto-upgrade tick", "err", err)
+			}
+		}
+	}
+}
+
+func isHomebrewInstall() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	return strings.Contains(exe, "/Cellar/mnemo/") ||
+		strings.Contains(exe, "/homebrew/") ||
+		strings.Contains(exe, "/linuxbrew/")
+}
+
+func runBrewUpgrade(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "brew", "upgrade", "mnemo")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("brew upgrade mnemo: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func runBrewServicesRestart(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "brew", "services", "restart", "mnemo")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("brew services restart mnemo: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func signalSelfSIGTERM() error {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return err
+	}
+	return p.Signal(syscall.SIGTERM)
+}
+
+// backendSelfURL is the loopback base URL peers/edge use for this
+// process when it listens on addr (e.g. ":19421" → "http://127.0.0.1:19421").
+func backendSelfURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// addr may be ":19421"
+		if strings.HasPrefix(addr, ":") {
+			return "http://127.0.0.1" + addr
+		}
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// spawnLoopbackBackend starts a sibling mnemo daemon on a free loopback
+// port for edge-mediated handoff (🎯T97.5). Returns the base URL.
+func spawnLoopbackBackend(ctx context.Context) (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	cmd := exec.CommandContext(ctx, exe, "--addr", addr)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("spawn backend: %w", err)
+	}
+	// Detach: do not wait; the new process is supervised by the OS /
+	// brew. Record PID for diagnostics.
+	slog.Info("spawned backend process", "pid", cmd.Process.Pid, "addr", addr)
+	go func() { _ = cmd.Wait() }()
+	// Brief readiness wait: poll TCP until accept or timeout.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return "http://" + addr, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return "http://" + addr, nil // return anyway; edge will 502 until ready
 }
 
 // compactorAdapter satisfies tools.CompactorHealthReporter by

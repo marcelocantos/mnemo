@@ -1,17 +1,19 @@
 # mnemo
 
-Searchable memory across all Claude Code session transcripts. Runs as
-a persistent MCP server — available in every Claude Code session.
+Searchable memory across coding-agent session transcripts. Runs as a
+persistent MCP server — available in every agent session.
 
-mnemo indexes JSONL transcript files from `~/.claude/projects/`,
-maintains a realtime SQLite FTS5 index, and exposes 30+ tools via MCP.
+mnemo indexes Claude Code (`~/.claude/projects/`), Codex CLI
+(`~/.codex/sessions/`), and Grok CLI (`~/.grok/sessions/`) transcripts
+into a realtime SQLite FTS5 index, and exposes 30+ tools via MCP.
 New transcripts are picked up automatically via filesystem watching. A
 browser dashboard is served on the same port at `http://localhost:19419`
 — no separate process or build step required.
 
 **What it indexes:**
 
-- **Session transcripts** — all content block types (text, tool use,
+- **Session transcripts** — Claude, Codex, and Grok (tagged
+  `session_meta.source`); all content block types (text, tool use,
   tool results, thinking), with full-text search and surrounding context
 - **Images** — inline and file-path images from transcripts, with AI
   descriptions, Apple Vision OCR, and CLIP embeddings for semantic and

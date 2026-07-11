@@ -1,8 +1,17 @@
 # mnemo — Agent Guide
 
-mnemo is an MCP server that provides searchable memory across all
-Claude Code session transcripts. It indexes JSONL transcript files from
-`~/.claude/projects/` and maintains a realtime FTS5 index in SQLite.
+mnemo is an MCP server that provides searchable memory across coding-agent
+session transcripts. It maintains a realtime FTS5 index in SQLite and
+ingests:
+
+- **Claude Code** — `~/.claude/projects/**/*.jsonl` (`source=claude`)
+- **Codex CLI** — `~/.codex/sessions/**/rollout-*.jsonl` and
+  `archived_sessions/` (`source=codex`; see `docs/design/codex-ingest.md`)
+- **Grok CLI** — `~/.grok/sessions/**/updates.jsonl` plus sibling
+  `summary.json` (`source=grok`; honour `GROK_HOME`; see
+  `docs/design/grok-ingest.md`)
+
+Filter or inspect provenance via `session_meta.source` (`mnemo_query`).
 
 ## Full setup (all steps required)
 

@@ -145,6 +145,46 @@ type Config struct {
 	// out (the open-row count will then grow unbounded as it did
 	// before — accepted only if some external mechanism reaps).
 	ConnectionSweep ConnectionSweepConfig `json:"connection_sweep,omitempty"`
+
+	// DisableUpgradeCheck turns off the periodic GitHub release poll
+	// that powers the upgrade.available diag check (🎯T97.2). The
+	// check is on by default (opt-out, like health notifications and
+	// the always-on gh-backed PR/CI mirrors). When true, zero outbound
+	// release-list calls are made.
+	DisableUpgradeCheck bool `json:"disable_upgrade_check,omitempty"`
+
+	// AutoUpgrade controls opt-in connection-preserving auto-apply
+	// (🎯T97.5). Zero value / absent → disabled (notify-only via
+	// upgrade.available). When enabled, only Homebrew non-Windows
+	// installs actually apply; others stay notify-only.
+	AutoUpgrade AutoUpgradeConfig `json:"auto_upgrade,omitempty"`
+}
+
+// AutoUpgradeConfig gates automatic backend swaps after quiescence.
+type AutoUpgradeConfig struct {
+	// Enabled opts in to auto-apply. Default false — detection and
+	// notification still work via upgrade.available when the upgrade
+	// check is not disabled.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Quiescence is how long MCP traffic must be idle before apply
+	// (Go duration string). Empty → "30m".
+	Quiescence string `json:"quiescence,omitempty"`
+}
+
+// EffectiveQuiescence returns the parsed idle window or 30m.
+func (a AutoUpgradeConfig) EffectiveQuiescence() (time.Duration, error) {
+	if a.Quiescence == "" {
+		return 30 * time.Minute, nil
+	}
+	d, err := time.ParseDuration(a.Quiescence)
+	if err != nil {
+		return 0, fmt.Errorf("auto_upgrade.quiescence: %w", err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("auto_upgrade.quiescence: must be non-negative, got %v", d)
+	}
+	return d, nil
 }
 
 // ConnectionSweepConfig controls how often the daemon checks for

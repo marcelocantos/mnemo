@@ -108,6 +108,14 @@ type Handler struct {
 	diagRunner       DiagRunner                                    // nil when diagnostics not wired
 	cfgCtl           ConfigController                              // nil when mnemo_config disabled
 	seen             sync.Map
+	// upgradeNotices injects a one-time "mnemo upgraded vN -> vN+1"
+	// banner into tool results after a backend swap (🎯T97.6).
+	upgradeNotices UpgradeNoticeSource
+}
+
+// UpgradeNoticeSource is the tools-facing surface of upgrade.NoticeTracker.
+type UpgradeNoticeSource interface {
+	Consume(sessionID string) (msg string, ok bool)
 }
 
 // NewHandler creates a tool handler that resolves each call's
@@ -144,6 +152,11 @@ func (h *Handler) SetDiagRunner(r DiagRunner) {
 // reports that runtime reconfiguration is not available.
 func (h *Handler) SetConfigController(c ConfigController) {
 	h.cfgCtl = c
+}
+
+// SetUpgradeNotices wires one-time upgrade banners (🎯T97.6).
+func (h *Handler) SetUpgradeNotices(n UpgradeNoticeSource) {
+	h.upgradeNotices = n
 }
 
 // callHandler is the per-call delegate that owns the user-resolved

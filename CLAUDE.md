@@ -17,6 +17,11 @@ Responses-API records are transformed into the same content model and
 flow through the same search/session machinery, tagged
 `session_meta.source = 'codex'`. See `docs/design/codex-ingest.md`.
 
+Also ingests xAI **Grok CLI** sessions from `~/.grok/sessions/`
+(honours `GROK_HOME`) — ACP `updates.jsonl` + `summary.json` are
+transformed into the same content model, tagged
+`session_meta.source = 'grok'`. See `docs/design/grok-ingest.md`.
+
 ## Build & Run
 
 ```bash

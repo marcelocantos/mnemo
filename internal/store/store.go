@@ -108,6 +108,12 @@ type Store struct {
 	// SetCodexRoots; existence is checked lazily in codexDirs.
 	codexRoots []string
 
+	// grokRoots are the candidate Grok session roots (~/.grok/sessions)
+	// ingested alongside Claude/Codex (🎯T110). Only updates.jsonl under
+	// these roots is indexed. Mutated only via SetGrokRoots; existence
+	// is checked lazily in grokDirs.
+	grokRoots []string
+
 	// todoGlobs are extra repo-relative globs that IngestTodos matches
 	// when discovering TODO files, beyond the default TODO.md / todos.md
 	// names (🎯T78). Mutated only via SetTodoGlobs, read under
@@ -220,6 +226,35 @@ func (s *Store) SetCodexRoots(roots []string) {
 func (s *Store) codexDirs() []string {
 	s.rootsMu.RLock()
 	roots := append([]string(nil), s.codexRoots...)
+	s.rootsMu.RUnlock()
+	var out []string
+	for _, d := range roots {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// SetGrokRoots configures the Grok session roots ingested alongside
+// the Claude project dirs (🎯T110). Pass the candidate directories
+// (GrokRootsFor); existence is checked lazily by grokDirs so roots
+// created after startup are still picked up. Call once after Store.New.
+func (s *Store) SetGrokRoots(roots []string) {
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	if len(roots) == 0 {
+		s.grokRoots = nil
+		return
+	}
+	s.grokRoots = append(s.grokRoots[:0:0], roots...)
+}
+
+// grokDirs returns the configured Grok session roots that currently
+// exist on disk. Empty when not configured or ~/.grok isn't present.
+func (s *Store) grokDirs() []string {
+	s.rootsMu.RLock()
+	roots := append([]string(nil), s.grokRoots...)
 	s.rootsMu.RUnlock()
 	var out []string
 	for _, d := range roots {
@@ -2809,8 +2844,8 @@ type parsedFile struct {
 	branch    string
 	topic     string
 	newOffset int64
-	// source is the producing agent ('claude' or 'codex'). Empty means
-	// 'claude' (the default for ~/.claude/projects transcripts).
+	// source is the producing agent ('claude', 'codex', or 'grok').
+	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
 }
 
@@ -2862,6 +2897,36 @@ func (s *Store) IngestAll() error {
 			return nil
 		})
 	}
+	// Grok session roots (🎯T110): only updates.jsonl — siblings
+	// (events/chat_history/rewind_points) must not hit the Claude parser.
+	for _, dir := range s.grokDirs() {
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				slog.Warn("grok dir unavailable, skipping", "dir", dir)
+			} else {
+				slog.Warn("grok dir stat failed, skipping", "dir", dir, "err", err)
+			}
+			continue
+		}
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !isGrokUpdates(path) {
+				return nil
+			}
+			s.mu.Lock()
+			offset := s.offsets[path]
+			s.mu.Unlock()
+			if offset >= info.Size() {
+				return nil
+			}
+			files = append(files, fileEntry{
+				path:   path,
+				mtime:  info.ModTime(),
+				size:   info.Size(),
+				offset: offset,
+			})
+			return nil
+		})
+	}
 
 	if len(files) == 0 {
 		return nil
@@ -2886,8 +2951,11 @@ func (s *Store) IngestAll() error {
 			defer wg.Done()
 			for fe := range pathCh {
 				parse := parseFile
-				if isCodexRollout(fe.path) {
+				switch {
+				case isCodexRollout(fe.path):
 					parse = parseCodexFile
+				case isGrokUpdates(fe.path):
+					parse = parseGrokFile
 				}
 				if pf, err := parse(fe.path, fe.offset); err == nil {
 					parsedCh <- pf
@@ -3325,6 +3393,19 @@ func (s *Store) Watch(ctx context.Context) error {
 		})
 	}
 
+	// Watch Grok session roots (🎯T110). New session dirs are picked up
+	// by the fsnotify Create→watcher.Add path below.
+	for _, dir := range s.grokDirs() {
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				if wErr := watcher.Add(path); wErr != nil {
+					slog.Warn("failed to watch grok directory", "path", path, "err", wErr)
+				}
+			}
+			return nil
+		})
+	}
+
 	// Also watch the skills directory for .md changes.
 	if sdir, err := skillsDir(); err == nil {
 		if wErr := watcher.Add(sdir); wErr != nil {
@@ -3393,6 +3474,22 @@ func (s *Store) Watch(ctx context.Context) error {
 						if err := s.ingestCodexFile(name); err != nil {
 							slog.Error("ingest codex failed", "file", name, "err", err)
 						}
+						return
+					}
+					if isGrokUpdates(name) {
+						if err := s.ingestGrokFile(name); err != nil {
+							slog.Error("ingest grok failed", "file", name, "err", err)
+						}
+						return
+					}
+					// Ignore other Grok sidecars that share the tree
+					// (events/chat_history/…) if a parent dir is watched.
+					if filepath.Base(name) == "chat_history.jsonl" ||
+						filepath.Base(name) == "events.jsonl" ||
+						filepath.Base(name) == "rewind_points.jsonl" ||
+						filepath.Base(name) == "prompt_history.jsonl" ||
+						filepath.Base(name) == "hunk_records.jsonl" ||
+						filepath.Base(name) == "feedback.jsonl" {
 						return
 					}
 					if err := s.ingestFile(name); err != nil {
