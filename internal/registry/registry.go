@@ -164,6 +164,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
 	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
 	s.SetCodexRoots(store.CodexRootsFor(home)) // 🎯T99: index ~/.codex rollouts
+	s.SetGrokRoots(store.GrokRootsFor(home))   // 🎯T110: index ~/.grok sessions
 	s.SetTodoGlobs(r.cfg.TodoGlobs)
 
 	synthRoots := r.cfg.ResolvedSynthesisRoots()
