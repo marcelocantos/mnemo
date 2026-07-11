@@ -497,6 +497,41 @@ targets:
     origin: user suggestion
     discovered: 2026-04-07
     achieved: 2026-04-13
+  T110:
+    name: mnemo ingests Grok CLI session transcripts into the existing searchable index
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - Grok sessions under ~/.grok/sessions are discovered at startup and watched for appends (GROK_HOME honoured)
+    - session_meta rows for Grok sessions have source='grok', correct cwd/repo from summary.json, and a usable topic/title
+    - User text, assistant text, tool_use (name+input), and tool_result content from updates.jsonl are searchable via mnemo_search
+    - Re-ingest is idempotent (synthetic uuid / offset resume); unknown update types never fail the file
+    - docs/design/grok-ingest.md exists as the design note (sibling of codex-ingest.md); unit tests with fixture updates.jsonl + summary.json cover the transform
+    context: |-
+      Sibling of 🎯T99 (Codex). Grok (xAI CLI, grok-build ~0.2.93) stores sessions under ~/.grok/sessions/<url-encoded-cwd>/<session-id>/ — directory-per-session, not a single JSONL file. MCP connectivity already works (streamable HTTP); the gap is transcript ingest so Grok work appears in mnemo_search / mnemo_recent_activity / session_meta with source='grok'.
+
+      Format (grounded on live ~/.grok data + official user-guide 17-sessions.md):
+      - summary.json: metadata (id, cwd, git remotes/branch/commit, title, model, timestamps, parent_session_id for forks)
+      - updates.jsonl: ACP session/update stream — authoritative append-only conversation log (drives /resume). Types: user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, tool_call_update (status=completed carries rawOutput), plus x.ai extensions (subagent_*, goal_*, auto_compact_*, session_recap)
+      - chat_history.jsonl: model-facing messages (user/assistant/tool_result/reasoning/backend_tool_call); rewritten on compact — loses pre-compaction turns
+      - events.jsonl: telemetry only; skip for MVP
+
+      Recommended MVP (mirror T99 spine):
+      1. Watch ~/.grok/sessions (honour GROK_HOME)
+      2. Parse updates.jsonl as primary durable stream + summary.json for session meta
+      3. Transform into parsedFile → writeParsedFile; source='grok'; synthetic entry uuid from byte offset
+      4. Repo attribution from summary.info.cwd / git_remotes
+      5. Defensive: ignore unknown sessionUpdate types; subagents are normal sibling sessions under the cwd tree
+
+      Out of scope MVP: events.jsonl, rewind snapshots, images/ sidecars, Grok-native memory, whatsup live-PID for grok processes, fork chains as mnemo chains.
+    tags:
+    - ingest
+    - grok
+    - multi-source
+    - transcripts
+    origin: 'conversation: user started using Grok and needs mnemo support; research 2026-07-11'
+    discovered: 2026-07-11
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
