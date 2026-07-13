@@ -3782,7 +3782,7 @@ targets:
     actual_cost: 8.0
     acceptance:
     - auto_upgrade.enabled gates the apply path; default off (detection/notification stay on).
-    - When enabled and a newer release is detected, after 30 min of MCP traffic quiescence the daemon runs a detached `brew upgrade mnemo`, spawns the new backend, routes new sessions to it, and drains+checkpoints+reaps the old backend.
+    - When enabled and a newer release is detected, after 5 min of MCP traffic quiescence (auto_upgrade.quiescence, default 5m) the daemon runs a detached `brew upgrade mnemo`, spawns the new backend, routes new sessions to it, and drains+checkpoints+reaps the old backend.
     - Throughout the swap an existing connected session keeps working without /mcp.
     - Installs not managed by Homebrew degrade to notify-only.
     context: |-

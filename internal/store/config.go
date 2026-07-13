@@ -168,14 +168,14 @@ type AutoUpgradeConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Quiescence is how long MCP traffic must be idle before apply
-	// (Go duration string). Empty → "30m".
+	// (Go duration string). Empty → "5m".
 	Quiescence string `json:"quiescence,omitempty"`
 }
 
-// EffectiveQuiescence returns the parsed idle window or 30m.
+// EffectiveQuiescence returns the parsed idle window or 5m.
 func (a AutoUpgradeConfig) EffectiveQuiescence() (time.Duration, error) {
 	if a.Quiescence == "" {
-		return 30 * time.Minute, nil
+		return 5 * time.Minute, nil
 	}
 	d, err := time.ParseDuration(a.Quiescence)
 	if err != nil {

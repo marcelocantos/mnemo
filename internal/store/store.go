@@ -3209,32 +3209,32 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 				source = CASE WHEN excluded.source != '' THEN excluded.source ELSE session_meta.source END`,
 			pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal, source)
 
-	// Parent/fork and subagent edges (Grok summary + spawn events, 🎯T111).
-	if pf.parentSessionID != "" && pf.sessionID != "" {
-		mech := pf.chainMechanism
-		if mech == "" {
-			mech = "grok_parent"
-		}
-		_, _ = ws.tx.Exec(`
+		// Parent/fork and subagent edges (Grok summary + spawn events, 🎯T111).
+		if pf.parentSessionID != "" && pf.sessionID != "" {
+			mech := pf.chainMechanism
+			if mech == "" {
+				mech = "grok_parent"
+			}
+			_, _ = ws.tx.Exec(`
 			INSERT OR IGNORE INTO session_chains
 				(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
 			VALUES (?, ?, 'fork', 0, 'high', ?)`,
-			pf.sessionID, pf.parentSessionID, mech)
-	}
-	for _, m := range pf.messages {
-		if m.contentType != "text" || !strings.HasPrefix(m.text, "[grok subagent spawned]") {
-			continue
+				pf.sessionID, pf.parentSessionID, mech)
 		}
-		child := fieldAfter(m.text, "child=")
-		if child == "" || pf.sessionID == "" {
-			continue
-		}
-		_, _ = ws.tx.Exec(`
+		for _, m := range pf.messages {
+			if m.contentType != "text" || !strings.HasPrefix(m.text, "[grok subagent spawned]") {
+				continue
+			}
+			child := fieldAfter(m.text, "child=")
+			if child == "" || pf.sessionID == "" {
+				continue
+			}
+			_, _ = ws.tx.Exec(`
 			INSERT OR IGNORE INTO session_chains
 				(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
 			VALUES (?, ?, 'subagent', 0, 'high', 'grok_subagent')`,
-			child, pf.sessionID)
-	}
+				child, pf.sessionID)
+		}
 	}
 
 	// Update ingest offset + fingerprint (🎯T68.6 same-size
