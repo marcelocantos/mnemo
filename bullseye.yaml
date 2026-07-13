@@ -2267,7 +2267,7 @@ targets:
     discovered: 2026-07-01
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
-    status: identified
+    status: achieved
     value: 2.0
     cost: 0.0
     set_aside_reason: 'NOT parked, NOT won''t-fix, NOT an achievement judgement — this is an OWNERSHIP EXCLUSION only. T64.2 is driven externally on open PR #112 (branch t64.2-mnemo-namespace-vault-layout, +1959/−46, both CI checks green at 2026-06-14 but 29 commits behind master; lineage from navnita''s now-closed #105). Excluded from Marcelo''s frontier so /cv stops recommending work that already exists on an open PR. bullseye has no dedicated owner/not-mine disposition (feature filed as bullseye 🎯T43), so set_aside is a stand-in here — the reason carries the nuance the status enum can''t. REVIVE by clearing status back to identified (bullseye_put id=T64.2 status=identified) when ownership returns to Marcelo or #112 lands/closes.'
@@ -2283,9 +2283,10 @@ targets:
     - T64.1
     origin: PR
     discovered: 2026-05-22
+    achieved: 2026-07-13
   T64.3:
     name: Move decisions + memories under _mnemo/
-    status: set_aside
+    status: identified
     value: 2.0
     cost: 0.0
     set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
@@ -2294,7 +2295,7 @@ targets:
     - Old v1 decision/memory files still written when vault_layout="both".
     - The atomic write protocol (tempfile + fsync + rename) is in place and survives a daemon crash mid-write.
     - Sync atomicity gate from parent acceptance
-    context: Re-renders the two existing v1 abstractions under the new wing. Validates the rendering shape, frontmatter, graph topology, and atomic write protocol before any genuinely new abstractions (themes, patterns, lessons, cross-repo) land.
+    context: Revived 2026-07-13 with T64.2 ownership return — unblocked once T64.2 lands on master.
     depends_on:
     - T64.2
     origin: PR
@@ -2315,7 +2316,7 @@ targets:
     discovered: 2026-05-22
   T64.5:
     name: PKM profile + auto-detect (mtime-based)
-    status: set_aside
+    status: identified
     value: 2.0
     cost: 0.0
     set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
@@ -2324,14 +2325,14 @@ targets:
     - 'Per-profile renderer hooks plumbed for link syntax + properties differences (Obsidian alias links, Logseq prop:: syntax, etc.).'
     - Auto-detect uses mtime of canonical signal files (.obsidian/workspace.json, logseq/config/config.edn, .foam/settings.json) rather than directory presence; tie-break ≤ 1 hour → obsidian → logseq → foam.
     - mnemo_vault_status reports the detected profile, the signal file path, its mtime, and any alternative profiles whose signal files exist.
-    context: Mere directory presence is too brittle — multi-tool PKM users (notably Obsidian + Logseq on the same directory) are common, and a single exploratory open months ago can persist .obsidian/ forever. Recency-of-modification on the canonical signal file is the better signal.
+    context: Revived 2026-07-13 with T64.2 ownership return — unblocked once T64.2 lands on master.
     depends_on:
     - T64.2
     origin: PR
     discovered: 2026-05-22
   T64.6:
     name: Bridges
-    status: set_aside
+    status: identified
     value: 2.0
     cost: 0.0
     set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
@@ -2342,7 +2343,7 @@ targets:
     - vault_bridges.max_links capping applies per bridge (default 50); memories bridge groups by source project.
     - bridge_<collection>.tmpl template overrides supported; standard template error handling applies.
     - mnemo_vault_bridge_list MCP tool reports active bridges, anchor paths, and any errors.
-    context: 'Optional, opt-in pointer from the user''s existing PKM structure into the wing. One-way: anchor file points at _mnemo/ pages, never the reverse. Anchor files live outside _mnemo/; a bridge pointing at a path inside _mnemo/ should be rejected at config time (not yet specified — flag as a residual issue).'
+    context: Revived 2026-07-13 with T64.2 ownership return — unblocked once T64.2 lands on master.
     depends_on:
     - T64.2
     origin: PR
