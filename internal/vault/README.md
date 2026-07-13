@@ -28,20 +28,47 @@ Concrete gains:
 
 ## What gets exported
 
+New vaults use the `_mnemo/` namespace (v2 layout — default since v0.49.0):
+
 ```
 <vault_path>/
-├── index.md               — root index (repos + total sessions)
-├── repos/<repo>.md        — per-repo index: recent sessions + decisions
-├── sessions/<repo>/       — one note per session (full conversation)
-├── decisions/<repo>/      — detected proposal + outcome pairs
-├── memories/              — project memory files (globally unique names)
-├── skills/                — skill procedures from ~/.claude/skills/
-├── configs/               — CLAUDE.md project instruction notes
-├── plans/<repo>/          — implementation plans
-├── targets/<repo>/        — convergence targets
-├── ci/<repo>/             — CI run summaries
-└── prs/<repo>/            — pull requests and issues
+└── _mnemo/
+    ├── index.md               — root index (repos + total sessions)
+    ├── repos/<repo>.md        — per-repo index: recent sessions + decisions
+    ├── sessions/<repo>/       — one note per session (full conversation)
+    ├── decisions/<repo>/      — detected proposal + outcome pairs
+    ├── memories/              — project memory files (globally unique names)
+    ├── skills/                — skill procedures from ~/.claude/skills/
+    ├── configs/               — CLAUDE.md project instruction notes
+    ├── plans/<repo>/          — implementation plans
+    ├── targets/<repo>/        — convergence targets
+    ├── ci/<repo>/             — CI run summaries
+    └── prs/<repo>/            — pull requests and issues
 ```
+
+The `_mnemo/` prefix keeps generated content in one fenced subtree so your
+own vault notes coexist cleanly without namespace collisions.
+
+## Migrating an existing vault (v1 → v2)
+
+If you set `vault_path` before v0.49.0, your vault is in v1 layout (files at
+the vault root). Use the `vault_layout` config key to migrate:
+
+```json
+{ "vault_layout": "both" }
+```
+
+`"both"` writes to both the old root layout and the new `_mnemo/` namespace
+simultaneously. Once you're happy with the new layout (typically after a few
+days of normal use), switch to `"v2"` and remove the old root-level dirs:
+
+```json
+{ "vault_layout": "v2" }
+```
+
+mnemo emits a warning if `vault_layout="both"` has been soaking for more than
+30 days (`vault_layout_soak_warn_after` is configurable). New vaults default
+to `"v2"` and need no migration. Valid values: `"v1"`, `"both"`, `"v2"`.
 
 Each note includes YAML frontmatter (tags, aliases, wikilinks) and a
 `<!-- mnemo:generated -->` fence. Everything above the fence is

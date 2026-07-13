@@ -533,6 +533,10 @@ Hot-reload coverage:
 - `vault_path` — applied live. Old vault workers stop, a fresh
   exporter is built at the new path, and an initial sync starts in the
   background. Set to `""` to disable vault export entirely.
+- `vault_layout` — applied live. Values: `"v1"` (legacy root layout),
+  `"both"` (dual-write for migration), `"v2"` (new `_mnemo/` namespace,
+  default for new vaults). See `internal/vault/README.md` for the
+  migration path from v1 to v2.
 - `workspace_roots`, `extra_project_dirs`, `synthesis_roots`,
   `todo_globs` — applied live; subsequent ingest passes pick up the new
   roots/globs.

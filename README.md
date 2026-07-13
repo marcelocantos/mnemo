@@ -208,14 +208,23 @@ and Logseq. Human annotations sync back into mnemo's FTS5 search within
 
 Add to `~/.mnemo/config.json` and restart the daemon — or, with a
 running daemon, ask any MCP client to call `mnemo_config` with
-`op=write` and `patch={"vault_path": "~/Documents/mnemo-vault"}` and
-the change is adopted in-process:
+`op=write` and the patch below; changes are adopted in-process:
 
 ```json
 {
-  "vault_path": "~/Documents/mnemo-vault"
+  "vault_path": "~/Documents/mnemo-vault",
+  "vault_layout": "v2"
 }
 ```
+
+`vault_layout` controls the directory structure:
+- `"v2"` — writes under `<vault>/_mnemo/` (new default for fresh vaults)
+- `"v1"` — legacy root layout (flat files at vault root)
+- `"both"` — dual-write during migration (default when upgrading from v1)
+
+Upgrading from v0.48.x or earlier? mnemo auto-detects an existing v1 vault
+and sets the default to `"both"`. A `_mnemo/MIGRATION.md` guide is written
+once. When ready, set `vault_layout: "v2"` to complete the migration.
 
 Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 
