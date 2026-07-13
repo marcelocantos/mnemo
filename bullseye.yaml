@@ -2267,7 +2267,7 @@ targets:
     discovered: 2026-07-01
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
-    status: set_aside
+    status: identified
     value: 2.0
     cost: 0.0
     set_aside_reason: 'NOT parked, NOT won''t-fix, NOT an achievement judgement — this is an OWNERSHIP EXCLUSION only. T64.2 is driven externally on open PR #112 (branch t64.2-mnemo-namespace-vault-layout, +1959/−46, both CI checks green at 2026-06-14 but 29 commits behind master; lineage from navnita''s now-closed #105). Excluded from Marcelo''s frontier so /cv stops recommending work that already exists on an open PR. bullseye has no dedicated owner/not-mine disposition (feature filed as bullseye 🎯T43), so set_aside is a stand-in here — the reason carries the nuance the status enum can''t. REVIVE by clearing status back to identified (bullseye_put id=T64.2 status=identified) when ownership returns to Marcelo or #112 lands/closes.'
@@ -2278,7 +2278,7 @@ targets:
     - state.json tracks vault_layout_first_seen for soak-TTL warning purposes.
     - mnemo_vault_status surfaces vault_layout, days_in_both, and a recommendation string (one of "still within soak", "opt into v2", "run gc_legacy", or empty).
     - vault_layout="both" past the configurable soak window (default 720h) emits a weekly structured warning; the layout never auto-narrows.
-    context: Plumbs the new directory root and the layout config knob. v1 writers retained, gated on vault_layout. The MIGRATION.md write-once exception lives here (rule scoped to MIGRATION.md only; every other file in _mnemo/ honours the standard fence contract).
+    context: 'Ownership returned to Marcelo 2026-07-13. Finishing Navinata/PR#112 lineage on a rebased branch (t64.2-finish): vault_layout + _mnemo wing + state.json soak, without relocating SQLite DB path (out of scope).'
     depends_on:
     - T64.1
     origin: PR
