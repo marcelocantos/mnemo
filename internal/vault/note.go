@@ -103,15 +103,22 @@ func renderSession(info store.SessionInfo, msgs []store.SessionMessage) string {
 }
 
 // renderDecision produces a Markdown note for a detected decision.
+// Frontmatter follows the library-wing page shape (🎯T64.3 / design):
+// type + mnemo/* tags plus provenance keys.
 func renderDecision(d store.DecisionInfo, sessionRelPath string) string {
 	var b strings.Builder
 
 	b.WriteString("---\n")
+	writeYAML(&b, "type", "decision")
 	writeYAML(&b, "session_id", d.SessionID)
 	writeYAML(&b, "repo", d.Repo)
 	writeYAML(&b, "date", dateOf(d.Timestamp))
 	writeYAML(&b, "timestamp", d.Timestamp)
+	writeYAML(&b, "first-seen", dateOf(d.Timestamp))
+	writeYAML(&b, "last-touched", dateOf(d.Timestamp))
 	b.WriteString("tags:\n")
+	b.WriteString("  - mnemo\n")
+	b.WriteString("  - mnemo/decision\n")
 	b.WriteString("  - decision\n")
 	if r := shortProjectName(d.Repo); r != "" && r != "untitled" && r != "unknown" {
 		fmt.Fprintf(&b, "  - %s\n", r)
@@ -139,18 +146,25 @@ func renderDecision(d store.DecisionInfo, sessionRelPath string) string {
 }
 
 // renderMemory produces a Markdown note for an indexed memory file.
+// Frontmatter follows the library-wing page shape (🎯T64.3).
 func renderMemory(m store.MemoryInfo) string {
 	var b strings.Builder
 
 	b.WriteString("---\n")
+	writeYAML(&b, "type", "memory")
 	writeYAML(&b, "project", m.Project)
 	writeYAML(&b, "name", m.Name)
 	writeYAML(&b, "memory_type", m.MemoryType)
 	writeYAML(&b, "updated_at", m.UpdatedAt)
+	if m.UpdatedAt != "" {
+		writeYAML(&b, "last-touched", dateOf(m.UpdatedAt))
+	}
 	if m.Description != "" {
 		writeYAML(&b, "description", m.Description)
 	}
 	b.WriteString("tags:\n")
+	b.WriteString("  - mnemo\n")
+	b.WriteString("  - mnemo/memory\n")
 	b.WriteString("  - memory\n")
 	if r := shortProjectName(m.Project); r != "" && r != "untitled" {
 		fmt.Fprintf(&b, "  - %s\n", r)
@@ -167,7 +181,9 @@ func renderMemory(m store.MemoryInfo) string {
 	fmt.Fprintf(&b, "# %s\n\n", name)
 
 	if m.Project != "" {
-		fmt.Fprintf(&b, "*Project: `%s` · [[repos/%s]]*\n\n", m.Project, shortProjectName(m.Project))
+		// Under pure v2, repos/ pages are not written; keep the project
+		// label but only link when the raw-signal index path would exist.
+		fmt.Fprintf(&b, "*Project: `%s`*\n\n", m.Project)
 	}
 
 	b.WriteString(strings.TrimSpace(m.Content))

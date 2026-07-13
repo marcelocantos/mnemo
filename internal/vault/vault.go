@@ -18,20 +18,15 @@
 // Human edits are preserved across re-syncs: generated content lives
 // above the fence, human notes live below and are never overwritten.
 //
-// Vault structure:
+// Vault structure (layout-dependent; vault_layout = v1 | both | v2):
 //
-//	<vault_path>/
-//	├── index.md               — root index (all repos, total sessions)
-//	├── repos/<repo>.md        — per-repo index with recent sessions + decisions
-//	├── sessions/<repo>/       — one note per session (full conversation)
-//	├── decisions/<repo>/      — one note per extracted decision
-//	├── memories/              — project memory notes (flat, globally unique names)
-//	├── skills/                — skill procedure notes from ~/.claude/skills/
-//	├── configs/               — CLAUDE.md project instruction notes
-//	├── plans/<repo>/          — planning documents
-//	├── targets/<repo>/        — convergence targets
-//	├── ci/<repo>/             — CI run summaries
-//	└── prs/<repo>/            — PR and issue notes
+//	v1 / both root (raw signal; suppressed under pure v2 — 🎯T64.4):
+//	  sessions/, repos/, ci/, prs/, decisions/, memories/
+//	v2 / both wing (🎯T64.2–T64.3):
+//	  _mnemo/{index,README,MIGRATION}.md
+//	  _mnemo/decisions/, _mnemo/memories/  (+ later: patterns, themes, …)
+//	Always (all layouts):
+//	  index.md, plans/, targets/, skills/, configs/
 package vault
 
 import (
@@ -182,43 +177,56 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	slog.Info("vault: sync starting", "path", e.path)
 	start := time.Now()
 
-	// Sessions must be synced first: the path map they produce is needed
-	// by decisions (for back-links) and repo indices (for forward-links).
-	sessionPaths, err := e.syncSessions(ctx)
+	layout := e.effectiveLayout()
+	rawSignal := writesRawSignalReports(layout)
+
 	var firstErr error
-	setErr := func(e error) {
-		if e != nil && firstErr == nil {
-			firstErr = e
+	setErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	setErr(err)
-	layout := e.effectiveLayout()
-	// v1 decision/memory writers run under "v1" and "both" layouts.
-	// Under "v2" they are suppressed; the wing writers handle those. (🎯T64.3)
-	if layout != store.VaultLayoutV2 {
-		setErr(e.syncDecisions(ctx, sessionPaths))
-		setErr(e.syncMemories(ctx))
+
+	// Sessions (raw signal) first when layout allows: the path map is
+	// used for decision back-links and repo indices. Under pure v2 the
+	// pages are not written (🎯T64.4); decision notes then cite session
+	// IDs only.
+	var sessionPaths map[string]string
+	if rawSignal {
+		paths, err := e.syncSessions(ctx)
+		setErr(err)
+		sessionPaths = paths
+	} else {
+		sessionPaths = map[string]string{}
 	}
+
+	// Decisions + memories: layout-selected paths (v1 and/or _mnemo/). (🎯T64.3)
+	setErr(e.syncDecisions(ctx, sessionPaths, layout))
+	setErr(e.syncMemories(ctx, layout))
+
 	setErr(e.syncPlans(ctx))
 	setErr(e.syncTargets(ctx))
-	setErr(e.syncCI(ctx))
-	setErr(e.syncPRs(ctx))
+	// CI / PR / repo indices are raw signal — suppress under pure v2. (🎯T64.4)
+	if rawSignal {
+		setErr(e.syncCI(ctx))
+		setErr(e.syncPRs(ctx))
+	}
 	setErr(e.syncSkills(ctx))
 	setErr(e.syncConfigs(ctx))
-	// Repo indices and root index are written last so they reflect the
-	// session paths already materialised above. Fetch repos once and
-	// pass to both so we avoid two identical ListRepos queries.
 	repos, err := e.backend.ListRepos("")
 	setErr(err)
-	setErr(e.syncRepoIndices(ctx, repos, sessionPaths))
+	if rawSignal {
+		setErr(e.syncRepoIndices(ctx, repos, sessionPaths))
+	}
+	// Root index is a thin rollup (not listed as raw-signal noise in T64.4);
+	// keep writing under every layout so the vault always has an entry point.
 	setErr(e.syncRootIndex(repos))
-	// 🎯T64.2/T64.3: library-wing (_mnemo/) writers + state.json bookkeeping
-	// + soak warning. Auxiliary to the v1 writers above; failures are
-	// logged inside and never block the rest of the sync.
+	// Library-wing (_mnemo/) index/README/MIGRATION + state.json + soak. (🎯T64.2)
 	e.syncMnemoWing(ctx, time.Now())
 
 	slog.Info("vault: sync complete",
 		"elapsed", time.Since(start).Round(time.Millisecond),
+		"layout", layout,
 		"err", firstErr)
 	return firstErr
 }
@@ -277,8 +285,9 @@ func (e *Exporter) syncSessions(ctx context.Context) (map[string]string, error) 
 	return pathMap, nil
 }
 
-// syncDecisions writes a vault note for every detected decision.
-func (e *Exporter) syncDecisions(ctx context.Context, sessionPaths map[string]string) error {
+// syncDecisions writes vault notes for every detected decision. Paths
+// depend on layout: v1 root, _mnemo/ wing, or both (🎯T64.3 dual-write).
+func (e *Exporter) syncDecisions(ctx context.Context, sessionPaths map[string]string, layout string) error {
 	// days=36500 effectively means "all time".
 	decisions, err := e.backend.SearchDecisions("", "", 36500, 100000)
 	if err != nil {
@@ -290,27 +299,29 @@ func (e *Exporter) syncDecisions(ctx context.Context, sessionPaths map[string]st
 		if ctx.Err() != nil {
 			break
 		}
-		relPath := decisionPath(d)
-		absPath := filepath.Join(e.path, relPath)
-		if !needsUpdate(absPath, d.Timestamp) {
-			skipped++
-			continue
-		}
 		content := renderDecision(d, sessionPaths[d.SessionID])
-		if err := writeNote(absPath, content, d.Timestamp); err != nil {
-			slog.Warn("vault: write decision note failed", "path", absPath, "err", err)
-			continue
+		for _, relPath := range decisionPathsForLayout(layout, d) {
+			absPath := filepath.Join(e.path, relPath)
+			if !needsUpdate(absPath, d.Timestamp) {
+				skipped++
+				continue
+			}
+			if err := writeNote(absPath, content, d.Timestamp); err != nil {
+				slog.Warn("vault: write decision note failed", "path", absPath, "err", err)
+				continue
+			}
+			e.recordOutput(relPath, "decision", d.SessionID+":"+d.Timestamp, content)
+			written++
 		}
-		e.recordOutput(relPath, "decision", d.SessionID+":"+d.Timestamp, content)
-		written++
 	}
 
-	slog.Info("vault: decisions synced", "written", written, "skipped", skipped)
+	slog.Info("vault: decisions synced", "written", written, "skipped", skipped, "layout", layout)
 	return nil
 }
 
-// syncMemories writes a vault note for every indexed memory file.
-func (e *Exporter) syncMemories(ctx context.Context) error {
+// syncMemories writes vault notes for every indexed memory file.
+// Paths depend on layout (🎯T64.3 dual-write under "both").
+func (e *Exporter) syncMemories(ctx context.Context, layout string) error {
 	memories, err := e.backend.SearchMemories("", "", "", 100000)
 	if err != nil {
 		return fmt.Errorf("vault: search memories: %w", err)
@@ -321,22 +332,23 @@ func (e *Exporter) syncMemories(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		relPath := memoryPath(m)
-		absPath := filepath.Join(e.path, relPath)
-		if !needsUpdate(absPath, m.UpdatedAt) {
-			skipped++
-			continue
-		}
 		content := renderMemory(m)
-		if err := writeNote(absPath, content, m.UpdatedAt); err != nil {
-			slog.Warn("vault: write memory note failed", "path", absPath, "err", err)
-			continue
+		for _, relPath := range memoryPathsForLayout(layout, m) {
+			absPath := filepath.Join(e.path, relPath)
+			if !needsUpdate(absPath, m.UpdatedAt) {
+				skipped++
+				continue
+			}
+			if err := writeNote(absPath, content, m.UpdatedAt); err != nil {
+				slog.Warn("vault: write memory note failed", "path", absPath, "err", err)
+				continue
+			}
+			e.recordOutput(relPath, "memory", m.Project+":"+m.Name, content)
+			written++
 		}
-		e.recordOutput(relPath, "memory", m.Project+":"+m.Name, content)
-		written++
 	}
 
-	slog.Info("vault: memories synced", "written", written, "skipped", skipped)
+	slog.Info("vault: memories synced", "written", written, "skipped", skipped, "layout", layout)
 	return nil
 }
 

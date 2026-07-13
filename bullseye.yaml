@@ -2286,7 +2286,7 @@ targets:
     achieved: 2026-07-13
   T64.3:
     name: Move decisions + memories under _mnemo/
-    status: identified
+    status: achieved
     value: 2.0
     cost: 0.0
     set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
@@ -2300,9 +2300,10 @@ targets:
     - T64.2
     origin: PR
     discovered: 2026-05-22
+    achieved: 2026-07-13
   T64.4:
     name: Drop session/CI/PR/repo writers from _mnemo/
-    status: identified
+    status: achieved
     value: 1.0
     cost: 0.0
     acceptance:
@@ -2314,6 +2315,7 @@ targets:
     - T64.3
     origin: PR
     discovered: 2026-05-22
+    achieved: 2026-07-13
   T64.5:
     name: PKM profile + auto-detect (mtime-based)
     status: identified

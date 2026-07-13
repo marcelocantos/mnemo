@@ -122,7 +122,7 @@ func sessionPath(info store.SessionInfo) string {
 	return filepath.Join("sessions", repo, name+".md")
 }
 
-// decisionPath returns the vault-relative file path for a decision note.
+// decisionPath returns the v1 vault-relative path for a decision note.
 // Format: decisions/<short-repo>/YYYY-MM-DD-<session-id8>.md
 func decisionPath(d store.DecisionInfo) string {
 	repo := decisionRepoSlug(d.Repo)
@@ -130,7 +130,30 @@ func decisionPath(d store.DecisionInfo) string {
 	return filepath.Join("decisions", repo, date+"-"+shortID(d.SessionID)+".md")
 }
 
-// memoryPath returns the vault-relative path for a memory note.
+// decisionPathV2 returns the library-wing path for a decision note (🎯T64.3).
+// Format: _mnemo/decisions/<short-repo>/YYYY-MM-DD-<session-id8>.md
+func decisionPathV2(d store.DecisionInfo) string {
+	return filepath.Join(mnemoWingDir, decisionPath(d))
+}
+
+// decisionPathsForLayout returns the set of relative paths a decision
+// should be written to under the active vault_layout.
+//
+//	v1   → decisions/...
+//	both → decisions/... and _mnemo/decisions/...
+//	v2   → _mnemo/decisions/... only
+func decisionPathsForLayout(layout string, d store.DecisionInfo) []string {
+	switch layout {
+	case store.VaultLayoutV1:
+		return []string{decisionPath(d)}
+	case store.VaultLayoutBoth:
+		return []string{decisionPath(d), decisionPathV2(d)}
+	default: // v2 or empty (New defaults empty → v2 wing content)
+		return []string{decisionPathV2(d)}
+	}
+}
+
+// memoryPath returns the v1 vault-relative path for a memory note.
 // Format: memories/<short-project>-<name-slug>.md
 //
 // Flat (no subdirectory) so that every file in the vault has a globally
@@ -146,6 +169,36 @@ func memoryPath(m store.MemoryInfo) string {
 		name = "memory"
 	}
 	return filepath.Join("memories", proj+"-"+name+".md")
+}
+
+// memoryPathV2 returns the library-wing path for a memory note (🎯T64.3).
+// Format: _mnemo/memories/<short-project>-<name-slug>.md
+func memoryPathV2(m store.MemoryInfo) string {
+	return filepath.Join(mnemoWingDir, memoryPath(m))
+}
+
+// memoryPathsForLayout mirrors decisionPathsForLayout for memories.
+func memoryPathsForLayout(layout string, m store.MemoryInfo) []string {
+	switch layout {
+	case store.VaultLayoutV1:
+		return []string{memoryPath(m)}
+	case store.VaultLayoutBoth:
+		return []string{memoryPath(m), memoryPathV2(m)}
+	default:
+		return []string{memoryPathV2(m)}
+	}
+}
+
+// writesRawSignalReports whether layout still materialises v1 raw-signal
+// pages (sessions, CI, PRs, repo indices). False for pure v2 / empty
+// (empty defaults to v2). (🎯T64.4)
+func writesRawSignalReports(layout string) bool {
+	switch layout {
+	case store.VaultLayoutV1, store.VaultLayoutBoth:
+		return true
+	default: // v2 or empty
+		return false
+	}
 }
 
 // planPath returns the vault-relative path for a plan note.
