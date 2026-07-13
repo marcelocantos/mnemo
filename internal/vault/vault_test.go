@@ -843,7 +843,7 @@ func TestExporterSyncCreatesFiles(t *testing.T) {
 	}
 
 	vaultDir := t.TempDir()
-	exp, err := New(s, vaultDir, Options{})
+	exp, err := New(s, vaultDir, Options{Layout: store.VaultLayoutBoth})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -895,7 +895,7 @@ func TestBidirectionalSync(t *testing.T) {
 	}
 
 	vaultDir := t.TempDir()
-	exp, err := New(s, vaultDir, Options{})
+	exp, err := New(s, vaultDir, Options{Layout: store.VaultLayoutBoth})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -985,7 +985,7 @@ func TestVaultOnlySearch(t *testing.T) {
 		t.Fatalf("ingest: %v", err)
 	}
 	vaultDir := t.TempDir()
-	exp, err := New(s, vaultDir, Options{})
+	exp, err := New(s, vaultDir, Options{Layout: store.VaultLayoutBoth})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1194,7 +1194,7 @@ func TestVaultSyncCoalescesConcurrentCalls(t *testing.T) {
 		t.Fatalf("ingest: %v", err)
 	}
 	vaultDir := t.TempDir()
-	exp, err := New(s, vaultDir, Options{})
+	exp, err := New(s, vaultDir, Options{Layout: store.VaultLayoutBoth})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
