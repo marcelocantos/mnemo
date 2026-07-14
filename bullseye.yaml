@@ -542,6 +542,29 @@ targets:
     origin: 'conversation: deepen Grok beyond MVP; keep Codex in mind; prefer Grok-beyond-Claude signals'
     discovered: 2026-07-11
     achieved: 2026-07-11
+  T112:
+    name: Codex transcript fidelity matches Grok's searchable metadata density where the format allows
+    status: achieved
+    value: 8.0
+    cost: 3.0
+    acceptance:
+    - turn_context.model is stamped on subsequent entries so entries.model is populated
+    - event_msg/token_count produces a synthetic usage entry with input/output tokens and searchable [codex tokens] text
+    - session_meta.parent_thread_id (or forked_from_id) yields a session_chains edge with mechanism codex_parent or codex_fork
+    - session_meta.source.subagent yields session_type=subagent via project=subagents
+    - normalizeAgentToolInput maps cmd→command and flattens command arrays; used from Codex tool path
+    - docs/design/codex-ingest.md documents the fidelity layer; unit + e2e tests cover model, usage, chains, tool_command
+    context: Parallel to Grok 🎯T111. Codex MVP (T99) only indexed conversation+tools; this adds model/usage/parent-chain density without inventing Grok-only streams.
+    depends_on:
+    - T99
+    tags:
+    - ingest
+    - codex
+    - multi-source
+    - transcripts
+    origin: manual
+    discovered: 2026-07-14
+    achieved: 2026-07-14
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved

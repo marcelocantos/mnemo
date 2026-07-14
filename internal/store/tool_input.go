@@ -5,11 +5,18 @@
 // file-path queries work across sources.
 package store
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // normalizeAgentToolInput rewrites common alias keys onto the Claude
 // vocabulary expected by messages.tool_* generated columns. Unknown
 // keys are preserved. Non-object inputs pass through unchanged.
+//
+// Also flattens command/cmd when the value is a JSON array of strings
+// (Codex shell often uses {"cmd":"…"} or {"command":["go","test"]}) so
+// tool_command is a single searchable string.
 func normalizeAgentToolInput(raw []byte) []byte {
 	if len(raw) == 0 || !isJSONObject(raw) {
 		return raw
@@ -31,11 +38,14 @@ func normalizeAgentToolInput(raw []byte) []byte {
 	if _, ok := m["command"]; !ok {
 		for _, alias := range []string{"cmd", "shell_command"} {
 			if v, ok := m[alias]; ok && v != nil && v != "" {
-				m["command"] = v
+				m["command"] = flattenStringOrArray(v)
 				changed = true
 				break
 			}
 		}
+	} else if flat := flattenStringOrArray(m["command"]); flat != m["command"] {
+		m["command"] = flat
+		changed = true
 	}
 	if !changed {
 		return raw
@@ -45,4 +55,24 @@ func normalizeAgentToolInput(raw []byte) []byte {
 		return raw
 	}
 	return out
+}
+
+// flattenStringOrArray joins a string-array command into a single string;
+// strings pass through. Other types return as-is.
+func flattenStringOrArray(v any) any {
+	switch x := v.(type) {
+	case string:
+		return x
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, el := range x {
+			if s, ok := el.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) == len(x) {
+			return strings.Join(parts, " ")
+		}
+	}
+	return v
 }
