@@ -1,11 +1,12 @@
-// Codex transcript ingest (🎯T99). OpenAI's Codex CLI records sessions
-// as "rollout" JSONL under ~/.codex/sessions/<YYYY>/<MM>/<DD>/ (and
-// ~/.codex/archived_sessions/). The format is the OpenAI Responses API
-// item stream wrapped in a thin {timestamp, type, payload} envelope —
-// structurally unlike Claude Code's schema. This file transforms each
-// rollout into the same parsedFile intermediate the Claude path
-// produces, so the shared writer (writeParsedFile) and the entire
-// search/session machinery are reused. See docs/design/codex-ingest.md.
+// Codex transcript ingest (🎯T99 MVP + 🎯T112 fidelity). OpenAI's Codex
+// CLI records sessions as "rollout" JSONL under ~/.codex/sessions/
+// <YYYY>/<MM>/<DD>/ (and ~/.codex/archived_sessions/). The format is the
+// OpenAI Responses API item stream wrapped in a thin
+// {timestamp, type, payload} envelope — structurally unlike Claude Code's
+// schema. This file transforms each rollout into the same parsedFile
+// intermediate the Claude path produces, so the shared writer
+// (writeParsedFile) and the entire search/session machinery are reused.
+// See docs/design/codex-ingest.md.
 package store
 
 import (
@@ -34,6 +35,7 @@ type codexLine struct {
 // subset and skip what we don't recognise.
 type codexPayload struct {
 	Type string `json:"type"` // for response_item: message | function_call | reasoning | ...
+	// for event_msg: token_count | user_message | agent_message | ...
 
 	// message
 	Role    string         `json:"role"`
@@ -53,9 +55,32 @@ type codexPayload struct {
 	EncryptedContent string         `json:"encrypted_content"`
 
 	// session_meta / turn_context
-	ID  string    `json:"id"`
-	Cwd string    `json:"cwd"`
-	Git *codexGit `json:"git"`
+	ID             string          `json:"id"`
+	SessionID      string          `json:"session_id"` // sometimes present alongside id
+	Cwd            string          `json:"cwd"`
+	Git            *codexGit       `json:"git"`
+	Model          string          `json:"model"`            // turn_context
+	ParentThreadID string          `json:"parent_thread_id"` // session_meta
+	ForkedFromID   string          `json:"forked_from_id"`   // session_meta
+	Source         json.RawMessage `json:"source"`           // string or {subagent:…}
+
+	// event_msg / token_count
+	Info *codexTokenInfo `json:"info"`
+}
+
+// codexTokenInfo is the subset of event_msg token_count we map into usage.
+type codexTokenInfo struct {
+	TotalTokenUsage    *codexTokenUsage `json:"total_token_usage"`
+	LastTokenUsage     *codexTokenUsage `json:"last_token_usage"`
+	ModelContextWindow int              `json:"model_context_window"`
+}
+
+type codexTokenUsage struct {
+	InputTokens           int `json:"input_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
+	TotalTokens           int `json:"total_tokens"`
 }
 
 type codexContent struct {
@@ -140,6 +165,9 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	reader := bufio.NewReader(f)
+	// currentModel tracks the latest turn_context.model (🎯T112).
+	var currentModel string
+	var isSubagent bool
 
 	// handleLine parses one rollout envelope into pf. Guard clauses skip a
 	// line by returning rather than a loop `continue`, so the EOF / read-
@@ -151,24 +179,118 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 			return // tolerate junk / unknown lines, never fail the file
 		}
 
+		ts := cl.Timestamp
+		if ts == "" {
+			ts = time.Now().Format(time.RFC3339)
+		}
+
 		switch cl.Type {
-		case "session_meta", "turn_context":
-			// Header / per-turn bookkeeping: harvest session metadata,
-			// emit no entry. cwd and git appear here, nowhere per-record.
+		case "session_meta":
 			var p codexPayload
-			if json.Unmarshal(cl.Payload, &p) == nil {
-				if p.Cwd != "" && pf.cwd == "" {
-					pf.cwd = p.Cwd
-				}
-				if p.Git != nil && p.Git.Branch != "" && pf.branch == "" {
-					pf.branch = p.Git.Branch
+			if json.Unmarshal(cl.Payload, &p) != nil {
+				return
+			}
+			if p.Cwd != "" && pf.cwd == "" {
+				pf.cwd = p.Cwd
+			}
+			if p.Git != nil && p.Git.Branch != "" && pf.branch == "" {
+				pf.branch = p.Git.Branch
+			}
+			// Prefer explicit id; filename already set sessionID as fallback.
+			if p.ID != "" {
+				pf.sessionID = p.ID
+			} else if p.SessionID != "" && pf.sessionID == "" {
+				pf.sessionID = p.SessionID
+			}
+			// Parent/fork chains (🎯T112). parent_thread_id is the common
+			// multi-agent / guardian edge; forked_from_id is a true fork.
+			parent := p.ParentThreadID
+			mech := "codex_parent"
+			if parent == "" && p.ForkedFromID != "" {
+				parent = p.ForkedFromID
+				mech = "codex_fork"
+			}
+			if parent != "" && parent != pf.sessionID {
+				pf.parentSessionID = parent
+				pf.chainMechanism = mech
+			}
+			if codexSourceIsSubagent(p.Source) {
+				isSubagent = true
+			}
+			return
+
+		case "turn_context":
+			var p codexPayload
+			if json.Unmarshal(cl.Payload, &p) != nil {
+				return
+			}
+			if p.Cwd != "" && pf.cwd == "" {
+				pf.cwd = p.Cwd
+			}
+			if p.Model != "" {
+				currentModel = p.Model
+				if pf.model == "" {
+					pf.model = p.Model
 				}
 			}
 			return
+
+		case "event_msg":
+			// token_count → synthetic usage entry (🎯T112). Other event_msg
+			// types are UI echoes of response_item and would double-index.
+			var p codexPayload
+			if json.Unmarshal(cl.Payload, &p) != nil || p.Type != "token_count" || p.Info == nil {
+				return
+			}
+			usage := p.Info.LastTokenUsage
+			if usage == nil {
+				usage = p.Info.TotalTokenUsage
+			}
+			if usage == nil {
+				return
+			}
+			inTok := usage.InputTokens
+			outTok := usage.OutputTokens + usage.ReasoningOutputTokens
+			if inTok == 0 && outTok == 0 && usage.TotalTokens == 0 {
+				return
+			}
+			uuid := fmt.Sprintf("codex-%s-%d", pf.sessionID, thisStart)
+			text := fmt.Sprintf(
+				"[codex tokens] model=%s input=%d cached=%d output=%d reasoning=%d total=%d context_window=%d",
+				currentModel, usage.InputTokens, usage.CachedInputTokens,
+				usage.OutputTokens, usage.ReasoningOutputTokens, usage.TotalTokens,
+				p.Info.ModelContextWindow,
+			)
+			raw, _ := json.Marshal(map[string]any{
+				"uuid":      uuid,
+				"type":      "assistant",
+				"timestamp": ts,
+				"message": map[string]any{
+					"model": currentModel,
+					"usage": map[string]any{
+						"input_tokens":  inTok,
+						"output_tokens": outTok,
+					},
+				},
+				"source": "codex_token_count",
+				"text":   text,
+			})
+			entryIdx := len(pf.entries)
+			pf.entries = append(pf.entries, parsedRawEntry{
+				entryType: "assistant",
+				timestamp: ts,
+				raw:       raw,
+			})
+			pf.messages = append(pf.messages, parsedMessage{
+				entryIdx: entryIdx, role: "assistant", typ: "assistant",
+				text: text, timestamp: ts, contentType: "text", isNoise: 1,
+			})
+			return
+
 		case "response_item":
 			// conversation content — handled below
 		default:
-			return // event_msg, compacted, world_state, inter_agent_* …
+			return // compacted, world_state, inter_agent_* …
 		}
 
 		var p codexPayload
@@ -181,22 +303,18 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 			return
 		}
 
-		ts := cl.Timestamp
-		if ts == "" {
-			ts = time.Now().Format(time.RFC3339)
-		}
-
 		// Store the original envelope plus an injected synthetic uuid —
 		// Codex records carry none, and the entries.uuid generated
 		// column (raw->>'$.uuid') drives (session_id, uuid) dedup. The
 		// line's byte offset is a stable, content-independent
-		// discriminator, so re-ingest is idempotent.
+		// discriminator, so re-ingest is idempotent. Stamp model so
+		// entries.model is populated (🎯T112).
 		uuid := fmt.Sprintf("codex-%s-%d", pf.sessionID, thisStart)
 		entryIdx := len(pf.entries)
 		pf.entries = append(pf.entries, parsedRawEntry{
 			entryType: entryType,
 			timestamp: ts,
-			raw:       injectCodexUUID(line, uuid),
+			raw:       enrichCodexRaw(line, uuid, currentModel, 0, 0),
 		})
 
 		for _, m := range msgs {
@@ -235,8 +353,95 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	pf.newOffset = consumed
-	pf.project = codexProject(pf.cwd)
+	// Subagent sessions keep project=subagents so session_summary.session_type
+	// classifies them (same SQL trigger path as Claude/Grok). Repo still
+	// comes from cwd via extractRepo on the meta write.
+	if isSubagent {
+		pf.project = "subagents"
+	} else {
+		pf.project = codexProject(pf.cwd)
+	}
+	if pf.model == "" {
+		pf.model = currentModel
+	}
 	return pf, nil
+}
+
+// codexSourceIsSubagent reports whether session_meta.source indicates a
+// subagent/guardian-style thread (object form {"subagent":…} or string
+// containing "subagent").
+func codexSourceIsSubagent(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.Contains(strings.ToLower(s), "subagent")
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) == nil {
+		if _, ok := m["subagent"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// enrichCodexRaw injects uuid + Claude-shaped message.model/usage so the
+// entries table generated columns (model, input_tokens, …) populate.
+// Mirrors enrichGrokRaw for the Codex envelope shape.
+func enrichCodexRaw(line []byte, uuid, model string, inTok, outTok int) []byte {
+	var m map[string]any
+	if json.Unmarshal(line, &m) != nil {
+		return injectCodexUUID(line, uuid)
+	}
+	m["uuid"] = uuid
+	// Prefer nesting under payload.message if present; else top-level message
+	// (Claude shape) so generated columns still find $.message.model.
+	var msg map[string]any
+	if payload, ok := m["payload"].(map[string]any); ok {
+		if existing, ok := payload["message"].(map[string]any); ok {
+			msg = existing
+		} else {
+			msg = map[string]any{}
+		}
+		if model != "" {
+			msg["model"] = model
+		}
+		if inTok > 0 || outTok > 0 {
+			msg["usage"] = map[string]any{
+				"input_tokens":  inTok,
+				"output_tokens": outTok,
+			}
+		}
+		if len(msg) > 0 {
+			payload["message"] = msg
+			m["payload"] = payload
+		}
+	}
+	// Also stamp top-level message for generated-column paths that expect
+	// Claude layout (entries.model is typically raw->>'$.message.model').
+	top, _ := m["message"].(map[string]any)
+	if top == nil {
+		top = map[string]any{}
+	}
+	if model != "" {
+		top["model"] = model
+	}
+	if inTok > 0 || outTok > 0 {
+		top["usage"] = map[string]any{
+			"input_tokens":  inTok,
+			"output_tokens": outTok,
+		}
+	}
+	if len(top) > 0 {
+		m["message"] = top
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return injectCodexUUID(line, uuid)
+	}
+	return out
 }
 
 // codexRecord maps one response_item payload to an entry type and its

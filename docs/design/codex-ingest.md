@@ -1,12 +1,11 @@
-# Codex Transcript Ingest (MVP)
+# Codex Transcript Ingest
 
-*Status: design note — 2026-06-30. Anchors 🎯T99. Scope is deliberately
-narrow: capture Codex CLI session transcripts into the existing index,
-and not much else.*
+*Status: design note — 2026-06-30 (MVP 🎯T99); fidelity layer 2026-07-14
+(🎯T112, parallel to Grok 🎯T111).*
 
-**Tracking.** Design source for 🎯T99. Grounded in real rollout files on
-disk (`~/.codex`, `cli_version 0.140`) and source-verified against
-`openai/codex` at `codex-rs` HEAD (`rust-v0.142.4`, 2026-06-29).
+**Tracking.** Design source for 🎯T99 + 🎯T112. Grounded in real rollout
+files on disk (`~/.codex`) and source-verified against `openai/codex`
+`codex-rs` rollouts.
 
 ---
 
@@ -107,16 +106,29 @@ map the envelope + the handful of core `response_item` inner types and
 modelling every variant. Unknown → skip-and-continue, never fail the
 file. (Aligns with the external-input defensive-coding rules.)
 
-## Explicitly out of scope (MVP)
+## Fidelity layer (🎯T112)
+
+Parallel to Grok's T111: map Codex-native metadata into the same
+columns/tables Claude already uses where the format allows.
+
+| Codex signal | Mapping |
+|--------------|---------|
+| `turn_context.model` | Current model stamp on subsequent entries (`raw.message.model` → `entries.model`) |
+| `session_meta.parent_thread_id` | `session_chains` edge, `mechanism=codex_parent` |
+| `session_meta.forked_from_id` | `session_chains` edge, `mechanism=codex_fork` (if parent empty) |
+| `session_meta.source.subagent` | `project=subagents` → `session_type=subagent` |
+| `event_msg/token_count` | Synthetic assistant entry with usage + `[codex tokens]` text (noise); `last_token_usage` preferred over total |
+| tool `cmd` / `command` array | `normalizeAgentToolInput` → Claude `command` string for `tool_command` |
+
+### Still out of scope
 
 The four `~/.codex/*.sqlite` DBs (logs/memories/state/goals — the state
 DB is itself backfilled from the JSONL, which stays canonical);
 `~/.codex/history.jsonl` (global *input* keystroke history, not a
-transcript); decrypting `reasoning`; modelling Codex compaction /
-fork / `parent_thread_id` as chains; `event_msg` richness beyond
-optional `token_count`; any Codex-specific MCP / threads / decisions /
-images plumbing. **Just text + tool calls + tool results, attributed to
-a session / repo / timestamp, searchable.**
+transcript); decrypting `reasoning` beyond summary placeholders;
+`event_msg` UI echoes of `response_item` (would double-index);
+`compacted` / `world_state` / `inter_agent_*` bookkeeping; image
+pipeline; Codex-specific MCP / threads / decisions plumbing.
 
 ## Cross-check references
 

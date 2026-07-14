@@ -39,4 +39,13 @@ func TestNormalizeAgentToolInput(t *testing.T) {
 	if m3["file_path"] != "/a" {
 		t.Errorf("should keep existing file_path, got %v", m3["file_path"])
 	}
+
+	// Codex-style command array → space-joined string
+	in4 := []byte(`{"command":["go","test","./..."]}`)
+	out4 := normalizeAgentToolInput(in4)
+	var m4 map[string]any
+	_ = json.Unmarshal(out4, &m4)
+	if m4["command"] != "go test ./..." {
+		t.Errorf("command array flatten = %v", m4["command"])
+	}
 }

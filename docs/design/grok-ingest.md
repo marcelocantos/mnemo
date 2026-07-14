@@ -150,8 +150,9 @@ as searchable text.
 | `task_completed` | tool_result-shaped text with exit/cmd/output | bg task completion |
 | `auto_compact_*` | thinking noise with token before/after | Grok-native compact markers |
 
-Codex reuses tool-input normalisation; session_type/model/usage adapters
-are the same extension points when Codex corpus grows.
+Codex reuses tool-input normalisation and, as of 🎯T112, the same
+session_type / model / usage / parent-chain extension points
+(`docs/design/codex-ingest.md` fidelity layer).
 
 ## Still out of scope
 

@@ -3209,11 +3209,11 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 				source = CASE WHEN excluded.source != '' THEN excluded.source ELSE session_meta.source END`,
 			pf.sessionID, repo, pf.cwd, pf.branch, workType, pf.topic, compactorInternal, source)
 
-		// Parent/fork and subagent edges (Grok summary + spawn events, 🎯T111).
+		// Parent/fork and subagent edges (Grok 🎯T111, Codex 🎯T112).
 		if pf.parentSessionID != "" && pf.sessionID != "" {
 			mech := pf.chainMechanism
 			if mech == "" {
-				mech = "grok_parent"
+				mech = "parent"
 			}
 			_, _ = ws.tx.Exec(`
 			INSERT OR IGNORE INTO session_chains

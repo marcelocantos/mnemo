@@ -12,11 +12,12 @@ import (
 )
 
 const codexSessUUID = "019ee2a8-189f-7540-a035-1cc6ee7bd02f"
+const codexParentUUID = "019ee2a8-0000-0000-0000-0000000000aa"
 
 // codexFixtureLines returns a representative Codex rollout: header,
 // per-turn context, user/assistant messages, a function call + output,
-// an apply_patch custom tool call, encrypted reasoning, plus records we
-// must skip (a developer instruction message and an event_msg).
+// an apply_patch custom tool call, encrypted reasoning, token_count usage
+// (🎯T112), plus records we must skip (a developer instruction message).
 func codexFixtureLines(t *testing.T, cwd string) []byte {
 	t.Helper()
 	line := func(typ string, payload map[string]any) map[string]any {
@@ -24,9 +25,10 @@ func codexFixtureLines(t *testing.T, cwd string) []byte {
 	}
 	records := []map[string]any{
 		line("session_meta", map[string]any{
-			"id":  codexSessUUID,
-			"cwd": cwd,
-			"git": map[string]any{"branch": "main", "repository_url": "https://github.com/acme/webapp"},
+			"id":               codexSessUUID,
+			"cwd":              cwd,
+			"parent_thread_id": codexParentUUID,
+			"git":              map[string]any{"branch": "main", "repository_url": "https://github.com/acme/webapp"},
 		}),
 		line("turn_context", map[string]any{"cwd": cwd, "model": "gpt-5.5"}),
 		line("response_item", map[string]any{
@@ -41,10 +43,23 @@ func codexFixtureLines(t *testing.T, cwd string) []byte {
 			"type": "reasoning", "summary": []map[string]any{}, "encrypted_content": "gAAAAABopaque",
 		}),
 		line("response_item", map[string]any{
-			"type": "function_call", "name": "shell",
-			"arguments": `{"command":["go","build"]}`, "call_id": "call_1",
+			// Real Codex uses exec_command with cmd=string; also cover array form.
+			"type": "function_call", "name": "exec_command",
+			"arguments": `{"cmd":"go build ./...","workdir":"/tmp/webapp"}`, "call_id": "call_1",
 		}),
-		line("event_msg", map[string]any{"type": "token_count", "info": map[string]any{"total_tokens": 1234}}),
+		line("event_msg", map[string]any{
+			"type": "token_count",
+			"info": map[string]any{
+				"last_token_usage": map[string]any{
+					"input_tokens": 100, "cached_input_tokens": 40,
+					"output_tokens": 20, "reasoning_output_tokens": 5, "total_tokens": 125,
+				},
+				"total_token_usage": map[string]any{
+					"input_tokens": 100, "output_tokens": 25, "total_tokens": 125,
+				},
+				"model_context_window": 258400,
+			},
+		}),
 		line("response_item", map[string]any{
 			"type": "function_call_output", "call_id": "call_1", "output": "build succeeded",
 		}),
@@ -67,6 +82,13 @@ func codexFixtureLines(t *testing.T, cwd string) []byte {
 		b.WriteByte('\n')
 	}
 	return []byte(b.String())
+}
+
+func shellToolInput(m *parsedMessage) string {
+	if m == nil {
+		return ""
+	}
+	return string(m.toolInput)
 }
 
 func writeCodexRollout(t *testing.T, dir, cwd string) string {
@@ -111,13 +133,48 @@ func TestParseCodexFile(t *testing.T) {
 		t.Errorf("topic = %q, want first user message", pf.topic)
 	}
 
-	// 6 response_items map to entries; developer message, event_msg,
-	// session_meta and turn_context are dropped.
-	if len(pf.entries) != 6 {
-		t.Fatalf("entries = %d, want 6", len(pf.entries))
+	// 6 response_items + 1 token_count usage entry; developer message,
+	// session_meta and turn_context are not conversation entries.
+	if len(pf.entries) != 7 {
+		t.Fatalf("entries = %d, want 7", len(pf.entries))
 	}
-	if len(pf.messages) != 6 {
-		t.Fatalf("messages = %d, want 6", len(pf.messages))
+	if len(pf.messages) != 7 {
+		t.Fatalf("messages = %d, want 7", len(pf.messages))
+	}
+	if pf.parentSessionID != codexParentUUID {
+		t.Errorf("parentSessionID = %q, want %q", pf.parentSessionID, codexParentUUID)
+	}
+	if pf.chainMechanism != "codex_parent" {
+		t.Errorf("chainMechanism = %q, want codex_parent", pf.chainMechanism)
+	}
+	if pf.model != "gpt-5.5" {
+		t.Errorf("model = %q, want gpt-5.5", pf.model)
+	}
+	// Model stamped on conversation entries.
+	var sawModel bool
+	for _, e := range pf.entries {
+		var raw map[string]any
+		if json.Unmarshal(e.raw, &raw) != nil {
+			continue
+		}
+		if msg, _ := raw["message"].(map[string]any); msg != nil && msg["model"] == "gpt-5.5" {
+			sawModel = true
+			break
+		}
+	}
+	if !sawModel {
+		t.Error("expected message.model=gpt-5.5 on at least one entry")
+	}
+	// token_count → searchable usage note
+	var sawUsage bool
+	for _, m := range pf.messages {
+		if strings.Contains(m.text, "[codex tokens]") && strings.Contains(m.text, "input=100") {
+			sawUsage = true
+			break
+		}
+	}
+	if !sawUsage {
+		t.Error("expected [codex tokens] usage message from token_count")
 	}
 
 	// The first entry's raw must carry the injected synthetic uuid so
@@ -150,20 +207,21 @@ func TestParseCodexFile(t *testing.T) {
 		t.Errorf("missing user/assistant text messages (user=%v assistant=%v)", sawUser, sawAssistant)
 	}
 
-	// tool_use: shell with JSON args, and apply_patch with text input.
+	// tool_use: exec_command with cmd normalised to command, apply_patch text.
 	var shell, patch *parsedMessage
 	for i := range byType["tool_use"] {
 		m := &byType["tool_use"][i]
 		switch m.toolName {
-		case "shell":
+		case "exec_command", "shell":
 			shell = m
 		case "apply_patch":
 			patch = m
 		}
 	}
 	if shell == nil || shell.toolUseID != "call_1" || !json.Valid(shell.toolInput) ||
-		!strings.Contains(string(shell.toolInput), "command") {
-		t.Errorf("shell tool_use malformed: %+v", shell)
+		!strings.Contains(string(shell.toolInput), "command") ||
+		!strings.Contains(string(shell.toolInput), "go build") {
+		t.Errorf("shell tool_use malformed: %+v input=%s", shell, shellToolInput(shell))
 	}
 	if patch == nil || patch.toolUseID != "call_2" || patch.toolInput != nil ||
 		!strings.Contains(patch.text, "Begin Patch") {
@@ -222,8 +280,39 @@ func TestCodexIngestEndToEnd(t *testing.T) {
 		}
 		return n
 	}
-	if got := entryCount(); got != 6 {
-		t.Fatalf("entries after ingest = %d, want 6", got)
+	if got := entryCount(); got != 7 {
+		t.Fatalf("entries after ingest = %d, want 7 (incl. token_count)", got)
+	}
+
+	// Model + usage + parent chain (🎯T112).
+	var model string
+	if err := s.readDB.QueryRow(
+		`SELECT model FROM entries WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL AND model != '' LIMIT 1`,
+		codexSessUUID,
+	).Scan(&model); err != nil || model != "gpt-5.5" {
+		t.Errorf("model = %q err=%v", model, err)
+	}
+	var usageN int
+	if err := s.readDB.QueryRow(
+		`SELECT count(*) FROM messages WHERE session_id = ? AND text LIKE '%[codex tokens]%'`,
+		codexSessUUID,
+	).Scan(&usageN); err != nil || usageN < 1 {
+		t.Errorf("usage messages = %d err=%v", usageN, err)
+	}
+	var pred, mech string
+	if err := s.readDB.QueryRow(
+		`SELECT predecessor_id, mechanism FROM session_chains WHERE successor_id = ?`,
+		codexSessUUID,
+	).Scan(&pred, &mech); err != nil || pred != codexParentUUID || mech != "codex_parent" {
+		t.Errorf("chain pred=%q mech=%q err=%v", pred, mech, err)
+	}
+	// cmd → command normalisation surfaces in tool_command.
+	var cmd string
+	if err := s.readDB.QueryRow(
+		`SELECT tool_command FROM messages WHERE session_id = ? AND tool_name = 'exec_command' LIMIT 1`,
+		codexSessUUID,
+	).Scan(&cmd); err != nil || !strings.Contains(cmd, "go build") {
+		t.Errorf("tool_command = %q err=%v", cmd, err)
 	}
 
 	// Idempotency: re-ingesting the same rollout from offset 0 must not
@@ -237,7 +326,7 @@ func TestCodexIngestEndToEnd(t *testing.T) {
 	if err := s.ingestCodexFile(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := entryCount(); got != 6 {
-		t.Errorf("entries after re-ingest = %d, want 6 (dedup)", got)
+	if got := entryCount(); got != 7 {
+		t.Errorf("entries after re-ingest = %d, want 7 (dedup)", got)
 	}
 }
