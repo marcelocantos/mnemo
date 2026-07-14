@@ -2270,7 +2270,6 @@ targets:
     status: achieved
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'NOT parked, NOT won''t-fix, NOT an achievement judgement — this is an OWNERSHIP EXCLUSION only. T64.2 is driven externally on open PR #112 (branch t64.2-mnemo-namespace-vault-layout, +1959/−46, both CI checks green at 2026-06-14 but 29 commits behind master; lineage from navnita''s now-closed #105). Excluded from Marcelo''s frontier so /cv stops recommending work that already exists on an open PR. bullseye has no dedicated owner/not-mine disposition (feature filed as bullseye 🎯T43), so set_aside is a stand-in here — the reason carries the nuance the status enum can''t. REVIVE by clearing status back to identified (bullseye_put id=T64.2 status=identified) when ownership returns to Marcelo or #112 lands/closes.'
     acceptance:
     - vault_layout config key accepts "v2", "both", or "v1"; default is "both" for existing vaults, "v2" for new.
     - _mnemo/index.md and _mnemo/README.md exist with the standard fence contract.
@@ -2289,7 +2288,6 @@ targets:
     status: achieved
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
     acceptance:
     - decisions/ and memories/ pages render under _mnemo/decisions/ and _mnemo/memories/ with the design's new frontmatter shape and
     - Old v1 decision/memory files still written when vault_layout="both".
@@ -2321,7 +2319,6 @@ targets:
     status: identified
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
     acceptance:
     - vault_profile config key accepts "obsidian", "logseq", "foam", or "generic".
     - 'Per-profile renderer hooks plumbed for link syntax + properties differences (Obsidian alias links, Logseq prop:: syntax, etc.).'
@@ -2337,7 +2334,6 @@ targets:
     status: identified
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
     acceptance:
     - vault_bridges config maps collection name (themes / patterns / cross-repo / lessons / decisions / memories) to an anchor-file path anywhere in the vault.
     - Whole-file atomic write inserts a fenced block ('<!-- mnemo:bridge:<name> --> ... <!-- /mnemo:bridge:<name> -->') into the named anchor file.
