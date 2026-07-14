@@ -102,6 +102,12 @@ func (e *Exporter) syncMnemoWing(ctx context.Context, now time.Time) {
 				st.MigrationDocWrittenAt = now.UTC()
 			}
 		}
+
+		// Bridges (🎯T64.6): reconcile configured bridges against anchor
+		// files + the written-bridge record. Runs even when no bridges
+		// are configured so a removed bridge's block is stripped. Mutates
+		// st (WrittenBridges + BridgeErrors); persisted by st.Write below.
+		e.syncBridges(st)
 	}
 
 	soak := e.effectiveSoakWarn()
