@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -102,6 +103,34 @@ type Config struct {
 	// under "Configuration surface" → "Soak-time TTL" in
 	// docs/design/vault-library-wing.md.
 	VaultLayout string `json:"vault_layout,omitempty"`
+
+	// VaultProfile selects the PKM tool dialect the vault exporter
+	// renders for (🎯T64.5). One of "obsidian", "logseq", "foam", or
+	// "generic". Controls link syntax (alias wikilinks vs. plain
+	// wikilinks vs. Markdown links) and other tool-specific quirks.
+	//
+	// Empty resolves via ResolvedVaultProfile at runtime: auto-detected
+	// from the recency of each tool's canonical signal file, falling
+	// back to "generic" when none is present. A user-set value always
+	// wins over auto-detect. See "PKM profile" in
+	// docs/design/vault-library-wing.md.
+	VaultProfile string `json:"vault_profile,omitempty"`
+
+	// VaultBridges maps a vault entity collection name (one of
+	// vaultBridgeCollections — "themes", "patterns", "cross-repo",
+	// "lessons", "decisions", "memories") to a vault-relative anchor
+	// file path anywhere in the vault (🎯T64.6). On each sync mnemo
+	// writes a fenced block of links to that collection into the named
+	// file, letting users pull mnemo content into their own MOCs
+	// without mnemo owning the file. Unknown collection names are
+	// skipped with a warning (fail-soft). Empty disables bridges.
+	VaultBridges map[string]string `json:"vault_bridges,omitempty"`
+
+	// VaultBridgesMaxLinks caps how many links a single bridge block
+	// emits (per source project for the memories bridge) so a bridge
+	// never becomes its own hairball (🎯T64.6). Zero resolves to the
+	// default (defaultVaultBridgesMaxLinks).
+	VaultBridgesMaxLinks int `json:"vault_bridges_max_links,omitempty"`
 
 	// VaultLayoutSoakWarnAfter is the duration (Go time.ParseDuration
 	// format) that vault_layout="both" may sit before mnemo emits the
@@ -513,8 +542,24 @@ func WriteConfig(cfg Config) error {
 	if err := cfg.validateVaultLayout(); err != nil {
 		return err
 	}
+	if err := cfg.validateVaultProfile(); err != nil {
+		return err
+	}
 	path := filepath.Join(home, ".mnemo", "config.json")
 	return writeConfigTo(path, cfg)
+}
+
+// validateVaultProfile rejects unknown vault_profile values so a typo
+// (e.g. "obsidan", "Logseq") never persists into config.json. Empty is
+// permitted — ResolvedVaultProfile auto-detects at runtime. (🎯T64.5)
+func (c Config) validateVaultProfile() error {
+	switch c.VaultProfile {
+	case "", VaultProfileObsidian, VaultProfileLogseq, VaultProfileFoam, VaultProfileGeneric:
+		return nil
+	default:
+		return fmt.Errorf("vault_profile %q is invalid; must be one of %q, %q, %q, %q",
+			c.VaultProfile, VaultProfileObsidian, VaultProfileLogseq, VaultProfileFoam, VaultProfileGeneric)
+	}
 }
 
 // validateVaultLayout rejects unknown vault_layout values so a typo
@@ -750,6 +795,74 @@ const (
 	VaultLayoutV2   = "v2"
 )
 
+// Vault PKM profile constants (🎯T64.5). Select the tool-specific
+// rendering dialect for the vault. Use these instead of bare strings.
+const (
+	VaultProfileObsidian = "obsidian"
+	VaultProfileLogseq   = "logseq"
+	VaultProfileFoam     = "foam"
+	VaultProfileGeneric  = "generic"
+)
+
+// vaultProfileSignalFiles maps a PKM profile to the canonical file
+// whose modification time signals that the tool is actively used
+// against this vault (🎯T64.5). Auto-detect stats these — recency of
+// mtime, not mere presence, decides the profile, because a stale
+// `.obsidian/` can linger for months after one exploratory open while
+// a multi-tool user's real editor keeps touching its own config.
+//
+// generic has no signal file: it is the fallback when none of these
+// exist.
+var vaultProfileSignalFiles = map[string]string{
+	VaultProfileObsidian: filepath.Join(".obsidian", "workspace.json"),
+	VaultProfileLogseq:   filepath.Join("logseq", "config", "config.edn"),
+	VaultProfileFoam:     filepath.Join(".foam", "settings.json"),
+}
+
+// vaultProfileTieBreak is the deterministic preference order applied
+// when two signal files' mtimes are within vaultProfileTieWindow of
+// each other: obsidian (most common) → logseq → foam. (🎯T64.5)
+var vaultProfileTieBreak = []string{
+	VaultProfileObsidian, VaultProfileLogseq, VaultProfileFoam,
+}
+
+// vaultProfileTieWindow is the mtime proximity within which two signal
+// files are considered "simultaneously touched" and the deterministic
+// tie-break order applies rather than raw most-recent-wins. (🎯T64.5)
+const vaultProfileTieWindow = time.Hour
+
+// vaultBridgeCollections is the closed set of entity collection names a
+// bridge may target (🎯T64.6). A vault_bridges entry keyed outside this
+// set is a typo or a future/unknown collection and is skipped fail-soft.
+var vaultBridgeCollections = []string{
+	"themes", "patterns", "cross-repo", "lessons", "decisions", "memories",
+}
+
+// defaultVaultBridgesMaxLinks caps a bridge block's link count when the
+// user has not set vault_bridges_max_links. (🎯T64.6)
+const defaultVaultBridgesMaxLinks = 50
+
+// IsVaultBridgeCollection reports whether name is a recognised bridge
+// target collection. (🎯T64.6)
+func IsVaultBridgeCollection(name string) bool {
+	for _, c := range vaultBridgeCollections {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolvedVaultBridgesMaxLinks returns the effective per-bridge link cap:
+// the configured value when positive, else defaultVaultBridgesMaxLinks.
+// (🎯T64.6)
+func (c Config) ResolvedVaultBridgesMaxLinks() int {
+	if c.VaultBridgesMaxLinks > 0 {
+		return c.VaultBridgesMaxLinks
+	}
+	return defaultVaultBridgesMaxLinks
+}
+
 // defaultVaultLayoutSoakWarnAfter is the soak window before the
 // "both"-layout warning fires. 30 days, hours-based per the design's
 // state-machine spec.
@@ -842,6 +955,115 @@ func (c Config) ResolvedVaultLayout(resolvedVaultPath string) string {
 		}
 	}
 	return VaultLayoutV2
+}
+
+// VaultProfileDetection is the outcome of profile resolution, carrying
+// enough provenance for mnemo_vault_status to explain *why* a profile
+// was chosen (🎯T64.5).
+type VaultProfileDetection struct {
+	// Profile is the resolved profile ("obsidian" | "logseq" | "foam"
+	// | "generic").
+	Profile string
+	// Source is how Profile was decided: "config" (user override),
+	// "auto" (a signal file was found), or "default" (no signal →
+	// generic).
+	Source string
+	// SignalFile is the vault-relative signal path that won auto-detect;
+	// empty for config/default sources.
+	SignalFile string
+	// SignalMtime is the modification time of SignalFile; zero when
+	// SignalFile is empty.
+	SignalMtime time.Time
+	// Alternatives lists the other profiles whose signal files also
+	// exist (sorted by descending mtime), so the user can spot a
+	// mis-detection. Empty for config/default sources.
+	Alternatives []string
+}
+
+// DetectVaultProfile resolves the effective PKM profile for the vault at
+// resolvedVaultPath and returns the full provenance (🎯T64.5).
+//
+// A user-set VaultProfile always wins (Source "config"). Otherwise the
+// signal files are stat'd and the rule from docs/design/vault-library-wing.md
+// applies:
+//
+//  1. drop signal files that do not exist;
+//  2. exactly one present → that profile;
+//  3. multiple present → most-recent mtime wins; ties within
+//     vaultProfileTieWindow break by vaultProfileTieBreak order;
+//  4. none present → "generic".
+//
+// An empty resolvedVaultPath yields generic (the caller is responsible
+// for not exporting when the vault is disabled).
+func (c Config) DetectVaultProfile(resolvedVaultPath string) VaultProfileDetection {
+	if p := c.VaultProfile; p != "" {
+		return VaultProfileDetection{Profile: p, Source: "config"}
+	}
+	if resolvedVaultPath == "" {
+		return VaultProfileDetection{Profile: VaultProfileGeneric, Source: "default"}
+	}
+
+	type sig struct {
+		profile string
+		rel     string
+		mtime   time.Time
+	}
+	var found []sig
+	for profile, rel := range vaultProfileSignalFiles {
+		fi, err := os.Stat(filepath.Join(resolvedVaultPath, rel))
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		found = append(found, sig{profile: profile, rel: rel, mtime: fi.ModTime()})
+	}
+	if len(found) == 0 {
+		return VaultProfileDetection{Profile: VaultProfileGeneric, Source: "default"}
+	}
+
+	// Sort most-recent first; within the tie window, order by the
+	// deterministic tie-break preference so the result is stable across
+	// runs and filesystems regardless of map iteration order.
+	sort.SliceStable(found, func(i, j int) bool {
+		di := found[i].mtime.Sub(found[j].mtime)
+		if di > vaultProfileTieWindow {
+			return true
+		}
+		if di < -vaultProfileTieWindow {
+			return false
+		}
+		return tieBreakRank(found[i].profile) < tieBreakRank(found[j].profile)
+	})
+
+	winner := found[0]
+	alts := make([]string, 0, len(found)-1)
+	for _, s := range found[1:] {
+		alts = append(alts, s.profile)
+	}
+	return VaultProfileDetection{
+		Profile:      winner.profile,
+		Source:       "auto",
+		SignalFile:   winner.rel,
+		SignalMtime:  winner.mtime,
+		Alternatives: alts,
+	}
+}
+
+// tieBreakRank returns the index of profile in vaultProfileTieBreak, or
+// a large sentinel for anything unlisted so it sorts last. (🎯T64.5)
+func tieBreakRank(profile string) int {
+	for i, p := range vaultProfileTieBreak {
+		if p == profile {
+			return i
+		}
+	}
+	return len(vaultProfileTieBreak)
+}
+
+// ResolvedVaultProfile returns just the effective profile string for the
+// vault at resolvedVaultPath. Convenience wrapper over DetectVaultProfile
+// for call sites that do not need the detection provenance. (🎯T64.5)
+func (c Config) ResolvedVaultProfile(resolvedVaultPath string) string {
+	return c.DetectVaultProfile(resolvedVaultPath).Profile
 }
 
 // ResolvedVaultLayoutSoakWarnAfter returns the configured soak duration

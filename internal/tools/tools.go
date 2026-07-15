@@ -708,6 +708,17 @@ Modes:
 Requires vault to be configured (vault_path set in ~/.mnemo/config.json).`),
 			mcp.WithBoolean("write", mcp.Description("If true, write the snapshot to _mnemo/MIGRATION.md, overwriting any existing file. Default false (preview only).")),
 		),
+		mcp.NewTool("mnemo_vault_bridge_list",
+			mcp.WithDescription(`List the vault bridges mnemo maintains (🎯T64.6).
+
+A bridge injects a fenced block of links to a mnemo collection (themes, patterns, cross-repo, lessons, decisions, memories) into a user-owned anchor file anywhere in the vault, so mnemo content is navigable from the user's own MOCs without mnemo owning the file.
+
+Returns, for the configured vault:
+  - active bridges: each collection → anchor file path, and whether its block has been written to disk yet;
+  - any bridge errors from the last sync (unknown collection, duplicate fence, unwritable anchor, etc.) with the reason and detail.
+
+Configured via the vault_bridges map (and vault_bridges_max_links) in ~/.mnemo/config.json. Requires vault to be enabled.`),
+		),
 		mcp.NewTool("mnemo_doctor",
 			mcp.WithDescription(`Run mnemo's self-diagnostics and report health (🎯T83). Returns a per-check report — name, severity (ok/warn/fail), tier (fast/full), detail, and a remediation hint — covering the summariser working directory, claude on PATH, configured roots, the compaction circuit-breaker (a tripped breaker means every compaction is failing systemically), whether the indexer has backfilled since startup, and database responsiveness. The single "is mnemo healthy, and what do I do about it" call; the same data backs the dashboard health page (http://localhost:19419/#health) and opt-out OS notifications.`),
 		),
@@ -947,6 +958,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultStatus(h.cfgCtl)
 	case "mnemo_vault_migration_doc":
 		return ch.vaultMigrationDoc(args)
+	case "mnemo_vault_bridge_list":
+		return ch.vaultBridgeList(h.cfgCtl)
 	case "mnemo_compactor_status":
 		return ch.compactorStatus(h.resolveCompactor)
 	case "mnemo_doctor":
@@ -2771,6 +2784,53 @@ func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 	}
 	b.WriteString("\n")
 
+	// PKM profile block (🎯T64.5): which tool dialect the exporter
+	// renders for, and — when auto-detected — the signal file + mtime
+	// that decided it, so the user can spot a mis-detection.
+	prof := cfg.DetectVaultProfile(vaultPath)
+	b.WriteString("PKM profile:\n")
+	fmt.Fprintf(&b, "  active:      %s", prof.Profile)
+	switch prof.Source {
+	case "config":
+		b.WriteString("  (configured)")
+	case "auto":
+		b.WriteString("  (auto-detected)")
+	case "default":
+		b.WriteString("  (default; no signal file found)")
+	}
+	b.WriteString("\n")
+	if prof.SignalFile != "" {
+		fmt.Fprintf(&b, "  signal:      %s (mtime %s)\n",
+			prof.SignalFile, prof.SignalMtime.UTC().Format(time.RFC3339))
+	}
+	if len(prof.Alternatives) > 0 {
+		fmt.Fprintf(&b, "  alternates:  %s\n", strings.Join(prof.Alternatives, ", "))
+	}
+	b.WriteString("\n")
+
+	// Bridges block (🎯T64.6): configured collection→anchor mappings and
+	// any errors from the last sync.
+	if len(cfg.VaultBridges) > 0 {
+		b.WriteString("Bridges:\n")
+		names := make([]string, 0, len(cfg.VaultBridges))
+		for n := range cfg.VaultBridges {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Fprintf(&b, "  %-12s → %s\n", n, cfg.VaultBridges[n])
+		}
+		if sp, perr := h.vault.StatePath(); perr == nil {
+			if st, err := store.LoadState(sp); err == nil && len(st.BridgeErrors) > 0 {
+				b.WriteString("  errors:\n")
+				for _, be := range st.BridgeErrors {
+					fmt.Fprintf(&b, "    %s (%s): %s\n", be.Name, be.AnchorPath, be.Reason)
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("Notes on disk:\n")
 	total := 0
 	for _, sec := range sections {
@@ -2780,6 +2840,70 @@ func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 	}
 	fmt.Fprintf(&b, "  %-12s %d\n", "total", total)
 	return b.String(), false, nil
+}
+
+// vaultBridgeList implements mnemo_vault_bridge_list (🎯T64.6): the
+// configured collection→anchor bridges, whether each has been written to
+// disk yet (from the state.json written-bridge record), and any errors
+// recorded on the last sync.
+func (h *callHandler) vaultBridgeList(ctl ConfigController) (string, bool, error) {
+	if h.vault == nil {
+		return vaultNotConfigured, false, nil
+	}
+	var cfg store.Config
+	if ctl != nil {
+		cfg = ctl.Get()
+	}
+
+	// Load the written-bridge record + errors from state.json.
+	var written map[string]string
+	var bridgeErrs []store.BridgeError
+	if sp, perr := h.vault.StatePath(); perr == nil {
+		if st, err := store.LoadState(sp); err == nil {
+			written = st.WrittenBridges
+			bridgeErrs = st.BridgeErrors
+		}
+	}
+
+	type bridgeView struct {
+		Collection string `json:"collection"`
+		Anchor     string `json:"anchor"`
+		Written    bool   `json:"written"`
+		Known      bool   `json:"known_collection"`
+	}
+	out := struct {
+		VaultPath string              `json:"vault_path"`
+		MaxLinks  int                 `json:"max_links"`
+		Bridges   []bridgeView        `json:"bridges"`
+		Errors    []store.BridgeError `json:"errors"`
+	}{
+		VaultPath: h.vault.Path(),
+		MaxLinks:  cfg.ResolvedVaultBridgesMaxLinks(),
+		Bridges:   []bridgeView{},
+		Errors:    bridgeErrs,
+	}
+	names := make([]string, 0, len(cfg.VaultBridges))
+	for n := range cfg.VaultBridges {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		_, isWritten := written[n]
+		out.Bridges = append(out.Bridges, bridgeView{
+			Collection: n,
+			Anchor:     cfg.VaultBridges[n],
+			Written:    isWritten,
+			Known:      store.IsVaultBridgeCollection(n),
+		})
+	}
+	if out.Errors == nil {
+		out.Errors = []store.BridgeError{}
+	}
+	buf, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(buf), false, nil
 }
 
 // doctor implements mnemo_doctor (🎯T83): it runs the full self-

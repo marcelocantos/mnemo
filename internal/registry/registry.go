@@ -181,8 +181,11 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 		s.RegisterExcludedPath(vaultPath, "vault_path")
 		s.SetVaultPath(vaultPath) // 🎯T68.6: vault divergence + GC machinery needs the path
 		exp, err := vault.New(s, vaultPath, vault.Options{
-			Layout:        r.cfg.ResolvedVaultLayout(vaultPath),
-			SoakWarnAfter: r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+			Layout:          r.cfg.ResolvedVaultLayout(vaultPath),
+			SoakWarnAfter:   r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+			Profile:         r.cfg.ResolvedVaultProfile(vaultPath),
+			Bridges:         r.cfg.VaultBridges,
+			BridgesMaxLinks: r.cfg.ResolvedVaultBridgesMaxLinks(),
 		})
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
@@ -966,8 +969,11 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 	}
 
 	exp, err := vault.New(e.store, newPath, vault.Options{
-		Layout:        r.cfg.ResolvedVaultLayout(newPath),
-		SoakWarnAfter: r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+		Layout:          r.cfg.ResolvedVaultLayout(newPath),
+		SoakWarnAfter:   r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+		Profile:         r.cfg.ResolvedVaultProfile(newPath),
+		Bridges:         r.cfg.VaultBridges,
+		BridgesMaxLinks: r.cfg.ResolvedVaultBridgesMaxLinks(),
 	})
 	if err != nil {
 		logger.Warn("vault: exporter creation failed on reload", "path", newPath, "err", err)

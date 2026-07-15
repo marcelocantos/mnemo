@@ -42,6 +42,14 @@ type State struct {
 	BrokenTemplates        []BrokenTemplate       `json:"broken_templates"`
 	BridgeErrors           []BridgeError          `json:"bridge_errors"`
 
+	// WrittenBridges maps each bridge collection name to the
+	// vault-relative anchor file its fenced block was last written into
+	// (🎯T64.6). Persisted so that when a bridge is removed from
+	// config, the next sync knows which anchor file to strip its block
+	// from — the anchor path is no longer in config at that point.
+	// nil/absent means no bridges have been written yet.
+	WrittenBridges map[string]string `json:"written_bridges,omitempty"`
+
 	// LastSoakWarnAt is the timestamp of the most recent soak-window
 	// warning emit. The exporter consults this to enforce a weekly
 	// cadence: a warning fires at most every 7 days, never on every
@@ -128,6 +136,7 @@ var knownStateKeys = map[string]struct{}{
 	"last_cluster_run_id":       {},
 	"broken_templates":          {},
 	"bridge_errors":             {},
+	"written_bridges":           {},
 	"last_soak_warn_at":         {},
 	"migration_doc_written_at":  {},
 }
