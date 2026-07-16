@@ -249,9 +249,10 @@ targets:
     achieved: 2026-07-16
   T102.3:
     name: 'Connect-mode: mnemo attaches to an already-running plugin server and drives it via the protocol'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - Given a configured base URL, mnemo fetches the manifest, validates the protocol version, and marks the instance ready — or surfaces a clear diag failure when unreachable/incompatible.
     - A uniform plugin-instance abstraction (base URL + manifest) is established that the launch and in-process transports later produce identically.
@@ -264,6 +265,7 @@ targets:
     - connect
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.4:
     name: 'Launch-mode: mnemo spawns a plugin executable, learns its port via a stdout handshake, and owns its lifecycle'
     status: identified
