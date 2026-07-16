@@ -766,6 +766,7 @@ Hot-reload coverage:
   - workspace_roots, extra_project_dirs, synthesis_roots: applied live; subsequent ingest passes pick up the new roots.
   - linked_instances: persisted to disk but requires a daemon restart to take effect (the federation client is built once at startup).
   - menu_bar_app: opt-in (default false) for the macOS menu-bar Threads app. Applied live — toggling it starts/stops the daemon supervising Mnemo.app immediately, no restart (disabling won't force-quit a running app, it just won't be relaunched). The Threads daemon API — mnemo_thread_* tools, the "mnemo thread" CLI, the HTTP thread routes — stays available regardless of this flag.
+  - plugins (🎯T102.2): list of {name, enabled, transport, command|url|script, args?, params?}. Applied live — enable starts an instance, disable tears one down, no restart. Metadata (facets, UI, config_schema) is discovered from each plugin's manifest endpoint, not stored in config. Optional default home: ~/.mnemo/plugins/<name>/.
 
 Response includes which fields changed, which were adopted live, and which require a restart.`),
 			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),

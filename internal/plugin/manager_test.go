@@ -1,0 +1,190 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package plugin
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"github.com/marcelocantos/mnemo/internal/store"
+)
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func manifestHandler(t *testing.T, name string) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Manifest{
+			ProtocolVersion: ProtocolVersionCurrent,
+			Name:            name,
+			Version:         "0.1.0",
+			Facets:          Facets{Check: true},
+			UI:              &UISurface{Label: "Test", PreviewPath: "ui/preview"},
+			ConfigSchema: map[string]any{
+				"type": "object",
+			},
+		})
+	})
+}
+
+func TestManagerReconcileConnectStartsAndStops(t *testing.T) {
+	srv := httptest.NewServer(manifestHandler(t, "lab"))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	m := NewManager(home, srv.Client(), testLogger())
+	t.Cleanup(m.Close)
+	ctx := context.Background()
+
+	m.Reconcile(ctx, []store.PluginEntry{{
+		Name:      "lab",
+		Enabled:   true,
+		Transport: store.PluginTransportConnect,
+		URL:       srv.URL,
+		Params:    map[string]any{"grace_multiple": 2.0},
+	}})
+
+	snap, ok := m.Get("lab")
+	if !ok {
+		t.Fatal("expected lab instance")
+	}
+	if snap.State != StateReady {
+		t.Fatalf("state: got %s want %s (err=%q)", snap.State, StateReady, snap.Err)
+	}
+	if snap.Manifest == nil || snap.Manifest.Version != "0.1.0" {
+		t.Fatalf("manifest: %+v", snap.Manifest)
+	}
+	if snap.Manifest.UI == nil || snap.Manifest.UI.Label != "Test" {
+		t.Fatalf("ui metadata missing: %+v", snap.Manifest.UI)
+	}
+	wantHome := filepath.Join(home, ".mnemo", "plugins", "lab")
+	if snap.Home != wantHome {
+		t.Errorf("home: got %q want %q", snap.Home, wantHome)
+	}
+
+	// Disable tears down without removing the config-shaped tracking
+	// only when we re-reconcile with enabled=false — instance may be
+	// deleted if entry is gone; with enabled=false entry stays tracked
+	// as stopped.
+	m.Reconcile(ctx, []store.PluginEntry{{
+		Name:      "lab",
+		Enabled:   false,
+		Transport: store.PluginTransportConnect,
+		URL:       srv.URL,
+	}})
+	snap, ok = m.Get("lab")
+	if !ok {
+		t.Fatal("disabled entry should remain tracked as stopped")
+	}
+	if snap.State != StateStopped {
+		t.Fatalf("after disable: state=%s want stopped", snap.State)
+	}
+	if snap.Manifest != nil || snap.BaseURL != "" {
+		t.Fatalf("after disable: metadata should be cleared: %+v", snap)
+	}
+
+	// Remove entry entirely.
+	m.Reconcile(ctx, nil)
+	if _, ok := m.Get("lab"); ok {
+		t.Fatal("removed entry should not be tracked")
+	}
+}
+
+func TestManagerReconcileLaunchIsConfiguredPending(t *testing.T) {
+	home := t.TempDir()
+	m := NewManager(home, nil, testLogger())
+	t.Cleanup(m.Close)
+
+	m.Reconcile(context.Background(), []store.PluginEntry{{
+		Name:      "liveness",
+		Enabled:   true,
+		Transport: store.PluginTransportLaunch,
+		Command:   "/opt/bin/plugin",
+	}})
+	snap, ok := m.Get("liveness")
+	if !ok {
+		t.Fatal("expected instance")
+	}
+	if snap.State != StateConfigured {
+		t.Fatalf("launch pending: state=%s want configured", snap.State)
+	}
+	if snap.BaseURL != "" {
+		t.Fatalf("launch pending should have no base URL yet: %q", snap.BaseURL)
+	}
+}
+
+func TestManagerConnectNameMismatch(t *testing.T) {
+	srv := httptest.NewServer(manifestHandler(t, "other"))
+	t.Cleanup(srv.Close)
+	m := NewManager(t.TempDir(), srv.Client(), testLogger())
+	t.Cleanup(m.Close)
+
+	m.Reconcile(context.Background(), []store.PluginEntry{{
+		Name:      "lab",
+		Enabled:   true,
+		Transport: store.PluginTransportConnect,
+		URL:       srv.URL,
+	}})
+	snap, _ := m.Get("lab")
+	if snap.State != StateError {
+		t.Fatalf("state=%s want error", snap.State)
+	}
+	if snap.Err == "" {
+		t.Fatal("expected error message")
+	}
+}
+
+func TestFetchManifest(t *testing.T) {
+	srv := httptest.NewServer(manifestHandler(t, "x"))
+	t.Cleanup(srv.Close)
+	man, err := FetchManifest(context.Background(), srv.Client(), srv.URL+"/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if man.Name != "x" || man.ProtocolVersion != ProtocolVersionCurrent {
+		t.Fatalf("unexpected manifest: %+v", man)
+	}
+}
+
+func TestFetchManifestBadProtocol(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"protocol_version": 99,
+			"name":             "x",
+			"version":          "1",
+			"facets":           map[string]bool{},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	_, err := FetchManifest(context.Background(), srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected protocol error")
+	}
+}
+
+func TestExpandPluginPath(t *testing.T) {
+	home := "/Users/me"
+	ph := store.PluginHome(home, "foo")
+	if got := store.ExpandPluginPath("~/bin/p", home, ph); got != filepath.Join(home, "bin", "p") {
+		t.Errorf("tilde: %q", got)
+	}
+	if got := store.ExpandPluginPath("bin/p", home, ph); got != filepath.Join(ph, "bin", "p") {
+		t.Errorf("relative: %q", got)
+	}
+	if got := store.ExpandPluginPath("/abs/p", home, ph); got != "/abs/p" {
+		t.Errorf("abs: %q", got)
+	}
+}

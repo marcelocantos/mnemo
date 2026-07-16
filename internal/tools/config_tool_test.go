@@ -84,6 +84,7 @@ func TestMergeConfigPatchAcceptsStructKeys(t *testing.T) {
 	for _, key := range []string{
 		"menu_bar_app", "threads_root", "todo_globs",
 		"disable_health_notifications", "backup", "cost_reconciliation",
+		"plugins", // 🎯T102.2 — must be patchable via derived allowlist (T96)
 	} {
 		if _, ok := knownConfigKeys[key]; !ok {
 			t.Errorf("config key %q missing from the derived allowlist", key)

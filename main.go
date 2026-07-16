@@ -52,6 +52,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
+	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
@@ -736,6 +737,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 
 	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
+
+	// 🎯T102.2: plugin registry reconciles against config on startup and
+	// on every mnemo_config hot-reload. Home is the process effective
+	// home for ~/.mnemo/plugins/<name> path convention.
+	if pluginHome, err := store.EffectiveHome(); err == nil {
+		reg.SetPluginManager(plugin.NewManager(pluginHome, nil, slog.Default()))
+	} else {
+		slog.Warn("plugin manager disabled (no home)", "err", err)
+	}
+	if n := len(cfg.Plugins); n > 0 {
+		slog.Info("plugins configured", "count", n)
+	}
 
 	// 🎯T97: upgrade detector, background lease, notices, auto-apply.
 	// Lease is acquired before eager ForUser so startWorkers can gate

@@ -28,6 +28,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
@@ -84,6 +85,9 @@ type Registry struct {
 	// "not configured" and background workers always start.
 	upgradeDetector *upgrade.Detector
 	lease           *upgrade.Lease
+	// plugins is the process-wide plugin registry (🎯T102.2). nil until
+	// SetPluginManager; Reload no-ops plugins when unset (tests).
+	plugins *plugin.Manager
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -125,6 +129,26 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 		summariserWorkDir: summariserWorkDir,
 		compactorModel:    "sonnet",
 	}
+}
+
+// SetPluginManager wires the 🎯T102 plugin registry. Call once from
+// main after construction; the first Reconcile runs with the startup
+// config so enabled plugins come up without waiting for a hot-reload.
+func (r *Registry) SetPluginManager(m *plugin.Manager) {
+	r.mu.Lock()
+	r.plugins = m
+	cfg := r.cfg
+	r.mu.Unlock()
+	if m != nil {
+		m.Reconcile(r.baseCtx, cfg.Plugins)
+	}
+}
+
+// PluginManager returns the wired plugin manager, or nil.
+func (r *Registry) PluginManager() *plugin.Manager {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.plugins
 }
 
 // ForUser returns the Store for the given username, creating it on
@@ -847,6 +871,9 @@ type ReloadReport struct {
 //     are wired up at startup against a process-wide http.Client; a
 //     mid-run swap would need to tear down and rebuild every fan-out
 //     handler, which is out of scope for this tool.
+//   - plugins — the plugin Manager reconciles enable/disable/params
+//     live (🎯T102.2); enable starts an instance, disable tears one
+//     down. No daemon restart.
 func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 	// Serialize reloads end-to-end. Two concurrent Reload calls would
 	// otherwise both pass through the swapVault stages, with one
@@ -929,7 +956,63 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 		}
 		report.Adopted = append(report.Adopted, "cost_reconciliation.enabled")
 	}
+	if !pluginsEqual(old.Plugins, newCfg.Plugins) {
+		report.Changed = append(report.Changed, "plugins")
+		r.mu.Lock()
+		pm := r.plugins
+		r.mu.Unlock()
+		if pm != nil {
+			pm.Reconcile(r.baseCtx, newCfg.Plugins)
+			report.Adopted = append(report.Adopted, "plugins")
+		} else {
+			// No manager wired (tests / early startup) — config is
+			// still the source of truth on disk; mark as restart so
+			// the caller is not told the live set changed.
+			report.RequiresRestart = append(report.RequiresRestart, "plugins")
+		}
+	}
 	return report
+}
+
+// pluginsEqual reports whether two plugin lists are equal for Reload
+// change detection. Order-sensitive: a reordering is a change.
+func pluginsEqual(a, b []store.PluginEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name ||
+			a[i].Enabled != b[i].Enabled ||
+			a[i].Transport != b[i].Transport ||
+			a[i].Command != b[i].Command ||
+			a[i].URL != b[i].URL ||
+			a[i].Script != b[i].Script ||
+			!stringSlicesEqual(a[i].Args, b[i].Args) ||
+			!paramsEqual(a[i].Params, b[i].Params) {
+			return false
+		}
+	}
+	return true
+}
+
+func paramsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	// Cheap structural compare via fmt for nested JSON-ish values.
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		if fmt.Sprint(va) != fmt.Sprint(vb) {
+			return false
+		}
+	}
+	return true
 }
 
 // swapVault tears down e's current vault workers, swaps in a fresh
@@ -1058,8 +1141,13 @@ func (r *Registry) Close() {
 		entries = append(entries, e)
 	}
 	r.stores = nil
+	pm := r.plugins
+	r.plugins = nil
 	r.mu.Unlock()
 
+	if pm != nil {
+		pm.Close()
+	}
 	for _, e := range entries {
 		e.workers.Wait()
 		e.vaultWorkers.Wait()
