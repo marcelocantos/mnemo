@@ -201,20 +201,38 @@ func TestAttachConnectAndDiag(t *testing.T) {
 		Name: "lab", Enabled: true, Transport: store.PluginTransportConnect, URL: srv.URL,
 	}})
 	checks := m.DynamicChecks()
-	if len(checks) != 1 || checks[0].Name != "plugin.lab.ready" {
-		t.Fatalf("diag checks: %+v", checks)
+	byName := map[string]bool{}
+	for _, c := range checks {
+		byName[c.Name] = true
 	}
-	res := checks[0].Run(ctx)
-	if res.Severity.String() != "ok" {
-		t.Fatalf("diag: %+v", res)
+	if !byName["plugin.lab.ready"] {
+		t.Fatalf("missing ready check: %+v", checks)
+	}
+	// Ready + Facets.Check → check facet is registered alongside ready.
+	if !byName["plugin.lab.check"] {
+		t.Fatalf("expected check facet when ready+Facets.Check: %+v", checks)
+	}
+	var resOK string
+	for _, c := range checks {
+		if c.Name == "plugin.lab.ready" {
+			resOK = c.Run(ctx).Severity.String()
+			break
+		}
+	}
+	if resOK != "ok" {
+		t.Fatalf("diag ready: %s", resOK)
 	}
 
-	// Unreachable URL → fail severity.
+	// Unreachable URL → fail severity on ready probe; facet drops (not ready).
 	m.Reconcile(ctx, []store.PluginEntry{{
 		Name: "lab", Enabled: true, Transport: store.PluginTransportConnect,
 		URL: "http://127.0.0.1:1",
 	}})
-	res = m.DynamicChecks()[0].Run(ctx)
+	checks = m.DynamicChecks()
+	if len(checks) != 1 || checks[0].Name != "plugin.lab.ready" {
+		t.Fatalf("error-state checks: %+v", checks)
+	}
+	res := checks[0].Run(ctx)
 	if res.Severity.String() != "fail" {
 		t.Fatalf("unreachable should fail diag: %+v", res)
 	}

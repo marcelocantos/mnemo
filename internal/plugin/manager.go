@@ -11,6 +11,11 @@
 // with backoff + T84 breaker. In-process (T102.6) later produces the
 // same Instance. Readiness is exposed on the T83 diag surface via
 // DynamicChecks.
+//
+// 🎯T102.7 owns backend facet adapters: reconcile → StreamReconciler
+// (POST /reconcile), check → diag.Check (GET /check), notify → POST
+// /notify. Facets ride the existing single scheduler and diag registry;
+// short HTTP timeouts isolate a slow/broken plugin.
 package plugin
 
 import (

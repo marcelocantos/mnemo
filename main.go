@@ -1005,6 +1005,24 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	notifier := diag.NewNotifier(notifyCfg)
 	notifier.OnAlert(func(a diag.Alert) {
 		eventHub.Publish(api.Event{Type: "alert", Data: a})
+		// 🎯T102.7: fan-out decided alerts to plugin notify facets.
+		// Async + short HTTP timeout inside NotifyAll so a hung plugin
+		// never wedges the diag notifier / scheduler.
+		if pm := reg.PluginManager(); pm != nil {
+			payload := plugin.NotifyPayload{
+				Title: a.Name,
+				Body:  a.Detail,
+				URL:   a.DashboardURL,
+			}
+			if a.Kind == "recovery" && payload.Body == "" {
+				payload.Body = "recovered"
+			}
+			go func() {
+				if err := pm.NotifyAll(context.Background(), payload); err != nil {
+					slog.Debug("plugin notify facet", "err", err)
+				}
+			}()
+		}
 	})
 	notifier.SetShimPresent(eventHub.HasSubscribers)
 	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)

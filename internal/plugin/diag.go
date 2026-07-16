@@ -45,14 +45,6 @@ func (m *Manager) DiagChecks() []diag.Check {
 	return out
 }
 
-// DynamicChecks implements the live-expanding diag provider so every
-// currently tracked plugin appears as plugin.<name>.ready on each
-// mnemo_doctor / /health / scheduler pass, including plugins added
-// after daemon startup via mnemo_config hot-reload.
-func (m *Manager) DynamicChecks() []diag.Check {
-	return m.DiagChecks()
-}
-
 func (m *Manager) checkOne(ctx context.Context, name string) diag.CheckResult {
 	_ = ctx
 	snap, ok := m.Get(name)

@@ -490,7 +490,17 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			// through the StreamReconciler abstraction. Adding a new
 			// stream is one entry in Store.StreamReconcilers(); this
 			// loop stays the same.
-			for _, sr := range e.store.StreamReconcilers() {
+			//
+			// 🎯T102.7: plugin reconcile facets are thin HTTP adapters
+			// (POST …/reconcile) returned by Manager.StreamReconcilers.
+			// They share this single worker and the same T84 breakers —
+			// no per-plugin tick loop. Facet HTTP calls use a short
+			// timeout so a hung plugin cannot wedge the dispatcher.
+			reconcilers := e.store.StreamReconcilers()
+			if pm := r.PluginManager(); pm != nil {
+				reconcilers = append(reconcilers, pm.StreamReconcilers()...)
+			}
+			for _, sr := range reconcilers {
 				b := breakers[sr.Name()]
 				if b == nil {
 					b = breaker.New(5, 10*time.Minute)
