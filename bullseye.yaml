@@ -268,9 +268,10 @@ targets:
     achieved: 2026-07-16
   T102.4:
     name: 'Launch-mode: mnemo spawns a plugin executable, learns its port via a stdout handshake, and owns its lifecycle'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - mnemo starts the configured executable, reads the child-chosen random port from the child's stdout handshake, and produces the same instance abstraction as connect-mode.
     - The supervisor restarts a crashed plugin with backoff, stops it on disable/shutdown, and reaps it cleanly — reusing the shimSupervisor/claudia subprocess pattern; a persistently-crashing plugin trips the T84 circuit-breaker instead of hammering.
@@ -284,11 +285,13 @@ targets:
     - supervisor
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.5:
     name: mnemo reverse-proxies /plugins/<name>/* to the plugin, same-origin, with WebSocket/SSE forwarding
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - Requests to /plugins/<name>/* are proxied to the instance's base URL; the plugin serves its own HTML/JS plus custom and plugin-conforming APIs under that subtree.
     - WebSocket and SSE upgrades are forwarded so streaming plugin UIs work; because the browser only ever talks to :19419, there is no CORS.
@@ -302,6 +305,7 @@ targets:
     - sse
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.6:
     name: In-process interpreted (Lua/goja) plugins present via the same HTTP protocol
     status: identified
@@ -321,9 +325,10 @@ targets:
     discovered: 2026-07-01
   T102.7:
     name: Backend facets ride the existing scheduler/diag/notifier via HTTP-delegating adapters
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - A plugin's reconciler facet registers a StreamReconciler (T68.7) whose Reconcile() POSTs the plugin's /reconcile; a check facet registers a diag.Check (T83) that GETs /check; a notifier facet POSTs /notify — all driven by the existing single scheduler and diag registry, not a new loop.
     - 'Facet failures are isolated: a slow or broken plugin degrades to a diag warning/failure and honours the T84 circuit-breaker; it never wedges the scheduler or the reconciler dispatcher.'
@@ -337,6 +342,7 @@ targets:
     - notifier
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.8:
     name: Reusable declarative signal-source primitives exist as config, needing no plugin process
     status: identified
