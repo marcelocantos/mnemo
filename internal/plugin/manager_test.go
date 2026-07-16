@@ -20,28 +20,32 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func manifestHandler(t *testing.T, name string) http.Handler {
+// pluginHandler serves /ready + /manifest for connect-mode tests (🎯T102.3).
+func pluginHandler(t *testing.T, name string) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/manifest" {
+		switch r.URL.Path {
+		case "/ready":
+			_ = json.NewEncoder(w).Encode(ReadyBody{OK: true})
+		case "/manifest":
+			_ = json.NewEncoder(w).Encode(Manifest{
+				ProtocolVersion: ProtocolVersionCurrent,
+				Name:            name,
+				Version:         "0.1.0",
+				Facets:          Facets{Check: true},
+				UI:              &UISurface{Label: "Test", PreviewPath: "ui/preview"},
+				ConfigSchema: map[string]any{
+					"type": "object",
+				},
+			})
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_ = json.NewEncoder(w).Encode(Manifest{
-			ProtocolVersion: ProtocolVersionCurrent,
-			Name:            name,
-			Version:         "0.1.0",
-			Facets:          Facets{Check: true},
-			UI:              &UISurface{Label: "Test", PreviewPath: "ui/preview"},
-			ConfigSchema: map[string]any{
-				"type": "object",
-			},
-		})
 	})
 }
 
 func TestManagerReconcileConnectStartsAndStops(t *testing.T) {
-	srv := httptest.NewServer(manifestHandler(t, "lab"))
+	srv := httptest.NewServer(pluginHandler(t, "lab"))
 	t.Cleanup(srv.Close)
 
 	home := t.TempDir()
@@ -127,7 +131,7 @@ func TestManagerReconcileLaunchIsConfiguredPending(t *testing.T) {
 }
 
 func TestManagerConnectNameMismatch(t *testing.T) {
-	srv := httptest.NewServer(manifestHandler(t, "other"))
+	srv := httptest.NewServer(pluginHandler(t, "other"))
 	t.Cleanup(srv.Close)
 	m := NewManager(t.TempDir(), srv.Client(), testLogger())
 	t.Cleanup(m.Close)
@@ -147,8 +151,79 @@ func TestManagerConnectNameMismatch(t *testing.T) {
 	}
 }
 
+func TestManagerConnectReadyFailure(t *testing.T) {
+	// Manifest-only server: no /ready → connect fails with clear error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/manifest" {
+			_ = json.NewEncoder(w).Encode(Manifest{
+				ProtocolVersion: ProtocolVersionCurrent,
+				Name:            "lab",
+				Version:         "1",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	m := NewManager(t.TempDir(), srv.Client(), testLogger())
+	t.Cleanup(m.Close)
+	m.Reconcile(context.Background(), []store.PluginEntry{{
+		Name:      "lab",
+		Enabled:   true,
+		Transport: store.PluginTransportConnect,
+		URL:       srv.URL,
+	}})
+	snap, _ := m.Get("lab")
+	if snap.State != StateError {
+		t.Fatalf("state=%s want error (err=%q)", snap.State, snap.Err)
+	}
+	if snap.BaseURL == "" {
+		t.Fatal("error state should retain attempted BaseURL for diag")
+	}
+}
+
+func TestAttachConnectAndDiag(t *testing.T) {
+	srv := httptest.NewServer(pluginHandler(t, "lab"))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+	att, err := AttachConnect(ctx, srv.Client(), srv.URL, "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if att.BaseURL == "" || att.Manifest == nil || att.Manifest.Name != "lab" {
+		t.Fatalf("attach result: %+v", att)
+	}
+
+	m := NewManager(t.TempDir(), srv.Client(), testLogger())
+	t.Cleanup(m.Close)
+	m.Reconcile(ctx, []store.PluginEntry{{
+		Name: "lab", Enabled: true, Transport: store.PluginTransportConnect, URL: srv.URL,
+	}})
+	checks := m.DynamicChecks()
+	if len(checks) != 1 || checks[0].Name != "plugin.lab.ready" {
+		t.Fatalf("diag checks: %+v", checks)
+	}
+	res := checks[0].Run(ctx)
+	if res.Severity.String() != "ok" {
+		t.Fatalf("diag: %+v", res)
+	}
+
+	// Unreachable URL → fail severity.
+	m.Reconcile(ctx, []store.PluginEntry{{
+		Name: "lab", Enabled: true, Transport: store.PluginTransportConnect,
+		URL: "http://127.0.0.1:1",
+	}})
+	res = m.DynamicChecks()[0].Run(ctx)
+	if res.Severity.String() != "fail" {
+		t.Fatalf("unreachable should fail diag: %+v", res)
+	}
+	if res.Remediation == "" {
+		t.Fatal("expected remediation")
+	}
+}
+
 func TestFetchManifest(t *testing.T) {
-	srv := httptest.NewServer(manifestHandler(t, "x"))
+	srv := httptest.NewServer(pluginHandler(t, "x"))
 	t.Cleanup(srv.Close)
 	man, err := FetchManifest(context.Background(), srv.Client(), srv.URL+"/")
 	if err != nil {
@@ -172,6 +247,14 @@ func TestFetchManifestBadProtocol(t *testing.T) {
 	_, err := FetchManifest(context.Background(), srv.Client(), srv.URL)
 	if err == nil {
 		t.Fatal("expected protocol error")
+	}
+}
+
+func TestProbeReady(t *testing.T) {
+	srv := httptest.NewServer(pluginHandler(t, "x"))
+	t.Cleanup(srv.Close)
+	if err := ProbeReady(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
 	}
 }
 

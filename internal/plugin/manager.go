@@ -4,12 +4,11 @@
 // Package plugin implements mnemo's plugin registry (🎯T102).
 //
 // 🎯T102.2 owns config declaration, hot-reload reconcile, and
-// manifest-based metadata discovery. Transports fill in progressively:
-// connect (🎯T102.3) attaches to a base URL and fetches the manifest;
-// launch (🎯T102.4) and in-process (🎯T102.6) produce the same Instance
-// abstraction once wired. This package starts connect-mode instances
-// fully enough for registry tests; launch/inprocess are tracked as
-// configured instances until those targets land.
+// manifest-based metadata discovery. 🎯T102.3 owns connect-mode attach:
+// ready probe + manifest fetch + protocol validation, producing the
+// uniform Instance (base URL + manifest) that launch (T102.4) and
+// in-process (T102.6) later produce identically. Readiness is exposed
+// on the T83 diag surface via DynamicChecks.
 package plugin
 
 import (
@@ -41,15 +40,18 @@ const (
 	StateStopped State = "stopped"
 )
 
-// Instance is one running (or configured) plugin, keyed by name.
-// Metadata comes from Manifest, never from config.
+// Instance is the uniform plugin-instance abstraction (🎯T102.3): a
+// base URL plus a validated manifest, independent of how the process
+// was started (connect / launch / in-process). Metadata comes from
+// Manifest, never from config. Transports only differ in how they
+// obtain BaseURL; after attach, all three look the same.
 type Instance struct {
 	Name     string
 	Entry    store.PluginEntry
-	BaseURL  string // set for connect (and later launch); empty for pending transports
+	BaseURL  string // set once the transport has a reachable HTTP root
 	Manifest *Manifest
 	State    State
-	Err      string // last error, if any
+	Err      string // last error, if any — also feeds diag.plugin.<name>.ready
 	Home     string // ~/.mnemo/plugins/<name> convention path (may not exist)
 }
 
@@ -140,9 +142,12 @@ func (m *Manager) Reconcile(ctx context.Context, entries []store.PluginEntry) {
 			m.startLocked(ctx, inst)
 			continue
 		}
+		// Compare against the previous entry before overwriting, so
+		// URL/command/script changes still trigger restart.
+		restart := needsRestart(inst, e)
 		inst.Entry = e
 		inst.Home = store.PluginHome(m.home, e.Name)
-		if needsRestart(inst, e) {
+		if restart {
 			m.stopLocked(inst)
 			m.startLocked(ctx, inst)
 		}
@@ -198,28 +203,23 @@ func (m *Manager) startLocked(ctx context.Context, inst *Instance) {
 
 	switch inst.Entry.Transport {
 	case store.PluginTransportConnect:
-		base := strings.TrimRight(inst.Entry.URL, "/")
-		inst.BaseURL = base
-		man, err := FetchManifest(ctx, m.client, base)
+		// 🎯T102.3: attach to an already-running server via the uniform path.
+		att, err := AttachConnect(ctx, m.client, inst.Entry.URL, inst.Name)
 		if err != nil {
 			inst.State = StateError
 			inst.Err = err.Error()
-			m.log.Warn("plugin start failed", "name", inst.Name, "transport", "connect", "err", err)
+			// Keep BaseURL so diag can show what we tried to reach.
+			inst.BaseURL = strings.TrimRight(inst.Entry.URL, "/")
+			m.log.Warn("plugin connect failed", "name", inst.Name, "url", inst.BaseURL, "err", err)
 			return
 		}
-		if man.Name != "" && man.Name != inst.Name {
-			inst.State = StateError
-			inst.Err = fmt.Sprintf("manifest name %q does not match config name %q", man.Name, inst.Name)
-			m.log.Warn("plugin name mismatch", "name", inst.Name, "manifest_name", man.Name)
-			return
-		}
-		inst.Manifest = man
-		inst.State = StateReady
-		m.log.Info("plugin ready", "name", inst.Name, "transport", "connect", "version", man.Version)
+		m.applyAttachLocked(inst, att)
+		m.log.Info("plugin ready", "name", inst.Name, "transport", "connect",
+			"version", att.Manifest.Version, "base_url", att.BaseURL)
 	case store.PluginTransportLaunch, store.PluginTransportInProcess:
-		// Transport wiring lands in 🎯T102.4 / 🎯T102.6. Track the
-		// instance so enable/disable reconcile is real; leave state
-		// configured until a base URL exists.
+		// Transport wiring lands in 🎯T102.4 / 🎯T102.6. Once those
+		// produce a base URL they call applyAttachLocked with the same
+		// AttachResult shape as connect.
 		inst.State = StateConfigured
 		m.log.Info("plugin configured (transport pending)",
 			"name", inst.Name, "transport", inst.Entry.Transport)
@@ -227,6 +227,15 @@ func (m *Manager) startLocked(ctx context.Context, inst *Instance) {
 		inst.State = StateError
 		inst.Err = fmt.Sprintf("unknown transport %q", inst.Entry.Transport)
 	}
+}
+
+// applyAttachLocked records a successful attach on inst. Shared by
+// connect now and by launch/in-process once they have a base URL.
+func (m *Manager) applyAttachLocked(inst *Instance, att *AttachResult) {
+	inst.BaseURL = att.BaseURL
+	inst.Manifest = att.Manifest
+	inst.State = StateReady
+	inst.Err = ""
 }
 
 func (m *Manager) stopLocked(inst *Instance) {
