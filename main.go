@@ -1171,6 +1171,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Wire up a single mux that serves:
 	//   /mcp          → MCP streamable-HTTP endpoint (for Claude Code)
 	//   /api/*        → JSON REST API (for the dashboard)
+	//   /plugins/*    → reverse-proxy to ready plugin instances (🎯T102.5)
 	//   /             → Web dashboard UI
 	mux := http.NewServeMux()
 	// Track MCP traffic for auto-apply quiescence (🎯T97.5) and remember
@@ -1188,6 +1189,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
 	apiHandler.RegisterRoutes(mux)
+
+	// 🎯T102.5: reverse-proxy /plugins/<name>/* to ready instances (same
+	// origin as the dashboard; WS/SSE pass through). Unknown/disabled
+	// names 404. Manager may be nil when EffectiveHome failed at startup.
+	mux.Handle("/plugins/", plugin.ProxyHandler(reg.PluginManager()))
 
 	// 🎯T92: opt-in pprof on the local listener. Diagnosing the CPU burn
 	// that motivated T91/T92 was slow because the release binary is stripped
