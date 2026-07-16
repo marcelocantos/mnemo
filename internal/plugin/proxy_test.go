@@ -165,14 +165,14 @@ func TestProxyHandlerDisabled404(t *testing.T) {
 }
 
 func TestProxyHandlerNotReady404(t *testing.T) {
-	// Launch transport stays configured with empty BaseURL (T102.4 pending).
+	// In-process transport stays configured with empty BaseURL until T102.6.
 	m := NewManager(t.TempDir(), nil, testLogger())
 	t.Cleanup(m.Close)
 	m.Reconcile(context.Background(), []store.PluginEntry{{
 		Name:      "lab",
 		Enabled:   true,
-		Transport: store.PluginTransportLaunch,
-		Command:   "/opt/bin/plugin",
+		Transport: store.PluginTransportInProcess,
+		Script:    "main.js",
 	}})
 	snap, _ := m.Get("lab")
 	if snap.State != StateConfigured {
@@ -268,10 +268,10 @@ func TestProxyHandlerUpgradeHeadersPassThrough(t *testing.T) {
 
 func TestSplitPluginPath(t *testing.T) {
 	cases := []struct {
-		in       string
-		name     string
-		rest     string
-		ok       bool
+		in   string
+		name string
+		rest string
+		ok   bool
 	}{
 		{"/plugins/lab", "lab", "/", true},
 		{"/plugins/lab/", "lab", "/", true},
