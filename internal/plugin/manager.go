@@ -6,9 +6,11 @@
 // 🎯T102.2 owns config declaration, hot-reload reconcile, and
 // manifest-based metadata discovery. 🎯T102.3 owns connect-mode attach:
 // ready probe + manifest fetch + protocol validation, producing the
-// uniform Instance (base URL + manifest) that launch (T102.4) and
-// in-process (T102.6) later produce identically. Readiness is exposed
-// on the T83 diag surface via DynamicChecks.
+// uniform Instance (base URL + manifest). 🎯T102.4 owns launch-mode:
+// spawn executable, stdout port handshake, AttachConnect, crash restart
+// with backoff + T84 breaker. In-process (T102.6) later produces the
+// same Instance. Readiness is exposed on the T83 diag surface via
+// DynamicChecks.
 package plugin
 
 import (
@@ -19,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -53,6 +56,10 @@ type Instance struct {
 	State    State
 	Err      string // last error, if any — also feeds diag.plugin.<name>.ready
 	Home     string // ~/.mnemo/plugins/<name> convention path (may not exist)
+
+	// launch is non-nil while a launch-mode supervisor owns this instance
+	// (🎯T102.4). Cleared on stop before the supervisor is joined.
+	launch *launchSupervisor
 }
 
 // Snapshot is a copy-safe view of an Instance for callers.
@@ -76,6 +83,9 @@ type Manager struct {
 	client    *http.Client
 	log       *slog.Logger
 	instances map[string]*Instance
+	// launchCfg is applied to every new launch supervisor (tests inject
+	// short timeouts). Zero value → production defaults.
+	launchCfg launchConfig
 }
 
 // NewManager builds a Manager. userHome is used for ~ expansion and the
@@ -179,11 +189,24 @@ func (m *Manager) Get(name string) (Snapshot, bool) {
 // Close stops every instance. Safe to call multiple times.
 func (m *Manager) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var launches []*launchSupervisor
 	for _, inst := range m.instances {
-		m.stopLocked(inst)
+		if inst.launch != nil {
+			launches = append(launches, inst.launch)
+			inst.launch = nil
+		}
+		inst.BaseURL = ""
+		inst.Manifest = nil
+		inst.State = StateStopped
+		inst.Err = ""
 	}
 	m.instances = map[string]*Instance{}
+	m.mu.Unlock()
+	// Join supervisors outside the lock so their state-update callbacks
+	// never deadlock against us.
+	for _, s := range launches {
+		s.Stop()
+	}
 }
 
 func (m *Manager) newInstance(e store.PluginEntry) *Instance {
@@ -216,10 +239,10 @@ func (m *Manager) startLocked(ctx context.Context, inst *Instance) {
 		m.applyAttachLocked(inst, att)
 		m.log.Info("plugin ready", "name", inst.Name, "transport", "connect",
 			"version", att.Manifest.Version, "base_url", att.BaseURL)
-	case store.PluginTransportLaunch, store.PluginTransportInProcess:
-		// Transport wiring lands in 🎯T102.4 / 🎯T102.6. Once those
-		// produce a base URL they call applyAttachLocked with the same
-		// AttachResult shape as connect.
+	case store.PluginTransportLaunch:
+		m.startLaunchLocked(ctx, inst)
+	case store.PluginTransportInProcess:
+		// Transport wiring lands in 🎯T102.6.
 		inst.State = StateConfigured
 		m.log.Info("plugin configured (transport pending)",
 			"name", inst.Name, "transport", inst.Entry.Transport)
@@ -229,8 +252,36 @@ func (m *Manager) startLocked(ctx context.Context, inst *Instance) {
 	}
 }
 
+// startLaunchLocked spawns the configured executable, waits for the
+// MNEMO_PLUGIN_PORT handshake, AttachConnects, and starts the restart
+// supervisor (🎯T102.4). First attach is synchronous so Reconcile
+// returns with Ready/Error; the background loop owns crash restarts.
+func (m *Manager) startLaunchLocked(ctx context.Context, inst *Instance) {
+	cmdPath := store.ExpandPluginPath(inst.Entry.Command, m.home, inst.Home)
+	sup := newLaunchSupervisor(m, inst, cmdPath, m.launchCfg)
+	inst.launch = sup
+
+	att, err := sup.startOnce(ctx)
+	firstOK := err == nil
+	if err != nil {
+		inst.State = StateError
+		inst.Err = err.Error()
+		// Count the failed first start toward the breaker so a binary
+		// that never handshakes still trips after threshold retries.
+		sup.br.Record(time.Now(), false, err.Error())
+		m.log.Warn("plugin launch failed", "name", inst.Name, "command", cmdPath, "err", err)
+	} else {
+		m.applyAttachLocked(inst, att)
+		m.log.Info("plugin ready", "name", inst.Name, "transport", "launch",
+			"version", att.Manifest.Version, "base_url", att.BaseURL)
+	}
+	// Always run the supervisor: on first-start failure it retries with
+	// backoff/breaker; on success it waits for exit and restarts.
+	go sup.run(firstOK)
+}
+
 // applyAttachLocked records a successful attach on inst. Shared by
-// connect now and by launch/in-process once they have a base URL.
+// connect and launch (and later in-process) once they have a base URL.
 func (m *Manager) applyAttachLocked(inst *Instance, att *AttachResult) {
 	inst.BaseURL = att.BaseURL
 	inst.Manifest = att.Manifest
@@ -238,15 +289,48 @@ func (m *Manager) applyAttachLocked(inst *Instance, att *AttachResult) {
 	inst.Err = ""
 }
 
+// noteLaunchReady applies a successful (re)attach from a live supervisor.
+// No-op when the instance was stopped or the supervisor replaced.
+func (m *Manager) noteLaunchReady(inst *Instance, sup *launchSupervisor, att *AttachResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if inst == nil || inst.launch != sup {
+		return
+	}
+	m.applyAttachLocked(inst, att)
+}
+
+// noteLaunchError records a launch failure/crash from a live supervisor.
+func (m *Manager) noteLaunchError(inst *Instance, sup *launchSupervisor, errMsg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if inst == nil || inst.launch != sup {
+		return
+	}
+	inst.State = StateError
+	inst.Err = errMsg
+	// Clear ready metadata so proxy/diag do not advertise a dead base URL.
+	inst.BaseURL = ""
+	inst.Manifest = nil
+}
+
 func (m *Manager) stopLocked(inst *Instance) {
 	if inst == nil {
 		return
 	}
-	// Connect-mode has no child process; launch-mode will SIGTERM here (T102.4).
+	launch := inst.launch
+	inst.launch = nil
 	inst.BaseURL = ""
 	inst.Manifest = nil
 	inst.State = StateStopped
 	inst.Err = ""
+	if launch != nil {
+		// Join outside the lock: the supervise loop may take m.mu to
+		// publish state and must not deadlock against Stop's wait.
+		m.mu.Unlock()
+		launch.Stop()
+		m.mu.Lock()
+	}
 	m.log.Info("plugin stopped", "name", inst.Name)
 }
 

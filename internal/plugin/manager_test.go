@@ -107,26 +107,27 @@ func TestManagerReconcileConnectStartsAndStops(t *testing.T) {
 	}
 }
 
-func TestManagerReconcileLaunchIsConfiguredPending(t *testing.T) {
+func TestManagerReconcileInProcessIsConfiguredPending(t *testing.T) {
+	// 🎯T102.6 not wired yet — inprocess stays configured-pending.
 	home := t.TempDir()
 	m := NewManager(home, nil, testLogger())
 	t.Cleanup(m.Close)
 
 	m.Reconcile(context.Background(), []store.PluginEntry{{
-		Name:      "liveness",
+		Name:      "tiny",
 		Enabled:   true,
-		Transport: store.PluginTransportLaunch,
-		Command:   "/opt/bin/plugin",
+		Transport: store.PluginTransportInProcess,
+		Script:    "main.js",
 	}})
-	snap, ok := m.Get("liveness")
+	snap, ok := m.Get("tiny")
 	if !ok {
 		t.Fatal("expected instance")
 	}
 	if snap.State != StateConfigured {
-		t.Fatalf("launch pending: state=%s want configured", snap.State)
+		t.Fatalf("inprocess pending: state=%s want configured", snap.State)
 	}
 	if snap.BaseURL != "" {
-		t.Fatalf("launch pending should have no base URL yet: %q", snap.BaseURL)
+		t.Fatalf("inprocess pending should have no base URL yet: %q", snap.BaseURL)
 	}
 }
 

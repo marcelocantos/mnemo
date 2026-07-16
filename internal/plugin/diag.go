@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/marcelocantos/mnemo/internal/diag"
+	"github.com/marcelocantos/mnemo/internal/store"
 )
 
 // DiagChecks returns one Fast-tier T83 check per tracked plugin instance
@@ -73,7 +74,7 @@ func (m *Manager) checkOne(ctx context.Context, name string) diag.CheckResult {
 	case StateConfigured:
 		return diag.Warning(
 			fmt.Sprintf("plugin %q is configured (%s) but not yet attached — transport pending", name, snap.Transport),
-			"launch/in-process transports land in T102.4/T102.6; use transport=connect with a live URL for now")
+			"in-process transport lands in T102.6; use transport=launch or transport=connect for now")
 	case StateStarting:
 		return diag.Warning(
 			fmt.Sprintf("plugin %q is still starting", name),
@@ -102,9 +103,14 @@ func pluginRemediation(snap Snapshot) string {
 		return "upgrade the plugin or mnemo so protocol_version matches (currently 1)"
 	case strings.Contains(snap.Err, "does not match config name"):
 		return "set plugins[].name to the plugin's manifest name, or fix the plugin manifest"
-	case snap.Transport == "connect":
+	case strings.Contains(snap.Err, "circuit breaker"):
+		return "fix the plugin process; mnemo stopped restarting after repeated failures — disable/re-enable the plugin or restart mnemo after the cooldown"
+	case snap.Transport == store.PluginTransportConnect:
 		return "ensure the plugin process is listening at " + snap.BaseURL +
 			" and serves GET /ready and GET /manifest; check firewall and URL in config"
+	case snap.Transport == store.PluginTransportLaunch:
+		return "check plugins[].command exists and is executable; the child must print " +
+			"'MNEMO_PLUGIN_PORT <port>' on stdout then serve GET /ready and GET /manifest on 127.0.0.1"
 	default:
 		return "inspect plugins entry in ~/.mnemo/config.json and the plugin logs"
 	}
