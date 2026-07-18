@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -21,8 +22,8 @@ import (
 // testPluginSource is a minimal plugin: bind 127.0.0.1:0, print
 // MNEMO_PLUGIN_PORT, serve /ready + /manifest. Optional env:
 //
-//	MNEMO_TEST_EXIT_AFTER — Go duration; exit after that (crash-restart tests)
-//	MNEMO_TEST_NAME       — manifest name (default "liveness")
+//	MNEMO_PLUGIN_PARAM_TEST_EXIT_AFTER — Go duration; exit after that
+//	MNEMO_PLUGIN_NAME / MNEMO_TEST_NAME — manifest name (default "liveness")
 const testPluginSource = `package main
 
 import (
@@ -45,6 +46,9 @@ func main() {
 
 	name := os.Getenv("MNEMO_TEST_NAME")
 	if name == "" {
+		name = os.Getenv("MNEMO_PLUGIN_NAME")
+	}
+	if name == "" {
 		name = "liveness"
 	}
 	mux := http.NewServeMux()
@@ -64,7 +68,11 @@ func main() {
 		fmt.Fprint(w, os.Getenv("MNEMO_PLUGIN_PARAM_GRACE_MULTIPLE"))
 	})
 
-	if d := os.Getenv("MNEMO_TEST_EXIT_AFTER"); d != "" {
+	d := os.Getenv("MNEMO_PLUGIN_PARAM_TEST_EXIT_AFTER")
+	if d == "" {
+		d = os.Getenv("MNEMO_TEST_EXIT_AFTER")
+	}
+	if d != "" {
 		go func() {
 			delay, err := time.ParseDuration(d)
 			if err != nil {
@@ -77,6 +85,15 @@ func main() {
 	_ = http.Serve(ln, mux)
 }
 `
+
+// exeName returns path with a Windows .exe suffix when needed so
+// go build / exec.Command treat the binary as runnable.
+func exeName(path string) string {
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(path), ".exe") {
+		return path + ".exe"
+	}
+	return path
+}
 
 var (
 	testPluginOnce sync.Once
@@ -98,7 +115,7 @@ func compiledTestPlugin(t *testing.T) string {
 			testPluginErr = err
 			return
 		}
-		bin := filepath.Join(dir, "testplugin")
+		bin := exeName(filepath.Join(dir, "testplugin"))
 		cmd := exec.Command("go", "build", "-o", bin, src)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -182,7 +199,7 @@ func TestLaunchHandshakeMissing(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	_ = os.WriteFile(src, []byte("package main\nfunc main() {}\n"), 0o644)
-	emptyBin := filepath.Join(dir, "empty")
+	emptyBin := exeName(filepath.Join(dir, "empty"))
 	if out, err := exec.Command("go", "build", "-o", emptyBin, src).CombinedOutput(); err != nil {
 		t.Fatalf("build empty: %v\n%s", err, out)
 	}
@@ -223,25 +240,14 @@ func TestLaunchRestartsAfterCrash(t *testing.T) {
 	}
 	t.Cleanup(m.Close)
 
-	// Child exits shortly after becoming ready; supervisor should restart.
-	// Pass exit-after via the plugin's own env by wrapping: use Args won't work
-	// for env. Set via a small shell wrapper... cleaner: put env in the entry
-	// by having the test binary read MNEMO_PLUGIN_PARAM or we set OS env for child
-	// through params is only MNEMO_PLUGIN_PARAM_*. Use a wrapper script:
-
-	// Actually buildPluginEnv only sets MNEMO_PLUGIN_*. Add exit via param that
-	// the test plugin doesn't use. Better: write a wrapper that sets env.
-	wrapper := filepath.Join(t.TempDir(), "wrap.sh")
-	script := fmt.Sprintf("#!/bin/sh\nexport MNEMO_TEST_EXIT_AFTER=80ms\nexport MNEMO_TEST_NAME=liveness\nexec %q \"$@\"\n", bin)
-	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
+	// Child exits shortly after ready via param→env (no shell wrapper —
+	// wrappers are not portable to Windows).
 	m.Reconcile(context.Background(), []store.PluginEntry{{
 		Name:      "liveness",
 		Enabled:   true,
 		Transport: store.PluginTransportLaunch,
-		Command:   wrapper,
+		Command:   bin,
+		Params:    map[string]any{"test_exit_after": "80ms"},
 	}})
 	snap, _ := m.Get("liveness")
 	if snap.State != StateReady {
@@ -281,7 +287,7 @@ func TestLaunchBreakerTripsOnPersistentFailure(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	_ = os.WriteFile(src, []byte("package main\nfunc main() {}\n"), 0o644)
-	failBin := filepath.Join(dir, "fail")
+	failBin := exeName(filepath.Join(dir, "fail"))
 	if out, err := exec.Command("go", "build", "-o", failBin, src).CombinedOutput(); err != nil {
 		t.Fatalf("build fail bin: %v\n%s", err, out)
 	}
@@ -356,19 +362,14 @@ func TestLaunchAndConnectCoexist(t *testing.T) {
 	}
 	connectURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	liveWrap := filepath.Join(t.TempDir(), "live.sh")
-	script := fmt.Sprintf("#!/bin/sh\nexport MNEMO_TEST_NAME=liveness\nexec %q\n", bin)
-	if err := os.WriteFile(liveWrap, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	m := NewManager(t.TempDir(), nil, testLogger())
 	m.launchCfg = launchConfig{StopGrace: 500 * time.Millisecond}
 	t.Cleanup(m.Close)
 
+	// Launch uses config name as MNEMO_PLUGIN_NAME for the manifest.
 	m.Reconcile(context.Background(), []store.PluginEntry{
 		{
-			Name: "liveness", Enabled: true, Transport: store.PluginTransportLaunch, Command: liveWrap,
+			Name: "liveness", Enabled: true, Transport: store.PluginTransportLaunch, Command: bin,
 		},
 		{
 			Name: "other", Enabled: true, Transport: store.PluginTransportConnect, URL: connectURL,

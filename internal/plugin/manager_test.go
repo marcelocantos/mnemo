@@ -278,7 +278,9 @@ func TestProbeReady(t *testing.T) {
 }
 
 func TestExpandPluginPath(t *testing.T) {
-	home := "/Users/me"
+	home := filepath.Join(string(filepath.Separator), "Users", "me")
+	// Use a real absolute path for the platform (Windows rejects bare "/abs/p").
+	abs := filepath.Join(t.TempDir(), "abs", "p")
 	ph := store.PluginHome(home, "foo")
 	if got := store.ExpandPluginPath("~/bin/p", home, ph); got != filepath.Join(home, "bin", "p") {
 		t.Errorf("tilde: %q", got)
@@ -286,7 +288,7 @@ func TestExpandPluginPath(t *testing.T) {
 	if got := store.ExpandPluginPath("bin/p", home, ph); got != filepath.Join(ph, "bin", "p") {
 		t.Errorf("relative: %q", got)
 	}
-	if got := store.ExpandPluginPath("/abs/p", home, ph); got != "/abs/p" {
-		t.Errorf("abs: %q", got)
+	if got := store.ExpandPluginPath(abs, home, ph); got != abs {
+		t.Errorf("abs: %q want %q", got, abs)
 	}
 }
