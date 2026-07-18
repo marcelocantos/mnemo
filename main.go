@@ -52,6 +52,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
+	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/tools"
@@ -77,7 +78,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.66.0"
+	version              = "0.67.0"
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 
@@ -737,6 +738,18 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
+	// 🎯T102.2: plugin registry reconciles against config on startup and
+	// on every mnemo_config hot-reload. Home is the process effective
+	// home for ~/.mnemo/plugins/<name> path convention.
+	if pluginHome, err := store.EffectiveHome(); err == nil {
+		reg.SetPluginManager(plugin.NewManager(pluginHome, nil, slog.Default()))
+	} else {
+		slog.Warn("plugin manager disabled (no home)", "err", err)
+	}
+	if n := len(cfg.Plugins); n > 0 {
+		slog.Info("plugins configured", "count", n)
+	}
+
 	// 🎯T97: upgrade detector, background lease, notices, auto-apply.
 	// Lease is acquired before eager ForUser so startWorkers can gate
 	// singleton background work on holder status.
@@ -992,6 +1005,24 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	notifier := diag.NewNotifier(notifyCfg)
 	notifier.OnAlert(func(a diag.Alert) {
 		eventHub.Publish(api.Event{Type: "alert", Data: a})
+		// 🎯T102.7: fan-out decided alerts to plugin notify facets.
+		// Async + short HTTP timeout inside NotifyAll so a hung plugin
+		// never wedges the diag notifier / scheduler.
+		if pm := reg.PluginManager(); pm != nil {
+			payload := plugin.NotifyPayload{
+				Title: a.Name,
+				Body:  a.Detail,
+				URL:   a.DashboardURL,
+			}
+			if a.Kind == "recovery" && payload.Body == "" {
+				payload.Body = "recovered"
+			}
+			go func() {
+				if err := pm.NotifyAll(context.Background(), payload); err != nil {
+					slog.Debug("plugin notify facet", "err", err)
+				}
+			}()
+		}
 	})
 	notifier.SetShimPresent(eventHub.HasSubscribers)
 	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)
@@ -1158,6 +1189,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Wire up a single mux that serves:
 	//   /mcp          → MCP streamable-HTTP endpoint (for Claude Code)
 	//   /api/*        → JSON REST API (for the dashboard)
+	//   /plugins/*    → reverse-proxy to ready plugin instances (🎯T102.5)
 	//   /             → Web dashboard UI
 	mux := http.NewServeMux()
 	// Track MCP traffic for auto-apply quiescence (🎯T97.5) and remember
@@ -1175,6 +1207,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
 	apiHandler.RegisterRoutes(mux)
+
+	// 🎯T102.5: reverse-proxy /plugins/<name>/* to ready instances (same
+	// origin as the dashboard; WS/SSE pass through). Unknown/disabled
+	// names 404. Manager may be nil when EffectiveHome failed at startup.
+	mux.Handle("/plugins/", plugin.ProxyHandler(reg.PluginManager()))
 
 	// 🎯T92: opt-in pprof on the local listener. Diagnosing the CPU burn
 	// that motivated T91/T92 was slow because the release binary is stripped

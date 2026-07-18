@@ -229,9 +229,10 @@ targets:
     discovered: 2026-07-01
   T102.2:
     name: Plugins are declared, enabled/disabled, and parameterised via ~/.mnemo/config.json, hot-reloaded like existing config
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - Config gains a plugins list; each entry names a plugin, its transport (launch exec path / connect url / in-process script), an enable flag, and params, validated with no hand-maintained allowlist (per T96).
     - A plugin registry instantiates enabled plugins and reconciles the set on config hot-reload — enable starts an instance, disable tears one down — mirroring the vault-path hot-swap in userEntry, needing no daemon restart.
@@ -245,11 +246,13 @@ targets:
     - hot-reload
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.3:
     name: 'Connect-mode: mnemo attaches to an already-running plugin server and drives it via the protocol'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - Given a configured base URL, mnemo fetches the manifest, validates the protocol version, and marks the instance ready — or surfaces a clear diag failure when unreachable/incompatible.
     - A uniform plugin-instance abstraction (base URL + manifest) is established that the launch and in-process transports later produce identically.
@@ -262,11 +265,13 @@ targets:
     - connect
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.4:
     name: 'Launch-mode: mnemo spawns a plugin executable, learns its port via a stdout handshake, and owns its lifecycle'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - mnemo starts the configured executable, reads the child-chosen random port from the child's stdout handshake, and produces the same instance abstraction as connect-mode.
     - The supervisor restarts a crashed plugin with backoff, stops it on disable/shutdown, and reaps it cleanly — reusing the shimSupervisor/claudia subprocess pattern; a persistently-crashing plugin trips the T84 circuit-breaker instead of hammering.
@@ -280,11 +285,13 @@ targets:
     - supervisor
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.5:
     name: mnemo reverse-proxies /plugins/<name>/* to the plugin, same-origin, with WebSocket/SSE forwarding
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - Requests to /plugins/<name>/* are proxied to the instance's base URL; the plugin serves its own HTML/JS plus custom and plugin-conforming APIs under that subtree.
     - WebSocket and SSE upgrades are forwarded so streaming plugin UIs work; because the browser only ever talks to :19419, there is no CORS.
@@ -298,6 +305,7 @@ targets:
     - sse
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.6:
     name: In-process interpreted (Lua/goja) plugins present via the same HTTP protocol
     status: identified
@@ -317,9 +325,10 @@ targets:
     discovered: 2026-07-01
   T102.7:
     name: Backend facets ride the existing scheduler/diag/notifier via HTTP-delegating adapters
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - A plugin's reconciler facet registers a StreamReconciler (T68.7) whose Reconcile() POSTs the plugin's /reconcile; a check facet registers a diag.Check (T83) that GETs /check; a notifier facet POSTs /notify — all driven by the existing single scheduler and diag registry, not a new loop.
     - 'Facet failures are isolated: a slow or broken plugin degrades to a diag warning/failure and honours the T84 circuit-breaker; it never wedges the scheduler or the reconciler dispatcher.'
@@ -333,6 +342,7 @@ targets:
     - notifier
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-16
   T102.8:
     name: Reusable declarative signal-source primitives exist as config, needing no plugin process
     status: identified
@@ -2293,7 +2303,6 @@ targets:
     status: achieved
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'NOT parked, NOT won''t-fix, NOT an achievement judgement — this is an OWNERSHIP EXCLUSION only. T64.2 is driven externally on open PR #112 (branch t64.2-mnemo-namespace-vault-layout, +1959/−46, both CI checks green at 2026-06-14 but 29 commits behind master; lineage from navnita''s now-closed #105). Excluded from Marcelo''s frontier so /cv stops recommending work that already exists on an open PR. bullseye has no dedicated owner/not-mine disposition (feature filed as bullseye 🎯T43), so set_aside is a stand-in here — the reason carries the nuance the status enum can''t. REVIVE by clearing status back to identified (bullseye_put id=T64.2 status=identified) when ownership returns to Marcelo or #112 lands/closes.'
     acceptance:
     - vault_layout config key accepts "v2", "both", or "v1"; default is "both" for existing vaults, "v2" for new.
     - _mnemo/index.md and _mnemo/README.md exist with the standard fence contract.
@@ -2312,7 +2321,6 @@ targets:
     status: achieved
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
     acceptance:
     - decisions/ and memories/ pages render under _mnemo/decisions/ and _mnemo/memories/ with the design's new frontmatter shape and
     - Old v1 decision/memory files still written when vault_layout="both".
@@ -2344,7 +2352,6 @@ targets:
     status: identified
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
     acceptance:
     - vault_profile config key accepts "obsidian", "logseq", "foam", or "generic".
     - 'Per-profile renderer hooks plumbed for link syntax + properties differences (Obsidian alias links, Logseq prop:: syntax, etc.).'
@@ -2360,7 +2367,6 @@ targets:
     status: identified
     value: 2.0
     cost: 0.0
-    set_aside_reason: 'Leak-containment for the T64.2 ownership exclusion. Downstream of 🎯T64.2 (externally-owned, open PR #112). T64.2''s _mnemo/ namespace foundation is NOT on master, so this is not actually actionable — bullseye mechanically unblocked it only because set_aside(T64.2) is treated like achievement. Excluded to keep Marcelo''s frontier honest. REVIVE together with T64.2 (status→identified) when ownership returns / #112 lands.'
     acceptance:
     - vault_bridges config maps collection name (themes / patterns / cross-repo / lessons / decisions / memories) to an anchor-file path anywhere in the vault.
     - Whole-file atomic write inserts a fenced block ('<!-- mnemo:bridge:<name> --> ... <!-- /mnemo:bridge:<name> -->') into the named anchor file.

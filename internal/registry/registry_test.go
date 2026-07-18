@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/storetest"
 	"github.com/marcelocantos/mnemo/internal/vault"
@@ -63,6 +65,32 @@ func TestReloadReportClassifiesFields(t *testing.T) {
 // Changed and Adopted fields. The flag is recognised as a live-
 // adoptable config change (🎯T63), distinct from linked_instances
 // which requires a restart.
+func TestReloadAdoptsPlugins(t *testing.T) {
+	// 🎯T102.2: plugins change is live-adopted via the plugin Manager.
+	home := t.TempDir()
+	r := NewRegistry(context.Background(), store.Config{}, "")
+	t.Cleanup(r.Close)
+	pm := plugin.NewManager(home, nil, slog.Default())
+	r.SetPluginManager(pm)
+
+	newCfg := store.Config{Plugins: []store.PluginEntry{{
+		Name:      "liveness",
+		Enabled:   true,
+		Transport: store.PluginTransportLaunch,
+		Command:   "/bin/true",
+	}}}
+	report := r.Reload(newCfg)
+	if !contains(report.Changed, "plugins") {
+		t.Errorf("Changed: got %v want plugins", report.Changed)
+	}
+	if !contains(report.Adopted, "plugins") {
+		t.Errorf("Adopted: got %v want plugins", report.Adopted)
+	}
+	if _, ok := pm.Get("liveness"); !ok {
+		t.Fatal("manager should track enabled launch plugin after Reload")
+	}
+}
+
 func TestReloadFlipsCostReconciliation(t *testing.T) {
 	old := store.Config{
 		CostReconciliation: store.CostReconciliationConfig{Enabled: false},

@@ -458,3 +458,12 @@ maintenance activities. Append-only — newest entries at the bottom.
   checkpoint 🎯T46 raised to gate the trio's end-to-end
   demonstration; live demo against a real admin key still
   pending. Homebrew formula updated.
+
+## 2026-07-18 — /release v0.67.0
+
+- **Commit**: (squash merge of t102-plugin-config-proxy-facets)
+- **Outcome**: Released v0.67.0. Plugin system foundation (🎯T102.2–T102.5,
+  T102.7): `plugins` config with launch/connect transports, hot-reload
+  registry, reverse proxy at `/plugins/<name>/*`, stdout port handshake
+  supervisor, facet adapters (reconcile/check/notify) on the existing
+  scheduler and diag. `plugin.<name>.ready` health checks.

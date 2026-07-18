@@ -180,6 +180,65 @@ type Config struct {
 	// upgrade.available). When enabled, only Homebrew non-Windows
 	// installs actually apply; others stay notify-only.
 	AutoUpgrade AutoUpgradeConfig `json:"auto_upgrade,omitempty"`
+
+	// Plugins declares out-of-process (or in-process interpreted)
+	// extension instances (🎯T102.2). Each entry names a plugin, its
+	// transport (launch / connect / inprocess), enable flag, and
+	// params. Metadata (facets, UI, config schema) is discovered from
+	// the plugin's manifest endpoint — never duplicated here. Absent
+	// or empty → no plugins. Hot-reloaded: enable starts an instance,
+	// disable tears one down, without a daemon restart. Optional
+	// on-disk home is ~/.mnemo/plugins/<name>/; a plugin may live
+	// anywhere its config entry points.
+	Plugins []PluginEntry `json:"plugins,omitempty"`
+}
+
+// Plugin transport constants (🎯T102.2). Use these instead of bare strings.
+const (
+	PluginTransportLaunch    = "launch"
+	PluginTransportConnect   = "connect"
+	PluginTransportInProcess = "inprocess"
+)
+
+// PluginEntry is one plugin declared in ~/.mnemo/config.json (🎯T102.2).
+// Config only names the plugin, transport, enable flag, and params;
+// facets/UI/schema come from GET …/manifest once the instance is up.
+type PluginEntry struct {
+	// Name uniquely identifies the plugin. Used as the URL segment
+	// under /plugins/<name>/ and as the instance key in the registry.
+	// Must be a non-empty path segment: [A-Za-z0-9][A-Za-z0-9_-]*.
+	Name string `json:"name"`
+
+	// Enabled starts the plugin when true. Disable tears the instance
+	// down on hot-reload without removing the config entry.
+	Enabled bool `json:"enabled"`
+
+	// Transport selects how mnemo reaches the plugin:
+	//   - "launch"    — spawn Command (+ Args); port via stdout handshake (🎯T102.4)
+	//   - "connect"   — attach to an already-running server at URL (🎯T102.3)
+	//   - "inprocess" — load Script as an in-process HTTP handler (🎯T102.6)
+	Transport string `json:"transport"`
+
+	// Command is the executable path for transport=launch. Supports ~.
+	// May be absolute or relative; relative paths resolve against
+	// ~/.mnemo/plugins/<name>/ when that home exists.
+	Command string `json:"command,omitempty"`
+
+	// Args are passed to Command on launch. Ignored for other transports.
+	Args []string `json:"args,omitempty"`
+
+	// URL is the base URL for transport=connect (http or https).
+	// The plugin serves /ready and /manifest (and facets/UI) under it.
+	URL string `json:"url,omitempty"`
+
+	// Script is the path to an interpreted plugin for transport=inprocess.
+	// Supports ~. Relative paths resolve against ~/.mnemo/plugins/<name>/.
+	Script string `json:"script,omitempty"`
+
+	// Params are free-form per-plugin settings. When the plugin has
+	// published a config_schema via its manifest, writes may validate
+	// against it; otherwise params pass through unchecked.
+	Params map[string]any `json:"params,omitempty"`
 }
 
 // AutoUpgradeConfig gates automatic backend swaps after quiescence.
@@ -456,6 +515,9 @@ func LoadConfig() (Config, error) {
 	if err := cfg.validateLinkedInstances(filepath.Join(home, ".mnemo", "peers")); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.validatePlugins(home); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -511,6 +573,9 @@ func WriteConfig(cfg Config) error {
 		return err
 	}
 	if err := cfg.validateVaultLayout(); err != nil {
+		return err
+	}
+	if err := cfg.validatePlugins(home); err != nil {
 		return err
 	}
 	path := filepath.Join(home, ".mnemo", "config.json")
@@ -605,6 +670,127 @@ func writeConfigTo(path string, cfg Config) error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil
+}
+
+// validatePlugins enforces the 🎯T102.2 config contract: unique names,
+// recognised transports, and transport-specific required fields.
+// Metadata fields (facets, UI, schema) must not appear in config —
+// they are discovered from the plugin's manifest endpoint, so this
+// validator never accepts or requires them.
+//
+// home is the daemon home for ~ expansion of command/script paths;
+// empty home skips expansion but still validates structure.
+func (c Config) validatePlugins(home string) error {
+	seen := map[string]int{}
+	for i, p := range c.Plugins {
+		if p.Name == "" {
+			return fmt.Errorf("plugins[%d]: name is required", i)
+		}
+		if !validPluginName(p.Name) {
+			return fmt.Errorf("plugins[%d]: name %q is invalid; must match [A-Za-z0-9][A-Za-z0-9_-]*", i, p.Name)
+		}
+		if prev, dup := seen[p.Name]; dup {
+			return fmt.Errorf("plugins: duplicate name %q at indexes %d and %d", p.Name, prev, i)
+		}
+		seen[p.Name] = i
+
+		switch p.Transport {
+		case PluginTransportLaunch:
+			if strings.TrimSpace(p.Command) == "" {
+				return fmt.Errorf("plugins[%q]: command is required for transport=launch", p.Name)
+			}
+		case PluginTransportConnect:
+			if strings.TrimSpace(p.URL) == "" {
+				return fmt.Errorf("plugins[%q]: url is required for transport=connect", p.Name)
+			}
+			u, err := url.Parse(p.URL)
+			if err != nil {
+				return fmt.Errorf("plugins[%q]: parse url %q: %w", p.Name, p.URL, err)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("plugins[%q]: url scheme must be http or https, got %q", p.Name, u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("plugins[%q]: url must include a host", p.Name)
+			}
+		case PluginTransportInProcess:
+			if strings.TrimSpace(p.Script) == "" {
+				return fmt.Errorf("plugins[%q]: script is required for transport=inprocess", p.Name)
+			}
+		case "":
+			return fmt.Errorf("plugins[%q]: transport is required (launch, connect, or inprocess)", p.Name)
+		default:
+			return fmt.Errorf("plugins[%q]: transport %q is invalid; must be launch, connect, or inprocess", p.Name, p.Transport)
+		}
+		_ = home // reserved for future path-existence checks; structure-only for now
+	}
+	return nil
+}
+
+// validPluginName reports whether name is a safe single path segment
+// for /plugins/<name>/ (no slashes, dots, or spaces).
+func validPluginName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			// ok
+		case r == '_' || r == '-':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// DefaultPluginsDir returns the optional on-disk plugins home root:
+// ~/.mnemo/plugins. Individual plugins live under <root>/<name>/.
+func DefaultPluginsDir(userHome string) string {
+	if userHome == "" {
+		return ""
+	}
+	return filepath.Join(userHome, ".mnemo", "plugins")
+}
+
+// PluginHome returns the optional default home for a named plugin:
+// ~/.mnemo/plugins/<name>. Config may still point command/script
+// anywhere; this is only a convention for relative resolution.
+func PluginHome(userHome, name string) string {
+	root := DefaultPluginsDir(userHome)
+	if root == "" || name == "" {
+		return ""
+	}
+	return filepath.Join(root, name)
+}
+
+// ExpandPluginPath expands ~ in path relative to userHome. Empty path
+// returns empty. When path is relative (not absolute and not ~-prefixed)
+// and pluginHome is non-empty, it is joined under pluginHome so a
+// command of "bin/plugin" under ~/.mnemo/plugins/foo/ resolves correctly.
+func ExpandPluginPath(path, userHome, pluginHome string) string {
+	if path == "" {
+		return ""
+	}
+	if userHome != "" {
+		switch {
+		case path == "~":
+			return userHome
+		case strings.HasPrefix(path, "~/"):
+			return filepath.Join(userHome, path[2:])
+		}
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if pluginHome != "" {
+		return filepath.Join(pluginHome, path)
+	}
+	return path
 }
 
 // validateLinkedInstances enforces the rules documented on

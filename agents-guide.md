@@ -540,6 +540,18 @@ Hot-reload coverage:
 - `workspace_roots`, `extra_project_dirs`, `synthesis_roots`,
   `todo_globs` — applied live; subsequent ingest passes pick up the new
   roots/globs.
+- `plugins` (🎯T102) — list of out-of-process (or in-process later)
+  extension instances. Each entry: `name`, `enabled`, `transport`
+  (`launch` | `connect` | `inprocess`), plus transport fields
+  (`command`/`args`, `url`, or `script`) and optional `params`. Applied
+  live: enable starts an instance, disable tears one down. Metadata
+  (facets, UI, config schema) comes from the plugin's `/manifest`, not
+  config. Optional default home: `~/.mnemo/plugins/<name>/`. Connect
+  attaches to a base URL (ready + manifest); launch spawns an executable
+  that prints `MNEMO_PLUGIN_PORT <port>` on stdout. Ready plugins are
+  reverse-proxied at `/plugins/<name>/*`. Facet adapters (reconcile /
+  check / notify) ride the existing scheduler and diag surface.
+  Health: `plugin.<name>.ready` on `mnemo_doctor` / `/health`.
 - `linked_instances` — persisted but requires a daemon restart (the
   federation client is wired once at startup).
 

@@ -135,11 +135,17 @@ func (r Report) Worst() Severity {
 	return worst
 }
 
+// DynamicProvider returns additional checks evaluated at Run time.
+// Used for hot-reloadable surfaces (e.g. plugin.<name>.ready, 🎯T102.3)
+// whose membership changes without rebuilding the registry.
+type DynamicProvider func() []Check
+
 // Registry holds the registered checks. Build one with NewRegistry,
 // Register checks at startup, then Run it from the scheduler, the
 // mnemo_doctor tool, and the /health endpoint.
 type Registry struct {
-	checks []Check
+	checks  []Check
+	dynamic DynamicProvider // optional; expanded on every Run
 }
 
 // NewRegistry returns an empty registry.
@@ -151,16 +157,33 @@ func (r *Registry) Register(checks ...Check) {
 	r.checks = append(r.checks, checks...)
 }
 
-// Checks returns the registered checks (read-only view).
+// SetDynamic installs a provider of checks that are expanded on every
+// Run. Safe to call once at startup after Register. The provider itself
+// must be safe for concurrent use with the subsystem it observes.
+func (r *Registry) SetDynamic(p DynamicProvider) {
+	r.dynamic = p
+}
+
+// Checks returns the registered static checks (read-only view). Dynamic
+// checks are not included — call Run to observe them.
 func (r *Registry) Checks() []Check { return r.checks }
 
 // Run executes the registered checks and returns a Report stamped at now.
 // When full is false only Fast-tier checks run (the frequent timer pass);
 // when true every check runs (startup, hourly, on-demand). A check that
 // panics is reported as a fail rather than crashing the run.
+//
+// Dynamic checks from SetDynamic are appended after static ones each Run,
+// so plugin enable/disable via hot-reload is visible without re-wiring.
 func (r *Registry) Run(ctx context.Context, full bool, now time.Time) Report {
 	rep := Report{GeneratedAt: now}
-	for _, c := range r.checks {
+	all := r.checks
+	if r.dynamic != nil {
+		if dyn := r.dynamic(); len(dyn) > 0 {
+			all = append(append([]Check{}, r.checks...), dyn...)
+		}
+	}
+	for _, c := range all {
 		if !full && c.Tier == Full {
 			continue
 		}

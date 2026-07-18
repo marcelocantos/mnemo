@@ -233,6 +233,12 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				"ensure exactly one mnemo backend is running, or check ~/.mnemo/background.lease")
 		}},
 	)
+
+	// 🎯T102.3: plugin.<name>.ready checks expand live from the plugin
+	// Manager so enable/disable via mnemo_config appears without rewiring.
+	if pm := r.PluginManager(); pm != nil {
+		reg.SetDynamic(pm.DynamicChecks)
+	}
 	return reg
 }
 
