@@ -467,3 +467,11 @@ maintenance activities. Append-only — newest entries at the bottom.
   registry, reverse proxy at `/plugins/<name>/*`, stdout port handshake
   supervisor, facet adapters (reconcile/check/notify) on the existing
   scheduler and diag. `plugin.<name>.ready` health checks.
+
+## 2026-07-19 — /release v0.68.0
+
+- **Commit**: (squash merge of release-t102-v0.68.0)
+- **Outcome**: Released v0.68.0. Completes 🎯T102 plugin system: in-process
+  goja host (T102.6), signal_sources (T102.8), MCP tool bridge (T102.10),
+  proof-of-surface + walkthrough (T102.11), lifecycle boundaries (T102.12).
+  Parent T102 achieved.
