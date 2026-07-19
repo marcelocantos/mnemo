@@ -107,8 +107,7 @@ func TestManagerReconcileConnectStartsAndStops(t *testing.T) {
 	}
 }
 
-func TestManagerReconcileInProcessIsConfiguredPending(t *testing.T) {
-	// 🎯T102.6 not wired yet — inprocess stays configured-pending.
+func TestManagerReconcileInProcessMissingScriptErrors(t *testing.T) {
 	home := t.TempDir()
 	m := NewManager(home, nil, testLogger())
 	t.Cleanup(m.Close)
@@ -117,17 +116,14 @@ func TestManagerReconcileInProcessIsConfiguredPending(t *testing.T) {
 		Name:      "tiny",
 		Enabled:   true,
 		Transport: store.PluginTransportInProcess,
-		Script:    "main.js",
+		Script:    "main.js", // missing under home
 	}})
 	snap, ok := m.Get("tiny")
 	if !ok {
 		t.Fatal("expected instance")
 	}
-	if snap.State != StateConfigured {
-		t.Fatalf("inprocess pending: state=%s want configured", snap.State)
-	}
-	if snap.BaseURL != "" {
-		t.Fatalf("inprocess pending should have no base URL yet: %q", snap.BaseURL)
+	if snap.State != StateError {
+		t.Fatalf("missing script: state=%s want error", snap.State)
 	}
 }
 

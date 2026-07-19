@@ -88,6 +88,8 @@ type Registry struct {
 	// plugins is the process-wide plugin registry (🎯T102.2). nil until
 	// SetPluginManager; Reload no-ops plugins when unset (tests).
 	plugins *plugin.Manager
+	// signals evaluates config signal_sources (🎯T102.8).
+	signals *plugin.SignalEvaluator
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -134,13 +136,25 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 // SetPluginManager wires the 🎯T102 plugin registry. Call once from
 // main after construction; the first Reconcile runs with the startup
 // config so enabled plugins come up without waiting for a hot-reload.
+// Also registers plugin home paths on existing stores for the T52
+// loop-safety fence (🎯T102.12).
 func (r *Registry) SetPluginManager(m *plugin.Manager) {
 	r.mu.Lock()
 	r.plugins = m
 	cfg := r.cfg
+	entries := make([]*userEntry, 0, len(r.stores))
+	for _, e := range r.stores {
+		entries = append(entries, e)
+	}
 	r.mu.Unlock()
 	if m != nil {
 		m.Reconcile(r.baseCtx, cfg.Plugins)
+		// Fence plugin homes so ingest never indexes plugin output.
+		for _, home := range m.PluginHomes(cfg.Plugins) {
+			for _, e := range entries {
+				e.store.RegisterExcludedPath(home, "plugin_home")
+			}
+		}
 	}
 }
 
@@ -149,6 +163,20 @@ func (r *Registry) PluginManager() *plugin.Manager {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.plugins
+}
+
+// SetSignalEvaluator wires declarative signal sources (🎯T102.8).
+func (r *Registry) SetSignalEvaluator(e *plugin.SignalEvaluator) {
+	r.mu.Lock()
+	r.signals = e
+	r.mu.Unlock()
+}
+
+// SignalEvaluator returns the wired evaluator, or nil.
+func (r *Registry) SignalEvaluator() *plugin.SignalEvaluator {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.signals
 }
 
 // ForUser returns the Store for the given username, creating it on
@@ -973,6 +1001,12 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 		r.mu.Unlock()
 		if pm != nil {
 			pm.Reconcile(r.baseCtx, newCfg.Plugins)
+			// Keep T52 fence in sync with configured plugin homes.
+			for _, e := range entries {
+				for _, home := range pm.PluginHomes(newCfg.Plugins) {
+					e.store.RegisterExcludedPath(home, "plugin_home")
+				}
+			}
 			report.Adopted = append(report.Adopted, "plugins")
 		} else {
 			// No manager wired (tests / early startup) — config is
@@ -981,7 +1015,34 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 			report.RequiresRestart = append(report.RequiresRestart, "plugins")
 		}
 	}
+	if !signalSourcesEqual(old.SignalSources, newCfg.SignalSources) {
+		report.Changed = append(report.Changed, "signal_sources")
+		home := ""
+		for _, e := range entries {
+			home = e.homeDir
+			break
+		}
+		if home == "" {
+			if h, err := store.EffectiveHome(); err == nil {
+				home = h
+			}
+		}
+		r.SetSignalEvaluator(plugin.NewSignalEvaluator(home, newCfg.SignalSources))
+		report.Adopted = append(report.Adopted, "signal_sources")
+	}
 	return report
+}
+
+func signalSourcesEqual(a, b []store.SignalSource) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // pluginsEqual reports whether two plugin lists are equal for Reload

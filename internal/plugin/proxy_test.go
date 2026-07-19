@@ -165,7 +165,7 @@ func TestProxyHandlerDisabled404(t *testing.T) {
 }
 
 func TestProxyHandlerNotReady404(t *testing.T) {
-	// In-process transport stays configured with empty BaseURL until T102.6.
+	// Missing script → error state with no BaseURL; proxy must 404.
 	m := NewManager(t.TempDir(), nil, testLogger())
 	t.Cleanup(m.Close)
 	m.Reconcile(context.Background(), []store.PluginEntry{{
@@ -175,8 +175,8 @@ func TestProxyHandlerNotReady404(t *testing.T) {
 		Script:    "main.js",
 	}})
 	snap, _ := m.Get("lab")
-	if snap.State != StateConfigured {
-		t.Fatalf("setup state=%s", snap.State)
+	if snap.State == StateReady {
+		t.Fatalf("setup should not be ready")
 	}
 
 	rr := httptest.NewRecorder()

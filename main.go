@@ -756,6 +756,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	if n := len(cfg.Plugins); n > 0 {
 		slog.Info("plugins configured", "count", n)
 	}
+	// 🎯T102.8: declarative signal sources → diag Fast checks.
+	if home, err := store.EffectiveHome(); err == nil {
+		reg.SetSignalEvaluator(plugin.NewSignalEvaluator(home, cfg.SignalSources))
+	}
+	if n := len(cfg.SignalSources); n > 0 {
+		slog.Info("signal sources configured", "count", n)
+	}
 
 	// 🎯T97: upgrade detector, background lease, notices, auto-apply.
 	// Lease is acquired before eager ForUser so startWorkers can gate
@@ -1178,6 +1185,25 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		registerFanoutTools(mcpSrv, handler, fedClient)
 	} else {
 		handler.RegisterTools(mcpSrv)
+	}
+
+	// 🎯T102.10: bridge plugin MCP tools onto the local MCP server.
+	// AddTool/DeleteTools support hot-reload without recreating the server.
+	if pm := reg.PluginManager(); pm != nil {
+		bridge := plugin.NewMCPServerBridge(
+			func(tool mcp.Tool, h func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+				mcpSrv.AddTool(tool, h)
+			},
+			func(names ...string) { mcpSrv.DeleteTools(names...) },
+		)
+		pm.SetToolBridge(bridge)
+		pm.SetOnToolsChanged(func() {
+			// Best-effort tools/list_changed for connected clients.
+			mcpSrv.SendNotificationToAllClients("notifications/tools/list_changed", map[string]any{})
+		})
+		// Sync any plugins already reconciled at startup.
+		// Reconcile already ran; force a no-op reconcile to push tools.
+		pm.Reconcile(ctx, cfg.Plugins)
 	}
 
 	// httpSrv implements http.Handler so we can mount it inside our

@@ -65,6 +65,8 @@ type Instance struct {
 	// launch is non-nil while a launch-mode supervisor owns this instance
 	// (🎯T102.4). Cleared on stop before the supervisor is joined.
 	launch *launchSupervisor
+	// inproc is non-nil for in-process interpreted hosts (🎯T102.6).
+	inproc *inprocessHost
 }
 
 // Snapshot is a copy-safe view of an Instance for callers.
@@ -93,6 +95,11 @@ type Manager struct {
 	launchCfg launchConfig
 	// publish fans events to the T86 SSE hub (plugin.reload, 🎯T102.9).
 	publish EventPublisher
+	// onToolsChanged is invoked after reconcile when MCP-bridged tools
+	// may have changed (🎯T102.10). Optional.
+	onToolsChanged func()
+	tools          ToolBridge
+	mcpPlugins     map[string]struct{} // plugins that last synced MCP tools
 }
 
 // NewManager builds a Manager. userHome is used for ~ expansion and the
@@ -169,6 +176,10 @@ func (m *Manager) Reconcile(ctx context.Context, entries []store.PluginEntry) {
 			m.startLocked(ctx, inst)
 		}
 	}
+	// Refresh MCP tool bridge after set stabilises (🎯T102.10).
+	m.mu.Unlock()
+	m.syncMCPTools()
+	m.mu.Lock()
 }
 
 // List returns a snapshot of every currently tracked instance.
@@ -193,14 +204,35 @@ func (m *Manager) Get(name string) (Snapshot, bool) {
 	return snapshotOf(inst), true
 }
 
+// PluginHomes returns conventional on-disk homes for the given entries
+// (🎯T102.12 fence registration). Does not create directories.
+func (m *Manager) PluginHomes(entries []store.PluginEntry) []string {
+	if m == nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Name == "" {
+			continue
+		}
+		out = append(out, store.PluginHome(m.home, e.Name))
+	}
+	return out
+}
+
 // Close stops every instance. Safe to call multiple times.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	var launches []*launchSupervisor
+	var inprocs []*inprocessHost
 	for _, inst := range m.instances {
 		if inst.launch != nil {
 			launches = append(launches, inst.launch)
 			inst.launch = nil
+		}
+		if inst.inproc != nil {
+			inprocs = append(inprocs, inst.inproc)
+			inst.inproc = nil
 		}
 		inst.BaseURL = ""
 		inst.Manifest = nil
@@ -213,6 +245,12 @@ func (m *Manager) Close() {
 	// never deadlock against us.
 	for _, s := range launches {
 		s.Stop()
+	}
+	for _, h := range inprocs {
+		h.Stop()
+	}
+	if m.onToolsChanged != nil {
+		m.onToolsChanged()
 	}
 }
 
@@ -249,10 +287,17 @@ func (m *Manager) startLocked(ctx context.Context, inst *Instance) {
 	case store.PluginTransportLaunch:
 		m.startLaunchLocked(ctx, inst)
 	case store.PluginTransportInProcess:
-		// Transport wiring lands in 🎯T102.6.
-		inst.State = StateConfigured
-		m.log.Info("plugin configured (transport pending)",
-			"name", inst.Name, "transport", inst.Entry.Transport)
+		att, host, err := startInProcess(ctx, m, inst)
+		if err != nil {
+			inst.State = StateError
+			inst.Err = err.Error()
+			m.log.Warn("plugin in-process failed", "name", inst.Name, "err", err)
+			return
+		}
+		inst.inproc = host
+		m.applyAttachLocked(inst, att)
+		m.log.Info("plugin ready", "name", inst.Name, "transport", "inprocess",
+			"version", att.Manifest.Version, "base_url", att.BaseURL)
 	default:
 		inst.State = StateError
 		inst.Err = fmt.Sprintf("unknown transport %q", inst.Entry.Transport)
@@ -331,6 +376,8 @@ func (m *Manager) stopLocked(inst *Instance) {
 	}
 	launch := inst.launch
 	inst.launch = nil
+	inproc := inst.inproc
+	inst.inproc = nil
 	inst.BaseURL = ""
 	inst.Manifest = nil
 	inst.State = StateStopped
@@ -340,6 +387,11 @@ func (m *Manager) stopLocked(inst *Instance) {
 		// publish state and must not deadlock against Stop's wait.
 		m.mu.Unlock()
 		launch.Stop()
+		m.mu.Lock()
+	}
+	if inproc != nil {
+		m.mu.Unlock()
+		inproc.Stop()
 		m.mu.Lock()
 	}
 	m.log.Info("plugin stopped", "name", inst.Name)

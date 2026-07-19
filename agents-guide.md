@@ -556,6 +556,14 @@ Hot-reload coverage:
   contribution; the menu-bar popup renders footer rows and loads
   `preview_url` in a live WKWebView. `plugin.reload` on `/api/events`
   forces a WebView reload.
+  In-process (🎯T102.6): `transport: "inprocess"` + `script` path to a
+  JS file defining `handle(req)` (goja). MCP tools (🎯T102.10): plugins
+  with `facets.mcp` exposing `GET …/mcp/tools` and `POST …/mcp/call`
+  appear as `plugin_<name>__<tool>` on mnemo's MCP list.
+- `signal_sources` (🎯T102.8) — pure-config liveness probes
+  (`file_mtime`, `launchd`, `newest_artifact`, `last_commit`) with
+  `cadence` + `grace_multiple`. Surface as `signal.<name>` on
+  `mnemo_doctor` / `/health` without a plugin process.
 - `linked_instances` — persisted but requires a daemon restart (the
   federation client is wired once at startup).
 
