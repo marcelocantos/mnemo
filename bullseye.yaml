@@ -362,9 +362,10 @@ targets:
     discovered: 2026-07-01
   T102.9:
     name: Plugin UI surfaces appear as popup menu items with a live, interactive WKWebView preview
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - GET /api/plugins enumerates each enabled plugin's UI contribution (label, icon, preview URL, page URL); the Swift shim renders these as menu entries (footer rows and/or a tab) built from the endpoint, not hardcoded.
     - The popup preview loads the plugin's live URL in a WKWebView (URLRequest, not static loadHTMLString) so JS, custom APIs, and WS/SSE streaming work; external links still open in the default browser.
@@ -380,6 +381,7 @@ targets:
     - dashboard
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-19
   T103:
     name: mnemo's read-only query surface cannot execute writes — user SQL cannot turn PRAGMA query_only back off
     status: achieved
