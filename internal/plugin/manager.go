@@ -91,6 +91,8 @@ type Manager struct {
 	// launchCfg is applied to every new launch supervisor (tests inject
 	// short timeouts). Zero value → production defaults.
 	launchCfg launchConfig
+	// publish fans events to the T86 SSE hub (plugin.reload, 🎯T102.9).
+	publish EventPublisher
 }
 
 // NewManager builds a Manager. userHome is used for ~ expansion and the
@@ -292,6 +294,10 @@ func (m *Manager) applyAttachLocked(inst *Instance, att *AttachResult) {
 	inst.Manifest = att.Manifest
 	inst.State = StateReady
 	inst.Err = ""
+	// Force-reload any live WKWebView for this plugin (🎯T102.9).
+	if att.Manifest != nil && att.Manifest.UI != nil {
+		m.emitReload(inst.Name)
+	}
 }
 
 // noteLaunchReady applies a successful (re)attach from a live supervisor.

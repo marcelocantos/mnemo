@@ -741,8 +741,15 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// 🎯T102.2: plugin registry reconciles against config on startup and
 	// on every mnemo_config hot-reload. Home is the process effective
 	// home for ~/.mnemo/plugins/<name> path convention.
+	// eventHub is created early so plugin.reload can publish during
+	// startup reconcile and hot-reload (🎯T102.9).
+	eventHub := api.NewEventHub()
 	if pluginHome, err := store.EffectiveHome(); err == nil {
-		reg.SetPluginManager(plugin.NewManager(pluginHome, nil, slog.Default()))
+		pm := plugin.NewManager(pluginHome, nil, slog.Default())
+		pm.SetEventPublisher(func(typ string, data any) {
+			eventHub.Publish(api.Event{Type: typ, Data: data})
+		})
+		reg.SetPluginManager(pm)
 	} else {
 		slog.Warn("plugin manager disabled (no home)", "err", err)
 	}
@@ -996,12 +1003,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}
-	// The SSE hub (🎯T86) fans diagnostics out to the native menu-bar shim. The
-	// notifier routes alerts to the shim when one is connected (a richer native
-	// notification) and falls back to osascript/notify-send when headless; the
-	// scheduler streams every report so the shim's dashboard panel and status
-	// glyph stay live. The hub is also handed to the api handler below.
-	eventHub := api.NewEventHub()
+	// The SSE hub (🎯T86) was created earlier so plugins can publish
+	// plugin.reload during startup reconcile (🎯T102.9). The notifier
+	// routes alerts to the shim when one is connected and falls back to
+	// osascript/notify-send when headless; the scheduler streams every
+	// report so the shim's dashboard panel and status glyph stay live.
 	notifier := diag.NewNotifier(notifyCfg)
 	notifier.OnAlert(func(a diag.Alert) {
 		eventHub.Publish(api.Event{Type: "alert", Data: a})
@@ -1206,6 +1212,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
+	// 🎯T102.9: data-driven plugin UI list for the menu-bar popup.
+	if pm := reg.PluginManager(); pm != nil {
+		apiHandler.SetPluginUILister(pm)
+	}
 	apiHandler.RegisterRoutes(mux)
 
 	// 🎯T102.5: reverse-proxy /plugins/<name>/* to ready instances (same

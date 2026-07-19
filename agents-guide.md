@@ -552,6 +552,10 @@ Hot-reload coverage:
   reverse-proxied at `/plugins/<name>/*`. Facet adapters (reconcile /
   check / notify) ride the existing scheduler and diag surface.
   Health: `plugin.<name>.ready` on `mnemo_doctor` / `/health`.
+  UI (🎯T102.9): `GET /api/plugins` lists each ready plugin's menu
+  contribution; the menu-bar popup renders footer rows and loads
+  `preview_url` in a live WKWebView. `plugin.reload` on `/api/events`
+  forces a WebView reload.
 - `linked_instances` — persisted but requires a daemon restart (the
   federation client is wired once at startup).
 
