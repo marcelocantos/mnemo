@@ -107,9 +107,10 @@ targets:
     discovered: 2026-06-30
   T102:
     name: mnemo has a plugin system — capabilities are added through a uniform extension surface, not bespoke core edits
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 21.0
     acceptance:
     - Plugins are added, enabled/disabled, and parameterised entirely through ~/.mnemo/config.json (hot-reloaded), never by rebuilding mnemo; no plugin type is compiled into the mnemo binary.
     - 'One HTTP plugin protocol serves every host uniformly: an mnemo-launched child process (random port via a stdout handshake), a connect-mode already-running server (configured URL), or an in-process interpreted (Lua/goja) component — all conforming to the same manifest + facet + UI contract and addressable under /plugins/<name>/.'
@@ -154,6 +155,7 @@ targets:
     - design
     origin: manual
     discovered: 2026-06-30
+    achieved: 2026-07-19
   T102.1:
     name: The plugin protocol and mechanism are specified and documented in docs/design/plugin-system.md
     status: achieved
@@ -173,9 +175,10 @@ targets:
     achieved: 2026-07-10
   T102.10:
     name: 'MCP-tool plugins: a plugin''s MCP tools are surfaced to mnemo''s clients'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - A plugin whose manifest declares an MCP endpoint (stdio-launched or HTTP-connected) has its tools bridged into mnemo's tool list and callable by Claude Code clients, reusing the T15 federation machinery.
     - Bridged tools are namespaced/attributed to their plugin and appear or disappear with enable/disable and hot-reload.
@@ -188,11 +191,13 @@ targets:
     - tools
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-19
   T102.11:
     name: 'Proof-of-surface: an existing capability is re-expressed as a plugin with no behaviour change'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - At least one existing capability (e.g. a diag/health check, or the thread-preview UI) is re-implemented as a plugin (launched or in-process) and produces identical behaviour, with the bespoke core path removed or shown redundant.
     - A written walkthrough demonstrates the automation-liveness use-case maps entirely onto the surface (signal-source + reconciler + check + notifier + UI) with zero core edits, establishing implementability without shipping that feature here.
@@ -206,11 +211,13 @@ targets:
     - validation
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-19
   T102.12:
     name: The plugin lifecycle honours mnemo's safety and architectural boundaries
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 2.0
     acceptance:
     - Plugin-served and plugin-generated content is inside the loop-safety exclusion fence (T52) — ingest never indexes a plugin's own output into a feedback loop.
     - Additive-only schema policy holds (any plugin-related persistence is new tables/columns); external egress stays opt-in; the single-scheduler/reconciler model is not bypassed.
@@ -227,6 +234,7 @@ targets:
     - lifecycle
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-19
   T102.2:
     name: Plugins are declared, enabled/disabled, and parameterised via ~/.mnemo/config.json, hot-reloaded like existing config
     status: achieved
@@ -308,9 +316,10 @@ targets:
     achieved: 2026-07-16
   T102.6:
     name: In-process interpreted (Lua/goja) plugins present via the same HTTP protocol
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 5.0
     acceptance:
     - A plugin may be an embedded goja (JS) or Lua script that mnemo hosts as an in-process http.Handler mounted at /plugins/<name>/, conforming to the same manifest + facet + UI contract as an external server — with no rebuild to add or change one.
     - The proxy/UI/facet machinery treats an in-process interpreted plugin identically to an external one; only the mount source differs (local handler vs proxied URL).
@@ -323,6 +332,7 @@ targets:
     - goja
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-19
   T102.7:
     name: Backend facets ride the existing scheduler/diag/notifier via HTTP-delegating adapters
     status: achieved
@@ -345,9 +355,10 @@ targets:
     achieved: 2026-07-16
   T102.8:
     name: Reusable declarative signal-source primitives exist as config, needing no plugin process
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 3.0
     acceptance:
     - The common liveness signals — file/log mtime, launchd LastExitStatus+PID, newest-artifact timestamp, last-commit — are expressible as pure config stanzas with an expected cadence and grace multiple, evaluated by mnemo and feeding the same scheduler/health/notifier surface.
     - No external process is required to watch a signal; a signal breaching its staleness threshold surfaces as a health degradation and optional notification.
@@ -360,6 +371,7 @@ targets:
     - config
     origin: subdivide(🎯T102)
     discovered: 2026-07-01
+    achieved: 2026-07-19
   T102.9:
     name: Plugin UI surfaces appear as popup menu items with a live, interactive WKWebView preview
     status: achieved
