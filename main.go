@@ -741,13 +741,27 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// 🎯T102.2: plugin registry reconciles against config on startup and
 	// on every mnemo_config hot-reload. Home is the process effective
 	// home for ~/.mnemo/plugins/<name> path convention.
+	// eventHub is created early so plugin.reload can publish during
+	// startup reconcile and hot-reload (🎯T102.9).
+	eventHub := api.NewEventHub()
 	if pluginHome, err := store.EffectiveHome(); err == nil {
-		reg.SetPluginManager(plugin.NewManager(pluginHome, nil, slog.Default()))
+		pm := plugin.NewManager(pluginHome, nil, slog.Default())
+		pm.SetEventPublisher(func(typ string, data any) {
+			eventHub.Publish(api.Event{Type: typ, Data: data})
+		})
+		reg.SetPluginManager(pm)
 	} else {
 		slog.Warn("plugin manager disabled (no home)", "err", err)
 	}
 	if n := len(cfg.Plugins); n > 0 {
 		slog.Info("plugins configured", "count", n)
+	}
+	// 🎯T102.8: declarative signal sources → diag Fast checks.
+	if home, err := store.EffectiveHome(); err == nil {
+		reg.SetSignalEvaluator(plugin.NewSignalEvaluator(home, cfg.SignalSources))
+	}
+	if n := len(cfg.SignalSources); n > 0 {
+		slog.Info("signal sources configured", "count", n)
 	}
 
 	// 🎯T97: upgrade detector, background lease, notices, auto-apply.
@@ -996,12 +1010,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}
-	// The SSE hub (🎯T86) fans diagnostics out to the native menu-bar shim. The
-	// notifier routes alerts to the shim when one is connected (a richer native
-	// notification) and falls back to osascript/notify-send when headless; the
-	// scheduler streams every report so the shim's dashboard panel and status
-	// glyph stay live. The hub is also handed to the api handler below.
-	eventHub := api.NewEventHub()
+	// The SSE hub (🎯T86) was created earlier so plugins can publish
+	// plugin.reload during startup reconcile (🎯T102.9). The notifier
+	// routes alerts to the shim when one is connected and falls back to
+	// osascript/notify-send when headless; the scheduler streams every
+	// report so the shim's dashboard panel and status glyph stay live.
 	notifier := diag.NewNotifier(notifyCfg)
 	notifier.OnAlert(func(a diag.Alert) {
 		eventHub.Publish(api.Event{Type: "alert", Data: a})
@@ -1174,6 +1187,25 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		handler.RegisterTools(mcpSrv)
 	}
 
+	// 🎯T102.10: bridge plugin MCP tools onto the local MCP server.
+	// AddTool/DeleteTools support hot-reload without recreating the server.
+	if pm := reg.PluginManager(); pm != nil {
+		bridge := plugin.NewMCPServerBridge(
+			func(tool mcp.Tool, h func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+				mcpSrv.AddTool(tool, h)
+			},
+			func(names ...string) { mcpSrv.DeleteTools(names...) },
+		)
+		pm.SetToolBridge(bridge)
+		pm.SetOnToolsChanged(func() {
+			// Best-effort tools/list_changed for connected clients.
+			mcpSrv.SendNotificationToAllClients("notifications/tools/list_changed", map[string]any{})
+		})
+		// Sync any plugins already reconciled at startup.
+		// Reconcile already ran; force a no-op reconcile to push tools.
+		pm.Reconcile(ctx, cfg.Plugins)
+	}
+
 	// httpSrv implements http.Handler so we can mount it inside our
 	// own mux alongside the dashboard and REST API routes.
 	httpSrv := server.NewStreamableHTTPServer(mcpSrv,
@@ -1206,6 +1238,10 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
+	// 🎯T102.9: data-driven plugin UI list for the menu-bar popup.
+	if pm := reg.PluginManager(); pm != nil {
+		apiHandler.SetPluginUILister(pm)
+	}
 	apiHandler.RegisterRoutes(mux)
 
 	// 🎯T102.5: reverse-proxy /plugins/<name>/* to ready instances (same

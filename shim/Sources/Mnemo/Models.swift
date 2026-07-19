@@ -66,3 +66,32 @@ struct ThreadList: Decodable {
 struct SearchResult: Decodable {
     let names: [String]
 }
+
+// PluginUIContribution mirrors GET /api/plugins entries (🎯T102.9).
+// Paths are same-origin (/plugins/<name>/…) for the WKWebView.
+struct PluginUIContribution: Decodable {
+    let name: String
+    let label: String
+    let icon: String?
+    let previewURL: String?
+    let pageURL: String?
+    let menu: String?
+    let version: String?
+    let description: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, label, icon, menu, version, description
+        case previewURL = "preview_url"
+        case pageURL = "page_url"
+    }
+}
+
+struct PluginList: Decodable {
+    let count: Int
+    let plugins: [PluginUIContribution]
+}
+
+// PluginReload is the data payload of the plugin.reload SSE event.
+struct PluginReload: Decodable {
+    let name: String?
+}

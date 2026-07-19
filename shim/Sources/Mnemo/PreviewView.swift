@@ -47,6 +47,15 @@ final class PreviewView: NSView {
         webView.loadHTMLString(html, baseURL: nil)
     }
 
+    // loadURL loads a live same-origin document (plugin preview, 🎯T102.9).
+    // URLRequest — not loadHTMLString — so JS, fetch('/api/…'), and WS/SSE work.
+    func loadURL(_ url: URL) {
+        webView.load(URLRequest(url: url))
+    }
+
+    // reload re-requests the current document (plugin.reload SSE).
+    func reload() { webView.reload() }
+
     func showPlain(_ text: String) {
         let escaped = text
             .replacingOccurrences(of: "&", with: "&amp;")

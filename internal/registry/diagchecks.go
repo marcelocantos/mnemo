@@ -234,11 +234,17 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		}},
 	)
 
-	// 🎯T102.3: plugin.<name>.ready checks expand live from the plugin
-	// Manager so enable/disable via mnemo_config appears without rewiring.
-	if pm := r.PluginManager(); pm != nil {
-		reg.SetDynamic(pm.DynamicChecks)
-	}
+	// 🎯T102.3 / T102.8: plugin ready checks + signal_sources expand live.
+	reg.SetDynamic(func() []diag.Check {
+		var out []diag.Check
+		if pm := r.PluginManager(); pm != nil {
+			out = append(out, pm.DynamicChecks()...)
+		}
+		if se := r.SignalEvaluator(); se != nil {
+			out = append(out, se.DiagChecks()...)
+		}
+		return out
+	})
 	return reg
 }
 

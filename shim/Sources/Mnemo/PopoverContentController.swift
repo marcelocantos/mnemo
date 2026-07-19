@@ -19,6 +19,9 @@ final class PopoverContentController: NSViewController, NSTableViewDataSource, N
     private var hovered = -1
     private var previewCache: [String: String] = [:]
     private var markerCatalog: [MarkerInfo] = []
+    private var pluginContribs: [PluginUIContribution] = []
+    private var pluginFooterHost: NSView?
+    private var viewingPluginName: String?
     private var keyMonitor: Any?
     private var refreshGeneration = 0
     // onRequestClose asks the owner (StatusItemController) to close the popover,
@@ -176,6 +179,16 @@ final class PopoverContentController: NSViewController, NSTableViewDataSource, N
 
     private func buildFooter() -> NSView {
         let container = NSView()
+        // Host for dynamic plugin rows (🎯T102.9); rebuilt when /api/plugins changes.
+        let pluginHost = NSView()
+        pluginHost.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(pluginHost)
+        pluginFooterHost = pluginHost
+
+        let staticBox = NSView()
+        staticBox.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(staticBox)
+
         let items: [(String, () -> Void)] = [
             ("New thread…", { [weak self] in self?.newThread() }),
             ("Dashboard…", { [weak self] in self?.onOpenDashboard?() }),
@@ -188,18 +201,106 @@ final class PopoverContentController: NSViewController, NSTableViewDataSource, N
                 if entered { self?.hover(-1) }
             })
             row.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(row)
+            staticBox.addSubview(row)
             NSLayoutConstraint.activate([
-                row.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                row.leadingAnchor.constraint(equalTo: staticBox.leadingAnchor),
+                row.trailingAnchor.constraint(equalTo: staticBox.trailingAnchor),
                 row.heightAnchor.constraint(equalToConstant: rowHeight),
                 row.topAnchor.constraint(
-                    equalTo: prev?.bottomAnchor ?? container.topAnchor, constant: prev == nil ? 4 : 0),
+                    equalTo: prev?.bottomAnchor ?? staticBox.topAnchor, constant: prev == nil ? 4 : 0),
             ])
             prev = row
         }
-        prev?.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6).isActive = true
+        prev?.bottomAnchor.constraint(equalTo: staticBox.bottomAnchor, constant: -6).isActive = true
+
+        NSLayoutConstraint.activate([
+            pluginHost.topAnchor.constraint(equalTo: container.topAnchor),
+            pluginHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            pluginHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            staticBox.topAnchor.constraint(equalTo: pluginHost.bottomAnchor),
+            staticBox.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            staticBox.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            staticBox.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        // Empty host has zero height until plugins load.
+        pluginHost.heightAnchor.constraint(greaterThanOrEqualToConstant: 0).isActive = true
         return container
+    }
+
+    // rebuildPluginFooter fills pluginFooterHost from the latest /api/plugins list.
+    private func rebuildPluginFooter() {
+        guard let host = pluginFooterHost else { return }
+        host.subviews.forEach { $0.removeFromSuperview() }
+        var prev: NSView?
+        for p in pluginContribs {
+            let title = p.label.isEmpty ? p.name : p.label
+            let row = HoverRow(title: "  \(title)", action: { [weak self] in
+                self?.openPluginPage(p)
+            }, onHover: { [weak self] entered in
+                if entered {
+                    self?.hover(-1)
+                    self?.showPluginPreview(p)
+                }
+            })
+            row.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(row)
+            NSLayoutConstraint.activate([
+                row.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+                row.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                row.heightAnchor.constraint(equalToConstant: rowHeight),
+                row.topAnchor.constraint(
+                    equalTo: prev?.bottomAnchor ?? host.topAnchor, constant: prev == nil ? 4 : 0),
+            ])
+            prev = row
+        }
+        if let prev = prev {
+            prev.bottomAnchor.constraint(equalTo: host.bottomAnchor).isActive = true
+        } else {
+            host.heightAnchor.constraint(equalToConstant: 0).isActive = true
+        }
+    }
+
+    private func showPluginPreview(_ p: PluginUIContribution) {
+        viewingPluginName = p.name
+        guard let path = p.previewURL ?? p.pageURL,
+              let url = DaemonClient.shared.absoluteURL(path) else {
+            preview.showPlain("Plugin \(p.name) has no preview URL")
+            return
+        }
+        preview.loadURL(url)
+    }
+
+    private func openPluginPage(_ p: PluginUIContribution) {
+        let path = p.pageURL ?? p.previewURL
+        guard let path, let url = DaemonClient.shared.absoluteURL(path) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    // handlePluginReload reacts to the plugin.reload SSE event (🎯T102.9).
+    func handlePluginReload(name: String?) {
+        if let name = name, let p = pluginContribs.first(where: { $0.name == name }) {
+            if viewingPluginName == name {
+                preview.reload()
+            }
+            // Refresh catalog in case label/URLs changed.
+            _ = p
+        } else if viewingPluginName != nil {
+            preview.reload()
+        }
+        fetchPlugins()
+    }
+
+    private func fetchPlugins() {
+        DaemonClient.shared.plugins { [weak self] result in
+            MainThread.soon {
+                guard let self = self else { return }
+                if case .success(let list) = result {
+                    self.pluginContribs = list
+                    self.rebuildPluginFooter()
+                }
+            }
+        }
     }
 
     // MARK: - lifecycle hooks
@@ -209,6 +310,7 @@ final class PopoverContentController: NSViewController, NSTableViewDataSource, N
     func prewarm() {
         _ = view
         fetchMarkerCatalog()
+        fetchPlugins()
         refresh { [weak self] in self?.prefetchPreviews() }
     }
 
@@ -228,6 +330,8 @@ final class PopoverContentController: NSViewController, NSTableViewDataSource, N
         // open (the cache is otherwise per-session; mtime-precise invalidation
         // would need the daemon to surface the file mtime).
         previewCache.removeAll()
+        viewingPluginName = nil
+        fetchPlugins()
         refresh(nil)
         installKeyMonitor()
         MainThread.soon { [weak self] in
@@ -325,6 +429,7 @@ final class PopoverContentController: NSViewController, NSTableViewDataSource, N
         guard row != hovered else { return }
         Log.debug("hover \(row)")
         hovered = row
+        viewingPluginName = nil
         table.enumerateAvailableRowViews { rowView, idx in
             rowView.backgroundColor = (idx == row)
                 ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25)

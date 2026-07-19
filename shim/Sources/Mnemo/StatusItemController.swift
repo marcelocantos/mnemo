@@ -60,6 +60,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         health.onSeverity = { [weak self] sev in self?.applySeverity(sev) }
         // A notification's "Open Dashboard" action opens the Status tab.
         health.onOpenRequested = { [weak self] in self?.showSettings(select: .status) }
+        // plugin.reload → re-request the live plugin WKWebView (🎯T102.9).
+        health.onPluginReload = { [weak self] name in
+            self?.content.handlePluginReload(name: name)
+        }
         health.start()
 
         // Restore the opt-in hotkey across launches (the daemon relaunches the

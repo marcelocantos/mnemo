@@ -30,6 +30,9 @@ final class HealthController {
     // onOpenRequested fires when a health notification's action asks to show the
     // dashboard; the owner opens the window (StatusItemController).
     var onOpenRequested: (() -> Void)?
+    // onPluginReload fires on the plugin.reload SSE event (🎯T102.9) so the
+    // popover can re-request the plugin's live WKWebView document.
+    var onPluginReload: ((String?) -> Void)?
 
     func start() {
         notifications.setOpenDashboard { [weak self] in self?.onOpenRequested?() }
@@ -67,6 +70,10 @@ final class HealthController {
             if let r = try? JSONDecoder().decode(HealthReport.self, from: data) { apply(r) }
         case "alert":
             if let a = try? JSONDecoder().decode(HealthAlert.self, from: data) { notifications.post(a) }
+        case "plugin.reload":
+            // Empty body or missing name → reload whatever is showing.
+            let pname = (try? JSONDecoder().decode(PluginReload.self, from: data))?.name
+            onPluginReload?(pname)
         default:
             Log.debug("HealthController: unhandled event \(name)")
         }

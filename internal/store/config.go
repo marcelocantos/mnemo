@@ -191,6 +191,41 @@ type Config struct {
 	// on-disk home is ~/.mnemo/plugins/<name>/; a plugin may live
 	// anywhere its config entry points.
 	Plugins []PluginEntry `json:"plugins,omitempty"`
+
+	// SignalSources are pure-config liveness probes (🎯T102.8) that need
+	// no plugin process. Each stanza names a kind (file_mtime,
+	// launchd, newest_artifact, last_commit), a path/label, an expected
+	// cadence, and a grace multiple. Evaluated by the diag surface.
+	SignalSources []SignalSource `json:"signal_sources,omitempty"`
+}
+
+// SignalSource kinds (🎯T102.8).
+const (
+	SignalKindFileMtime      = "file_mtime"
+	SignalKindLaunchd        = "launchd"
+	SignalKindNewestArtifact = "newest_artifact"
+	SignalKindLastCommit     = "last_commit"
+)
+
+// SignalSource is one declarative liveness probe in config.json.
+type SignalSource struct {
+	// Name uniquely identifies the signal (used in diag check names).
+	Name string `json:"name"`
+	// Kind is one of file_mtime, launchd, newest_artifact, last_commit.
+	Kind string `json:"kind"`
+	// Path is the file, directory, or git repo path to observe.
+	// Supports ~ expansion. For launchd, Path may be empty.
+	Path string `json:"path,omitempty"`
+	// Label is the launchd job label when Kind is launchd.
+	Label string `json:"label,omitempty"`
+	// Cadence is the expected update interval (Go duration, e.g. "1h").
+	Cadence string `json:"cadence"`
+	// GraceMultiple multiplies Cadence before the signal is stale
+	// (default 2). Stale → diag fail/warn.
+	GraceMultiple float64 `json:"grace_multiple,omitempty"`
+	// Notify when true raises a notifier alert on fail transitions
+	// (handled by the existing diag notification path when severity fails).
+	Notify bool `json:"notify,omitempty"`
 }
 
 // Plugin transport constants (🎯T102.2). Use these instead of bare strings.

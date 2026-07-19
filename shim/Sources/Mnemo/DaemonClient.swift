@@ -101,6 +101,27 @@ final class DaemonClient {
         }
     }
 
+    // MARK: - plugins (🎯T102.9)
+
+    // plugins fetches data-driven UI contributions for the popup footer.
+    func plugins(_ done: @escaping (Result<[PluginUIContribution], Error>) -> Void) {
+        get("/api/plugins") { result in
+            done(result.flatMap { data in
+                Result { try JSONDecoder().decode(PluginList.self, from: data).plugins }
+            })
+        }
+    }
+
+    // absoluteURL resolves a same-origin path (e.g. /plugins/lab/ui/) against
+    // the daemon base, for WKWebView URLRequest loads.
+    func absoluteURL(_ path: String) -> URL? {
+        if path.hasPrefix("http://") || path.hasPrefix("https://") {
+            return URL(string: path)
+        }
+        let p = path.hasPrefix("/") ? path : "/" + path
+        return URL(string: baseURL + p)
+    }
+
     // MARK: - health / events (🎯T86)
 
     // eventsURL is the SSE endpoint EventStream subscribes to.
