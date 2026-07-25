@@ -250,6 +250,20 @@ func (s *Store) dirtySegmentSessionIDs() ([]string, error) {
 // is served by search over span text instead, so the pass is now linear
 // in dirty sessions plus un-projected compactions.
 func (s *Store) SegmentAllSessions() error {
+	// Project compactions first. It is the cheap pass (one INSERT per
+	// un-projected compaction, no LLM call) and the high-value one —
+	// those spans carry real summaries, whereas the structural sweep
+	// below is O(corpus) and can run for many minutes. Front-loading it
+	// means an interrupted or restarted backfill still leaves every
+	// summarised window searchable.
+	n, err := s.BackfillCompactionSegments(0)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		slog.Info("projected compactions into topic spans", "count", n)
+	}
+
 	ids, err := s.dirtySegmentSessionIDs()
 	if err != nil {
 		return err
@@ -258,13 +272,6 @@ func (s *Store) SegmentAllSessions() error {
 		if err := s.SegmentSession(id); err != nil {
 			slog.Warn("segment session failed", "session", id, "err", err)
 		}
-	}
-	n, err := s.BackfillCompactionSegments(0)
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		slog.Info("projected compactions into topic spans", "count", n)
 	}
 	return nil
 }
