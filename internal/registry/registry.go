@@ -428,6 +428,16 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				"sessions", stats.TotalSessions,
 				"messages", stats.TotalMessages)
 		}
+		// 🎯T64.10: structural topic segments in the background so they
+		// never delay docs/todos/plans backfill stamps (ingest.backfill
+		// health check keys off ingest_status.last_backfill).
+		go func() {
+			if err := e.store.SegmentAllSessions(); err != nil {
+				logger.Warn("segment backfill failed", "err", err)
+			} else {
+				logger.Info("segment backfill complete")
+			}
+		}()
 		e.store.StartImageDescriber()
 		e.store.StartImageOCR()
 		e.store.StartImageEmbedder()

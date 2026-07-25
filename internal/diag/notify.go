@@ -96,7 +96,12 @@ func NewNotifier(cfg NotifierConfig) *Notifier {
 		lastSeverity: map[string]Severity{},
 		lastNotified: map[string]time.Time{},
 	}
-	n.send = osSend
+	// Capture the dashboard URL so osSend can deep-link (terminal-notifier
+	// -open, or open(1) after osascript). Bare osascript "display
+	// notification" is attributed to Script Editor — clicking the banner
+	// opens an empty Script Editor, which is useless.
+	dash := cfg.DashboardURL
+	n.send = func(title, body string) { osSend(title, body, dash) }
 	return n
 }
 
@@ -215,18 +220,43 @@ func parseSeverity(s string) Severity {
 // osSend delivers a notification through the platform's native mechanism,
 // best-effort. Failures are logged at debug and otherwise ignored — a
 // missing notifier must never wedge the diagnostics loop.
-func osSend(title, body string) {
+//
+// openURL, when non-empty, is the deep-link target (usually the dashboard
+// #health page). On macOS we prefer terminal-notifier -open so a click
+// opens that URL; plain osascript notifications are attributed to Script
+// Editor and a click opens an empty Script Editor window — so the
+// osascript path also runs `open <url>` as a usable fallback.
+func osSend(title, body, openURL string) {
 	switch runtime.GOOS {
 	case "darwin":
+		oneLine := strings.ReplaceAll(body, "\n", " — ")
+		if tn, err := exec.LookPath("terminal-notifier"); err == nil {
+			args := []string{
+				"-title", title,
+				"-message", oneLine,
+				"-group", "mnemo-health",
+			}
+			if openURL != "" {
+				args = append(args, "-open", openURL)
+			}
+			runNotify(tn, args...)
+			return
+		}
 		// AppleScript notification bodies are single-line; collapse
 		// newlines. %q produces a valid double-quoted AppleScript literal
 		// for normal text (escapes embedded quotes/backslashes), and the
 		// osascript -e arg keeps it clear of the shell.
-		oneLine := strings.ReplaceAll(body, "\n", " — ")
 		script := fmt.Sprintf("display notification %q with title %q", oneLine, title)
 		runNotify("osascript", "-e", script)
+		// Clicking an osascript banner opens Script Editor (empty). Open
+		// the dashboard so the deep-link is actually actionable.
+		if openURL != "" {
+			runNotify("open", openURL)
+		}
 	case "linux":
 		runNotify("notify-send", title, body)
+		// notify-send has no portable click-action without a desktop
+		// entry; leave the URL in the body for copy/paste.
 	}
 }
 

@@ -13,8 +13,9 @@ import UserNotifications
 // the dashboard — so a healthy default install never raises an unsolicited
 // prompt (the project's minimal-friction ethos, §0.9). UNUserNotificationCenter
 // needs a real bundle identity, which the signed Mnemo.app has but a bare SPM
-// dev binary does not; in that case we fall back to `osascript` so development
-// runs still surface alerts.
+// dev binary does not; in that case we fall back to terminal-notifier / open
+// rather than bare osascript (which attributes the banner to Script Editor and
+// opens an empty Script Editor on click).
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private let categoryID = "HEALTH"
     private let openActionID = "OPEN_DASHBOARD"
@@ -53,9 +54,10 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             ? "mnemo: \(alert.name) recovered"
             : "mnemo: \(alert.name) \(alert.severity)"
         let body = alert.isRecovery ? "This check is healthy again." : failBody(alert)
+        let openURL = alert.dashboardURL ?? DaemonClient.shared.dashboardURL()?.absoluteString
 
         guard canUseUN else {
-            osascriptFallback(title: title, body: body)
+            headlessFallback(title: title, body: body, openURL: openURL)
             return
         }
         ensureAuthorized()
@@ -104,16 +106,45 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         completionHandler()
     }
 
-    // MARK: - dev fallback
+    // MARK: - headless / dev fallback
 
-    private func osascriptFallback(title: String, body: String) {
-        // osascript notification bodies are single line; collapse newlines.
+    // Prefer terminal-notifier -open (click opens the dashboard). Bare
+    // osascript "display notification" is attributed to Script Editor — a
+    // click opens an empty Script Editor — so we always `open` the URL too
+    // when falling back to osascript.
+    private func headlessFallback(title: String, body: String, openURL: String?) {
         let oneLine = body.replacingOccurrences(of: "\n", with: " — ")
+        if let tn = which("terminal-notifier") {
+            var args = ["-title", title, "-message", oneLine, "-group", "mnemo-health"]
+            if let openURL, !openURL.isEmpty { args += ["-open", openURL] }
+            run(tn, args)
+            return
+        }
         let script = "display notification \(quote(oneLine)) with title \(quote(title))"
+        run("/usr/bin/osascript", ["-e", script])
+        if let openURL, !openURL.isEmpty {
+            run("/usr/bin/open", [openURL])
+        }
+    }
+
+    private func which(_ name: String) -> String? {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", script]
-        do { try p.run() } catch { Log.debug("osascript fallback failed: \(error)") }
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        p.arguments = [name]
+        let out = Pipe()
+        p.standardOutput = out
+        do { try p.run(); p.waitUntilExit() } catch { return nil }
+        guard p.terminationStatus == 0 else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (s?.isEmpty == false) ? s : nil
+    }
+
+    private func run(_ path: String, _ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        do { try p.run() } catch { Log.debug("notify run failed path=\(path) err=\(error)") }
     }
 
     // quote produces a safe double-quoted AppleScript string literal.

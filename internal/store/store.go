@@ -3085,15 +3085,22 @@ func (s *Store) IngestAll() error {
 	// haven't been scanned yet (e.g. sessions ingested before decisions
 	// table existed).
 	backfillDecisions(s.writeDB)
-	// 🎯T64.10: structural topic segments (Tier-1, zero egress).
-	if err := s.SegmentAllSessions(); err != nil {
-		slog.Warn("segment backfill failed", "err", err)
-	}
 
-	// Extract and store images from all ingested entries and messages.
-	// Runs synchronously (fast — no API calls). Description generation
-	// happens separately in the background worker started by StartImageDescriber.
-	backfillImages(s)
+	// 🎯T64.10 structural segmentation and full-corpus image extract are
+	// NOT run inline here. Both can take many minutes on a multi-GB DB
+	// and used to block every subsequent startup stream
+	// (docs/todos/plans/…), so ingest_status never got a post-boot
+	// last_backfill stamp and ingest.backfill falsely failed after the
+	// 10‑minute grace. The registry schedules SegmentAllSessions after
+	// IngestAll returns; image backfill runs in a goroutine below.
+	// Per-session SegmentSession / targeted image extract still run on
+	// live Watch appends.
+
+	// Full-corpus image extract (inline base64 + path refs). No API
+	// calls, but the LIKE scans over a large entries/messages table
+	// still dominate cold start — keep it off the critical path so
+	// stream backfills can stamp last_backfill promptly.
+	go backfillImages(s)
 
 	// Git commits and GitHub PRs/issues are no longer backfilled at
 	// boot: the "commits" and "github" mirror streams are
