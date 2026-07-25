@@ -52,6 +52,12 @@ func (f *fakeBackend) ReadSession(sessionID string, role string, offset int, lim
 func (f *fakeBackend) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]store.SearchResult, error) {
 	panic("unexpected Search call")
 }
+func (f *fakeBackend) AttachSegmentExpand(results []store.SearchResult, mode string) ([]store.SearchResult, error) {
+	panic("unexpected AttachSegmentExpand call")
+}
+func (f *fakeBackend) QuerySegments(q store.SegmentQuery) ([]store.TopicSegment, error) {
+	panic("unexpected QuerySegments call")
+}
 func (f *fakeBackend) ListRepos(filter string) ([]store.RepoInfo, error) {
 	panic("unexpected ListRepos call")
 }

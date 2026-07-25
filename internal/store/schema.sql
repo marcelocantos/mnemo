@@ -499,6 +499,14 @@ CREATE TABLE session_summary (
 			last_msg TEXT NOT NULL DEFAULT ''
 		);
 
+-- 🎯T64.10: incremental segmentation watermark (seal-on-lookahead).
+CREATE TABLE segment_scan_state (
+			session_id TEXT PRIMARY KEY,
+			segmented_through_id INTEGER NOT NULL DEFAULT 0,
+			method TEXT NOT NULL DEFAULT 'structural',
+			scanned_at TEXT NOT NULL DEFAULT ''
+		);
+
 CREATE TABLE skills (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			file_path TEXT NOT NULL UNIQUE,
@@ -529,6 +537,49 @@ CREATE TABLE targets (
 			UNIQUE(file_path, target_id)
 		);
 
+-- 🎯T64.8 / 🎯T64.10: themes + membership (clustering engine surface).
+-- parent_theme_id / depth retain the agglomerative dendrogram (T64.10
+-- reverses the flat-themes non-goal). membership_kind distinguishes
+-- primary vs secondary soft membership for segment/doc members.
+CREATE TABLE themes (
+			id TEXT PRIMARY KEY,
+			label TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			weight REAL NOT NULL DEFAULT 0,
+			repos TEXT NOT NULL DEFAULT '[]',
+			parent_theme_id TEXT,
+			depth INTEGER,
+			first_seen TEXT NOT NULL DEFAULT '',
+			last_touched TEXT NOT NULL DEFAULT '',
+			computed_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE INDEX idx_themes_parent ON themes(parent_theme_id);
+
+CREATE TABLE theme_members (
+			theme_id TEXT NOT NULL,
+			doc_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			membership_kind TEXT,
+			similarity REAL,
+			PRIMARY KEY (theme_id, doc_kind, entity_id)
+		);
+
+CREATE INDEX idx_theme_members_entity ON theme_members(doc_kind, entity_id);
+
+CREATE TABLE cluster_embeddings (
+			doc_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			model_version TEXT NOT NULL DEFAULT '',
+			dims INTEGER NOT NULL DEFAULT 0,
+			vector BLOB,
+			computed_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (doc_kind, entity_id, content_hash, provider, model, model_version)
+		);
+
 -- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash
 -- drives incremental skip, and (size, mtime) is the write-back
 -- fingerprint that lets a mutation detect an external edit since the
@@ -548,6 +599,29 @@ CREATE TABLE todo_files (
 			todo_count INTEGER NOT NULL DEFAULT 0,
 			indexed_at TEXT NOT NULL DEFAULT ''
 		);
+
+-- 🎯T64.10: hierarchical topic segments (message-level extent axis).
+CREATE TABLE topic_segments (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			from_msg_id INTEGER NOT NULL,
+			to_msg_id INTEGER NOT NULL,
+			level INTEGER NOT NULL DEFAULT 0,
+			parent_id TEXT,
+			method TEXT NOT NULL DEFAULT 'structural',
+			confidence REAL NOT NULL DEFAULT 0,
+			sealed INTEGER NOT NULL DEFAULT 0,
+			label TEXT,
+			summary TEXT,
+			repo TEXT,
+			first_ts TEXT,
+			last_ts TEXT,
+			computed_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE INDEX topic_segments_by_session ON topic_segments (session_id, from_msg_id, to_msg_id);
+CREATE INDEX topic_segments_by_parent ON topic_segments (parent_id);
+CREATE INDEX topic_segments_sealed ON topic_segments (session_id, sealed);
 
 CREATE TABLE todos (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -891,6 +965,18 @@ CREATE VIRTUAL TABLE todos_fts USING fts5(
 			text, tags, section, repo,
 			content=todos,
 			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE topic_segments_fts USING fts5(
+			label, summary,
+			content=topic_segments,
+			content_rowid=rowid
+		);
+
+CREATE VIRTUAL TABLE themes_fts USING fts5(
+			label, summary,
+			content=themes,
+			content_rowid=rowid
 		);
 
 -- Triggers
@@ -1251,6 +1337,46 @@ CREATE TRIGGER todos_au AFTER UPDATE ON todos
 			VALUES ('delete', old.id, old.text, old.tags, old.section, old.repo);
 			INSERT INTO todos_fts(rowid, text, tags, section, repo)
 			VALUES (new.id, new.text, new.tags, new.section, new.repo);
+		END;
+
+CREATE TRIGGER topic_segments_ad AFTER DELETE ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts(topic_segments_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+		END;
+
+CREATE TRIGGER topic_segments_ai AFTER INSERT ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER topic_segments_au AFTER UPDATE ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts(topic_segments_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+			INSERT INTO topic_segments_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER themes_ad AFTER DELETE ON themes
+		BEGIN
+			INSERT INTO themes_fts(themes_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+		END;
+
+CREATE TRIGGER themes_ai AFTER INSERT ON themes
+		BEGIN
+			INSERT INTO themes_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER themes_au AFTER UPDATE ON themes
+		BEGIN
+			INSERT INTO themes_fts(themes_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+			INSERT INTO themes_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
 		END;
 
 -- Views

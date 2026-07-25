@@ -1,0 +1,513 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"crypto/sha1"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/marcelocantos/mnemo/internal/segment"
+)
+
+// SegmentExpand modes for Search (🎯T64.10).
+const (
+	SegmentExpandNone   = "none"
+	SegmentExpandFine   = "segment"
+	SegmentExpandCoarse = "segment:coarse"
+)
+
+// DefaultSegmentExpand is off until golden Pk/WindowDiff bar is cleared.
+const DefaultSegmentExpand = SegmentExpandNone
+
+// TopicSegment is a persisted topic span.
+type TopicSegment struct {
+	ID         string  `json:"id"`
+	SessionID  string  `json:"session_id"`
+	FromMsgID  int     `json:"from_msg_id"`
+	ToMsgID    int     `json:"to_msg_id"`
+	Level      int     `json:"level"`
+	ParentID   string  `json:"parent_id,omitempty"`
+	Method     string  `json:"method"`
+	Confidence float64 `json:"confidence"`
+	Sealed     bool    `json:"sealed"`
+	Label      string  `json:"label,omitempty"`
+	Summary    string  `json:"summary,omitempty"`
+	Repo       string  `json:"repo,omitempty"`
+	FirstTS    string  `json:"first_ts,omitempty"`
+	LastTS     string  `json:"last_ts,omitempty"`
+	ComputedAt string  `json:"computed_at,omitempty"`
+}
+
+// SegmentQuery filters for QuerySegments / mnemo_segments.
+type SegmentQuery struct {
+	SessionID       string
+	ThemeID         string
+	ContainingMsgID int
+	FTSQuery        string
+	OverlapsThemeA  string
+	OverlapsThemeB  string
+	SealedOnly      bool
+	Limit           int
+}
+
+// SegmentExpandHit is an enclosing span attached to a search hit.
+type SegmentExpandHit struct {
+	ID        string `json:"id"`
+	FromMsgID int    `json:"from_msg_id"`
+	ToMsgID   int    `json:"to_msg_id"`
+	Label     string `json:"label,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	Level     int    `json:"level"`
+	Sealed    bool   `json:"sealed"`
+}
+
+// SegmentSession runs Tier-1 structural segmentation for one session
+// and persists sealed spans + theme membership. Unsealed spans are
+// replaced each pass; sealed spans are never rewritten.
+func (s *Store) SegmentSession(sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	var through int
+	_ = s.readDB.QueryRow(
+		`SELECT segmented_through_id FROM segment_scan_state WHERE session_id = ?`,
+		sessionID,
+	).Scan(&through)
+
+	rows, err := s.readDB.Query(`
+		SELECT id, role, text, timestamp, COALESCE(is_noise, 0)
+		FROM messages
+		WHERE session_id = ?
+		ORDER BY id
+	`, sessionID)
+	if err != nil {
+		return fmt.Errorf("segment load messages: %w", err)
+	}
+	var msgs []segment.Message
+	for rows.Next() {
+		var m segment.Message
+		var noise int
+		if err := rows.Scan(&m.ID, &m.Role, &m.Text, &m.Timestamp, &noise); err != nil {
+			rows.Close()
+			return err
+		}
+		m.IsNoise = noise != 0
+		msgs = append(msgs, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	spans := segment.Structural(msgs, segment.DefaultConfig())
+	if len(spans) == 0 {
+		return nil
+	}
+
+	var repo string
+	_ = s.readDB.QueryRow(
+		`SELECT COALESCE(repo, '') FROM session_meta WHERE session_id = ?`,
+		sessionID,
+	).Scan(&repo)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := s.writeDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Drop unsealed rows for this session only — sealed rows stay.
+	if _, err := tx.Exec(
+		`DELETE FROM topic_segments WHERE session_id = ? AND sealed = 0`,
+		sessionID,
+	); err != nil {
+		return err
+	}
+
+	// Map ParentIdx → parent segment id after insert order (coarse then fine).
+	ids := make([]string, len(spans))
+	maxSealed := through
+	for i, sp := range spans {
+		id := segment.SegmentID(sessionID, sp.FromMsgID, sp.ToMsgID, sp.Level, sp.Method)
+		ids[i] = id
+		if sp.Sealed {
+			// Never rewrite sealed: skip insert if already present sealed.
+			var existing int
+			_ = tx.QueryRow(
+				`SELECT sealed FROM topic_segments WHERE id = ?`, id,
+			).Scan(&existing)
+			if existing == 1 {
+				if sp.ToMsgID > maxSealed {
+					maxSealed = sp.ToMsgID
+				}
+				continue
+			}
+		}
+		parentID := sql.NullString{}
+		if sp.ParentIdx >= 0 && sp.ParentIdx < len(ids) && ids[sp.ParentIdx] != "" {
+			parentID = sql.NullString{String: ids[sp.ParentIdx], Valid: true}
+		}
+		sealed := 0
+		if sp.Sealed {
+			sealed = 1
+			if sp.ToMsgID > maxSealed {
+				maxSealed = sp.ToMsgID
+			}
+		}
+		_, err := tx.Exec(`
+			INSERT INTO topic_segments (
+				id, session_id, from_msg_id, to_msg_id, level, parent_id,
+				method, confidence, sealed, label, summary, repo,
+				first_ts, last_ts, computed_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				parent_id = excluded.parent_id,
+				confidence = excluded.confidence,
+				sealed = CASE WHEN topic_segments.sealed = 1 THEN 1 ELSE excluded.sealed END,
+				label = CASE WHEN topic_segments.sealed = 1 THEN topic_segments.label ELSE excluded.label END,
+				summary = CASE WHEN topic_segments.sealed = 1 THEN topic_segments.summary ELSE excluded.summary END,
+				computed_at = excluded.computed_at
+		`, id, sessionID, sp.FromMsgID, sp.ToMsgID, sp.Level, parentID,
+			sp.Method, sp.Confidence, sealed, sp.Label, sp.Summary, repo,
+			sp.FirstTS, sp.LastTS, now)
+		if err != nil {
+			return fmt.Errorf("insert segment %s: %w", id, err)
+		}
+	}
+
+	// Theme membership for sealed spans (minimal T64.8 surface).
+	for i, sp := range spans {
+		if !sp.Sealed {
+			continue
+		}
+		segID := ids[i]
+		if err := upsertSegmentTheme(tx, segID, sp, ids, spans, repo, now); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO segment_scan_state (session_id, segmented_through_id, method, scanned_at)
+		VALUES (?, ?, 'structural', ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			segmented_through_id = excluded.segmented_through_id,
+			method = excluded.method,
+			scanned_at = excluded.scanned_at
+	`, sessionID, maxSealed, now); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func upsertSegmentTheme(tx *sql.Tx, segID string, sp segment.Span, ids []string, spans []segment.Span, repo, now string) error {
+	themeID := themeIDForSegment(segID)
+	label := sp.Label
+	if label == "" {
+		label = "segment"
+	}
+	var parentTheme sql.NullString
+	var depth int
+	if sp.ParentIdx >= 0 && sp.ParentIdx < len(spans) && spans[sp.ParentIdx].Sealed {
+		pid := themeIDForSegment(ids[sp.ParentIdx])
+		parentTheme = sql.NullString{String: pid, Valid: true}
+		depth = 1
+	}
+	reposJSON := "[]"
+	if repo != "" {
+		reposJSON = fmt.Sprintf("[%q]", repo)
+	}
+	_, err := tx.Exec(`
+		INSERT INTO themes (id, label, summary, weight, repos, parent_theme_id, depth, first_seen, last_touched, computed_at)
+		VALUES (?, ?, ?, 0.9, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			label = excluded.label,
+			summary = excluded.summary,
+			parent_theme_id = excluded.parent_theme_id,
+			depth = excluded.depth,
+			last_touched = excluded.last_touched,
+			computed_at = excluded.computed_at
+	`, themeID, label, sp.Summary, reposJSON, parentTheme, depth, sp.FirstTS, sp.LastTS, now)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
+		INSERT INTO theme_members (theme_id, doc_kind, entity_id, membership_kind, similarity)
+		VALUES (?, 'segment', ?, 'primary', 1.0)
+		ON CONFLICT(theme_id, doc_kind, entity_id) DO UPDATE SET
+			membership_kind = 'primary',
+			similarity = 1.0
+	`, themeID, segID)
+	if err != nil {
+		return err
+	}
+	// Secondary: also member of parent theme when nested (centroid proxy).
+	if parentTheme.Valid {
+		_, err = tx.Exec(`
+			INSERT INTO theme_members (theme_id, doc_kind, entity_id, membership_kind, similarity)
+			VALUES (?, 'segment', ?, 'secondary', 0.75)
+			ON CONFLICT(theme_id, doc_kind, entity_id) DO UPDATE SET
+				membership_kind = excluded.membership_kind,
+				similarity = excluded.similarity
+		`, parentTheme.String, segID)
+	}
+	return err
+}
+
+func themeIDForSegment(segID string) string {
+	sum := sha1.Sum([]byte("theme|" + segID))
+	return "theme_" + hex.EncodeToString(sum[:])[:12]
+}
+
+// SegmentAllSessions runs structural segmentation for every known session.
+func (s *Store) SegmentAllSessions() error {
+	rows, err := s.readDB.Query(`SELECT session_id FROM session_summary`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		if err := s.SegmentSession(id); err != nil {
+			slog.Warn("segment session failed", "session", id, "err", err)
+		}
+	}
+	return nil
+}
+
+// QuerySegments implements mnemo_segments query shapes.
+func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
+	if q.Limit <= 0 {
+		q.Limit = 50
+	}
+	// overlaps_theme: segments that are members of both themes.
+	if q.OverlapsThemeA != "" && q.OverlapsThemeB != "" {
+		rows, err := s.readDB.Query(`
+			SELECT s.id, s.session_id, s.from_msg_id, s.to_msg_id, s.level,
+			       COALESCE(s.parent_id, ''), s.method, s.confidence, s.sealed,
+			       COALESCE(s.label, ''), COALESCE(s.summary, ''), COALESCE(s.repo, ''),
+			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, '')
+			FROM topic_segments s
+			JOIN theme_members m1 ON m1.entity_id = s.id AND m1.doc_kind = 'segment' AND m1.theme_id = ?
+			JOIN theme_members m2 ON m2.entity_id = s.id AND m2.doc_kind = 'segment' AND m2.theme_id = ?
+			WHERE (? = 0 OR s.sealed = 1)
+			ORDER BY s.first_ts, s.session_id
+			LIMIT ?
+		`, q.OverlapsThemeA, q.OverlapsThemeB, boolToInt(q.SealedOnly), q.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return scanSegments(rows)
+	}
+
+	if q.ContainingMsgID > 0 {
+		rows, err := s.readDB.Query(`
+			SELECT id, session_id, from_msg_id, to_msg_id, level,
+			       COALESCE(parent_id, ''), method, confidence, sealed,
+			       COALESCE(label, ''), COALESCE(summary, ''), COALESCE(repo, ''),
+			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
+			FROM topic_segments
+			WHERE from_msg_id <= ? AND to_msg_id >= ?
+			  AND (? = 0 OR sealed = 1)
+			ORDER BY level ASC, (to_msg_id - from_msg_id) ASC
+			LIMIT ?
+		`, q.ContainingMsgID, q.ContainingMsgID, boolToInt(q.SealedOnly), q.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return scanSegments(rows)
+	}
+
+	if q.ThemeID != "" {
+		rows, err := s.readDB.Query(`
+			SELECT s.id, s.session_id, s.from_msg_id, s.to_msg_id, s.level,
+			       COALESCE(s.parent_id, ''), s.method, s.confidence, s.sealed,
+			       COALESCE(s.label, ''), COALESCE(s.summary, ''), COALESCE(s.repo, ''),
+			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, '')
+			FROM topic_segments s
+			JOIN theme_members m ON m.entity_id = s.id AND m.doc_kind = 'segment' AND m.theme_id = ?
+			WHERE (? = 0 OR s.sealed = 1)
+			ORDER BY s.first_ts, s.session_id
+			LIMIT ?
+		`, q.ThemeID, boolToInt(q.SealedOnly), q.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return scanSegments(rows)
+	}
+
+	if q.FTSQuery != "" {
+		fts := relaxQuery(q.FTSQuery)
+		rows, err := s.readDB.Query(`
+			SELECT s.id, s.session_id, s.from_msg_id, s.to_msg_id, s.level,
+			       COALESCE(s.parent_id, ''), s.method, s.confidence, s.sealed,
+			       COALESCE(s.label, ''), COALESCE(s.summary, ''), COALESCE(s.repo, ''),
+			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, '')
+			FROM topic_segments s
+			JOIN topic_segments_fts f ON f.rowid = s.rowid
+			WHERE topic_segments_fts MATCH ?
+			  AND (? = 0 OR s.sealed = 1)
+			ORDER BY rank
+			LIMIT ?
+		`, fts, boolToInt(q.SealedOnly), q.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return scanSegments(rows)
+	}
+
+	if q.SessionID != "" {
+		rows, err := s.readDB.Query(`
+			SELECT id, session_id, from_msg_id, to_msg_id, level,
+			       COALESCE(parent_id, ''), method, confidence, sealed,
+			       COALESCE(label, ''), COALESCE(summary, ''), COALESCE(repo, ''),
+			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
+			FROM topic_segments
+			WHERE session_id = ?
+			  AND (? = 0 OR sealed = 1)
+			ORDER BY level DESC, from_msg_id
+			LIMIT ?
+		`, q.SessionID, boolToInt(q.SealedOnly), q.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return scanSegments(rows)
+	}
+
+	return nil, fmt.Errorf("segment query requires session_id, theme_id, containing_msg_id, query, or overlaps_theme pair")
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func scanSegments(rows *sql.Rows) ([]TopicSegment, error) {
+	defer rows.Close()
+	var out []TopicSegment
+	for rows.Next() {
+		var t TopicSegment
+		var sealed int
+		if err := rows.Scan(
+			&t.ID, &t.SessionID, &t.FromMsgID, &t.ToMsgID, &t.Level,
+			&t.ParentID, &t.Method, &t.Confidence, &sealed,
+			&t.Label, &t.Summary, &t.Repo, &t.FirstTS, &t.LastTS, &t.ComputedAt,
+		); err != nil {
+			return nil, err
+		}
+		t.Sealed = sealed != 0
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// AttachSegmentExpand annotates search hits with enclosing sealed segments.
+// mode "" or "none" returns results unchanged (byte-identical path when caller
+// skips this entirely for none).
+func (s *Store) AttachSegmentExpand(results []SearchResult, mode string) ([]SearchResult, error) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" || mode == SegmentExpandNone {
+		return results, nil
+	}
+	for i := range results {
+		if results[i].MessageID <= 0 {
+			continue
+		}
+		segs, err := s.QuerySegments(SegmentQuery{
+			ContainingMsgID: results[i].MessageID,
+			SealedOnly:      true,
+			Limit:           20,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(segs) == 0 {
+			continue
+		}
+		// Smallest enclosing = lowest level then narrowest already ordered.
+		pick := segs[0]
+		if mode == SegmentExpandCoarse {
+			// Walk parent_id to root.
+			for pick.ParentID != "" {
+				parent, err := s.segmentByID(pick.ParentID)
+				if err != nil || parent == nil {
+					break
+				}
+				pick = *parent
+			}
+		}
+		results[i].Segment = &SegmentExpandHit{
+			ID:        pick.ID,
+			FromMsgID: pick.FromMsgID,
+			ToMsgID:   pick.ToMsgID,
+			Label:     pick.Label,
+			Summary:   pick.Summary,
+			Level:     pick.Level,
+			Sealed:    pick.Sealed,
+		}
+	}
+	return results, nil
+}
+
+func (s *Store) segmentByID(id string) (*TopicSegment, error) {
+	row := s.readDB.QueryRow(`
+		SELECT id, session_id, from_msg_id, to_msg_id, level,
+		       COALESCE(parent_id, ''), method, confidence, sealed,
+		       COALESCE(label, ''), COALESCE(summary, ''), COALESCE(repo, ''),
+		       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
+		FROM topic_segments WHERE id = ?
+	`, id)
+	var t TopicSegment
+	var sealed int
+	if err := row.Scan(
+		&t.ID, &t.SessionID, &t.FromMsgID, &t.ToMsgID, &t.Level,
+		&t.ParentID, &t.Method, &t.Confidence, &sealed,
+		&t.Label, &t.Summary, &t.Repo, &t.FirstTS, &t.LastTS, &t.ComputedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	t.Sealed = sealed != 0
+	return &t, nil
+}
+
+// ThemeAncestors returns parent chain for a theme (dendrogram walk).
+func (s *Store) ThemeAncestors(themeID string) ([]string, error) {
+	var chain []string
+	id := themeID
+	seen := map[string]bool{}
+	for id != "" && !seen[id] {
+		chain = append(chain, id)
+		seen[id] = true
+		var parent sql.NullString
+		err := s.readDB.QueryRow(`SELECT parent_theme_id FROM themes WHERE id = ?`, id).Scan(&parent)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				break
+			}
+			return chain, err
+		}
+		if !parent.Valid {
+			break
+		}
+		id = parent.String
+	}
+	return chain, nil
+}

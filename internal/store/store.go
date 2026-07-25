@@ -315,15 +315,16 @@ type ContextMessage struct {
 
 // SearchResult is a single search hit with optional surrounding context.
 type SearchResult struct {
-	MessageID int              `json:"message_id"`
-	SessionID string           `json:"session_id"`
-	Project   string           `json:"project"`
-	Role      string           `json:"role"`
-	Text      string           `json:"text"`
-	Timestamp string           `json:"timestamp"`
-	Rank      float64          `json:"rank"`
-	Before    []ContextMessage `json:"before,omitempty"`
-	After     []ContextMessage `json:"after,omitempty"`
+	MessageID int               `json:"message_id"`
+	SessionID string            `json:"session_id"`
+	Project   string            `json:"project"`
+	Role      string            `json:"role"`
+	Text      string            `json:"text"`
+	Timestamp string            `json:"timestamp"`
+	Rank      float64           `json:"rank"`
+	Before    []ContextMessage  `json:"before,omitempty"`
+	After     []ContextMessage  `json:"after,omitempty"`
+	Segment   *SegmentExpandHit `json:"segment,omitempty"` // 🎯T64.10 expand=
 }
 
 // SessionInfo is a summary of a transcript session.
@@ -2993,6 +2994,10 @@ func (s *Store) IngestAll() error {
 	// haven't been scanned yet (e.g. sessions ingested before decisions
 	// table existed).
 	backfillDecisions(s.writeDB)
+	// 🎯T64.10: structural topic segments (Tier-1, zero egress).
+	if err := s.SegmentAllSessions(); err != nil {
+		slog.Warn("segment backfill failed", "err", err)
+	}
 
 	// Extract and store images from all ingested entries and messages.
 	// Runs synchronously (fast — no API calls). Description generation
@@ -6388,6 +6393,15 @@ func (s *Store) ingestFile(path string) error {
 	// Detect decision pairs (proposal + confirmation) in this session.
 	repo := extractRepo(metaCwd)
 	detectDecisions(s.writeDB, sessionID, repo)
+
+	// 🎯T64.10: incremental structural segmentation (seal-on-lookahead).
+	if err := s.SegmentSession(sessionID); err != nil {
+		sid := sessionID
+		if len(sid) > 8 {
+			sid = sid[:8]
+		}
+		slog.Warn("segment session failed", "session", sid, "err", err)
+	}
 
 	// Extract and store any images from newly ingested entries.
 	// Uses a targeted query so only new entries need scanning.
