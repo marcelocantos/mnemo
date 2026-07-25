@@ -2288,9 +2288,10 @@ targets:
     achieved: 2026-05-23
   T64.10:
     name: Sessions are segmented into hierarchical, overlapping topic spans that feed the clustering engine as a message-level corpus, so a search hit expands to its enclosing conversation and a theme resolves to its spans across sessions
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 8.0
     acceptance:
     - A segmentation pass produces topic_segments rows with nested (parent_id/level) and, where warranted, overlapping intervals; Tier 1 (structural) is the default and runs with zero egress and no stored vectors.
     - Segments participate in clustering as doc_kind='segment' and appear as theme_members; each segment has exactly one primary theme and zero-or-more secondary themes above the similarity threshold.
@@ -2312,6 +2313,7 @@ targets:
     - clustering
     origin: manual
     discovered: 2026-07-01
+    achieved: 2026-07-25
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: achieved
