@@ -630,6 +630,25 @@ targets:
     origin: manual
     discovered: 2026-07-25
     achieved: 2026-07-25
+  T115:
+    name: Agents can load a session via one session parameter that accepts an id, a project/repo, or latest/recent shorthand
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'mnemo_read_session (and mnemo_compacted_session if shared) take a single session argument (name may stay session_id for compatibility, or rename to session with alias) whose value is interpreted by content: session UUID/prefix → that session; bare project/repo path fragment → newest matching interactive session; reserved tokens like latest or recent (optionally with project, e.g. latest:mnemo or latest mnemo) → resolve by recency + optional scope'
+    - Resolution rules are documented in the tool description with examples matching natural speech ("latest mnemo", "marcelocantos/mnemo", full/prefix id) so agents do not need a two-step mnemo_sessions plan
+    - Ambiguous matches return a short ranked list or a clear error; zero matches are explicit; exact id always wins over repo-name collision heuristics
+    - Default body for non-id resolution is the compacted view when available (or documented opt-in view=); raw message read remains available
+    - Unit tests cover id, prefix, repo-as-session, latest-with-repo, empty, and id-vs-repo disambiguation
+    context: 'Refined 2026-07-25: do not add parallel which/repo params. One field — session — becomes session_id or which+scope internally depending on contents (UUID/prefix vs project/repo vs latest/recent). Keeps the tool surface small and matches how users already speak. Still distinct from thematic search.'
+    tags:
+    - mcp
+    - tools
+    - discoverability
+    - sessions
+    origin: 'session discussion 2026-07-25: latest-session-for-project tool affordance'
+    discovered: 2026-07-25
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
@@ -2355,6 +2374,27 @@ targets:
     origin: manual
     discovered: 2026-07-01
     achieved: 2026-07-25
+  T64.11:
+    name: 'Topic segmentation is an enrichment of the summarisation engine: the compactor''s LLM pass emits per-session span documents (boundaries + labels + summaries) that search indexes directly, and global clustering is off the hot path'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The compactor's LLM pass also emits topic spans ({from,to,label,summary} anchored to message ranges) for each window it summarises; spans are persisted as additive schema under sqlift AllowNone (no destructive change to topic_segments/themes).
+    - 'ClusterSealedSegments is no longer invoked from ingest, SegmentAllSessions, or the live-segment debounce path; the themes/theme_members dendrogram schema goes dormant (no writes on the hot path). Oracle: grep/test asserts no call sites on the ingest path, and a soak run shows no theme rewrites.'
+    - Structural segmentation remains the always-on provisional layer for sessions not yet compacted; once the compactor emits spans for a range, those spans supersede structural ones for retrieval in that range.
+    - mnemo_search expand="segment" and mnemo_segments resolve from compactor-emitted spans when present, falling back to structural spans; expand="none" remains byte-identical to today.
+    - 'Thematic retrieval is a search problem over span documents: span label/summary text is FTS-indexed and a query returns matching spans across sessions ranked by score, with no dependency on precomputed themes.'
+    - 'Daemon CPU stays bounded during backfill: a full segment backfill run completes without the O(n^3) recluster pass; profile shows no ClusterSealedSegments frames.'
+    context: 'Pivot from T64.10''s shipped design, decided in the Grok session of 2026-07-25 (session 019f6ab2, topic grok:grok-build-plan). Findings: (1) ClusterSealedSegments — single-link agglomerative over all sealed segments with full delete-and-rewrite per pass — is roughly cubic in sealed-segment count and pegged the daemon CPU during backfill; (2) cross-session theme clustering is not needed for the product goal — thematic/semantic search is a search-engine problem over per-session span documents; (3) LLM span-finding is the same job the compactor already does (read a contiguous transcript chunk, emit structured JSON with message-range anchors), so it folds into summarisation rather than standing up a second LLM pipeline — reusing the compactor''s watcher, newest-first ordering, budget, quarantine, and cursor machinery. This deliberately reverses the topic-segmentation.md non-goal separating compaction spans from topic segments. Structural segmentation stays as the zero-egress provisional sketch; the dendrogram/theme machinery becomes dormant future analytics, not the retrieval substrate.'
+    tags:
+    - segmentation
+    - summarisation
+    - compaction
+    - search
+    - performance
+    origin: Grok session 019f6ab2 design discussion, 2026-07-25
+    discovered: 2026-07-25
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: achieved
