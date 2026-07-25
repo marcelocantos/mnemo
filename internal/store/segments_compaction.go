@@ -275,6 +275,11 @@ func (s *Store) BackfillCompactionSegments(limit int) (int, error) {
 	// and claim to cover every session ingested before this one. Clamp
 	// both ends into the session's own id range so a span can only ever
 	// describe its own session.
+	// Ordering is by the session's highest message id rather than
+	// session_summary.last_msg: that view is itself an aggregate over
+	// messages, so joining it would scan the table a second time purely
+	// to sort. Max message id is already computed here and is the same
+	// "most recently active first" intent.
 	q := `
 		SELECT c.id, c.session_id,
 		       MAX(c.entry_id_from + 1, m.first_id),
@@ -282,7 +287,6 @@ func (s *Store) BackfillCompactionSegments(limit int) (int, error) {
 		       COALESCE(c.summary, '')
 		FROM compactions c
 		LEFT JOIN topic_segments ts ON ts.compaction_id = c.id
-		JOIN session_summary ss ON ss.session_id = c.session_id
 		JOIN (
 			SELECT session_id, MIN(id) AS first_id, MAX(id) AS last_id
 			FROM messages GROUP BY session_id
@@ -290,7 +294,7 @@ func (s *Store) BackfillCompactionSegments(limit int) (int, error) {
 		WHERE ts.id IS NULL
 		  AND c.entry_id_to > c.entry_id_from
 		  AND MAX(c.entry_id_from + 1, m.first_id) <= MIN(c.entry_id_to, m.last_id)
-		ORDER BY ss.last_msg DESC, c.id DESC
+		ORDER BY m.last_id DESC, c.id DESC
 	`
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
