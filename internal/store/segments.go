@@ -302,6 +302,18 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 	}
 
 	if q.ContainingMsgID > 0 {
+		// messages.id is global, so a bare interval test can match spans
+		// from OTHER sessions whose id range happens to cover this
+		// message. Scope to the containing message's own session: a span
+		// only ever describes the session it was computed for. When the
+		// caller supplies SessionID we trust it; otherwise resolve it
+		// from the message.
+		sessionID := q.SessionID
+		if sessionID == "" {
+			_ = s.readDB.QueryRow(
+				`SELECT session_id FROM messages WHERE id = ?`, q.ContainingMsgID,
+			).Scan(&sessionID)
+		}
 		rows, err := s.readDB.Query(`
 			SELECT id, session_id, from_msg_id, to_msg_id, level,
 			       COALESCE(parent_id, ''), method, confidence, sealed,
@@ -309,10 +321,12 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
 			FROM topic_segments
 			WHERE from_msg_id <= ? AND to_msg_id >= ?
+			  AND (? = '' OR session_id = ?)
 			  AND (? = 0 OR sealed = 1)
 			ORDER BY ` + SegmentMethodRank + `, level ASC, (to_msg_id - from_msg_id) ASC
 			LIMIT ?
-		`, q.ContainingMsgID, q.ContainingMsgID, boolToInt(q.SealedOnly), q.Limit)
+		`, q.ContainingMsgID, q.ContainingMsgID, sessionID, sessionID,
+			boolToInt(q.SealedOnly), q.Limit)
 		if err != nil {
 			return nil, err
 		}
@@ -418,6 +432,7 @@ func (s *Store) AttachSegmentExpand(results []SearchResult, mode string) ([]Sear
 		}
 		segs, err := s.QuerySegments(SegmentQuery{
 			ContainingMsgID: results[i].MessageID,
+			SessionID:       results[i].SessionID,
 			SealedOnly:      true,
 			Limit:           20,
 		})

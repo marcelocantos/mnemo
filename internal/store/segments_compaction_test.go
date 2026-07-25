@@ -325,6 +325,72 @@ func TestBackfillCompactionSegmentsProjectsHistory(t *testing.T) {
 	}
 }
 
+// TestProjectedSpansStayInsideTheirSession guards the bound that live
+// data broke: a session's FIRST compaction has entry_id_from = 0, and
+// messages.id is global, so a naive projection anchored the span at
+// message 1 and claimed to cover every session ingested earlier. On the
+// real index that produced a span over msgs 1–1194681 which, ranking
+// above structural, hijacked expansion for nearly every hit.
+func TestProjectedSpansStayInsideTheirSession(t *testing.T) {
+	s, sid := segmentFixture(t, "aaaaaaaa-bbbb-cccc-dddd-000000000107")
+	lo, hi := sessionMsgBounds(t, s, sid)
+
+	// A first compaction: cursor 0, and an entry_id_to that overshoots
+	// the session's last message.
+	if _, err := s.PutCompaction(Compaction{
+		SessionID: sid, Model: "stub",
+		EntryIDFrom: 0, EntryIDTo: hi + 5_000_000,
+		Summary: "first window of the session", PayloadJSON: `{}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.BackfillCompactionSegments(0); err != nil {
+		t.Fatal(err)
+	}
+
+	var from, to int64
+	if err := s.readDB.QueryRow(`
+		SELECT from_msg_id, to_msg_id FROM topic_segments
+		WHERE session_id = ? AND method = ?`, sid, SegmentMethodCompaction,
+	).Scan(&from, &to); err != nil {
+		t.Fatalf("projected span missing: %v", err)
+	}
+	if from < lo {
+		t.Errorf("span starts at %d, before the session's first message %d — it would claim other sessions' messages",
+			from, lo)
+	}
+	if to > hi {
+		t.Errorf("span ends at %d, past the session's last message %d", to, hi)
+	}
+}
+
+// TestExpandDoesNotCrossSessions: messages.id is global, so a bare
+// interval test can match a span belonging to a different session.
+// Expansion must never attribute one session's topic to another's hit.
+func TestExpandDoesNotCrossSessions(t *testing.T) {
+	s, sid := segmentFixture(t, "aaaaaaaa-bbbb-cccc-dddd-000000000108")
+	lo, hi := sessionMsgBounds(t, s, sid)
+
+	// A span on a DIFFERENT session that nonetheless covers this
+	// session's id range — exactly the shape the live bug produced.
+	if err := s.PutCompactionSegments(CompactionSegments{
+		SessionID: "some-other-session", CompactionID: 99,
+		FromMsgID: 1, ToMsgID: hi + 1000,
+		WindowSummary: "a foreign session's window",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.AttachSegmentExpand(
+		[]SearchResult{{MessageID: int(lo), SessionID: sid}}, SegmentExpandFine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Segment != nil && got[0].Segment.Summary == "a foreign session's window" {
+		t.Error("expansion attached a span from another session")
+	}
+}
+
 // TestSegmentAllSessionsWritesNoThemes is the load-bearing oracle for
 // "global clustering is off the hot path". The backfill pass must leave
 // the theme tables untouched — that super-quadratic rebuild was the

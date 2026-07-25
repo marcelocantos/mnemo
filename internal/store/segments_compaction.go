@@ -263,18 +263,33 @@ func firstLine(summary string) string {
 // every backfill. Newest sessions first, matching ingest and compaction
 // ordering so recent work converges first. limit ≤ 0 means no cap.
 func (s *Store) BackfillCompactionSegments(limit int) (int, error) {
-	// entry_id_from is the PRIOR window's last message (the cursor), and
-	// ReadSessionAfter starts strictly past it — so the window's own
-	// first message is entry_id_from + 1. Projecting the raw value would
-	// make every span overlap its predecessor by one message and
-	// mis-anchor containing_msg_id lookups at the boundary.
+	// Bounds need care on two fronts.
+	//
+	// entry_id_from is the PRIOR window's last message (the cursor) and
+	// ReadSessionAfter starts strictly past it, so the window's own
+	// first message is entry_id_from + 1; projecting the raw value would
+	// overlap each span with its predecessor by one message.
+	//
+	// But a session's FIRST compaction has entry_id_from = 0, and
+	// messages.id is global — so +1 would anchor the span at message 1
+	// and claim to cover every session ingested before this one. Clamp
+	// both ends into the session's own id range so a span can only ever
+	// describe its own session.
 	q := `
-		SELECT c.id, c.session_id, c.entry_id_from + 1, c.entry_id_to, COALESCE(c.summary, '')
+		SELECT c.id, c.session_id,
+		       MAX(c.entry_id_from + 1, m.first_id),
+		       MIN(c.entry_id_to, m.last_id),
+		       COALESCE(c.summary, '')
 		FROM compactions c
 		LEFT JOIN topic_segments ts ON ts.compaction_id = c.id
 		JOIN session_summary ss ON ss.session_id = c.session_id
+		JOIN (
+			SELECT session_id, MIN(id) AS first_id, MAX(id) AS last_id
+			FROM messages GROUP BY session_id
+		) m ON m.session_id = c.session_id
 		WHERE ts.id IS NULL
 		  AND c.entry_id_to > c.entry_id_from
+		  AND MAX(c.entry_id_from + 1, m.first_id) <= MIN(c.entry_id_to, m.last_id)
 		ORDER BY ss.last_msg DESC, c.id DESC
 	`
 	if limit > 0 {
