@@ -5,17 +5,20 @@ import AppKit
 import UserNotifications
 
 // NotificationManager posts native health notifications (🎯T86). The daemon
-// already decides *when* to notify (threshold, dedup, cooldown) and streams the
-// decision as an `alert` event; this turns that into a UNNotification with an
-// "Open Dashboard" action.
+// decides *when* to notify (threshold, dedup, cooldown) and always streams
+// the decision as an `alert` event on /api/events; this is the sole
+// presenter (the multi-purpose shim always runs when installed).
 //
-// Authorization is requested lazily — on the first alert or when the user opens
-// the dashboard — so a healthy default install never raises an unsolicited
-// prompt (the project's minimal-friction ethos, §0.9). UNUserNotificationCenter
-// needs a real bundle identity, which the signed Mnemo.app has but a bare SPM
-// dev binary does not; in that case we fall back to terminal-notifier / open
-// rather than bare osascript (which attributes the banner to Script Editor and
-// opens an empty Script Editor on click).
+// Authorization is requested at HealthController.start, and again lazily on
+// the first alert or when the user opens the dashboard. Asking at start is
+// what makes a headless install (menu-bar chrome off) still get banners —
+// the shim is the sole presenter of health alerts, so waiting for a menu-bar
+// interaction that never comes would mean waiting forever.
+//
+// UNUserNotificationCenter needs a real bundle identity, which the signed
+// Mnemo.app has but a bare SPM dev binary does not; in that case we fall back
+// to terminal-notifier / open rather than bare osascript (which attributes
+// the banner to Script Editor and opens an empty Script Editor on click).
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private let categoryID = "HEALTH"
     private let openActionID = "OPEN_DASHBOARD"

@@ -10,31 +10,31 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync/atomic"
 	"time"
 )
 
 // threadsShimCheckInterval is how often the supervisor re-checks that the
-// menu-bar shim is still running.
+// multi-purpose native shim is still running.
 const threadsShimCheckInterval = 30 * time.Second
 
-// shimSupervisor launches and keeps alive the Mnemo menu-bar app (🎯T85.5,
-// Integration §0.1), gated on the menu_bar_app config flag — which is
-// hot-reloadable: SetEnabled wires the running daemon to the live config so
-// toggling menu_bar_app via mnemo_config takes effect immediately, no
-// restart. The shim is its own signed .app (a stable Accessibility TCC
-// identity) but the daemon launches it (via `open -g`, so it never steals
-// focus) and relaunches it if it exits, so there is no separate install step
-// or second LaunchAgent.
+// shimSupervisor launches and keeps alive the multi-purpose Mnemo.app
+// (🎯T85.5, Integration §0.1). The shim is the sole presenter for health
+// notifications (and optional menu-bar chrome, dashboard, threads UI).
+// The daemon always supervises it when the app is installed — there is
+// no menu_bar_app process gate. menu_bar_app only toggles whether the
+// status item is shown (retained "ui" SSE event from main).
 //
-// It is best-effort and conservative: it only does anything on macOS and
-// only when a Mnemo.app is actually found (at $MNEMO_THREADS_APP or a known
-// install location). A daemon without the app installed is a silent no-op,
-// so pulling this code never makes a menu-bar item appear unexpectedly.
+// The shim is its own signed .app (stable Accessibility / notification
+// TCC identity). The daemon launches it via `open -g` (never steals
+// focus) and relaunches it if it exits, so there is no separate install
+// step or second LaunchAgent.
+//
+// Best-effort and conservative: only does anything on macOS and only
+// when a Mnemo.app is found (at $MNEMO_THREADS_APP or a known install
+// location). A daemon without the app is a silent no-op.
 type shimSupervisor struct {
-	app     string      // resolved Mnemo.app path; "" disables the supervisor entirely
-	enabled atomic.Bool // mirrors menu_bar_app from live config
-	wake    chan struct{}
+	app  string // resolved Mnemo.app path; "" disables the supervisor entirely
+	wake chan struct{}
 }
 
 // newShimSupervisor resolves Mnemo.app once. The supervisor is inert (a
@@ -47,27 +47,12 @@ func newShimSupervisor() *shimSupervisor {
 	return s
 }
 
-// SetEnabled records the desired state (menu_bar_app) and pokes the
-// supervisor to reconcile immediately. Called at startup with the initial
-// config and from configController.Put on every live config change.
-func (s *shimSupervisor) SetEnabled(on bool) {
-	s.enabled.Store(on)
-	select {
-	case s.wake <- struct{}{}:
-	default:
-	}
-}
-
-// run reconciles the menu-bar app against the desired state on a ticker and
-// on demand (SetEnabled). When enabled it keeps Mnemo.app running; when
-// disabled it stops launching it (a running instance is left alone rather
-// than force-quit, so a manually-launched app is never killed out from
-// under the user — it simply won't be relaunched). Returns immediately when
-// there is nothing to supervise.
+// run keeps Mnemo.app alive on a ticker (and on demand via poke). Returns
+// immediately when there is nothing to supervise.
 func (s *shimSupervisor) run(ctx context.Context) {
 	if s.app == "" {
 		if runtime.GOOS == "darwin" {
-			slog.Debug("threads shim: no Mnemo.app found; menu-bar supervision disabled")
+			slog.Debug("threads shim: no Mnemo.app found; native shim supervision disabled")
 		}
 		return
 	}
@@ -88,12 +73,7 @@ func (s *shimSupervisor) run(ctx context.Context) {
 }
 
 func (s *shimSupervisor) reconcile() {
-	if s.enabled.Load() {
-		launchThreadsShimIfNeeded(s.app)
-	}
-	// Disabled: do nothing. We deliberately don't force-quit a running app —
-	// it may have been launched manually, and killing it on every tick would
-	// be hostile. It just won't be relaunched once it exits.
+	launchThreadsShimIfNeeded(s.app)
 }
 
 // resolveThreadsApp returns the path to Mnemo.app, or "" when none is

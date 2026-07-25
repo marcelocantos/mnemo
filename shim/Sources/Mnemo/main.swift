@@ -3,9 +3,10 @@
 
 import AppKit
 
-// Entry point for the Mnemo menu-bar shim (🎯T85.4). Runs as an accessory
-// app (no Dock icon, LSUIElement-equivalent) via setActivationPolicy(.accessory)
-// so a development build behaves like the bundled .app without an Info.plist.
+// Entry point for the multi-purpose Mnemo native shim (🎯T85.4). Always
+// presents health notifications; optional menu-bar chrome is toggled by
+// the daemon's retained "ui" event. Runs as an accessory app (no Dock
+// icon, LSUIElement-equivalent) via setActivationPolicy(.accessory).
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()

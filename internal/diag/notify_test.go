@@ -52,34 +52,31 @@ func TestNotifierTransitionsAndCooldown(t *testing.T) {
 	}
 }
 
-// When a native shim is connected (shimPresent true) alerts route to OnAlert
-// for a rich native notification; when it is absent they fall back to the OS
-// sender. (🎯T86)
-func TestNotifierRoutesToShim(t *testing.T) {
+// When OnAlert is wired, every decided alert goes there — never the OS
+// fallback. There is no subscriber/presence gate. (🎯T86)
+func TestNotifierRoutesToOnAlert(t *testing.T) {
 	n := NewNotifier(DefaultNotifierConfig("http://x/#health"))
 	var sends int
 	var alerts []Alert
 	n.SetSender(func(string, string) { sends++ })
 	n.OnAlert(func(a Alert) { alerts = append(alerts, a) })
-	present := true
-	n.SetShimPresent(func() bool { return present })
 
 	base := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	fail := Result{Name: "claude.path", Severity: "fail", Detail: "missing", Remediation: "install"}
 
-	n.Observe(rep(fail), base) // shim present → alert, no OS send
+	n.Observe(rep(fail), base)
 	if len(alerts) != 1 || sends != 0 {
-		t.Fatalf("present: alerts=%d sends=%d, want 1/0", len(alerts), sends)
+		t.Fatalf("OnAlert path: alerts=%d sends=%d, want 1/0", len(alerts), sends)
 	}
 	if a := alerts[0]; a.Name != "claude.path" || a.Severity != "fail" || a.Kind != "fail" ||
 		a.Detail != "missing" || a.Remediation != "install" || a.DashboardURL != "http://x/#health" {
 		t.Fatalf("alert payload mismatch: %+v", a)
 	}
 
-	present = false
-	n.Observe(rep(Result{Name: "db.readable", Severity: "fail"}), base) // absent → OS send
-	if sends != 1 || len(alerts) != 1 {
-		t.Fatalf("absent: sends=%d alerts=%d, want 1/1", sends, len(alerts))
+	// Second check: still OnAlert only, even with no "presence" concept.
+	n.Observe(rep(Result{Name: "db.readable", Severity: "fail"}), base)
+	if sends != 0 || len(alerts) != 2 {
+		t.Fatalf("still OnAlert only: sends=%d alerts=%d, want 0/2", sends, len(alerts))
 	}
 }
 

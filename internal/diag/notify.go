@@ -14,18 +14,20 @@ import (
 	"time"
 )
 
-// Notifier turns diagnostic Reports into OS-level notifications (🎯T83).
+// Notifier turns diagnostic Reports into health alerts (🎯T83 / 🎯T86).
 //
 // It is opt-out: enabled by default and fires only on fail severity
-// (config can disable it or widen the threshold). Notifications are
-// deduped per check name — a check that stays failing re-notifies only
-// after Cooldown — and a check that recovers (fail→ok) notifies once. The
-// body carries a deep-link to the dashboard health page so the user can
-// jump straight to remediation.
+// (config can disable it or widen the threshold). Alerts are deduped per
+// check name — a check that stays failing re-notifies only after
+// Cooldown — and a check that recovers (fail→ok) notifies once.
 //
-// Delivery is local-only and best-effort: macOS osascript, Linux
-// notify-send. No network, nothing cached — safe in environments where
-// outbound calls require review. send is injectable for tests.
+// Delivery is a single path: when OnAlert is wired (production daemon),
+// every decided alert goes there — the multi-purpose native shim
+// (notifications, optional menu-bar chrome, dashboard) is the sole
+// presenter. There is no "shim connected?" branch and no parallel
+// osascript path for health. When OnAlert is nil (unit tests, or a
+// build that never wired a consumer), send is a last-resort fallback
+// for test observability only.
 type Notifier struct {
 	mu sync.Mutex
 
@@ -35,13 +37,9 @@ type Notifier struct {
 	dashboardURL string
 	send         func(title, body string)
 
-	// onAlert, when set, receives structured alerts so a richer consumer (the
-	// native menu-bar shim) can format them itself. shimPresent gates it: an
-	// alert routes to onAlert only when a shim is actually connected, else it
-	// falls back to send (osascript/notify-send). Both nil → today's behaviour
-	// (always send), which the tests rely on. (🎯T86)
-	onAlert     func(Alert)
-	shimPresent func() bool
+	// onAlert, when set, is the sole production delivery path for decided
+	// alerts (SSE → native shim). (🎯T86)
+	onAlert func(Alert)
 
 	lastSeverity map[string]Severity
 	lastNotified map[string]time.Time
@@ -113,22 +111,13 @@ func (n *Notifier) SetSender(send func(title, body string)) {
 	n.send = send
 }
 
-// OnAlert registers a structured-alert consumer (the native shim path). When
-// set and a shim is connected (see SetShimPresent), alerts route here instead
-// of to the OS sender. (🎯T86)
+// OnAlert registers the sole production consumer for decided alerts (SSE →
+// native shim). When set, every emit goes here; the OS send path is only
+// used if OnAlert is nil. (🎯T86)
 func (n *Notifier) OnAlert(fn func(Alert)) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.onAlert = fn
-}
-
-// SetShimPresent supplies the predicate that decides whether a native shim is
-// connected. An alert routes to OnAlert only when this returns true; otherwise
-// it falls back to the OS sender. (🎯T86)
-func (n *Notifier) SetShimPresent(fn func() bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.shimPresent = fn
 }
 
 // Observe folds a report into the notifier, emitting notifications for
@@ -174,23 +163,21 @@ func (n *Notifier) Observe(report Report, now time.Time) {
 	}
 }
 
-// emit routes a decided alert (the threshold/dedup/cooldown gate has already
-// passed): to the native shim when one is connected, else to the OS sender. The
-// OS title/body are preserved verbatim from the pre-T86 behaviour so headless
-// notifications (and the notifier tests) are unchanged.
-//
-// Every emit is also logged at WARN (fail) or INFO (recovery) with the check
-// name, detail, and remediation — OS banners are ephemeral and click-through
-// on the osascript path is unreliable, so the daemon log is the durable record.
+// emit delivers a decided alert (threshold/dedup/cooldown already passed).
+// Production always uses onAlert (shim path). send is only the nil-OnAlert
+// fallback for tests. Every emit is also logged at WARN (fail) or INFO
+// (recovery) so the daemon log is a durable record independent of UI.
 func (n *Notifier) emit(a Alert) {
-	via := "os"
-	if n.onAlert != nil && n.shimPresent != nil && n.shimPresent() {
-		via = "shim"
+	via := "shim"
+	if n.onAlert != nil {
 		n.onAlert(a)
-	} else if a.Kind == "recovery" {
-		n.send(fmt.Sprintf("mnemo: %s recovered", a.Name), "This check is healthy again.")
 	} else {
-		n.send(fmt.Sprintf("mnemo: %s %s", a.Name, a.Severity), n.alertBody(a))
+		via = "fallback"
+		if a.Kind == "recovery" {
+			n.send(fmt.Sprintf("mnemo: %s recovered", a.Name), "This check is healthy again.")
+		} else {
+			n.send(fmt.Sprintf("mnemo: %s %s", a.Name, a.Severity), n.alertBody(a))
+		}
 	}
 	logHealthAlert(a, via)
 }
