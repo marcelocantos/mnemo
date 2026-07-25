@@ -40,6 +40,10 @@ type Status struct {
 	Detail string
 	Since  time.Time
 	Err    string // non-empty when PhaseFailed
+	// Upgrade is a non-empty overlay while a background schema upgrade
+	// (pre-migration backup and/or sqlift.Apply) is in flight. The store
+	// may already be PhaseReady and serving; Upgrade explains residual work.
+	Upgrade string
 }
 
 var (
@@ -63,6 +67,18 @@ func Set(phase Phase, detail string) {
 	}
 }
 
+// SetUpgrade records background schema-upgrade progress (backup / apply).
+// Empty detail clears the overlay. Orthogonal to Phase: the daemon can be
+// PhaseReady (tools serving) while Upgrade describes concurrent SQLite work.
+func SetUpgrade(detail string) {
+	mu.Lock()
+	defer mu.Unlock()
+	cur.Upgrade = detail
+}
+
+// ClearUpgrade clears the background upgrade overlay.
+func ClearUpgrade() { SetUpgrade("") }
+
 // Fail marks startup failed with the given error.
 func Fail(err error) {
 	mu.Lock()
@@ -78,6 +94,7 @@ func Fail(err error) {
 		cur.Err = "startup failed"
 		cur.Detail = cur.Err
 	}
+	cur.Upgrade = ""
 }
 
 // Get returns a copy of the current status.
@@ -96,8 +113,14 @@ func Ready() bool {
 func Summary() string {
 	st := Get()
 	elapsed := time.Since(st.Since).Round(time.Second)
+	base := ""
 	if st.Detail == "" {
-		return fmt.Sprintf("%s (%s)", st.Phase, elapsed)
+		base = fmt.Sprintf("%s (%s)", st.Phase, elapsed)
+	} else {
+		base = fmt.Sprintf("%s: %s (%s)", st.Phase, st.Detail, elapsed)
 	}
-	return fmt.Sprintf("%s: %s (%s)", st.Phase, st.Detail, elapsed)
+	if st.Upgrade != "" {
+		return base + "; upgrade: " + st.Upgrade
+	}
+	return base
 }

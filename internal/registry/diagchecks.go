@@ -45,13 +45,18 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 	}
 
 	reg.Register(
-		// Process boot phase: listen-first startup keeps /health up while
-		// pre-migration VACUUM+gzip or sqlift.Apply runs (multi-minute on
-		// large DBs). Warn until ready so the report is not a false green.
+		// Process boot phase: listen-first + deferred schema upgrade
+		// (🎯T114 / 🎯T114.1). PhaseReady means tools can run; Upgrade
+		// overlay means backup/apply still running concurrently.
 		diag.Check{Name: "startup.ready", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			st := boot.Get()
 			switch st.Phase {
 			case boot.PhaseReady:
+				if st.Upgrade != "" {
+					return diag.Warning(
+						"default-user store serving; schema upgrade in progress: "+st.Upgrade,
+						"tools and /health stay up — pre-migration VACUUM INTO + gzip run concurrently with the live SQLite pools; wait for apply to finish for new-schema features")
+				}
 				return diag.Healthy("default-user store ready")
 			case boot.PhaseFailed:
 				return diag.Failure(
@@ -60,7 +65,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			case boot.PhasePreMigrationBackup:
 				return diag.Warning(
 					boot.Summary(),
-					"pre-migration backup (VACUUM INTO + gzip) can take several minutes on multi-GB DBs; HTTP/MCP stay up — wait, or check the daemon log")
+					"pre-migration backup (VACUUM INTO + gzip) can take several minutes on multi-GB DBs; HTTP stays up — wait, or check the daemon log")
 			case boot.PhaseApplyingSchema:
 				return diag.Warning(
 					boot.Summary(),
@@ -70,6 +75,16 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					boot.Summary(),
 					"daemon is still bringing up the default-user store; /health stays available")
 			}
+		}},
+
+		diag.Check{Name: "schema.upgrade", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			st := boot.Get()
+			if st.Upgrade == "" {
+				return diag.Healthy("no schema upgrade in progress")
+			}
+			return diag.Warning(
+				st.Upgrade,
+				"store is serving on the current schema; backup then apply run in the background (SQLite concurrent VACUUM INTO)")
 		}},
 
 		diag.Check{Name: "compactor.workdir", Tier: diag.Full, Run: func(context.Context) diag.CheckResult {

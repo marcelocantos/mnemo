@@ -5,6 +5,7 @@ package boot
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,9 +40,7 @@ func TestSetAdvancesPhaseAndPreservesSinceWithinPhase(t *testing.T) {
 	if !st3.Since.After(since1) {
 		t.Fatalf("phase change should advance Since")
 	}
-	if !Ready() {
-		// not ready yet — good
-	} else {
+	if Ready() {
 		t.Fatal("Ready before PhaseReady")
 	}
 
@@ -63,5 +62,21 @@ func TestFail(t *testing.T) {
 	}
 	if Ready() {
 		t.Fatal("failed should not be ready")
+	}
+}
+
+func TestUpgradeOverlay(t *testing.T) {
+	Set(PhaseReady, "serving")
+	SetUpgrade("gzipping 20 GB")
+	st := Get()
+	if st.Phase != PhaseReady || st.Upgrade != "gzipping 20 GB" {
+		t.Fatalf("overlay: %+v", st)
+	}
+	if s := Summary(); s == "" || !strings.Contains(s, "gzipping") {
+		t.Fatalf("summary missing upgrade: %q", s)
+	}
+	ClearUpgrade()
+	if Get().Upgrade != "" {
+		t.Fatal("ClearUpgrade failed")
 	}
 }

@@ -149,6 +149,12 @@ type Store struct {
 	// (worker will wait the full quiescence period before its first
 	// backup attempt). Atomic so reads and writes don't need rootsMu.
 	lastWriteAt atomic.Int64
+
+	// upgradeDone is closed when any deferred schema upgrade (pre-
+	// migration backup + sqlift.Apply) has finished, or immediately when
+	// no upgrade was pending. Close waits on it so we do not tear down
+	// DB handles mid-VACUUM / mid-Apply. 🎯T114.1
+	upgradeDone <-chan struct{}
 }
 
 // NoteActivity records that a write happened just now. The backup worker
@@ -618,29 +624,67 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 	return db, nil
 }
 
-// applySchema brings the live DB at dbPath to the shape declared in
-// schema.sql. Uses sqlift under ApplyOptions{} (= AllowNone): only pure
-// additive changes are permitted (CREATE TABLE, ADD COLUMN, CREATE
-// INDEX/VIEW/TRIGGER/VIRTUAL TABLE, and trigger body modifications).
-// Anything else — drops, rebuilds, loosening, data-dependent changes —
-// is rejected per the append-only schema policy in CLAUDE.md.
-//
-// The sqlift handle is opened exclusively for the migration and closed
-// before returning so the caller can reopen with its own PRAGMA settings.
-func applySchema(dbPath string) error {
-	// Fast path: a brand-new / empty database needs no migration diffing.
-	// sqlift's parse/extract/diff/apply only earns its keep when *upgrading*
-	// an existing schema; for a fresh DB the desired schema can be created
-	// by executing schema.sql directly. This avoids re-parsing and
-	// re-diffing the full 42 KB schema on every store.New() — the common
-	// case for tests (a fresh DB per test, 123+ in internal/store alone)
-	// and for a first-run install — and is dramatically cheaper than the
-	// cgo sqlift path, especially on Windows (🎯T90).
+// preMigrationBackup runs the pre-migration snapshot. Overridden in tests
+// to prove store.New returns while a multi-minute VACUUM+gzip would block
+// the old synchronous path (🎯T114.1).
+var preMigrationBackup = func(srcPath, destPath string, args *backup.BackupArgs) (backup.Result, error) {
+	return backup.BackupWith(srcPath, destPath, args)
+}
+
+// schemaPrep is the cheap result of prepareSchema: either the DB is at the
+// desired shape, or an upgrade (backup + apply) is still required.
+type schemaPrep struct {
+	// pendingUpgrade is true when sqlift.Diff is non-empty. The store may
+	// open and serve on the current schema immediately; upgradeSchema then
+	// runs backup → apply (insurance order) in the background.
+	pendingUpgrade bool
+}
+
+// prepareSchema creates a fresh schema when the DB is empty, or reports
+// whether an additive upgrade is still required. It does not take a
+// pre-migration backup and does not apply migrations — that is upgradeSchema.
+func prepareSchema(dbPath string) (schemaPrep, error) {
+	// Fast path: brand-new / empty database (🎯T90).
 	if created, err := applyFreshSchema(dbPath); err != nil {
-		return err
+		return schemaPrep{}, err
 	} else if created {
-		return nil
+		return schemaPrep{}, nil
 	}
+
+	sdb, err := sqlift.Open(dbPath)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift open: %w", err)
+	}
+	defer sdb.Close()
+
+	current, err := sqlift.Extract(sdb)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift extract: %w", err)
+	}
+	desired, err := sqlift.Parse(schemaSQL)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift parse schema.sql: %w", err)
+	}
+	plan, err := sqlift.Diff(current, desired)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift diff: %w", err)
+	}
+	if plan.Empty() {
+		return schemaPrep{}, nil
+	}
+	return schemaPrep{pendingUpgrade: true}, nil
+}
+
+// upgradeSchema takes the pre-migration backup (when tables exist), then
+// applies the additive sqlift plan, then ANALYZE. Safe to run while the
+// store already holds long-lived read/write pools: VACUUM INTO uses its own
+// read-only connection (SQLite shared lock / snapshot), and AllowNone DDL is
+// additive. Insurance order is preserved: backup completes before Apply.
+//
+// Used synchronously by applySchema (tests / tools) and asynchronously by
+// store.New when a pending upgrade is deferred off the open path (🎯T114.1).
+func upgradeSchema(dbPath string) error {
+	defer boot.ClearUpgrade()
 
 	sdb, err := sqlift.Open(dbPath)
 	if err != nil {
@@ -661,37 +705,12 @@ func applySchema(dbPath string) error {
 		return fmt.Errorf("sqlift diff: %w", err)
 	}
 	if plan.Empty() {
-		// No diff — nothing to back up before, nothing to apply.
 		return nil
 	}
 
-	// Pre-migration backup. Cheap insurance even though AllowNone gates
-	// reject everything destructive: if a future sqlift bug or an
-	// unexpected interaction at apply time corrupts the live DB, this
-	// snapshot is the rollback point. Tagged pre-migration so the daily
-	// worker's retention GC can identify it; sharing the daily pool per
-	// 🎯T61 design.
-	//
-	// Skipped on a fresh DB (no existing tables) — there's nothing to
-	// protect, and every test using t.TempDir hits this path so we'd
-	// pay backup.Backup's two short-lived sql.DB opens per test for no
-	// benefit. On a real upgrade, current.Tables is populated and the
-	// backup fires.
-	//
-	// Backup uses its own read-only sqlite connection; sdb stays open
-	// throughout. Earlier versions of this hook closed sdb before the
-	// backup and reopened after — on Windows that re-open deadlocked
-	// because mattn/go-sqlite3's file handle release is asynchronous
-	// (NTFS file-lock release lags Close() return). SQLite is fine with
-	// the writer connection idle while a separate reader takes a
-	// shared lock for VACUUM INTO, so the original close-and-reopen
-	// was unnecessary on every platform — Linux/macOS just tolerated
-	// it where Windows didn't.
-	//
-	// Publish boot phase so /health can report "busy: pre-migration
-	// backup" while VACUUM INTO + gzip run — which can take minutes on
-	// multi-GB production DBs. The HTTP listener is already up by then
-	// (runServe listens before eager ForUser).
+	// Pre-migration backup — insurance before Apply (🎯T61). Skipped when
+	// there are no tables (nothing to protect). VACUUM INTO is concurrent-
+	// safe with live mnemo readers/writers.
 	if len(current.Tables) > 0 {
 		backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 		if err := os.MkdirAll(backupDir, 0o755); err != nil {
@@ -700,11 +719,11 @@ func applySchema(dbPath string) error {
 		} else {
 			destPath := filepath.Join(backupDir,
 				backup.Filename(backup.TagPreMigration, time.Now()))
-			boot.Set(boot.PhasePreMigrationBackup,
+			reportUpgrade(boot.PhasePreMigrationBackup,
 				fmt.Sprintf("pre-migration snapshot of %s", filepath.Base(dbPath)))
-			res, berr := backup.BackupWith(dbPath, destPath, &backup.BackupArgs{
+			res, berr := preMigrationBackup(dbPath, destPath, &backup.BackupArgs{
 				OnStep: func(step string) {
-					boot.Set(boot.PhasePreMigrationBackup, step)
+					reportUpgrade(boot.PhasePreMigrationBackup, step)
 				},
 			})
 			if berr != nil {
@@ -720,22 +739,44 @@ func applySchema(dbPath string) error {
 		}
 	}
 
-	boot.Set(boot.PhaseApplyingSchema, "applying additive schema migration (sqlift AllowNone)")
+	reportUpgrade(boot.PhaseApplyingSchema, "applying additive schema migration (sqlift AllowNone)")
 	if err := sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone}); err != nil {
 		return err
 	}
 
-	// 🎯T93: refresh planner statistics after a schema change. A migration
-	// that adds an index leaves it without sqlite_stat1 data, and SQLite's
-	// cost model will keep choosing the old (worse) index until ANALYZE
-	// runs — e.g. the usage covering index is ignored, reverting to a full
-	// assistant-table scan (~2.8s vs ~0.1s). Runs only here, on a real
-	// migration (rare; this path already took a pre-migration backup), so
-	// it is not a per-startup cost. Best-effort: a failure only costs
-	// planner stats, never correctness.
-	boot.Set(boot.PhaseApplyingSchema, "post-migration ANALYZE (planner statistics)")
+	// 🎯T93: planner stats after real migration only.
+	reportUpgrade(boot.PhaseApplyingSchema, "post-migration ANALYZE (planner statistics)")
 	analyzeForPlanner(dbPath)
 	return nil
+}
+
+// reportUpgrade surfaces upgrade progress on /health. When the store is
+// already PhaseReady (deferred upgrade), only the Upgrade overlay is set so
+// tools stay "ready" while backup/apply run. Before Ready, the boot phase
+// itself moves so early /health still explains the stall.
+func reportUpgrade(phase boot.Phase, detail string) {
+	boot.SetUpgrade(detail)
+	if !boot.Ready() {
+		boot.Set(phase, detail)
+	}
+}
+
+// applySchema brings the live DB at dbPath to the shape declared in
+// schema.sql synchronously (prepare + upgrade). Used by tests and any
+// caller that needs the schema fully applied before continuing. Production
+// store.New defers upgradeSchema onto a background goroutine (🎯T114.1).
+//
+// Uses sqlift under ApplyOptions{} (= AllowNone): only pure additive
+// changes are permitted. The sqlift handle is closed before return.
+func applySchema(dbPath string) error {
+	prep, err := prepareSchema(dbPath)
+	if err != nil {
+		return err
+	}
+	if !prep.pendingUpgrade {
+		return nil
+	}
+	return upgradeSchema(dbPath)
 }
 
 // Optimize runs `PRAGMA optimize`, SQLite's lightweight, self-tuning
@@ -818,20 +859,25 @@ func applyFreshSchema(dbPath string) (bool, error) {
 }
 
 // New creates or opens a transcript store.
+//
+// Schema policy (🎯T114.1): prepareSchema runs synchronously (fresh create
+// or "is an upgrade pending?"). The long-lived pools open immediately so
+// tools can serve. When an upgrade is pending, pre-migration VACUUM+gzip
+// and sqlift.Apply run in a background goroutine — SQLite is designed for
+// concurrent VACUUM INTO against a live DB. Insurance order is preserved
+// inside that goroutine (backup finishes before Apply).
 func New(dbPath, projectDir string) (*Store, error) {
-	// Apply schema before opening the long-lived connection. Holding
-	// sqlift's connection separately keeps PRAGMA setup on the mnemo
-	// handle isolated from migration. boot phases inside applySchema
-	// surface multi-minute pre-migration backups on /health.
 	boot.Set(boot.PhaseOpeningStore, "opening store and checking schema: "+filepath.Base(dbPath))
-	if err := applySchema(dbPath); err != nil {
+	prep, prepErr := prepareSchema(dbPath)
+	if prepErr != nil {
 		// Acceptance criterion 6 of 🎯T49: an older binary against a
 		// newer mnemo.db must read without crashing. sqlift rejects the
 		// implied destructive/rebuild ops; we log and proceed. Writes
 		// against unknown schema will fail at SQLite level, which is
 		// the expected degraded-mode signal — reads continue to work.
-		slog.Warn("schema apply rejected; continuing without migration (older binary vs newer DB?)",
-			"db", dbPath, "err", err)
+		slog.Warn("schema prepare rejected; continuing without migration (older binary vs newer DB?)",
+			"db", dbPath, "err", prepErr)
+		prep = schemaPrep{}
 	}
 	boot.Set(boot.PhaseOpeningStore, "opening long-lived DB handles")
 
@@ -859,14 +905,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 	if n < 1 {
 		n = 1
 	}
+	done := make(chan struct{})
 	s := &Store{
-		writeDB:    writeDB,
-		readDB:     readDB,
-		dbPath:     dbPath,
-		projectDir: projectDir,
-		offsets:    make(map[string]int64),
-		imageSem:   make(chan struct{}, n),
-		exclusions: &exclusionRegistry{},
+		writeDB:     writeDB,
+		readDB:      readDB,
+		dbPath:      dbPath,
+		projectDir:  projectDir,
+		offsets:     make(map[string]int64),
+		imageSem:    make(chan struct{}, n),
+		exclusions:  &exclusionRegistry{},
+		upgradeDone: done,
 	}
 
 	rows, err := readDB.Query("SELECT path, offset FROM ingest_state")
@@ -880,11 +928,37 @@ func New(dbPath, projectDir string) (*Store, error) {
 		}
 	}
 
+	if prep.pendingUpgrade {
+		slog.Info("schema upgrade deferred to background (store serving on current schema)",
+			"db", dbPath)
+		boot.SetUpgrade("queued: pre-migration backup + schema apply")
+		go func() {
+			defer close(done)
+			if err := upgradeSchema(dbPath); err != nil {
+				// Same degrade posture as a rejected sync apply: keep
+				// serving; new code paths that need missing columns fail
+				// at SQL level until a later binary succeeds.
+				slog.Warn("background schema upgrade failed; continuing on current schema",
+					"db", dbPath, "err", err)
+			} else {
+				slog.Info("background schema upgrade complete", "db", dbPath)
+			}
+		}()
+	} else {
+		close(done)
+	}
+
 	return s, nil
 }
 
 // Close closes the store.
 func (s *Store) Close() error {
+	// Wait for a deferred schema upgrade so we do not close handles under
+	// an in-flight VACUUM INTO or sqlift.Apply (🎯T114.1).
+	if s.upgradeDone != nil {
+		<-s.upgradeDone
+	}
+
 	// Drain order matters (🎯T97.1): quiesce the read pool first, then
 	// checkpoint the writer, then close the writer. TRUNCATE only fully
 	// resets the -wal when no other connection holds a WAL read lock, so
