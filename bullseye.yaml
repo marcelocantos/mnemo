@@ -649,6 +649,28 @@ targets:
     - sessions
     origin: 'session discussion 2026-07-25: latest-session-for-project tool affordance'
     discovered: 2026-07-25
+  T116:
+    name: The GitHub mirror addresses repos by their true GitHub identity, resolved from the checkout's origin remote, so no outbound call is made for a directory that merely looks like a repo
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The gh-backed mirror streams only fetch for directories that are genuinely GitHub checkouts: identity is resolved from the checkout''s configured origin remote, not from its path. A directory with no remote, or a non-GitHub remote, is never fetched. Oracle: unit test asserts a workspace dir with no origin, and one with a non-GitHub origin, are both absent from the gh repo list.'
+    - 'Identity resolution handles the two legitimate layouts: a git worktree resolves to its parent repo (its shared config already carries the parent''s origin), and a local clone whose directory name is prefixed by a sibling repo resolves to that sibling. Oracle: fixture with a worktree dir and a ''foo.experiment'' clone both resolve to ''org/foo''.'
+    - 'Resolution reads .git/config directly rather than shelling out to git per repo per pass, so a ~200-repo workspace costs no subprocesses. Oracle: reconcile pass spawns no git processes for identity.'
+    - 'pollGitHubForRepo propagates fetch errors instead of returning nil, so the existing 🎯T91 recordMirrorFailure backoff engages. Oracle: test asserts a failing fetch records a mirror failure and the repo is skipped while inside the backoff window.'
+    - 'A repo whose issues (or Actions) are disabled is treated as a permanent, quiet skip for that sub-stream rather than a recurring warning; a repo that cannot be resolved at all is a real failure and backs off. Oracle: table test over representative gh stderr messages.'
+    - '🎯T17''s intent is preserved: a real GitHub checkout discovered by the workspace walk is still polled even with no session history. Oracle: the existing union test still passes, with its fixture given a real origin.'
+    - CLAUDE.md's documented GitHub egress posture matches the implemented scope.
+    context: 'Found 2026-07-26 while reviewing an overnight soak of the T64.11 daemon: ~2,500 WARN lines from the GitHub mirror over 46 repos. Root cause is that repo identity is derived from the directory path (regex /work/github.com/<org>/<repo>) and never checked against the checkout''s actual origin remote, so anything shaped like a repo gets PR/issue/CI fetches. Breakdown of the 46: 18 with no remote at all (empty `git init` scaffolds like hellojava/brain1/lit/relay — 0 commits, 0 sessions), 14 whose path name differs from their true repo (all git worktrees — rustuml-activity/-class/-state etc. of marcelocantos/rustuml, mnemo-rel of mnemo, esfera2-webgpu of esfera2 — plus prefix-named local clones yourworld.defunct -> yourworld, frozen.old -> frozen, hms.bak -> hms), 1 with a non-GitHub (Windows path) remote, 2 stale session_meta rows for dirs no longer on disk, and 11 real repos failing for other reasons (torvalds/linux: "has disabled issues"). NOTE: an earlier framing of this target proposed restricting the gh streams to session history only; that was wrong — TestCIRepos_UnionOfWorkspaceAndSessionMeta records that 🎯T17 deliberately ADDED the workspace walk so a brand-new project untouched by a session can still have CI polled. Requiring a real GitHub origin achieves the same noise elimination without reversing T17, since every noisy entry is either not a GitHub checkout or resolvable to its true repo. Tertiary defect: pollGitHubForRepo logs both fetch errors and returns nil unconditionally, so T91''s recordMirrorFailure never fires and all 46 retry every 15 min forever — that is why the noise never decays. Open question deliberately left out of scope: vendored third-party checkouts (google/dawn, torvalds/linux) are real repos and would still be polled; restricting to orgs seen in session history would drop them.'
+    tags:
+    - mirrors
+    - github
+    - egress
+    - noise
+    - hygiene
+    origin: overnight soak review, 2026-07-26
+    discovered: 2026-07-26
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
@@ -2376,7 +2398,7 @@ targets:
     achieved: 2026-07-25
   T64.11:
     name: 'Topic segmentation is an enrichment of the summarisation engine: the compactor''s LLM pass emits per-session span documents (boundaries + labels + summaries) that search indexes directly, and global clustering is off the hot path'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -2395,6 +2417,7 @@ targets:
     - performance
     origin: Grok session 019f6ab2 design discussion, 2026-07-25
     discovered: 2026-07-25
+    achieved: 2026-07-25
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: achieved
