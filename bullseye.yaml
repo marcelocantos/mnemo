@@ -591,9 +591,10 @@ targets:
     achieved: 2026-07-14
   T114:
     name: HTTP and /health are available from process start; boot phases (pre-migration backup, schema apply) are reported while the store opens
-    status: identified
+    status: achieved
     value: 80.0
     cost: 15.0
+    actual_cost: 8.0
     acceptance:
     - ListenAndServe starts before eager ForUser / store.New
     - GET /health responds during multi-minute pre-migration VACUUM+gzip
@@ -607,6 +608,28 @@ targets:
     - ux
     origin: manual
     discovered: 2026-07-25
+    achieved: 2026-07-25
+  T114.1:
+    name: Pre-migration backup runs concurrently with a live store; tools serve during VACUUM INTO + gzip
+    status: achieved
+    value: 85.0
+    cost: 20.0
+    actual_cost: 12.0
+    acceptance:
+    - store.New returns and accepts queries without waiting for pre-migration backup
+    - Pre-migration VACUUM INTO + gzip run in a background goroutine against the open DB
+    - Schema apply runs after backup completes (insurance order preserved)
+    - /health reports serving + upgrade-in-progress rather than store-unavailable
+    - Unit test proves New returns while a blocked backup would hang the old path
+    context: 'Listen-first fixed HTTP; store open still serialized behind multi-minute backup. SQLite VACUUM INTO is designed for concurrent use (shared lock / snapshot). User correctly pushed: mnemo should not be unavailable in any sense during backup.'
+    tags:
+    - startup
+    - health
+    - sqlite
+    - ux
+    origin: manual
+    discovered: 2026-07-25
+    achieved: 2026-07-25
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
