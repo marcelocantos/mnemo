@@ -432,6 +432,11 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		// never delay docs/todos/plans backfill stamps (ingest.backfill
 		// health check keys off ingest_status.last_backfill).
 		go func() {
+			// Wait out any deferred schema upgrade first (🎯T114.1): the
+			// pass projects compactions into spans via topic_segments.
+			// compaction_id, a column a pending migration may still be
+			// adding while the store serves on the old schema.
+			e.store.AwaitSchemaUpgrade()
 			if err := e.store.SegmentAllSessions(); err != nil {
 				logger.Warn("segment backfill failed", "err", err)
 			} else {

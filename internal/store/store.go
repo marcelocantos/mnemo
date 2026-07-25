@@ -951,6 +951,20 @@ func New(dbPath, projectDir string) (*Store, error) {
 	return s, nil
 }
 
+// AwaitSchemaUpgrade blocks until any deferred schema upgrade has
+// finished (🎯T114.1 defers it so the daemon can serve during the
+// pre-migration backup, which takes minutes on a large index).
+//
+// Background workers that read columns a pending migration adds must
+// wait for this: until it returns, the store is deliberately serving on
+// the OLD schema, and touching a new column fails with "no such
+// column". Workers that only read long-standing columns need not.
+func (s *Store) AwaitSchemaUpgrade() {
+	if s.upgradeDone != nil {
+		<-s.upgradeDone
+	}
+}
+
 // Close closes the store.
 func (s *Store) Close() error {
 	// Wait for a deferred schema upgrade so we do not close handles under
