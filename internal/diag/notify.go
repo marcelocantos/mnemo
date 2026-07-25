@@ -178,16 +178,46 @@ func (n *Notifier) Observe(report Report, now time.Time) {
 // passed): to the native shim when one is connected, else to the OS sender. The
 // OS title/body are preserved verbatim from the pre-T86 behaviour so headless
 // notifications (and the notifier tests) are unchanged.
+//
+// Every emit is also logged at WARN (fail) or INFO (recovery) with the check
+// name, detail, and remediation — OS banners are ephemeral and click-through
+// on the osascript path is unreliable, so the daemon log is the durable record.
 func (n *Notifier) emit(a Alert) {
+	via := "os"
 	if n.onAlert != nil && n.shimPresent != nil && n.shimPresent() {
+		via = "shim"
 		n.onAlert(a)
-		return
+	} else if a.Kind == "recovery" {
+		n.send(fmt.Sprintf("mnemo: %s recovered", a.Name), "This check is healthy again.")
+	} else {
+		n.send(fmt.Sprintf("mnemo: %s %s", a.Name, a.Severity), n.alertBody(a))
+	}
+	logHealthAlert(a, via)
+}
+
+// logHealthAlert writes a durable line for every notification decision so a
+// transient OS banner is not the only evidence of a health transition.
+func logHealthAlert(a Alert, via string) {
+	attrs := []any{
+		"check", a.Name,
+		"kind", a.Kind,
+		"severity", a.Severity,
+		"via", via,
+	}
+	if a.Detail != "" {
+		attrs = append(attrs, "detail", a.Detail)
+	}
+	if a.Remediation != "" {
+		attrs = append(attrs, "remediation", a.Remediation)
+	}
+	if a.DashboardURL != "" {
+		attrs = append(attrs, "dashboard", a.DashboardURL)
 	}
 	if a.Kind == "recovery" {
-		n.send(fmt.Sprintf("mnemo: %s recovered", a.Name), "This check is healthy again.")
+		slog.Info("diag: health alert", attrs...)
 		return
 	}
-	n.send(fmt.Sprintf("mnemo: %s %s", a.Name, a.Severity), n.alertBody(a))
+	slog.Warn("diag: health alert", attrs...)
 }
 
 // alertBody composes the OS notification text: the detail plus a remediation
@@ -264,6 +294,8 @@ func runNotify(name string, args ...string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := exec.CommandContext(ctx, name, args...).Run(); err != nil {
-		slog.Debug("diag: notification delivery failed", "err", err)
+		// WARN: the user may have only the OS banner as a cue; if delivery
+		// itself fails we still need a durable breadcrumb.
+		slog.Warn("diag: notification delivery failed", "cmd", name, "err", err)
 	}
 }

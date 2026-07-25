@@ -4,6 +4,8 @@
 package diag
 
 import (
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,5 +98,40 @@ func TestNotifierDisabledAndThreshold(t *testing.T) {
 	on.Observe(rep(Result{Name: "y", Severity: "warn"}), time.Now())
 	if b != 0 {
 		t.Error("warn notified at fail threshold")
+	}
+}
+
+// logHealthAlert is pure: fail → WARN, recovery → INFO, attrs carry the
+// check identity. Captured via a temporary default logger so a missing
+// log line is a regression of the forensics path that left db.readable
+// notifications untraceable in the daemon log.
+func TestLogHealthAlertLevels(t *testing.T) {
+	var buf strings.Builder
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	logHealthAlert(Alert{
+		Name: "db.readable", Kind: "fail", Severity: "fail",
+		Detail: "the database is not responding", Remediation: "restart",
+		DashboardURL: "http://localhost:19419/#health",
+	}, "os")
+	logHealthAlert(Alert{
+		Name: "db.readable", Kind: "recovery", Severity: "ok",
+	}, "shim")
+
+	out := buf.String()
+	if !strings.Contains(out, `level=WARN`) || !strings.Contains(out, `check=db.readable`) {
+		t.Fatalf("fail alert not logged at WARN with check name:\n%s", out)
+	}
+	if !strings.Contains(out, `kind=fail`) || !strings.Contains(out, `detail=`) {
+		t.Fatalf("fail alert missing kind/detail:\n%s", out)
+	}
+	if !strings.Contains(out, `level=INFO`) || !strings.Contains(out, `kind=recovery`) {
+		t.Fatalf("recovery alert not logged at INFO:\n%s", out)
+	}
+	if !strings.Contains(out, `via=os`) || !strings.Contains(out, `via=shim`) {
+		t.Fatalf("via attribute missing:\n%s", out)
 	}
 }
