@@ -6394,13 +6394,15 @@ func (s *Store) ingestFile(path string) error {
 	repo := extractRepo(metaCwd)
 	detectDecisions(s.writeDB, sessionID, repo)
 
-	// 🎯T64.10: incremental structural segmentation (seal-on-lookahead).
+	// 🎯T64.10: incremental structural segmentation + reclusters sealed spans.
 	if err := s.SegmentSession(sessionID); err != nil {
 		sid := sessionID
 		if len(sid) > 8 {
 			sid = sid[:8]
 		}
 		slog.Warn("segment session failed", "session", sid, "err", err)
+	} else if err := s.ClusterSealedSegments(); err != nil {
+		slog.Warn("cluster sealed segments failed", "err", err)
 	}
 
 	// Extract and store any images from newly ingested entries.

@@ -4,9 +4,7 @@
 package store
 
 import (
-	"crypto/sha1"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -68,8 +66,12 @@ type SegmentExpandHit struct {
 }
 
 // SegmentSession runs Tier-1 structural segmentation for one session
-// and persists sealed spans + theme membership. Unsealed spans are
-// replaced each pass; sealed spans are never rewritten.
+// and persists spans. Unsealed spans are replaced each pass; sealed
+// spans are never rewritten. Theme clustering is a separate global
+// pass (ClusterSealedSegments).
+//
+// Watermark: if max(messages.id) ≤ segmented_through_id, the sealed
+// prefix is complete and there is no new tail — skip work.
 func (s *Store) SegmentSession(sessionID string) error {
 	if sessionID == "" {
 		return nil
@@ -79,6 +81,16 @@ func (s *Store) SegmentSession(sessionID string) error {
 		`SELECT segmented_through_id FROM segment_scan_state WHERE session_id = ?`,
 		sessionID,
 	).Scan(&through)
+
+	var maxMsgID int
+	_ = s.readDB.QueryRow(
+		`SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?`,
+		sessionID,
+	).Scan(&maxMsgID)
+	if through > 0 && maxMsgID > 0 && maxMsgID <= through {
+		// No messages past the sealed watermark — nothing to recompute.
+		return nil
+	}
 
 	rows, err := s.readDB.Query(`
 		SELECT id, role, text, timestamp, COALESCE(is_noise, 0)
@@ -131,14 +143,12 @@ func (s *Store) SegmentSession(sessionID string) error {
 		return err
 	}
 
-	// Map ParentIdx → parent segment id after insert order (coarse then fine).
 	ids := make([]string, len(spans))
 	maxSealed := through
 	for i, sp := range spans {
 		id := segment.SegmentID(sessionID, sp.FromMsgID, sp.ToMsgID, sp.Level, sp.Method)
 		ids[i] = id
 		if sp.Sealed {
-			// Never rewrite sealed: skip insert if already present sealed.
 			var existing int
 			_ = tx.QueryRow(
 				`SELECT sealed FROM topic_segments WHERE id = ?`, id,
@@ -182,17 +192,6 @@ func (s *Store) SegmentSession(sessionID string) error {
 		}
 	}
 
-	// Theme membership for sealed spans (minimal T64.8 surface).
-	for i, sp := range spans {
-		if !sp.Sealed {
-			continue
-		}
-		segID := ids[i]
-		if err := upsertSegmentTheme(tx, segID, sp, ids, spans, repo, now); err != nil {
-			return err
-		}
-	}
-
 	if _, err := tx.Exec(`
 		INSERT INTO segment_scan_state (session_id, segmented_through_id, method, scanned_at)
 		VALUES (?, ?, 'structural', ?)
@@ -207,72 +206,21 @@ func (s *Store) SegmentSession(sessionID string) error {
 	return tx.Commit()
 }
 
-func upsertSegmentTheme(tx *sql.Tx, segID string, sp segment.Span, ids []string, spans []segment.Span, repo, now string) error {
-	themeID := themeIDForSegment(segID)
-	label := sp.Label
-	if label == "" {
-		label = "segment"
-	}
-	var parentTheme sql.NullString
-	var depth int
-	if sp.ParentIdx >= 0 && sp.ParentIdx < len(spans) && spans[sp.ParentIdx].Sealed {
-		pid := themeIDForSegment(ids[sp.ParentIdx])
-		parentTheme = sql.NullString{String: pid, Valid: true}
-		depth = 1
-	}
-	reposJSON := "[]"
-	if repo != "" {
-		reposJSON = fmt.Sprintf("[%q]", repo)
-	}
-	_, err := tx.Exec(`
-		INSERT INTO themes (id, label, summary, weight, repos, parent_theme_id, depth, first_seen, last_touched, computed_at)
-		VALUES (?, ?, ?, 0.9, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			label = excluded.label,
-			summary = excluded.summary,
-			parent_theme_id = excluded.parent_theme_id,
-			depth = excluded.depth,
-			last_touched = excluded.last_touched,
-			computed_at = excluded.computed_at
-	`, themeID, label, sp.Summary, reposJSON, parentTheme, depth, sp.FirstTS, sp.LastTS, now)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(`
-		INSERT INTO theme_members (theme_id, doc_kind, entity_id, membership_kind, similarity)
-		VALUES (?, 'segment', ?, 'primary', 1.0)
-		ON CONFLICT(theme_id, doc_kind, entity_id) DO UPDATE SET
-			membership_kind = 'primary',
-			similarity = 1.0
-	`, themeID, segID)
-	if err != nil {
-		return err
-	}
-	// Secondary: also member of parent theme when nested (centroid proxy).
-	if parentTheme.Valid {
-		_, err = tx.Exec(`
-			INSERT INTO theme_members (theme_id, doc_kind, entity_id, membership_kind, similarity)
-			VALUES (?, 'segment', ?, 'secondary', 0.75)
-			ON CONFLICT(theme_id, doc_kind, entity_id) DO UPDATE SET
-				membership_kind = excluded.membership_kind,
-				similarity = excluded.similarity
-		`, parentTheme.String, segID)
-	}
-	return err
-}
-
-func themeIDForSegment(segID string) string {
-	sum := sha1.Sum([]byte("theme|" + segID))
-	return "theme_" + hex.EncodeToString(sum[:])[:12]
-}
-
-// SegmentAllSessions runs structural segmentation for every known session.
+// SegmentAllSessions segments sessions that have messages past their
+// seal watermark, then reclusters all sealed segments into themes.
 func (s *Store) SegmentAllSessions() error {
-	rows, err := s.readDB.Query(`SELECT session_id FROM session_summary`)
+	rows, err := s.readDB.Query(`
+		SELECT ss.session_id
+		FROM session_summary ss
+		LEFT JOIN segment_scan_state st ON st.session_id = ss.session_id
+		WHERE COALESCE(
+			(SELECT MAX(m.id) FROM messages m WHERE m.session_id = ss.session_id),
+			0
+		) > COALESCE(st.segmented_through_id, 0)
+	`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	var ids []string
 	for rows.Next() {
 		var id string
@@ -280,10 +228,17 @@ func (s *Store) SegmentAllSessions() error {
 			ids = append(ids, id)
 		}
 	}
+	rows.Close()
 	for _, id := range ids {
 		if err := s.SegmentSession(id); err != nil {
 			slog.Warn("segment session failed", "session", id, "err", err)
 		}
+	}
+	// Always recluster so membership reflects the full sealed corpus
+	// (new seals or first run with zero dirty after a partial write).
+	if err := s.ClusterSealedSegments(); err != nil {
+		slog.Warn("cluster sealed segments failed", "err", err)
+		return err
 	}
 	return nil
 }

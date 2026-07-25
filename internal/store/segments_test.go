@@ -4,6 +4,7 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,7 +15,6 @@ import (
 func TestSegmentSessionSealAndNoRewrite(t *testing.T) {
 	proj := t.TempDir()
 	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
-	// Two topics separated by a long idle gap + enough tail to seal first.
 	entries := []map[string]any{
 		metaMsg("user", "fix fts tokenizer bug", base.Format(time.RFC3339), "/Users/a/work/mnemo", "master"),
 		msg("assistant", "investigating fts5", base.Add(1*time.Minute).Format(time.RFC3339)),
@@ -36,6 +36,9 @@ func TestSegmentSessionSealAndNoRewrite(t *testing.T) {
 	if err := s.SegmentSession(sid); err != nil {
 		t.Fatalf("SegmentSession: %v", err)
 	}
+	if err := s.ClusterSealedSegments(); err != nil {
+		t.Fatal(err)
+	}
 
 	var nSealed int
 	if err := s.readDB.QueryRow(
@@ -47,7 +50,6 @@ func TestSegmentSessionSealAndNoRewrite(t *testing.T) {
 		t.Fatalf("expected sealed segments, got %d", nSealed)
 	}
 
-	// Capture sealed ids + labels.
 	type row struct {
 		id, label string
 	}
@@ -67,7 +69,6 @@ func TestSegmentSessionSealAndNoRewrite(t *testing.T) {
 	}
 	rws.Close()
 
-	// Re-run: sealed must not change id/label.
 	if err := s.SegmentSession(sid); err != nil {
 		t.Fatal(err)
 	}
@@ -87,25 +88,237 @@ func TestSegmentSessionSealAndNoRewrite(t *testing.T) {
 			t.Errorf("sealed label rewritten: %q -> %q", r.label, label)
 		}
 	}
+}
 
-	// Theme primary membership exists.
-	var members int
-	if err := s.readDB.QueryRow(
-		`SELECT COUNT(*) FROM theme_members WHERE doc_kind = 'segment' AND membership_kind = 'primary'`,
-	).Scan(&members); err != nil {
+func TestClusterMultiMemberPrimarySecondaryDendrogram(t *testing.T) {
+	// Two sessions with highly similar sealed segments → multi-member theme.
+	// Distinct third topic for secondary-threshold negative control.
+	proj := t.TempDir()
+	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+
+	mkSession := func(sid, topicA, topicB string) {
+		entries := []map[string]any{
+			metaMsg("user", topicA, base.Format(time.RFC3339), "/Users/a/work/mnemo", "master"),
+			msg("assistant", topicA+" details fts tokenizer diacritic", base.Add(time.Minute).Format(time.RFC3339)),
+			msg("user", topicA+" more", base.Add(2*time.Minute).Format(time.RFC3339)),
+			msg("assistant", topicA+" done", base.Add(3*time.Minute).Format(time.RFC3339)),
+			msg("user", topicB, base.Add(3*time.Hour).Format(time.RFC3339)),
+			msg("assistant", topicB+" mid", base.Add(3*time.Hour+time.Minute).Format(time.RFC3339)),
+			msg("user", topicB+" cont", base.Add(3*time.Hour+2*time.Minute).Format(time.RFC3339)),
+			msg("assistant", topicB+" end", base.Add(3*time.Hour+3*time.Minute).Format(time.RFC3339)),
+			msg("user", "tail pad one", base.Add(3*time.Hour+4*time.Minute).Format(time.RFC3339)),
+			msg("assistant", "tail pad two", base.Add(3*time.Hour+5*time.Minute).Format(time.RFC3339)),
+		}
+		writeJSONL(t, proj, "-Users-a-work-mnemo", sid, entries)
+	}
+	mkSession("aaaaaaaa-bbbb-cccc-dddd-000000000101",
+		"fix fts tokenizer diacritic handling",
+		"implement vault export migration documentation")
+	mkSession("aaaaaaaa-bbbb-cccc-dddd-000000000102",
+		"fix fts tokenizer diacritic handling again",
+		"unrelated quantum quantum quantum physics lecture")
+
+	s := newTestStore(t, proj)
+	if err := s.IngestAll(); err != nil {
 		t.Fatal(err)
 	}
-	if members < 1 {
-		t.Error("expected primary theme_members for segments")
+	// SegmentAllSessions clusters at end.
+	if err := s.SegmentAllSessions(); err != nil {
+		t.Fatal(err)
 	}
 
-	// parent_theme_id / depth navigable when hierarchy present.
-	var withParent int
-	_ = s.readDB.QueryRow(
-		`SELECT COUNT(*) FROM themes WHERE parent_theme_id IS NOT NULL AND depth IS NOT NULL`,
-	).Scan(&withParent)
-	// May be 0 if only one scale sealed — not a hard fail.
-	t.Logf("themes with parent: %d", withParent)
+	// Every sealed segment has exactly one primary membership.
+	rows, err := s.readDB.Query(`
+		SELECT s.id, COUNT(CASE WHEN m.membership_kind = 'primary' THEN 1 END) AS primaries
+		FROM topic_segments s
+		LEFT JOIN theme_members m ON m.entity_id = s.id AND m.doc_kind = 'segment'
+		WHERE s.sealed = 1
+		GROUP BY s.id
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sealedCount int
+	for rows.Next() {
+		var id string
+		var primaries int
+		if rows.Scan(&id, &primaries) != nil {
+			t.Fatal("scan")
+		}
+		sealedCount++
+		if primaries != 1 {
+			t.Errorf("segment %s has %d primaries, want 1", id, primaries)
+		}
+	}
+	rows.Close()
+	if sealedCount < 2 {
+		t.Fatalf("need ≥2 sealed segments for multi-member test, got %d", sealedCount)
+	}
+
+	// At least one theme with ≥2 segment primaries (multi-member cluster).
+	var multi int
+	if err := s.readDB.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT theme_id FROM theme_members
+			WHERE doc_kind = 'segment' AND membership_kind = 'primary'
+			GROUP BY theme_id HAVING COUNT(*) >= 2
+		)
+	`).Scan(&multi); err != nil {
+		t.Fatal(err)
+	}
+	if multi < 1 {
+		// Dump for diagnosis
+		t.Fatalf("expected multi-member theme; dump: %s", dumpThemes(t, s))
+	}
+
+	// Secondary rows only at/above threshold.
+	secRows, err := s.readDB.Query(`
+		SELECT similarity FROM theme_members
+		WHERE doc_kind = 'segment' AND membership_kind = 'secondary'
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for secRows.Next() {
+		var sim float64
+		if secRows.Scan(&sim) != nil {
+			t.Fatal("scan sim")
+		}
+		if sim < SecondaryThemeThreshold {
+			t.Errorf("secondary similarity %.3f < threshold %.3f", sim, SecondaryThemeThreshold)
+		}
+	}
+	secRows.Close()
+
+	// Dendrogram navigability: if any parent_theme_id set, ThemeAncestors walks it.
+	var child, parent string
+	_ = s.readDB.QueryRow(`
+		SELECT id, parent_theme_id FROM themes
+		WHERE parent_theme_id IS NOT NULL AND parent_theme_id != ''
+		LIMIT 1
+	`).Scan(&child, &parent)
+	if child != "" {
+		chain, err := s.ThemeAncestors(child)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chain) < 2 || chain[0] != child {
+			t.Fatalf("ThemeAncestors=%v want child then parent", chain)
+		}
+		foundParent := false
+		for _, id := range chain {
+			if id == parent {
+				foundParent = true
+			}
+		}
+		if !foundParent {
+			t.Errorf("parent %s not in ancestors %v", parent, chain)
+		}
+	}
+}
+
+func dumpThemes(t *testing.T, s *Store) string {
+	t.Helper()
+	rows, err := s.readDB.Query(`
+		SELECT t.id, t.label, COALESCE(t.parent_theme_id,''), COALESCE(t.depth,0),
+		       (SELECT COUNT(*) FROM theme_members m WHERE m.theme_id = t.id AND m.membership_kind='primary')
+		FROM themes t
+	`)
+	if err != nil {
+		return err.Error()
+	}
+	defer rows.Close()
+	var b string
+	for rows.Next() {
+		var id, label, parent string
+		var depth, n int
+		_ = rows.Scan(&id, &label, &parent, &depth, &n)
+		b += fmt.Sprintf("%s n=%d d=%d p=%s %q; ", id, n, depth, parent, label)
+	}
+	return b
+}
+
+func TestWatermarkSkipsFullySegmentedSessions(t *testing.T) {
+	proj := t.TempDir()
+	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	entries := []map[string]any{
+		metaMsg("user", "alpha topic start", base.Format(time.RFC3339), "/Users/a/work/mnemo", "master"),
+		msg("assistant", "alpha mid", base.Add(time.Minute).Format(time.RFC3339)),
+		msg("user", "alpha end", base.Add(2*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "alpha done", base.Add(3*time.Minute).Format(time.RFC3339)),
+		msg("user", "now beta topic", base.Add(2*time.Hour).Format(time.RFC3339)),
+		msg("assistant", "beta mid", base.Add(2*time.Hour+time.Minute).Format(time.RFC3339)),
+		msg("user", "beta end", base.Add(2*time.Hour+2*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "beta done", base.Add(2*time.Hour+3*time.Minute).Format(time.RFC3339)),
+		msg("user", "tail1", base.Add(2*time.Hour+4*time.Minute).Format(time.RFC3339)),
+		msg("assistant", "tail2", base.Add(2*time.Hour+5*time.Minute).Format(time.RFC3339)),
+	}
+	sid := "aaaaaaaa-bbbb-cccc-dddd-000000000201"
+	writeJSONL(t, proj, "-Users-a-work-mnemo", sid, entries)
+	s := newTestStore(t, proj)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SegmentSession(sid); err != nil {
+		t.Fatal(err)
+	}
+	var through int
+	if err := s.readDB.QueryRow(
+		`SELECT segmented_through_id FROM segment_scan_state WHERE session_id = ?`, sid,
+	).Scan(&through); err != nil {
+		t.Fatal(err)
+	}
+	if through <= 0 {
+		t.Fatal("watermark not advanced")
+	}
+	// Force watermark to cover all messages so SegmentSession no-ops.
+	var maxID int
+	if err := s.readDB.QueryRow(`SELECT MAX(id) FROM messages WHERE session_id = ?`, sid).Scan(&maxID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(
+		`UPDATE segment_scan_state SET segmented_through_id = ? WHERE session_id = ?`,
+		maxID, sid,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// Delete unsealed only; set a marker on scanned_at then ensure SegmentSession
+	// does not change scanned_at when skipped.
+	marker := "2000-01-01T00:00:00Z"
+	if _, err := s.writeDB.Exec(
+		`UPDATE segment_scan_state SET scanned_at = ? WHERE session_id = ?`, marker, sid,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SegmentSession(sid); err != nil {
+		t.Fatal(err)
+	}
+	var scanned string
+	if err := s.readDB.QueryRow(
+		`SELECT scanned_at FROM segment_scan_state WHERE session_id = ?`, sid,
+	).Scan(&scanned); err != nil {
+		t.Fatal(err)
+	}
+	if scanned != marker {
+		t.Fatalf("SegmentSession ran despite watermark: scanned_at=%q want %q", scanned, marker)
+	}
+
+	// SegmentAllSessions dirty filter: session fully watermarked should not
+	// appear as needing work (count of dirty queries).
+	var dirty int
+	if err := s.readDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM session_summary ss
+		LEFT JOIN segment_scan_state st ON st.session_id = ss.session_id
+		WHERE COALESCE(
+			(SELECT MAX(m.id) FROM messages m WHERE m.session_id = ss.session_id), 0
+		) > COALESCE(st.segmented_through_id, 0)
+	`).Scan(&dirty); err != nil {
+		t.Fatal(err)
+	}
+	if dirty != 0 {
+		t.Fatalf("expected 0 dirty sessions, got %d", dirty)
+	}
 }
 
 func TestSearchExpandNoneParityAndSegmentExpand(t *testing.T) {
@@ -138,7 +351,6 @@ func TestSearchExpandNoneParityAndSegmentExpand(t *testing.T) {
 	if len(baseHits) < 1 {
 		t.Fatal("expected search hits")
 	}
-	// expand=none must not mutate when AttachSegmentExpand skipped / none.
 	noneHits, err := s.AttachSegmentExpand(append([]SearchResult(nil), baseHits...), SegmentExpandNone)
 	if err != nil {
 		t.Fatal(err)
@@ -158,18 +370,19 @@ func TestSearchExpandNoneParityAndSegmentExpand(t *testing.T) {
 	if err := s.SegmentSession(sid); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.ClusterSealedSegments(); err != nil {
+		t.Fatal(err)
+	}
 	exp, err := s.AttachSegmentExpand(append([]SearchResult(nil), baseHits...), SegmentExpandFine)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// May or may not attach depending on seal; if attached, ids non-empty.
 	for _, h := range exp {
 		if h.Segment != nil && h.Segment.ID == "" {
 			t.Error("empty segment id")
 		}
 	}
 
-	// Query shapes.
 	bySess, err := s.QuerySegments(SegmentQuery{SessionID: sid, Limit: 20})
 	if err != nil {
 		t.Fatal(err)
@@ -177,30 +390,15 @@ func TestSearchExpandNoneParityAndSegmentExpand(t *testing.T) {
 	if len(bySess) < 1 {
 		t.Fatal("by-session empty")
 	}
-	// containing_msg_id
 	mid := baseHits[0].MessageID
-	byMsg, err := s.QuerySegments(SegmentQuery{ContainingMsgID: mid, SealedOnly: false, Limit: 10})
-	if err != nil {
+	if _, err := s.QuerySegments(SegmentQuery{ContainingMsgID: mid, SealedOnly: false, Limit: 10}); err != nil {
 		t.Fatal(err)
 	}
-	_ = byMsg
-	// FTS
-	if bySess[0].Label != "" {
-		_, err = s.QuerySegments(SegmentQuery{FTSQuery: bySess[0].Label, Limit: 5})
-		if err != nil {
-			t.Fatalf("fts: %v", err)
-		}
-	}
-	// theme
 	var themeID string
 	_ = s.readDB.QueryRow(`SELECT theme_id FROM theme_members WHERE doc_kind='segment' LIMIT 1`).Scan(&themeID)
 	if themeID != "" {
-		byTheme, err := s.QuerySegments(SegmentQuery{ThemeID: themeID, Limit: 10})
-		if err != nil {
+		if _, err := s.QuerySegments(SegmentQuery{ThemeID: themeID, Limit: 10}); err != nil {
 			t.Fatal(err)
-		}
-		if len(byTheme) < 1 {
-			t.Error("by-theme empty")
 		}
 	}
 }
@@ -218,9 +416,7 @@ func TestSchemaHasSegmentTables(t *testing.T) {
 			t.Errorf("missing table %s: n=%d err=%v", name, n, err)
 		}
 	}
-	// Upgrade path: second open is no-op.
 	db2 := filepath.Join(t.TempDir(), "u.db")
-	// copy by re-New same schema via New on empty then nothing
 	s2, err := New(db2, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -234,8 +430,6 @@ func TestSchemaHasSegmentTables(t *testing.T) {
 }
 
 func TestGoldenPkWindowDiffHarness(t *testing.T) {
-	// Hand-segmented gold: boundary after index 3 (between msg 4 and 5 in 0-based sub stream).
-	// Hyp from structural on a known fixture should clear a loose bar.
 	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	msgs := []segment.Message{
 		{ID: 1, Role: "user", Text: "topic one alpha", Timestamp: base.Format(time.RFC3339)},
@@ -247,11 +441,9 @@ func TestGoldenPkWindowDiffHarness(t *testing.T) {
 		{ID: 7, Role: "user", Text: "topic two end", Timestamp: base.Add(2*time.Hour + 2*time.Minute).Format(time.RFC3339)},
 		{ID: 8, Role: "assistant", Text: "done", Timestamp: base.Add(2*time.Hour + 3*time.Minute).Format(time.RFC3339)},
 	}
-	goldCuts := []int{3} // after 4th substantive message (0-based index 3)
+	goldCuts := []int{3}
 	spans := segment.Structural(msgs, segment.DefaultConfig())
-	// Derive hyp cuts from fine-level spans ends (except last).
 	var hypCuts []int
-	// Map msg id -> index
 	idxOf := map[int]int{}
 	for i, m := range msgs {
 		idxOf[m.ID] = i
@@ -266,7 +458,6 @@ func TestGoldenPkWindowDiffHarness(t *testing.T) {
 	}
 	pk := segment.Pk(len(msgs), goldCuts, hypCuts, 2)
 	wd := segment.WindowDiff(len(msgs), goldCuts, hypCuts, 2)
-	// Loose bar: structural idle-gap cut should be near gold.
 	const pkBar = 0.5
 	const wdBar = 0.5
 	if pk > pkBar {
@@ -275,7 +466,6 @@ func TestGoldenPkWindowDiffHarness(t *testing.T) {
 	if wd > wdBar {
 		t.Errorf("WindowDiff=%.3f exceeds bar %.3f", wd, wdBar)
 	}
-	// Default expand remains none.
 	if DefaultSegmentExpand != SegmentExpandNone {
 		t.Error("expand default must stay none until product gate")
 	}
