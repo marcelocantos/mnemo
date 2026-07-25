@@ -1002,7 +1002,8 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	if strings.HasPrefix(addr, ":") {
 		dashHost = "localhost" + addr
 	}
-	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/#health")
+	// /health content-negotiates HTML for browsers (notification clicks).
+	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/health")
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}

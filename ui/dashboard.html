@@ -444,7 +444,9 @@ function toggleTheme() {
 
 // ── Fetch helpers ─────────────────────────────────────────────────────
 async function apiFetch(path) {
-  const res = await fetch(path);
+  // Prefer JSON explicitly so /health content-negotiation stays machine-
+  // readable for the dashboard while browsers navigating to /health get HTML.
+  const res = await fetch(path, { headers: { 'Accept': 'application/json' } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
