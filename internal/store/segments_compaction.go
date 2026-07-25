@@ -263,8 +263,13 @@ func firstLine(summary string) string {
 // every backfill. Newest sessions first, matching ingest and compaction
 // ordering so recent work converges first. limit ≤ 0 means no cap.
 func (s *Store) BackfillCompactionSegments(limit int) (int, error) {
+	// entry_id_from is the PRIOR window's last message (the cursor), and
+	// ReadSessionAfter starts strictly past it — so the window's own
+	// first message is entry_id_from + 1. Projecting the raw value would
+	// make every span overlap its predecessor by one message and
+	// mis-anchor containing_msg_id lookups at the boundary.
 	q := `
-		SELECT c.id, c.session_id, c.entry_id_from, c.entry_id_to, COALESCE(c.summary, '')
+		SELECT c.id, c.session_id, c.entry_id_from + 1, c.entry_id_to, COALESCE(c.summary, '')
 		FROM compactions c
 		LEFT JOIN topic_segments ts ON ts.compaction_id = c.id
 		JOIN session_summary ss ON ss.session_id = c.session_id

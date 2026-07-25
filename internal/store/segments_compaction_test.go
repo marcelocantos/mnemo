@@ -297,6 +297,23 @@ func TestBackfillCompactionSegmentsProjectsHistory(t *testing.T) {
 		t.Errorf("got %d projected window spans, want 1", got)
 	}
 
+	// entry_id_from is the prior window's cursor and the window starts
+	// strictly past it, so the projected span must not include it —
+	// otherwise consecutive windows overlap by one message.
+	var from, to int64
+	if err := s.readDB.QueryRow(`
+		SELECT from_msg_id, to_msg_id FROM topic_segments
+		WHERE compaction_id = (SELECT MAX(id) FROM compactions)`,
+	).Scan(&from, &to); err != nil {
+		t.Fatal(err)
+	}
+	if from != lo {
+		t.Errorf("projected span starts at %d, want %d (entry_id_from is exclusive)", from, lo)
+	}
+	if to != hi {
+		t.Errorf("projected span ends at %d, want %d", to, hi)
+	}
+
 	// Idempotent: an already-projected compaction is skipped, so this is
 	// safe on every backfill.
 	again, err := s.BackfillCompactionSegments(0)
