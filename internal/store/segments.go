@@ -65,34 +65,15 @@ type SegmentExpandHit struct {
 	Sealed    bool   `json:"sealed"`
 }
 
-// defaultClusterDebounce is how long after the last SegmentSession we
-// wait before running ClusterSealedSegments. Long enough to absorb a
-// burst of Watch appends; short enough that themes stay useful.
-const defaultClusterDebounce = 30 * time.Second
-
-// scheduleClusterSealed requests a debounced global recluster. Safe to
-// call from any goroutine; concurrent kicks reset the timer.
-func (s *Store) scheduleClusterSealed() {
-	period := s.clusterPeriod
-	if period <= 0 {
-		period = defaultClusterDebounce
-	}
-	s.clusterMu.Lock()
-	defer s.clusterMu.Unlock()
-	if s.clusterTimer != nil {
-		s.clusterTimer.Stop()
-	}
-	s.clusterTimer = time.AfterFunc(period, func() {
-		if err := s.ClusterSealedSegments(); err != nil {
-			slog.Warn("debounced cluster sealed segments failed", "err", err)
-		}
-	})
-}
-
 // SegmentSession runs Tier-1 structural segmentation for one session
 // and persists spans. Unsealed spans are replaced each pass; sealed
-// spans are never rewritten. Theme clustering is a separate global
-// pass (ClusterSealedSegments / scheduleClusterSealed).
+// spans are never rewritten.
+//
+// Structural spans are the provisional layer (🎯T64.11): they give every
+// session immediate coverage with zero egress, and are superseded at
+// retrieval time by the richer spans a compaction contributes for the
+// ranges it has summarised (see SegmentMethodRank). No theme clustering
+// happens here or anywhere on the ingest path.
 //
 // Watermark: if max(messages.id) ≤ segmented_through_id, the sealed
 // prefix is complete and there is no new tail — skip work.
@@ -259,8 +240,15 @@ func (s *Store) dirtySegmentSessionIDs() ([]string, error) {
 }
 
 // SegmentAllSessions segments sessions that have messages past their
-// seal watermark (newest first), then reclusters all sealed segments
-// into themes.
+// seal watermark (newest first), then projects any already-summarised
+// windows that have no spans yet into span documents.
+//
+// It deliberately does NOT cluster (🎯T64.11). The previous global
+// recluster was single-link agglomerative over every sealed span with a
+// full rewrite per pass — super-quadratic in corpus size, and the
+// dominant CPU cost of a backfill on a large index. Thematic retrieval
+// is served by search over span text instead, so the pass is now linear
+// in dirty sessions plus un-projected compactions.
 func (s *Store) SegmentAllSessions() error {
 	ids, err := s.dirtySegmentSessionIDs()
 	if err != nil {
@@ -271,11 +259,12 @@ func (s *Store) SegmentAllSessions() error {
 			slog.Warn("segment session failed", "session", id, "err", err)
 		}
 	}
-	// Always recluster so membership reflects the full sealed corpus
-	// (new seals or first run with zero dirty after a partial write).
-	if err := s.ClusterSealedSegments(); err != nil {
-		slog.Warn("cluster sealed segments failed", "err", err)
+	n, err := s.BackfillCompactionSegments(0)
+	if err != nil {
 		return err
+	}
+	if n > 0 {
+		slog.Info("projected compactions into topic spans", "count", n)
 	}
 	return nil
 }
@@ -314,7 +303,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			FROM topic_segments
 			WHERE from_msg_id <= ? AND to_msg_id >= ?
 			  AND (? = 0 OR sealed = 1)
-			ORDER BY level ASC, (to_msg_id - from_msg_id) ASC
+			ORDER BY ` + SegmentMethodRank + `, level ASC, (to_msg_id - from_msg_id) ASC
 			LIMIT ?
 		`, q.ContainingMsgID, q.ContainingMsgID, boolToInt(q.SealedOnly), q.Limit)
 		if err != nil {

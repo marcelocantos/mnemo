@@ -616,12 +616,14 @@ CREATE TABLE topic_segments (
 			repo TEXT,
 			first_ts TEXT,
 			last_ts TEXT,
-			computed_at TEXT NOT NULL DEFAULT ''
+			computed_at TEXT NOT NULL DEFAULT '',
+			compaction_id INTEGER
 		);
 
 CREATE INDEX topic_segments_by_session ON topic_segments (session_id, from_msg_id, to_msg_id);
 CREATE INDEX topic_segments_by_parent ON topic_segments (parent_id);
 CREATE INDEX topic_segments_sealed ON topic_segments (session_id, sealed);
+CREATE INDEX topic_segments_by_compaction ON topic_segments (compaction_id);
 
 CREATE TABLE todos (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

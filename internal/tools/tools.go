@@ -218,16 +218,15 @@ By default searches only interactive sessions (excludes subagents, worktrees, ep
 			mcp.WithString("expand", mcp.Description(`Expand each hit to a topic segment (🎯T64.10). "none" (default): ±N context only. "segment": smallest enclosing sealed segment. "segment:coarse": top-level span. Default remains "none" until boundary-quality gates clear.`)),
 		),
 		mcp.NewTool("mnemo_segments",
-			mcp.WithDescription(`Query hierarchical topic segments (🎯T64.10). Segments are precomputed topic-coherent spans over a session's substantive messages.
+			mcp.WithDescription(`Query hierarchical topic segments (🎯T64.10, folded into summarisation by 🎯T64.11). Segments are precomputed topic-coherent spans over a session's substantive messages.
 
 Query shapes (provide one primary filter):
+- query: FTS over segment label/summary — the thematic search shape. Returns spans from many sessions ranked by relevance; use this to find "that thing about X" without knowing the session.
 - session_id: topic-AST of one session
-- theme_id: segments that are members of a theme
 - containing_msg_id: spans that enclose a message id
-- query: FTS over segment label/summary
-- overlaps_theme_a + overlaps_theme_b: segments that are members of both themes (intersection)
+- theme_id / overlaps_theme_a + overlaps_theme_b: DORMANT. Cross-session theme clustering is off (🎯T64.11) — thematic retrieval is served by the query shape above, so these return nothing on a current index.
 
-Tier-1 structural segmentation is always on (zero egress). expand on mnemo_search stays default-off until quality gates pass.`),
+Spans come from three layers, in precedence order: 'llm' (drawn by the summariser inside a window it compacted), 'compaction' (a window-level span projected from a compaction, covering all summarised history), and 'structural' (always-on local pass, zero egress, covers everything else). The method field on each result says which. expand on mnemo_search stays default-off until quality gates pass.`),
 			mcp.WithString("session_id", mcp.Description("Session ID to list segments for")),
 			mcp.WithString("theme_id", mcp.Description("Theme ID — return segment members")),
 			mcp.WithNumber("containing_msg_id", mcp.Description("Message id — enclosing segments")),

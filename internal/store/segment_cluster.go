@@ -41,6 +41,26 @@ type aggCluster struct {
 // ClusterSealedSegments runs single-link agglomerative clustering over
 // sealed topic segments.
 //
+// DORMANT as of 🎯T64.11 — nothing in production calls this, and
+// TestNoClusteringOnIngestPath fails the build if anything starts to.
+//
+// It was written to make retrieval thematic by assigning every span to
+// a precomputed theme object. That turned out to be the wrong shape for
+// the goal: thematic retrieval is a search problem over span text, and
+// a query already returns related spans from many sessions ranked by
+// score without anyone naming a theme. Meanwhile the cost was real —
+// every pass rebuilt the whole dendrogram from scratch (bestPair scans
+// all active pairs, pairSim is member×member cosine, phase 2 merges to
+// a single root), which is super-quadratic in sealed-span count and was
+// the dominant CPU cost of a backfill on a full-sized index.
+//
+// It is kept rather than deleted because cross-session theme objects
+// may return as an offline analytic over span summaries — a batch
+// question ("show me everything about X as a group"), not something the
+// ingest path should compute. Anything reviving it needs an incremental
+// or approximate design; this implementation must not go back on a hot
+// path.
+//
 // Phase 1 (cut): merge while pair sim ≥ ClusterMergeThreshold → leaf
 // themes (primary membership; multi-member when similar segments merge).
 //

@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -50,6 +52,26 @@ type Payload struct {
 	Files             []string          `json:"files"`
 	OpenThreads       []string          `json:"open_threads"`
 	Summary           string            `json:"summary"`
+	// Spans is the topic segmentation of this window (🎯T64.11): the
+	// summariser marks where the conversation changed subject and
+	// labels each stretch. Segmentation is an enrichment of
+	// summarisation rather than a second LLM pipeline — the model is
+	// already reading this exact transcript, so the marginal cost of
+	// asking where the topics start and stop is a few output tokens.
+	// omitempty keeps the pre-🎯T64.11 payload shape valid: a model
+	// that omits spans yields the window-level span alone.
+	Spans []Span `json:"spans,omitempty"`
+}
+
+// Span is one topic-coherent stretch of the compacted window, anchored
+// to the transcript's `#<id>` message markers. From/To are messages.id
+// values; they are treated as untrusted model output and clamped to the
+// window by validateSpans before they reach the store.
+type Span struct {
+	From    int64  `json:"from"`
+	To      int64  `json:"to"`
+	Label   string `json:"label"`
+	Summary string `json:"summary"`
 }
 
 // Decision records a choice made during the session.
@@ -93,7 +115,8 @@ const SystemPrompt = `You are a session compactor. You are given a transcript sp
   "decisions": [{"what": "...", "why": "..."}, ...],
   "files": ["path/to/file.go", ...],
   "open_threads": ["unfinished work", ...],
-  "summary": "one or two sentences describing the span"
+  "summary": "one or two sentences describing the span",
+  "spans": [{"from": 120, "to": 168, "label": "short topic name", "summary": "what this stretch was about"}, ...]
 }
 
 Rules:
@@ -107,7 +130,8 @@ Rules:
 - "decisions" capture choices that future sessions need to remember — include the rationale.
 - "files" are paths touched, reviewed, or named as load-bearing.
 - "open_threads" are tasks started but not finished, and questions raised but not answered.
-- "summary" is a factual prose abstract of the span, not a rating.`
+- "summary" is a factual prose abstract of the span, not a rating.
+- "spans" segments the transcript by TOPIC. Each transcript line begins with a "#<id>" marker; "from" and "to" are those ids, giving the first and last message of a stretch that is about one thing. Start a new span where the subject genuinely changes (a different bug, feature, file, or question) — not merely because time passed or the speaker changed. Spans must be in ascending order, must not overlap, and should cover the whole window; a window that is about one thing throughout is correctly a single span. Prefer a handful of substantial spans over many tiny ones. "label" is a terse noun phrase (2-6 words) naming the topic; "summary" is one or two sentences on what happened in that stretch. Both are indexed for search, so write them to be findable later by someone who remembers the topic but not the session.`
 
 // storeBackend is the narrow slice of *store.Store the compactor uses.
 // Kept as an interface so tests can inject a fake.
@@ -117,6 +141,10 @@ type storeBackend interface {
 	LatestCompaction(sessionID string) (*store.Compaction, error)
 	SessionTokens(sessionID string) (int64, int64, error)
 	CompactionTokens(sessionID string) (int64, int64, error)
+	// PutCompactionSegments records the topic spans carried by a
+	// compaction (🎯T64.11). Separated from PutCompaction so a span
+	// write can never roll back a summary that cost an LLM call.
+	PutCompactionSegments(seg store.CompactionSegments) error
 }
 
 // Compactor produces compactions for sessions on demand.
@@ -328,6 +356,35 @@ func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string,
 		return nil, fmt.Errorf("put compaction: %w", err)
 	}
 	comp.ID = id
+
+	// Persist the span index for this window (🎯T64.11). A failure here
+	// is logged, not returned: the compaction itself is durable and the
+	// spans are recoverable by the backfill pass, so losing them must
+	// not turn a paid summarisation into a failed tick that the watcher
+	// retries (and pays for again).
+	windowIDs := make([]int64, 0, len(msgs))
+	for _, m := range msgs {
+		windowIDs = append(windowIDs, int64(m.ID))
+	}
+	segs := store.CompactionSegments{
+		SessionID:     sessionID,
+		CompactionID:  id,
+		FromMsgID:     windowIDs[0],
+		ToMsgID:       windowIDs[len(windowIDs)-1],
+		WindowSummary: payload.Summary,
+	}
+	for _, sp := range validateSpans(payload.Spans, windowIDs) {
+		segs.Spans = append(segs.Spans, store.CompactionSpan{
+			FromMsgID: sp.From,
+			ToMsgID:   sp.To,
+			Label:     sp.Label,
+			Summary:   sp.Summary,
+		})
+	}
+	if err := c.store.PutCompactionSegments(segs); err != nil {
+		slog.Warn("compact: put compaction segments",
+			"session_id", sessionID, "compaction_id", id, "err", err)
+	}
 	return &comp, nil
 }
 
@@ -380,10 +437,15 @@ func buildUserPrompt(tc *TargetContext, transcript string) string {
 // renderTranscript formats messages for the LLM prompt, tail-truncating
 // once the byte budget is exceeded. Kept simple: tests can verify the
 // exact format, and the LLM doesn't need surrounding ceremony.
+// The "#<id>" prefix is the anchor the summariser cites back in
+// Payload.Spans (🎯T64.11): topic boundaries are only useful if they can
+// be resolved to rows in messages, so the ids the model may reference
+// have to be in front of it. Without the prefix the model can only
+// describe boundaries in prose, which is not addressable.
 func renderTranscript(msgs []store.SessionMessage, maxChars int) string {
 	var b strings.Builder
 	for _, m := range msgs {
-		line := fmt.Sprintf("[%s] %s\n", m.Role, m.Text)
+		line := fmt.Sprintf("#%d [%s] %s\n", m.ID, m.Role, m.Text)
 		if b.Len()+len(line) > maxChars {
 			b.WriteString("... (truncated)\n")
 			break
@@ -391,6 +453,91 @@ func renderTranscript(msgs []store.SessionMessage, maxChars int) string {
 		b.WriteString(line)
 	}
 	return b.String()
+}
+
+// validateSpans turns the summariser's claimed topic spans into ones
+// safe to persist (🎯T64.11). Model output is external input: ids may be
+// hallucinated, inverted, duplicated, out of order, or outside the
+// window entirely. Rather than reject a whole payload over one bad
+// interval, each span is snapped to the message ids actually present in
+// the window and anything still degenerate is dropped.
+//
+// windowIDs must be ascending — the ids of the messages that were
+// rendered into the prompt. Spans are returned in ascending order with
+// overlaps trimmed, so downstream code can assume a clean cover.
+func validateSpans(spans []Span, windowIDs []int64) []Span {
+	if len(spans) == 0 || len(windowIDs) == 0 {
+		return nil
+	}
+	lo, hi := windowIDs[0], windowIDs[len(windowIDs)-1]
+
+	// snap moves an id to the nearest real message id in the window, so
+	// a model that cites a truncated or noise-filtered line still yields
+	// a resolvable boundary.
+	snap := func(id int64) int64 {
+		if id <= lo {
+			return lo
+		}
+		if id >= hi {
+			return hi
+		}
+		best, bestDist := lo, int64(-1)
+		for _, w := range windowIDs {
+			d := w - id
+			if d < 0 {
+				d = -d
+			}
+			if bestDist < 0 || d < bestDist {
+				best, bestDist = w, d
+			}
+		}
+		return best
+	}
+
+	out := make([]Span, 0, len(spans))
+	for _, sp := range spans {
+		if sp.From > sp.To {
+			sp.From, sp.To = sp.To, sp.From
+		}
+		sp.From, sp.To = snap(sp.From), snap(sp.To)
+		sp.Label = strings.TrimSpace(sp.Label)
+		sp.Summary = strings.TrimSpace(sp.Summary)
+		if sp.Label == "" && sp.Summary == "" {
+			// A span with no text contributes nothing to the search index,
+			// which is the entire point of emitting spans.
+			continue
+		}
+		out = append(out, sp)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].From != out[j].From {
+			return out[i].From < out[j].From
+		}
+		return out[i].To < out[j].To
+	})
+
+	// Trim overlaps by pushing each span's start past the previous end.
+	// Single-message spans that collapse entirely are dropped.
+	deduped := out[:0]
+	var prevEnd int64 = -1
+	for _, sp := range out {
+		if prevEnd >= 0 && sp.From <= prevEnd {
+			sp.From = prevEnd + 1
+		}
+		if sp.From > sp.To {
+			continue
+		}
+		deduped = append(deduped, sp)
+		prevEnd = sp.To
+	}
+	if len(deduped) == 0 {
+		return nil
+	}
+	return deduped
 }
 
 // parsePayload extracts the structured Payload from the LLM's raw text,

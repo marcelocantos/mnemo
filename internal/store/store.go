@@ -155,15 +155,6 @@ type Store struct {
 	// no upgrade was pending. Close waits on it so we do not tear down
 	// DB handles mid-VACUUM / mid-Apply. 🎯T114.1
 	upgradeDone <-chan struct{}
-
-	// clusterDebounce coalesces theme reclustering after live SegmentSession
-	// calls. Full ClusterSealedSegments is O(n²) over sealed spans — running
-	// it on every transcript append pegs the CPU (and thrashing a 21 GB DB
-	// also wakes antivirus like Bitdefender's BDLDaemon). Debounce waits for
-	// a quiet window after the last seal before reclustering once.
-	clusterMu     sync.Mutex
-	clusterTimer  *time.Timer
-	clusterPeriod time.Duration // zero → defaultClusterDebounce
 }
 
 // NoteActivity records that a write happened just now. The backup worker
@@ -6502,16 +6493,15 @@ func (s *Store) ingestFile(path string) error {
 	detectDecisions(s.writeDB, sessionID, repo)
 
 	// 🎯T64.10: incremental structural segmentation for this session only.
-	// Theme reclustering is debounced (scheduleClusterSealed) — a full
-	// ClusterSealedSegments on every file was pegging multi-core CPU.
+	// Nothing clusters here (🎯T64.11) — this pass is bounded by the
+	// session's own message count, so a transcript append costs one
+	// segmentation, never a corpus-wide recompute.
 	if err := s.SegmentSession(sessionID); err != nil {
 		sid := sessionID
 		if len(sid) > 8 {
 			sid = sid[:8]
 		}
 		slog.Warn("segment session failed", "session", sid, "err", err)
-	} else {
-		s.scheduleClusterSealed()
 	}
 
 	// Extract and store any images from newly ingested entries.

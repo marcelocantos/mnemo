@@ -1,8 +1,58 @@
 # Topic Segmentation — the message-level extent axis
 
-*Status: design draft — 2026-07-01.*
+*Status: partially superseded — 2026-07-25 (🎯T64.11). Shipped 🎯T64.10.*
 *Extends `docs/design/vault-clustering.md` (Slice 8, T64.8).*
 *Depends on the clustering engine (themes / theme_members / cluster_embeddings) shipping first.*
+
+---
+
+## Superseding note (🎯T64.11)
+
+Two of this document's load-bearing assumptions were reversed after
+🎯T64.10 shipped and ran against the real corpus.
+
+**1. Segments no longer feed a clustering engine.** The design treats
+cross-session themes as the way retrieval becomes thematic, with
+segments as a new corpus kind for the Engine A/B pipeline. In practice
+the goal — "find the spans that are about X" — is a search problem over
+span text: one query already returns related spans from many sessions
+ranked by score, and no theme object needs to exist for that to work.
+The global recluster, meanwhile, rebuilt its whole dendrogram per pass
+(super-quadratic in sealed-span count) and dominated backfill CPU.
+`ClusterSealedSegments` is now dormant; nothing on a production path
+calls it, and a guard test keeps it that way. Cross-session themes may
+return later as an *offline analytic over span summaries*, not as the
+retrieval substrate.
+
+**2. The "Replacing compaction spans" non-goal is withdrawn.** This
+document separates topic segments (topic-coherent) from compaction
+spans (window-based) as different products. Once themes left the
+picture, that distinction stopped paying rent: both are
+message-range-anchored summaries of a stretch of one session, and the
+compactor is *already* an LLM reading exactly the transcript a
+segmenter would need. So segmentation folds into summarisation — the
+compactor emits topic spans alongside its summary (`Payload.Spans`,
+anchored to the `#<id>` markers now rendered into its prompt), reusing
+the watcher, budget, quarantine, and cursor machinery instead of
+standing up a second LLM pipeline.
+
+What remains valid from this design: the `topic_segments` table and its
+extent hierarchy, seal-on-lookahead, the structural tier as the
+always-on zero-egress layer, and expand-to-enclosing-span as the
+retrieval experience. What changed is *who draws the boundaries* (the
+summariser, where it has run) and *what happens next* (search, not
+clustering).
+
+Layering as built:
+
+| Layer | Method | Cost | Role |
+|-------|--------|------|------|
+| Structural | `structural` | local CPU | provisional coverage for every session; the live tail |
+| Compaction window | `compaction` | none (projected from existing rows) | coarse span for every summarised window, incl. all history |
+| Summariser topic spans | `llm` | rides the compaction call | fine, topic-coherent spans where the compactor has run |
+
+Precedence at retrieval is `llm` > `compaction` > `structural`
+(`SegmentMethodRank`); weaker spans are superseded, never deleted.
 
 ---
 
