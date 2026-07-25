@@ -91,45 +91,41 @@ func TestSegmentSessionSealAndNoRewrite(t *testing.T) {
 }
 
 func TestClusterMultiMemberPrimarySecondaryDendrogram(t *testing.T) {
-	// Two sessions with highly similar sealed segments → multi-member theme.
-	// Distinct third topic for secondary-threshold negative control.
-	proj := t.TempDir()
-	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
-
-	mkSession := func(sid, topicA, topicB string) {
-		entries := []map[string]any{
-			metaMsg("user", topicA, base.Format(time.RFC3339), "/Users/a/work/mnemo", "master"),
-			msg("assistant", topicA+" details fts tokenizer diacritic", base.Add(time.Minute).Format(time.RFC3339)),
-			msg("user", topicA+" more", base.Add(2*time.Minute).Format(time.RFC3339)),
-			msg("assistant", topicA+" done", base.Add(3*time.Minute).Format(time.RFC3339)),
-			msg("user", topicB, base.Add(3*time.Hour).Format(time.RFC3339)),
-			msg("assistant", topicB+" mid", base.Add(3*time.Hour+time.Minute).Format(time.RFC3339)),
-			msg("user", topicB+" cont", base.Add(3*time.Hour+2*time.Minute).Format(time.RFC3339)),
-			msg("assistant", topicB+" end", base.Add(3*time.Hour+3*time.Minute).Format(time.RFC3339)),
-			msg("user", "tail pad one", base.Add(3*time.Hour+4*time.Minute).Format(time.RFC3339)),
-			msg("assistant", "tail pad two", base.Add(3*time.Hour+5*time.Minute).Format(time.RFC3339)),
+	// Drive ClusterSealedSegments on controlled sealed rows (not via
+	// structural segmenter), so multi-member cut + dendrogram parents
+	// are deterministic.
+	s := newTestStore(t, t.TempDir())
+	now := time.Now().UTC().Format(time.RFC3339)
+	// Two near-duplicate FTS segments (should merge at cut) + two near-
+	// duplicate vault segments (second leaf) → ≥2 leaf themes → phase-2
+	// parent edge.
+	segs := []struct {
+		id, label, summary string
+	}{
+		{"seg_fts_aaaa01", "fts tokenizer diacritic handling", "fix fts5 tokenizer diacritic unicode"},
+		{"seg_fts_bbbb02", "fts tokenizer diacritic handling again", "fix fts5 tokenizer diacritic unicode path"},
+		{"seg_vault_cc03", "vault export migration documentation", "obsidian vault export migration wing pages"},
+		{"seg_vault_dd04", "vault export migration docs", "obsidian vault export migration wing documentation"},
+	}
+	for i, sg := range segs {
+		_, err := s.writeDB.Exec(`
+			INSERT INTO topic_segments (
+				id, session_id, from_msg_id, to_msg_id, level, parent_id,
+				method, confidence, sealed, label, summary, repo,
+				first_ts, last_ts, computed_at
+			) VALUES (?, ?, ?, ?, 0, NULL, 'structural', 0.9, 1, ?, ?, 'mnemo', ?, ?, ?)
+		`, sg.id, fmt.Sprintf("sess-%d", i), 10*i+1, 10*i+5, sg.label, sg.summary, now, now, now)
+		if err != nil {
+			t.Fatal(err)
 		}
-		writeJSONL(t, proj, "-Users-a-work-mnemo", sid, entries)
 	}
-	mkSession("aaaaaaaa-bbbb-cccc-dddd-000000000101",
-		"fix fts tokenizer diacritic handling",
-		"implement vault export migration documentation")
-	mkSession("aaaaaaaa-bbbb-cccc-dddd-000000000102",
-		"fix fts tokenizer diacritic handling again",
-		"unrelated quantum quantum quantum physics lecture")
-
-	s := newTestStore(t, proj)
-	if err := s.IngestAll(); err != nil {
-		t.Fatal(err)
-	}
-	// SegmentAllSessions clusters at end.
-	if err := s.SegmentAllSessions(); err != nil {
+	if err := s.ClusterSealedSegments(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Every sealed segment has exactly one primary membership.
+	// Exactly one primary per sealed segment.
 	rows, err := s.readDB.Query(`
-		SELECT s.id, COUNT(CASE WHEN m.membership_kind = 'primary' THEN 1 END) AS primaries
+		SELECT s.id, COUNT(CASE WHEN m.membership_kind = 'primary' THEN 1 END)
 		FROM topic_segments s
 		LEFT JOIN theme_members m ON m.entity_id = s.id AND m.doc_kind = 'segment'
 		WHERE s.sealed = 1
@@ -151,11 +147,11 @@ func TestClusterMultiMemberPrimarySecondaryDendrogram(t *testing.T) {
 		}
 	}
 	rows.Close()
-	if sealedCount < 2 {
-		t.Fatalf("need ≥2 sealed segments for multi-member test, got %d", sealedCount)
+	if sealedCount != 4 {
+		t.Fatalf("sealedCount=%d want 4", sealedCount)
 	}
 
-	// At least one theme with ≥2 segment primaries (multi-member cluster).
+	// Multi-member leaf themes (FTS pair and/or vault pair).
 	var multi int
 	if err := s.readDB.QueryRow(`
 		SELECT COUNT(*) FROM (
@@ -167,11 +163,22 @@ func TestClusterMultiMemberPrimarySecondaryDendrogram(t *testing.T) {
 		t.Fatal(err)
 	}
 	if multi < 1 {
-		// Dump for diagnosis
 		t.Fatalf("expected multi-member theme; dump: %s", dumpThemes(t, s))
 	}
 
-	// Secondary rows only at/above threshold.
+	// ≥2 leaf themes so dendrogram phase has work.
+	var leafThemes int
+	if err := s.readDB.QueryRow(`
+		SELECT COUNT(DISTINCT theme_id) FROM theme_members
+		WHERE doc_kind = 'segment' AND membership_kind = 'primary'
+	`).Scan(&leafThemes); err != nil {
+		t.Fatal(err)
+	}
+	if leafThemes < 2 {
+		t.Fatalf("need ≥2 leaf themes for dendrogram, got %d: %s", leafThemes, dumpThemes(t, s))
+	}
+
+	// Secondary only ≥ threshold.
 	secRows, err := s.readDB.Query(`
 		SELECT similarity FROM theme_members
 		WHERE doc_kind = 'segment' AND membership_kind = 'secondary'
@@ -190,30 +197,40 @@ func TestClusterMultiMemberPrimarySecondaryDendrogram(t *testing.T) {
 	}
 	secRows.Close()
 
-	// Dendrogram navigability: if any parent_theme_id set, ThemeAncestors walks it.
+	// Dendrogram required: parent_theme_id edges + ThemeAncestors.
+	var withParent int
+	if err := s.readDB.QueryRow(`
+		SELECT COUNT(*) FROM themes
+		WHERE parent_theme_id IS NOT NULL AND parent_theme_id != ''
+	`).Scan(&withParent); err != nil {
+		t.Fatal(err)
+	}
+	if withParent < 1 {
+		t.Fatalf("expected dendrogram parent_theme_id edges, got 0: %s", dumpThemes(t, s))
+	}
 	var child, parent string
-	_ = s.readDB.QueryRow(`
+	if err := s.readDB.QueryRow(`
 		SELECT id, parent_theme_id FROM themes
 		WHERE parent_theme_id IS NOT NULL AND parent_theme_id != ''
 		LIMIT 1
-	`).Scan(&child, &parent)
-	if child != "" {
-		chain, err := s.ThemeAncestors(child)
-		if err != nil {
-			t.Fatal(err)
+	`).Scan(&child, &parent); err != nil {
+		t.Fatal(err)
+	}
+	chain, err := s.ThemeAncestors(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain) < 2 || chain[0] != child {
+		t.Fatalf("ThemeAncestors=%v want [child, …parent…]", chain)
+	}
+	foundParent := false
+	for _, id := range chain {
+		if id == parent {
+			foundParent = true
 		}
-		if len(chain) < 2 || chain[0] != child {
-			t.Fatalf("ThemeAncestors=%v want child then parent", chain)
-		}
-		foundParent := false
-		for _, id := range chain {
-			if id == parent {
-				foundParent = true
-			}
-		}
-		if !foundParent {
-			t.Errorf("parent %s not in ancestors %v", parent, chain)
-		}
+	}
+	if !foundParent {
+		t.Errorf("parent %s not in ancestors %v", parent, chain)
 	}
 }
 

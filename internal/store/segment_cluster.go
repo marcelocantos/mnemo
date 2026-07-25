@@ -17,7 +17,8 @@ import (
 // SecondaryThemeThreshold: centroid cosine above this → secondary membership.
 const SecondaryThemeThreshold = 0.35
 
-// ClusterMergeThreshold: single-link merge while nearest pair ≥ this.
+// ClusterMergeThreshold: single-link merge while nearest pair ≥ this
+// defines the hard cut (primary theme assignment).
 const ClusterMergeThreshold = 0.45
 
 type segDoc struct {
@@ -38,11 +39,17 @@ type aggCluster struct {
 }
 
 // ClusterSealedSegments runs single-link agglomerative clustering over
-// sealed topic segments. Multi-member themes share one theme_id (stable
-// hash of sorted member segment ids). Dendrogram parents populate
-// themes.parent_theme_id/depth. Each segment gets exactly one primary
-// membership; secondary rows are written only when cosine to another
-// leaf-theme centroid ≥ SecondaryThemeThreshold.
+// sealed topic segments.
+//
+// Phase 1 (cut): merge while pair sim ≥ ClusterMergeThreshold → leaf
+// themes (primary membership; multi-member when similar segments merge).
+//
+// Phase 2 (dendrogram): continue merging past the cut until one root
+// remains, creating parent themes and setting parent_theme_id/depth so
+// ancestors are navigable (reverses flat-themes non-goal).
+//
+// Secondary memberships: cosine to another leaf-theme centroid ≥
+// SecondaryThemeThreshold (never below).
 func (s *Store) ClusterSealedSegments() error {
 	rows, err := s.readDB.Query(`
 		SELECT id, session_id, COALESCE(repo,''), COALESCE(label,''), COALESCE(summary,''),
@@ -104,7 +111,6 @@ func (s *Store) ClusterSealedSegments() error {
 		for t := range out {
 			out[t] *= inv
 		}
-		// re-L2
 		var norm float64
 		for _, v := range out {
 			norm += v * v
@@ -125,22 +131,20 @@ func (s *Store) ClusterSealedSegments() error {
 		sort.Strings(ids)
 		return ids
 	}
-
-	for len(active) >= 2 {
-		bestI, bestJ := -1, -1
-		bestSim := -1.0
+	bestPair := func() (bi, bj int, sim float64) {
+		bi, bj, sim = -1, -1, -1
 		for i := 0; i < len(active); i++ {
 			for j := i + 1; j < len(active); j++ {
-				sim := pairSim(all[active[i]], all[active[j]])
-				if sim > bestSim {
-					bestSim = sim
-					bestI, bestJ = i, j
+				s := pairSim(all[active[i]], all[active[j]])
+				if s > sim {
+					sim = s
+					bi, bj = i, j
 				}
 			}
 		}
-		if bestSim < ClusterMergeThreshold {
-			break
-		}
+		return
+	}
+	mergeActive := func(bestI, bestJ int) int {
 		ai, aj := active[bestI], active[bestJ]
 		merged := append(append([]int{}, all[ai].members...), all[aj].members...)
 		sort.Ints(merged)
@@ -154,6 +158,20 @@ func (s *Store) ClusterSealedSegments() error {
 		all[aj].parent = newIdx
 		active[bestI] = newIdx
 		active = append(active[:bestJ], active[bestJ+1:]...)
+		return newIdx
+	}
+
+	// Phase 1: hard cut.
+	for len(active) >= 2 {
+		bi, bj, sim := bestPair()
+		if bi < 0 || sim < ClusterMergeThreshold {
+			break
+		}
+		// bestJ must be > bestI for slice delete — ensure order
+		if bj < bi {
+			bi, bj = bj, bi
+		}
+		mergeActive(bi, bj)
 	}
 
 	type themeRow struct {
@@ -167,13 +185,13 @@ func (s *Store) ClusterSealedSegments() error {
 		last    string
 		cent    map[string]float64
 		members []int
+		isLeaf  bool
 	}
 	themes := map[string]*themeRow{}
-	leafOf := make([]string, n) // primary theme per doc index
+	leafOf := make([]string, n)      // primary theme per doc
+	clusterTheme := map[int]string{} // active cluster idx → theme id
 
-	// Leaf themes = active cut clusters.
-	for _, ci := range active {
-		c := all[ci]
+	makeThemeFromCluster := func(c aggCluster, isLeaf bool) *themeRow {
 		ids := memberSegIDs(c)
 		tid := themeIDFromMembers(ids)
 		label, summary := docs[c.members[0]].label, docs[c.members[0]].summary
@@ -196,53 +214,76 @@ func (s *Store) ClusterSealedSegments() error {
 			if d.lastTS != "" && (last == "" || d.lastTS > last) {
 				last = d.lastTS
 			}
-			leafOf[mi] = tid
 		}
-		repoList := sortedKeys(repos)
-		themes[tid] = &themeRow{
-			id: tid, label: label, summary: summary, repos: repoList,
-			depth: 0, first: first, last: last, cent: centroid(c), members: append([]int{}, c.members...),
+		if label == "" {
+			label = "theme"
+		}
+		return &themeRow{
+			id: tid, label: label, summary: summary, repos: sortedKeys(repos),
+			depth: 0, first: first, last: last, cent: centroid(c),
+			members: append([]int{}, c.members...), isLeaf: isLeaf,
 		}
 	}
 
-	// Dendrogram parents: climb from each active leaf; when a merge node
-	// contains multiple leaf themes, emit a parent theme for that node.
+	// Leaf themes at the cut (primary membership).
 	for _, ci := range active {
-		leafTID := leafOf[all[ci].members[0]]
-		cur := all[ci].parent
-		childTID := leafTID
-		depth := 0
-		for cur >= 0 {
-			// Leaf themes represented under this merge node.
-			leafSet := map[string]struct{}{}
-			for _, mi := range all[cur].members {
-				if lt := leafOf[mi]; lt != "" {
-					leafSet[lt] = struct{}{}
-				}
-			}
-			if len(leafSet) >= 2 {
-				ids := memberSegIDs(all[cur])
-				pid := themeIDFromMembers(ids)
-				if _, ok := themes[pid]; !ok {
-					themes[pid] = &themeRow{
-						id:      pid,
-						label:   "merged-theme",
-						summary: fmt.Sprintf("dendrogram merge of %d segments", len(ids)),
-						depth:   depth + 1,
-						cent:    centroid(all[cur]),
-						members: append([]int{}, all[cur].members...),
-					}
-				}
-				if tw, ok := themes[childTID]; ok && tw.parent == "" {
-					tw.parent = pid
-					tw.depth = depth
-				}
-				childTID = pid
-				depth++
-			}
-			cur = all[cur].parent
+		tw := makeThemeFromCluster(all[ci], true)
+		themes[tw.id] = tw
+		clusterTheme[ci] = tw.id
+		for _, mi := range all[ci].members {
+			leafOf[mi] = tw.id
 		}
 	}
+
+	// Phase 2: continue merges to a single root for dendrogram parents.
+	// Even weak pairs are merged so parent_theme_id is always navigable
+	// when ≥2 leaf themes exist.
+	for len(active) >= 2 {
+		bi, bj, _ := bestPair()
+		if bi < 0 {
+			break
+		}
+		if bj < bi {
+			bi, bj = bj, bi
+		}
+		// Capture child theme ids before merge mutates active.
+		childAI, childAJ := active[bi], active[bj]
+		tidA := clusterTheme[childAI]
+		tidB := clusterTheme[childAJ]
+		newIdx := mergeActive(bi, bj)
+		parentTW := makeThemeFromCluster(all[newIdx], false)
+		parentTW.label = "merged-theme"
+		parentTW.summary = fmt.Sprintf("dendrogram merge of %d segments", len(all[newIdx].members))
+		// Parent depth = 1 + max(child depths)
+		dA, dB := 0, 0
+		if tw, ok := themes[tidA]; ok {
+			dA = tw.depth
+		}
+		if tw, ok := themes[tidB]; ok {
+			dB = tw.depth
+		}
+		depth := dA
+		if dB > depth {
+			depth = dB
+		}
+		parentTW.depth = depth + 1
+		// Children point at parent; child depth stays (distance from leaf).
+		// Design: depth is dendrogram depth — leaves 0, parents higher.
+		if tw, ok := themes[tidA]; ok {
+			tw.parent = parentTW.id
+			// leaf keeps depth 0; intermediate nodes already have depth
+		}
+		if tw, ok := themes[tidB]; ok {
+			tw.parent = parentTW.id
+		}
+		themes[parentTW.id] = parentTW
+		clusterTheme[newIdx] = parentTW.id
+	}
+
+	// Recompute leaf depths as distance-to-root for navigability consistency:
+	// leaf depth = 0; after parents set, set depth = parent.depth - 1 walking down.
+	// Already: leaves 0, parents increasing. Ensure intermediate child depths
+	// that are themselves parents stay correct (they got depth when created).
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.writeDB.Begin()
@@ -258,7 +299,7 @@ func (s *Store) ClusterSealedSegments() error {
 		return err
 	}
 
-	// Insert parents before children: higher depth first.
+	// Parents (higher depth) before children.
 	ordered := make([]*themeRow, 0, len(themes))
 	for _, tw := range themes {
 		ordered = append(ordered, tw)
@@ -283,19 +324,14 @@ func (s *Store) ClusterSealedSegments() error {
 		if tw.parent != "" {
 			parent = tw.parent
 		}
-		label := tw.label
-		if label == "" {
-			label = "theme"
-		}
 		if _, err := tx.Exec(`
 			INSERT INTO themes (id, label, summary, weight, repos, parent_theme_id, depth, first_seen, last_touched, computed_at)
 			VALUES (?, ?, ?, 0.9, ?, ?, ?, ?, ?, ?)
-		`, tw.id, label, tw.summary, reposJSON, parent, tw.depth, tw.first, tw.last, now); err != nil {
+		`, tw.id, tw.label, tw.summary, reposJSON, parent, tw.depth, tw.first, tw.last, now); err != nil {
 			return fmt.Errorf("insert theme %s: %w", tw.id, err)
 		}
 	}
 
-	// Exactly one primary per segment.
 	for mi, tid := range leafOf {
 		if tid == "" {
 			continue
@@ -308,13 +344,12 @@ func (s *Store) ClusterSealedSegments() error {
 		}
 	}
 
-	// Leaf themes for secondary pass.
 	leafThemes := map[string]*themeRow{}
 	for _, tid := range leafOf {
 		if tid == "" {
 			continue
 		}
-		if tw, ok := themes[tid]; ok {
+		if tw, ok := themes[tid]; ok && tw.isLeaf {
 			leafThemes[tid] = tw
 		}
 	}
