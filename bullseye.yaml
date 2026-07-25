@@ -589,6 +589,24 @@ targets:
     origin: manual
     discovered: 2026-07-14
     achieved: 2026-07-14
+  T114:
+    name: HTTP and /health are available from process start; boot phases (pre-migration backup, schema apply) are reported while the store opens
+    status: identified
+    value: 80.0
+    cost: 15.0
+    acceptance:
+    - ListenAndServe starts before eager ForUser / store.New
+    - GET /health responds during multi-minute pre-migration VACUUM+gzip
+    - /health startup.ready (or equivalent) reports current boot phase including backup substeps
+    - Registry.ForUser does not hold the registry mutex across store.New
+    - Unit tests cover boot status and backup OnStep
+    context: 'Eager ForUser blocked ListenAndServe for the entire pre-migration backup of multi-GB mnemo.db (~4+ minutes). Health API could not work during that window. Fix: listen-first + boot status + unlock ForUser during New.'
+    tags:
+    - startup
+    - health
+    - ux
+    origin: manual
+    discovered: 2026-07-25
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
