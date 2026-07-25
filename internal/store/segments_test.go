@@ -322,19 +322,66 @@ func TestWatermarkSkipsFullySegmentedSessions(t *testing.T) {
 
 	// SegmentAllSessions dirty filter: session fully watermarked should not
 	// appear as needing work (count of dirty queries).
-	var dirty int
-	if err := s.readDB.QueryRow(`
-		SELECT COUNT(*)
-		FROM session_summary ss
-		LEFT JOIN segment_scan_state st ON st.session_id = ss.session_id
-		WHERE COALESCE(
-			(SELECT MAX(m.id) FROM messages m WHERE m.session_id = ss.session_id), 0
-		) > COALESCE(st.segmented_through_id, 0)
-	`).Scan(&dirty); err != nil {
+	ids, err := s.dirtySegmentSessionIDs()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if dirty != 0 {
-		t.Fatalf("expected 0 dirty sessions, got %d", dirty)
+	if len(ids) != 0 {
+		t.Fatalf("expected 0 dirty sessions, got %d %v", len(ids), ids)
+	}
+}
+
+// TestDirtySegmentSessionIDsNewestFirst asserts segment backfill walks
+// sessions by last_msg DESC so recent work converges before archives.
+func TestDirtySegmentSessionIDsNewestFirst(t *testing.T) {
+	proj := t.TempDir()
+	oldBase := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	newBase := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	// Enough turns for structural seals on both sessions.
+	mkEntries := func(base time.Time, topic string) []map[string]any {
+		return []map[string]any{
+			metaMsg("user", topic+" a", base.Format(time.RFC3339), "/Users/a/work/mnemo", "master"),
+			msg("assistant", topic+" a-ack", base.Add(time.Minute).Format(time.RFC3339)),
+			msg("user", topic+" b", base.Add(2*time.Minute).Format(time.RFC3339)),
+			msg("assistant", topic+" b-ack", base.Add(3*time.Minute).Format(time.RFC3339)),
+			msg("user", topic+" gap topic", base.Add(3*time.Hour).Format(time.RFC3339)),
+			msg("assistant", topic+" gap-ack", base.Add(3*time.Hour+time.Minute).Format(time.RFC3339)),
+			msg("user", topic+" tail1", base.Add(3*time.Hour+2*time.Minute).Format(time.RFC3339)),
+			msg("assistant", topic+" tail2", base.Add(3*time.Hour+3*time.Minute).Format(time.RFC3339)),
+			msg("user", topic+" tail3", base.Add(3*time.Hour+4*time.Minute).Format(time.RFC3339)),
+			msg("assistant", topic+" tail4", base.Add(3*time.Hour+5*time.Minute).Format(time.RFC3339)),
+		}
+	}
+	oldSID := "aaaaaaaa-bbbb-cccc-dddd-0000000000aa"
+	newSID := "aaaaaaaa-bbbb-cccc-dddd-0000000000bb"
+	writeJSONL(t, proj, "-Users-a-work-mnemo", oldSID, mkEntries(oldBase, "old"))
+	writeJSONL(t, proj, "-Users-a-work-mnemo", newSID, mkEntries(newBase, "new"))
+	s := newTestStore(t, proj)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := s.dirtySegmentSessionIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) < 2 {
+		t.Fatalf("want ≥2 dirty sessions, got %v", ids)
+	}
+	// Newest must be first among the two we created.
+	var posOld, posNew = -1, -1
+	for i, id := range ids {
+		switch id {
+		case oldSID:
+			posOld = i
+		case newSID:
+			posNew = i
+		}
+	}
+	if posOld < 0 || posNew < 0 {
+		t.Fatalf("missing sessions in dirty list: %v", ids)
+	}
+	if posNew > posOld {
+		t.Fatalf("expected newest session before oldest; new@%d old@%d ids=%v", posNew, posOld, ids)
 	}
 }
 

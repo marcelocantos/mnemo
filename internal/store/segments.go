@@ -230,9 +230,10 @@ func (s *Store) SegmentSession(sessionID string) error {
 	return tx.Commit()
 }
 
-// SegmentAllSessions segments sessions that have messages past their
-// seal watermark, then reclusters all sealed segments into themes.
-func (s *Store) SegmentAllSessions() error {
+// dirtySegmentSessionIDs returns sessions with messages past their seal
+// watermark, newest activity first. Matches ingest (mtime DESC) and
+// compaction (last_msg DESC) so backfill converges on recent work first.
+func (s *Store) dirtySegmentSessionIDs() ([]string, error) {
 	rows, err := s.readDB.Query(`
 		SELECT ss.session_id
 		FROM session_summary ss
@@ -241,10 +242,12 @@ func (s *Store) SegmentAllSessions() error {
 			(SELECT MAX(m.id) FROM messages m WHERE m.session_id = ss.session_id),
 			0
 		) > COALESCE(st.segmented_through_id, 0)
+		ORDER BY ss.last_msg DESC, ss.session_id ASC
 	`)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer rows.Close()
 	var ids []string
 	for rows.Next() {
 		var id string
@@ -252,7 +255,17 @@ func (s *Store) SegmentAllSessions() error {
 			ids = append(ids, id)
 		}
 	}
-	rows.Close()
+	return ids, rows.Err()
+}
+
+// SegmentAllSessions segments sessions that have messages past their
+// seal watermark (newest first), then reclusters all sealed segments
+// into themes.
+func (s *Store) SegmentAllSessions() error {
+	ids, err := s.dirtySegmentSessionIDs()
+	if err != nil {
+		return err
+	}
 	for _, id := range ids {
 		if err := s.SegmentSession(id); err != nil {
 			slog.Warn("segment session failed", "session", id, "err", err)
