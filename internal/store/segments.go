@@ -65,10 +65,34 @@ type SegmentExpandHit struct {
 	Sealed    bool   `json:"sealed"`
 }
 
+// defaultClusterDebounce is how long after the last SegmentSession we
+// wait before running ClusterSealedSegments. Long enough to absorb a
+// burst of Watch appends; short enough that themes stay useful.
+const defaultClusterDebounce = 30 * time.Second
+
+// scheduleClusterSealed requests a debounced global recluster. Safe to
+// call from any goroutine; concurrent kicks reset the timer.
+func (s *Store) scheduleClusterSealed() {
+	period := s.clusterPeriod
+	if period <= 0 {
+		period = defaultClusterDebounce
+	}
+	s.clusterMu.Lock()
+	defer s.clusterMu.Unlock()
+	if s.clusterTimer != nil {
+		s.clusterTimer.Stop()
+	}
+	s.clusterTimer = time.AfterFunc(period, func() {
+		if err := s.ClusterSealedSegments(); err != nil {
+			slog.Warn("debounced cluster sealed segments failed", "err", err)
+		}
+	})
+}
+
 // SegmentSession runs Tier-1 structural segmentation for one session
 // and persists spans. Unsealed spans are replaced each pass; sealed
 // spans are never rewritten. Theme clustering is a separate global
-// pass (ClusterSealedSegments).
+// pass (ClusterSealedSegments / scheduleClusterSealed).
 //
 // Watermark: if max(messages.id) ≤ segmented_through_id, the sealed
 // prefix is complete and there is no new tail — skip work.
