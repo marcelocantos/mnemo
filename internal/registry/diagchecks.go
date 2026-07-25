@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -44,6 +45,33 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 	}
 
 	reg.Register(
+		// Process boot phase: listen-first startup keeps /health up while
+		// pre-migration VACUUM+gzip or sqlift.Apply runs (multi-minute on
+		// large DBs). Warn until ready so the report is not a false green.
+		diag.Check{Name: "startup.ready", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			st := boot.Get()
+			switch st.Phase {
+			case boot.PhaseReady:
+				return diag.Healthy("default-user store ready")
+			case boot.PhaseFailed:
+				return diag.Failure(
+					"startup failed: "+st.Detail,
+					"check the daemon log; fix the underlying open/migration error and restart mnemo")
+			case boot.PhasePreMigrationBackup:
+				return diag.Warning(
+					boot.Summary(),
+					"pre-migration backup (VACUUM INTO + gzip) can take several minutes on multi-GB DBs; HTTP/MCP stay up — wait, or check the daemon log")
+			case boot.PhaseApplyingSchema:
+				return diag.Warning(
+					boot.Summary(),
+					"schema migration in progress; wait for apply + ANALYZE to finish")
+			default:
+				return diag.Warning(
+					boot.Summary(),
+					"daemon is still bringing up the default-user store; /health stays available")
+			}
+		}},
+
 		diag.Check{Name: "compactor.workdir", Tier: diag.Full, Run: func(context.Context) diag.CheckResult {
 			if workDir == "" {
 				return diag.Failure(
@@ -128,7 +156,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "ingest.backfill", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
-				return diag.Healthy("store not started yet")
+				return storeNotReadyResult("ingest.backfill")
 			}
 			if time.Since(daemonStart) < 10*time.Minute {
 				return diag.Healthy("startup backfill in progress")
@@ -152,7 +180,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "db.readable", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
-				return diag.Healthy("store not started yet")
+				return storeNotReadyResult("db.readable")
 			}
 			if _, err := s.Query("SELECT 1 AS ok"); err != nil {
 				return diag.Failure(
@@ -165,7 +193,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "db.wal", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
-				return diag.Healthy("store not started yet")
+				return storeNotReadyResult("db.wal")
 			}
 			fi, err := os.Stat(s.DBPath() + "-wal")
 			if err != nil {
@@ -256,4 +284,21 @@ func expandTilde(p string) string {
 		}
 	}
 	return p
+}
+
+// storeNotReadyResult reports boot progress when a check needs the
+// default-user store but ForUser has not finished yet.
+func storeNotReadyResult(check string) diag.CheckResult {
+	st := boot.Get()
+	switch st.Phase {
+	case boot.PhaseFailed:
+		return diag.Failure("store unavailable: "+st.Detail, "see startup.ready")
+	case boot.PhaseReady:
+		// Race: boot marked ready but registry map not visible yet.
+		return diag.Warning("store not visible yet", "retry /health shortly")
+	case boot.PhaseStarting:
+		return diag.Healthy(check + ": store not started yet")
+	default:
+		return diag.Warning(boot.Summary(), "see startup.ready")
+	}
 }

@@ -26,6 +26,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/plugin"
@@ -73,10 +74,15 @@ type Registry struct {
 	// leaving the registry with two live exporters per user. mu is
 	// still acquired in fine-grained sections inside Reload; reloadMu
 	// is the coarse-grained guard.
-	reloadMu          sync.Mutex
-	baseCtx           context.Context
-	cancel            context.CancelFunc
-	stores            map[string]*userEntry
+	reloadMu sync.Mutex
+	baseCtx  context.Context
+	cancel   context.CancelFunc
+	stores   map[string]*userEntry
+	// creating is single-flight for in-progress ForUser constructions.
+	// store.New (schema + pre-migration backup) can take minutes on a
+	// large DB; we must not hold mu across that window or /health and
+	// other registry methods block for the whole backup.
+	creating          map[string]chan struct{}
 	cfg               store.Config
 	summariserWorkDir string
 	compactorModel    string
@@ -127,6 +133,7 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 		baseCtx:           ctx,
 		cancel:            cancel,
 		stores:            map[string]*userEntry{},
+		creating:          map[string]chan struct{}{},
 		cfg:               cfg,
 		summariserWorkDir: summariserWorkDir,
 		compactorModel:    "sonnet",
@@ -186,17 +193,65 @@ func (r *Registry) SignalEvaluator() *plugin.SignalEvaluator {
 //
 // Callers that must never silently index SYSTEM's profile should
 // reject the empty username up-front via DefaultUsername.
+//
+// Heavy work (store.New → applySchema → pre-migration backup) runs
+// *outside* r.mu so /health and other registry methods stay responsive
+// during multi-minute startups. Concurrent first-access for the same
+// username single-flights via r.creating.
 func (r *Registry) ForUser(username string) (*store.Store, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	for {
+		r.mu.Lock()
+		if r.stores == nil {
+			r.mu.Unlock()
+			return nil, fmt.Errorf("registry is closed")
+		}
+		if e, ok := r.stores[username]; ok {
+			s := e.store
+			r.mu.Unlock()
+			return s, nil
+		}
+		if wait, ok := r.creating[username]; ok {
+			r.mu.Unlock()
+			<-wait
+			continue // re-check stores / closed after peer finishes
+		}
+		done := make(chan struct{})
+		r.creating[username] = done
+		cfg := r.cfg
+		r.mu.Unlock()
 
-	if r.stores == nil {
-		return nil, fmt.Errorf("registry is closed")
+		entry, err := r.openUserStore(username, cfg)
+		r.mu.Lock()
+		delete(r.creating, username)
+		close(done)
+		if r.stores == nil {
+			r.mu.Unlock()
+			if entry != nil && entry.store != nil {
+				entry.store.Close()
+			}
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("registry is closed")
+		}
+		if err != nil {
+			r.mu.Unlock()
+			return nil, err
+		}
+		// Another path cannot have inserted the same user while we held
+		// the creating slot; still guard closed-races above.
+		r.stores[username] = entry
+		boot.Set(boot.PhaseStartingWorkers, "starting per-user workers for "+username)
+		r.startWorkers(username, entry.projectDir, entry)
+		st := entry.store
+		r.mu.Unlock()
+		return st, nil
 	}
-	if e, ok := r.stores[username]; ok {
-		return e.store, nil
-	}
+}
 
+// openUserStore builds a store + vault entry without holding r.mu.
+// The caller owns single-flight and the insert into r.stores.
+func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry, error) {
 	home, err := store.ResolveHomeFor(username)
 	if err != nil {
 		return nil, err
@@ -216,15 +271,15 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store for %q: %w", username, err)
 	}
-	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
-	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
+	s.SetWorkspaceRoots(cfg.ResolvedWorkspaceRoots())
+	s.SetExtraProjectDirs(cfg.ExtraProjectDirs)
 	s.SetCodexRoots(store.CodexRootsFor(home)) // 🎯T99: index ~/.codex rollouts
 	s.SetGrokRoots(store.GrokRootsFor(home))   // 🎯T110: index ~/.grok sessions
-	s.SetTodoGlobs(r.cfg.TodoGlobs)
+	s.SetTodoGlobs(cfg.TodoGlobs)
 
-	synthRoots := r.cfg.ResolvedSynthesisRoots()
+	synthRoots := cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
-	if vaultPath := r.cfg.ResolvedVaultPath(home); vaultPath != "" {
+	if vaultPath := cfg.ResolvedVaultPath(home); vaultPath != "" {
 		// Exclude the vault path from ingest walkers before any
 		// Ingest* call runs. Without this, a vault sitting inside a
 		// synthesis root or repo docs/ tree would have its generated
@@ -233,8 +288,8 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 		s.RegisterExcludedPath(vaultPath, "vault_path")
 		s.SetVaultPath(vaultPath) // 🎯T68.6: vault divergence + GC machinery needs the path
 		exp, err := vault.New(s, vaultPath, vault.Options{
-			Layout:        r.cfg.ResolvedVaultLayout(vaultPath),
-			SoakWarnAfter: r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+			Layout:        cfg.ResolvedVaultLayout(vaultPath),
+			SoakWarnAfter: cfg.ResolvedVaultLayoutSoakWarnAfter(),
 		})
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
@@ -244,10 +299,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	}
 	s.SetSynthesisRoots(synthRoots)
 
-	e := &userEntry{store: s, vault: vaultExp, homeDir: home, projectDir: projectDir}
-	r.stores[username] = e
-	r.startWorkers(username, projectDir, e)
-	return s, nil
+	return &userEntry{store: s, vault: vaultExp, homeDir: home, projectDir: projectDir}, nil
 }
 
 // SetUpgradeDetector wires the 🎯T97.2 release detector for diag checks.
@@ -722,10 +774,10 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 // them to the same cancellation as the periodic-sync/watcher pair.
 // Returns nil when e.vault is nil (no workers started).
 //
-// PRECONDITION: caller MUST hold r.mu. ForUser owns it via its defer
-// for the entire Store-construction path; swapVault re-acquires it
-// after building the new exporter. Re-acquiring inside this function
-// would self-deadlock the ForUser path.
+// PRECONDITION: caller MUST hold r.mu. ForUser holds it only around
+// startWorkers (not during store.New); swapVault re-acquires it after
+// building the new exporter. Re-acquiring inside this function would
+// self-deadlock those paths.
 //
 // The vault pointer is captured locally so a concurrent hot-swap that
 // replaces e.vault does not race with the goroutines already running

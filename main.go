@@ -46,6 +46,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/api"
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/edgeproxy"
@@ -974,23 +975,16 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// without an explicit ?user=<name> query parameter. On a Windows
 	// Service deployment (running as LocalSystem) there is no
 	// sensible default, so every request MUST carry a user.
+	//
+	// Eager ForUser is deferred until *after* ListenAndServe so /health
+	// (and the rest of the HTTP surface) is available during multi-minute
+	// pre-migration backups and schema apply. See eagerOpenDefaultUser
+	// below the listener start.
 	defaultUser, defErr := store.DefaultUsername()
 	if defErr != nil {
 		slog.Info("no default user — requests must include ?user=<name>", "reason", defErr)
 	} else {
 		slog.Info("default user", "user", defaultUser)
-		// Eager-start the default user's per-user workers (compactor,
-		// reviewer, CI poller, backup worker, etc.) at daemon boot. Without
-		// this, ForUser is only invoked when the first MCP tool call lands
-		// — so a daemon nobody pokes never starts its backup worker, never
-		// runs ingest, etc. (🎯T62).
-		//
-		// Multi-user lazy startup still works: ForUser(otherUser) for a
-		// non-default user keeps firing on demand.
-		if _, err := reg.ForUser(defaultUser); err != nil {
-			slog.Error("eager startup failed for default user", "user", defaultUser, "err", err)
-			return err
-		}
 	}
 
 	// Self-diagnostics (🎯T83). A registry of health checks (summariser
@@ -1000,6 +994,8 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// suite hourly. A fail-severity transition fires an opt-out OS
 	// notification that deep-links to the dashboard health page. The same
 	// registry backs the /health endpoint and the mnemo_doctor tool.
+	// Built before the store opens so /health can report boot phases
+	// (startup.ready) during pre-migration backup.
 	daemonStart := time.Now()
 	diagReg := reg.BuildDiagRegistry(defaultUser, daemonStart)
 	dashHost := addr
@@ -1281,8 +1277,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Run the local HTTP server in a goroutine so we can react to ctx
 	// cancellation (triggered by the Windows Service handler on SCM
 	// Stop, or never triggered in the foreground case).
+	//
+	// Listen BEFORE eager store open: pre-migration backup can take
+	// minutes on a multi-GB mnemo.db. /health must answer throughout
+	// and report the boot phase (startup.ready).
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
+	boot.Set(boot.PhaseListening, "HTTP listener up on "+addr+"; opening default-user store")
 
 	// Start the menu-bar shim supervisor (🎯T85.5). It honours menu_bar_app
 	// (initial value set above) and reacts to live toggles via Put, so the
@@ -1310,11 +1311,50 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		}
 	}
 
-	select {
-	case err := <-errCh:
-		slog.Error("HTTP MCP server failed", "err", err)
-		return err
-	case <-ctx.Done():
+	// Eager-start the default user's per-user workers (compactor,
+	// reviewer, CI poller, backup worker, etc.) at daemon boot (🎯T62).
+	// Runs after ListenAndServe so health stays available during
+	// store.New → applySchema → pre-migration VACUUM+gzip.
+	// Multi-user lazy startup still works: ForUser(otherUser) on demand.
+	// Open in a goroutine so an immediate Listen failure is not masked
+	// by a multi-minute backup.
+	openErrCh := make(chan error, 1)
+	if defErr == nil {
+		go func() {
+			openErrCh <- eagerOpenDefaultUser(reg, defaultUser)
+		}()
+	} else {
+		// Windows Service / no default identity: ready means "listener
+		// up; stores open on first ?user= request".
+		boot.Set(boot.PhaseReady, "listening; no default user (open stores on demand)")
+		openErrCh <- nil
+	}
+
+	// Wait until the default-user store is open (or open is skipped),
+	// or until the HTTP server fails / ctx cancels. Once open succeeds,
+	// keep serving until Listen fails or ctx cancels.
+	for {
+		select {
+		case err := <-errCh:
+			slog.Error("HTTP MCP server failed", "err", err)
+			return err
+		case err := <-openErrCh:
+			if err != nil {
+				slog.Error("eager startup failed for default user", "user", defaultUser, "err", err)
+				_ = httpServer.Close()
+				if fedSrv != nil {
+					_ = fedSrv.Close()
+				}
+				return err
+			}
+			// Store ready — ignore further openErrCh (nil channel pattern:
+			// reassign so subsequent loop iterations only wait on err/ctx).
+			openErrCh = nil
+			continue
+		case <-ctx.Done():
+			// drain below
+		}
+
 		slog.Info("mnemo serve draining", "deadline", drainDeadline)
 		// Ordered graceful drain (🎯T97.1), bounded by drainDeadline:
 		//   1. stop intake      — refuse new MCP/HTTP/federated requests,
@@ -1366,6 +1406,21 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			return nil // unreachable; os.Exit does not return
 		}
 	}
+}
+
+// eagerOpenDefaultUser opens the default user's store and starts its
+// workers (🎯T62). Called after the HTTP listener is up so /health can
+// report boot.Phase* while store.New runs pre-migration backup / schema
+// apply. Sets boot.PhaseReady on success or boot.Fail on error.
+func eagerOpenDefaultUser(reg *registry.Registry, defaultUser string) error {
+	boot.Set(boot.PhaseOpeningStore, "eager-open default user "+defaultUser)
+	if _, err := reg.ForUser(defaultUser); err != nil {
+		boot.Fail(err)
+		return err
+	}
+	boot.Set(boot.PhaseReady, "default-user store ready")
+	slog.Info("default-user store ready", "user", defaultUser)
+	return nil
 }
 
 // atomicTime is a mutex-guarded time.Time for MCP activity tracking.

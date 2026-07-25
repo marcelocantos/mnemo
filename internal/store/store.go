@@ -29,6 +29,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/sqldeep/go/sqldeep"
 	"github.com/marcelocantos/sqlift/go/sqlift"
 	_ "github.com/mattn/go-sqlite3"
@@ -686,6 +687,11 @@ func applySchema(dbPath string) error {
 	// shared lock for VACUUM INTO, so the original close-and-reopen
 	// was unnecessary on every platform — Linux/macOS just tolerated
 	// it where Windows didn't.
+	//
+	// Publish boot phase so /health can report "busy: pre-migration
+	// backup" while VACUUM INTO + gzip run — which can take minutes on
+	// multi-GB production DBs. The HTTP listener is already up by then
+	// (runServe listens before eager ForUser).
 	if len(current.Tables) > 0 {
 		backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 		if err := os.MkdirAll(backupDir, 0o755); err != nil {
@@ -694,7 +700,13 @@ func applySchema(dbPath string) error {
 		} else {
 			destPath := filepath.Join(backupDir,
 				backup.Filename(backup.TagPreMigration, time.Now()))
-			res, berr := backup.Backup(dbPath, destPath)
+			boot.Set(boot.PhasePreMigrationBackup,
+				fmt.Sprintf("pre-migration snapshot of %s", filepath.Base(dbPath)))
+			res, berr := backup.BackupWith(dbPath, destPath, &backup.BackupArgs{
+				OnStep: func(step string) {
+					boot.Set(boot.PhasePreMigrationBackup, step)
+				},
+			})
 			if berr != nil {
 				slog.Warn("pre-migration backup failed; proceeding with migration anyway",
 					"err", berr)
@@ -708,6 +720,7 @@ func applySchema(dbPath string) error {
 		}
 	}
 
+	boot.Set(boot.PhaseApplyingSchema, "applying additive schema migration (sqlift AllowNone)")
 	if err := sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone}); err != nil {
 		return err
 	}
@@ -720,6 +733,7 @@ func applySchema(dbPath string) error {
 	// migration (rare; this path already took a pre-migration backup), so
 	// it is not a per-startup cost. Best-effort: a failure only costs
 	// planner stats, never correctness.
+	boot.Set(boot.PhaseApplyingSchema, "post-migration ANALYZE (planner statistics)")
 	analyzeForPlanner(dbPath)
 	return nil
 }
@@ -807,7 +821,9 @@ func applyFreshSchema(dbPath string) (bool, error) {
 func New(dbPath, projectDir string) (*Store, error) {
 	// Apply schema before opening the long-lived connection. Holding
 	// sqlift's connection separately keeps PRAGMA setup on the mnemo
-	// handle isolated from migration.
+	// handle isolated from migration. boot phases inside applySchema
+	// surface multi-minute pre-migration backups on /health.
+	boot.Set(boot.PhaseOpeningStore, "opening store and checking schema: "+filepath.Base(dbPath))
 	if err := applySchema(dbPath); err != nil {
 		// Acceptance criterion 6 of 🎯T49: an older binary against a
 		// newer mnemo.db must read without crashing. sqlift rejects the
@@ -817,6 +833,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		slog.Warn("schema apply rejected; continuing without migration (older binary vs newer DB?)",
 			"db", dbPath, "err", err)
 	}
+	boot.Set(boot.PhaseOpeningStore, "opening long-lived DB handles")
 
 	writeDB, err := openDB(dbPath, true)
 	if err != nil {
