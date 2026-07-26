@@ -2713,36 +2713,44 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 	}
 }
 
-// ciRepos returns "org/repo" identifiers for every GitHub repository
-// reachable through knownRepoRoots. This is the union of
-// workspace-walked repos (default ~/work) and session_meta-known repos,
-// so CI polling works even for projects mnemo hasn't seen through a
-// session yet (🎯T17).
+// ciRepos returns the "org/repo" identifiers the mirror streams may
+// collect data for.
 //
-// Identity comes from each checkout's origin remote, never from its
-// path (🎯T116). The path convention is a label; the remote is
-// evidence. A directory with no origin, or one pointing somewhere other
-// than GitHub, is not a GitHub repo and is dropped rather than fetched
-// under a name that does not exist — and a worktree or prefix-named
-// local clone resolves to the repo it actually belongs to.
+// The set is driven by agent-session discovery (🎯T117): mnemo is a
+// session tracking tool, so it indexes the repos its sessions were
+// actually connected to and never goes looking for repos on its own. A
+// checkout mnemo has never seen a session in is not fetched, however
+// plausibly it is laid out. This retires 🎯T17, which walked the
+// workspace so an untouched project could still be polled — on a real
+// machine that meant 70 of 147 repos were contacted purely because a
+// directory existed.
+//
+// Within that set, identity comes from each checkout's origin remote,
+// never from its path (🎯T116). session_meta.repo is itself derived by
+// path regex, so it needs the same correction: a session in a worktree
+// resolves to the parent repo, and a session in a directory that is not
+// a GitHub checkout resolves to nothing and is dropped.
 func (s *Store) ciRepos() ([]string, error) {
+	sessionNames, err := s.sessionRepoNames()
+	if err != nil || len(sessionNames) == 0 {
+		return nil, nil
+	}
+
 	seen := map[string]bool{}
 	var repos []string
 
-	// Workspace + session_meta union via the central choke point.
-	// knownRepoRoots acquires rootsMu.RLock to read workspaceRoots.
-	//
-	// pathAlias maps each root's path-derived name to its resolved
-	// identity, so the session_meta pass below — whose repo column is
-	// path-derived by the same regex — does not reintroduce the very
-	// names this resolution exists to correct.
-	pathAlias := map[string]string{}
+	// Resolve the session-connected checkouts we can find on disk.
+	// knownRepoRoots acquires rootsMu.RLock to read workspaceRoots; it
+	// is used here only to locate roots, not to widen the set — the
+	// sessionNames gate above is what bounds collection.
+	resolved := map[string]bool{}
 	for _, rr := range s.knownRepoRoots() {
 		pathName := extractRepo(rr.root)
-		repo := resolveGitHubRepo(rr.root)
-		if pathName != "" {
-			pathAlias[pathName] = repo // "" records "not a GitHub repo"
+		if pathName == "" || !sessionNames[pathName] {
+			continue
 		}
+		resolved[pathName] = true
+		repo := resolveGitHubRepo(rr.root)
 		if repo == "" || !strings.Contains(repo, "/") || seen[repo] {
 			continue
 		}
@@ -2750,34 +2758,41 @@ func (s *Store) ciRepos() ([]string, error) {
 		repos = append(repos, repo)
 	}
 
-	// Fallback: session_meta.repo column may carry a normalised
-	// "org/repo" for repos outside any workspace root (e.g., clones in
-	// /tmp). Include anything we haven't already captured.
+	// Session-connected repos with no checkout to inspect — a clone that
+	// has since been deleted, or a directory that was never a git repo.
+	// They stay in scope because a session did happen there, and there
+	// is no local evidence to resolve them by; the 🎯T116 failure
+	// backoff is what stops an impossible one being retried.
+	for name := range sessionNames {
+		if resolved[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		repos = append(repos, name)
+	}
+	return repos, nil
+}
+
+// sessionRepoNames returns the distinct path-derived "org/repo" names
+// mnemo has observed agent sessions in. This is the discovery signal
+// that bounds all mirror collection (🎯T117).
+func (s *Store) sessionRepoNames() (map[string]bool, error) {
 	rows, err := s.readDB.Query(
 		`SELECT DISTINCT repo FROM session_meta WHERE repo != '' AND repo LIKE '%/%'`,
 	)
 	if err != nil {
-		return repos, nil
+		return nil, err
 	}
 	defer rows.Close()
+	names := map[string]bool{}
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {
 			continue
 		}
-		if _, walked := pathAlias[r]; walked {
-			// This checkout was walked above and already judged: either
-			// resolved (so its true name is in the list) or established
-			// as not a GitHub repo. Re-adding the path-derived name here
-			// would undo both.
-			continue
-		}
-		if !seen[r] {
-			seen[r] = true
-			repos = append(repos, r)
-		}
+		names[r] = true
 	}
-	return repos, nil
+	return names, rows.Err()
 }
 
 // SearchCI searches CI runs with optional FTS query, repo filter, conclusion filter, and recency window.
