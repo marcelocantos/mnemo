@@ -763,7 +763,7 @@ targets:
     achieved: 2026-04-13
   T120:
     name: The compaction watcher stops paying full candidate-selection cost on every tick when nothing is owed
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -782,9 +782,10 @@ targets:
     - cpu
     origin: health sweep, 2026-07-26
     discovered: 2026-07-26
+    achieved: 2026-07-27
   T121:
     name: Image embedding fetches no model weights from the network unless the user opted in, and a failed embedding is recorded rather than violating a NOT NULL constraint
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -804,6 +805,7 @@ targets:
     - reliability
     origin: health sweep, 2026-07-26
     discovered: 2026-07-26
+    achieved: 2026-07-27
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
