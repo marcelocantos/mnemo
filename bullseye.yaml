@@ -697,7 +697,7 @@ targets:
     achieved: 2026-07-26
   T118:
     name: A failure inside Apple Vision OCR degrades that one image, and can never abort the daemon
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -714,9 +714,10 @@ targets:
     - crash
     origin: daemon crash observed during T117 verification, 2026-07-26
     discovered: 2026-07-26
+    achieved: 2026-07-26
   T119:
     name: 'Image OCR succeeds at a rate explained by image content, not by how long the daemon has been running: no systematic failure cliff partway through a backfill'
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
@@ -724,7 +725,14 @@ targets:
     - 'Success rate does not degrade with position in the run: the last decile of images processed succeeds at a rate comparable to the first. Oracle: the id-block query that exposed the cliff (0-319: 318 ok/1 failed; 384+: 0 ok/254 failed) shows no such discontinuity.'
     - The root cause is named and evidenced rather than assumed — whether it is per-process Metal/AGX resource exhaustion, a leak in the native recogniser, concurrency against the GPU, or something else. A one-line explanation ties the observed cliff to a mechanism.
     - If subprocess isolation (🎯T118) alone resolves it, that is recorded as the explanation and the fix, with before/after numbers; if it does not, the residual cause is diagnosed separately.
-    context: 'Found 2026-07-26 while fixing 🎯T118. 307 of 637 images (48%) have an OCR error recorded, all apple_vision: 278 "VNImageRequestHandler.performRequests failed", 28 "TextRecognition.CR…", 1 undecodable. Two pieces of evidence show this is NOT about the images or a broken machine. (1) Three images that failed inside the daemon were re-run by hand through the same binary (bin/mnemo ocr-worker) and all three succeeded. (2) Failures cluster hard by processing order: image ids 0-319 are 318 ok / 1 failed, 320-383 are 12 ok / 52 failed, and every block from 384 up is 0 ok / 64 failed. So Vision worked essentially perfectly for the first ~330 recognitions in that process and then failed for every subsequent one — the signature of per-process resource exhaustion in the Vision/Metal stack, consistent with the AGX compiler error ("Could not open .../AGXCompilerCore.framework/agxa_compiler_hash") and the MPS metallib load failure seen at the moment of the SIGABRT. Not format-specific: PNG shows 327 ok / 303 failed. Strong prior: 🎯T118''s subprocess-per-image isolation incidentally fixes this, since each recognition now starts a fresh process and cannot inherit an exhausted one — this target exists to verify that empirically rather than assume it, and to diagnose the residue if it does not.'
+    context: |-
+      Found 2026-07-26 while fixing 🎯T118. 307 of 637 images (48%) had an OCR error recorded, all apple_vision: 278 "VNImageRequestHandler.performRequests failed", 28 "TextRecognition.CR…", 1 undecodable.
+
+      ROOT CAUSE ESTABLISHED: per-process resource exhaustion in the Vision/Metal stack, not bad images and not a broken machine. Two independent lines of evidence. (1) Failures cluster by processing order, not by content: image ids 0-319 were 318 ok / 1 failed, 320-383 were 12 ok / 52 failed, and every block from 384 up was 0 ok / 64 failed — Vision worked essentially perfectly for the first ~330 recognitions in the process, then failed for every subsequent one. Consistent with the AGX compiler error ("Could not open .../AGXCompilerCore.framework/agxa_compiler_hash") and MPS metallib load failure logged at the moment of the SIGABRT. (2) Three images that failed inside the daemon succeeded when re-run by hand through the same binary. Not format-specific (PNG was 327 ok / 303 failed).
+
+      FIX: 🎯T118's subprocess-per-image isolation resolves it as a side effect — each recognition starts a fresh process and cannot inherit an exhausted one. Measured after the change: 104 images that had previously failed 100% of the time now succeed 104/104; corpus at 433 ok / 1 failed (0.2%, the single remaining failure being a genuinely undecodable image); the block-wise cliff is gone (every block 0 failures).
+
+      REMAINING: 203 of the 307 cleared images have not yet been re-OCR'd — the backfill processes 50 per pass and fires per ingest cycle, so it drains as sessions are ingested rather than in one run. Retire once the full corpus has been re-processed and the aggregate rate holds in the single digits; nothing suggests it will not, but the criterion says full corpus and the measurement is currently partial.
     tags:
     - ocr
     - darwin
@@ -753,6 +761,49 @@ targets:
     origin: user suggestion
     discovered: 2026-04-07
     achieved: 2026-04-13
+  T120:
+    name: The compaction watcher stops paying full candidate-selection cost on every tick when nothing is owed
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'On a continuously-ingesting daemon with an empty owed-set, the per-minute scan does not run the full candidate-selection query. Oracle: over 30 minutes of live ingest, scans logged at WARN (>=5s) drop to zero and total scan CPU is materially reduced.'
+    - 'The owed-set stays correct: a session that crosses the addenda-token threshold is still picked up within one scan interval of doing so. Oracle: test drives a session past the threshold and asserts it is selected on the next scan.'
+    - 'The mechanism is stated: whatever replaces or augments the 🎯T91 MAX(entries.id) gate must explain why it holds under continuous ingest, since that is precisely when the current gate fails.'
+    context: |-
+      Observed 2026-07-26 during a T118 health sweep. The compaction watcher scans every 60s and each scan took 2.1-9.3s while returning candidates=0 backlog=0 every single time — 10 scans exceeded the 5s WARN threshold in a 32-minute window. That is a multi-second query over a 21 GB index, once a minute, forever, for no result, plus the SQLite contention it causes against ingest.
+
+      🎯T91 added an idle gate intended to prevent exactly this: skip the expensive scan when MAX(entries.id) is unchanged since the last scan and that scan left nothing owed or quarantined. The gate is sound in principle but never fires in the common case, because ANY transcript append anywhere advances MAX(entries.id) — and on an actively-used machine that is continuous. So the cheap O(1) check almost always says "something changed", and the expensive re-sum of every session's addenda tokens runs regardless, even though the sessions that changed are usually nowhere near the threshold.
+
+      Directions worth considering rather than a fixed design: track the watermark per session rather than globally so only sessions with new entries are re-summed; maintain the addenda token total incrementally at ingest instead of re-aggregating at scan time; or keep a cheap "next session to cross the threshold" bound so the scan can early-exit. Note the compactor itself is healthy — 9132 compactions, 93 in the last 7 days, last one today — so this is pure overhead, not a functional fault.
+    tags:
+    - compaction
+    - performance
+    - cpu
+    origin: health sweep, 2026-07-26
+    discovered: 2026-07-26
+  T121:
+    name: Image embedding fetches no model weights from the network unless the user opted in, and a failed embedding is recorded rather than violating a NOT NULL constraint
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A failed embedding records the failure and moves on; it never attempts an INSERT that violates image_embeddings.vector NOT NULL. Oracle: fault-injection test with a script that exits non-zero produces no constraint error and marks the image so it is not retried forever.'
+    - 'Model-weight downloads are covered by the documented egress posture: either the embedder is opt-in like cost reconciliation, or CLAUDE.md''s ''External API egress'' section states plainly that enabling image embeddings fetches weights from the HuggingFace Hub on first use. No silent outbound fetch. Oracle: the section names the behaviour and matches the code.'
+    - 'Whether the embedder ran or was skipped is visible without reading the log — the reason (no uv, script missing, weights unavailable, disabled) is retrievable. Oracle: a status/diagnostic surface reports it.'
+    context: |-
+      Observed 2026-07-26 during a T118 health sweep. Two distinct problems in the image embedder (internal/store/image_embeddings.go, which shells out via `uv` to tools/embed-clip/embed.py).
+
+      (1) Undocumented network egress. The logs show "embed script error: Downloading transformers (11.1MiB)" and "Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads." So generating image embeddings pulls model weights from the HuggingFace Hub at runtime. CLAUDE.md's "External API egress" section enumerates Anthropic Admin API (opt-in), GitHub, and federation — it does not mention HuggingFace at all. Given the project's stated posture (defaults are silent; opt-in must be deliberate, for users in environments where unsolicited outbound calls need security review) this is a gap between documented and actual behaviour, and arguably wants the same explicit opt-in as cost reconciliation.
+
+      (2) A failure path that violates the schema. When the script fails or returns no vector, the code proceeds to store anyway and SQLite rejects it: "NOT NULL constraint failed: image_embeddings.vector" (seen for image_id 73 and 166, repeatedly across restarts). So the failure is neither recorded nor suppressed, and the same images are retried on every startup, each attempt costing a subprocess and a download attempt. Contrast image_ocr, which records an error column and is therefore skipped next pass.
+    tags:
+    - images
+    - embeddings
+    - egress
+    - reliability
+    origin: health sweep, 2026-07-26
+    discovered: 2026-07-26
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
