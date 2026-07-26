@@ -101,7 +101,7 @@ func (c *WatcherConfig) maxCandidates() int {
 // is consulted only for best-effort connection_id attribution, exposed
 // via the CompactionCandidate already filled by the store.
 type storeSource interface {
-	// SelectCompactionCandidates returns the sessions owed a
+	// SelectCompactionCandidatesSince returns the sessions owed a
 	// compaction under the token-volume predicate (🎯T72) plus the
 	// total backlog (owed count before the limit). See
 	// store.SelectCompactionCandidates for the full semantics; in
@@ -110,7 +110,13 @@ type storeSource interface {
 	// session is the size floor) and it is not a compactor-internal
 	// session. There is no recency floor — recency is the ORDER BY
 	// priority only. maxBudgetRatio is a runaway backstop.
-	SelectCompactionCandidates(
+	//
+	// sinceEntryID restricts the scan to sessions that gained an entry
+	// after that watermark (🎯T120); a negative value scans every
+	// session. The watcher passes the previous scan's watermark whenever
+	// that scan left nothing owed and nothing quarantined — see scan().
+	SelectCompactionCandidatesSince(
+		sinceEntryID int64,
 		budgetTokens int64,
 		maxBudgetRatio float64,
 		quarantineThreshold int,
@@ -131,10 +137,9 @@ type storeSource interface {
 	// by the quarantine, for mnemo_compactor_status.
 	QuarantinedCount(threshold int, since time.Time) int
 	// CompactionScanWatermark returns MAX(entries.id) — a cheap O(1)
-	// activity signal (🎯T91). The watcher skips the expensive candidate
-	// scan when this is unchanged since the last scan and that scan left
-	// nothing owed (backlog) or quarantined awaiting parole, since the
-	// owed-set cannot have changed without new ingested entries.
+	// activity signal (🎯T91). The watcher skips the candidate scan
+	// entirely when this is unchanged since the last scan, and otherwise
+	// uses it as the incremental window bound (🎯T120).
 	CompactionScanWatermark() (int64, error)
 }
 
@@ -160,7 +165,8 @@ type Watcher struct {
 	lastN               int       // candidates returned by the last scan
 	lastBacklog         int       // owed sessions before the per-scan limit (gap to fixed point)
 	lastQuarantined     int       // sessions excluded by the durable quarantine at last scan (🎯T77)
-	lastScanMaxEntryID  int64     // MAX(entries.id) observed at the last full scan; the 🎯T91 idle gate
+	lastScanMaxEntryID  int64     // MAX(entries.id) observed at the last scan; 🎯T91 idle gate + 🎯T120 incremental window
+	haveScanBaseline    bool      // a scan has established lastScanMaxEntryID (🎯T120: no baseline → full scan)
 	lastScanAt          time.Time // wall clock of the last scan return
 	lastTickAt          time.Time // wall clock of the last tick completion
 	lastTickOutcome     tickOutcome
@@ -286,29 +292,49 @@ func (w *Watcher) LastScanCount() int {
 func (w *Watcher) scan(ctx context.Context) {
 	now := time.Now()
 
-	// 🎯T91 idle gate: SelectCompactionCandidates re-sums the entries
-	// table for every session, so on a 15 GB index a single tick costs
-	// many seconds — and the watcher fires one every ScanInterval even
-	// when nothing changed. MAX(entries.id) is an O(1) rowid lookup; if
-	// no new entries have been ingested since the last full scan and that
-	// scan left nothing owed (backlog) or quarantined (awaiting parole),
-	// no session's addenda volume can have grown, so the owed-set is
-	// unchanged and the expensive scan is pure waste. Skip it. (A
-	// watermark read error falls through to a normal scan.)
+	// Scan gate. The full candidate query re-sums the entries table for
+	// every session, so on a 21 GB index one scan costs seconds — every
+	// ScanInterval, forever.
+	//
+	// 🎯T91 added an equality gate on MAX(entries.id): skip when nothing
+	// was ingested at all. Sound, but it almost never fires in practice —
+	// on a machine with any live session, *some* transcript appends every
+	// minute, so the watermark always moves and the full scan always ran,
+	// even though the sessions that moved were nowhere near the budget.
+	//
+	// 🎯T120 keeps the equality skip and adds the case that actually
+	// occurs: when the watermark HAS moved, scan only the sessions that
+	// moved it. Every input to the owed predicate is monotone in ingest
+	// (addenda volume only grows with new assistant entries; the cursor
+	// only advances, which shrinks it; compactor_internal only goes 0→1;
+	// the ratio guard only loosens as sess_tokens grows), so a session
+	// with no entry past the last scan's watermark is exactly as owed as
+	// it was then — and the last scan established that it was not owed.
+	// Quarantine parole is the sole non-monotone input, hence the
+	// lastQuarantined == 0 conjunct: with anything quarantined we fall
+	// back to a full scan. This holds under continuous ingest because it
+	// bounds work by *new entries*, not by "no entries at all".
+	//
+	// A watermark read error, or no baseline yet (startup), falls through
+	// to a full scan.
+	sinceEntryID := int64(-1) // -1 → scan every session
 	maxEntryID, watermarkErr := w.src.CompactionScanWatermark()
 	if watermarkErr == nil {
 		w.mu.Lock()
-		gated := maxEntryID == w.lastScanMaxEntryID && w.lastBacklog == 0 && w.lastQuarantined == 0
-		if gated {
-			w.lastScanAt = now
-			w.mu.Unlock()
-			return
+		if w.haveScanBaseline && w.lastBacklog == 0 && w.lastQuarantined == 0 {
+			if maxEntryID == w.lastScanMaxEntryID {
+				w.lastScanAt = now
+				w.mu.Unlock()
+				return
+			}
+			sinceEntryID = w.lastScanMaxEntryID
 		}
 		w.mu.Unlock()
 	}
 
 	quarantineSince := now.Add(-store.DefaultQuarantineCooldown)
-	cands, backlog, err := w.src.SelectCompactionCandidates(
+	cands, backlog, err := w.src.SelectCompactionCandidatesSince(
+		sinceEntryID,
 		w.cfg.addendaBudgetTokens(),
 		w.compactor.MaxTokenRatio(),
 		store.DefaultQuarantineThreshold,
@@ -332,6 +358,7 @@ func (w *Watcher) scan(ctx context.Context) {
 	logFn("compact: scan",
 		"candidates", len(cands),
 		"backlog", backlog,
+		"since_entry_id", sinceEntryID,
 		"elapsed", elapsed.Round(time.Millisecond),
 	)
 	quarantined := w.src.QuarantinedCount(store.DefaultQuarantineThreshold, quarantineSince)
@@ -342,9 +369,13 @@ func (w *Watcher) scan(ctx context.Context) {
 	// Record the watermark observed at the START of this scan (not now):
 	// entries ingested while the scan ran have a higher id, so the next
 	// tick sees the watermark advance and re-scans rather than skipping
-	// activity that landed mid-scan (🎯T91).
+	// activity that landed mid-scan (🎯T91). The same reasoning makes it
+	// the correct lower bound for the next incremental window (🎯T120) —
+	// the window is [lastScanMaxEntryID, ∞), so a mid-scan append is
+	// re-examined next time rather than falling through the gap.
 	if watermarkErr == nil {
 		w.lastScanMaxEntryID = maxEntryID
+		w.haveScanBaseline = true
 	}
 	w.lastScanAt = time.Now()
 	w.mu.Unlock()

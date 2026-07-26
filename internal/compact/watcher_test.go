@@ -6,7 +6,10 @@ package compact
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/storetest"
 )
 
 // fakeStoreSource implements storeSource for tests. Candidate lists
@@ -29,10 +33,12 @@ type fakeStoreSource struct {
 	cleared     map[string]int // ClearCompactionFailure calls per session (🎯T77)
 	watermark   int64          // backing value for CompactionScanWatermark (🎯T91)
 	fixedMark   bool           // when set, CompactionScanWatermark returns watermark verbatim (🎯T91)
-	selectCalls int            // SelectCompactionCandidates invocations (🎯T91 idle-gate assertion)
+	selectCalls int            // SelectCompactionCandidatesSince invocations (🎯T91 idle-gate assertion)
+	sinceArgs   []int64        // sinceEntryID of each invocation; -1 = full scan (🎯T120)
 }
 
-func (f *fakeStoreSource) SelectCompactionCandidates(
+func (f *fakeStoreSource) SelectCompactionCandidatesSince(
+	sinceEntryID int64,
 	budgetTokens int64,
 	maxBudgetRatio float64,
 	quarantineThreshold int,
@@ -42,6 +48,7 @@ func (f *fakeStoreSource) SelectCompactionCandidates(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.selectCalls++
+	f.sinceArgs = append(f.sinceArgs, sinceEntryID)
 	out := make([]store.CompactionCandidate, len(f.candidates))
 	copy(out, f.candidates)
 	if limit > 0 && len(out) > limit {
@@ -97,11 +104,25 @@ func (f *fakeStoreSource) setFixedWatermark(v int64) {
 	f.watermark = v
 }
 
-// selectCallCount returns how many times SelectCompactionCandidates ran.
+// selectCallCount returns how many times SelectCompactionCandidatesSince ran.
 func (f *fakeStoreSource) selectCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.selectCalls
+}
+
+// fullScanCount returns how many of those calls were full scans — the
+// expensive every-session query the 🎯T120 gate exists to avoid.
+func (f *fakeStoreSource) fullScanCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, since := range f.sinceArgs {
+		if since < 0 {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *fakeStoreSource) recordCount(sessionID string) int {
@@ -251,6 +272,42 @@ func TestWatcherIdleGateSkipsUnchangedScan(t *testing.T) {
 	}
 }
 
+// TestWatcherIncrementalScanUnderContinuousIngest is the 🎯T120 case the
+// 🎯T91 equality gate could not cover: the entries watermark advances on
+// every scan (some session, somewhere, is being appended to), so the gate
+// never fires and the full every-session query ran once a minute forever
+// for candidates=0. With an established baseline and nothing owed or
+// quarantined, only the *first* scan may be a full scan; every later one
+// is bounded by the previous scan's watermark.
+func TestWatcherIncrementalScanUnderContinuousIngest(t *testing.T) {
+	src := &fakeStoreSource{} // default: watermark increments per read
+	llm := &stubNopLLM{}
+	compactor := New(newCountingStore(), llm, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{ScanInterval: time.Hour})
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		w.scan(ctx)
+	}
+
+	if got := src.selectCallCount(); got != 5 {
+		t.Fatalf("continuous ingest must keep scanning, got %d scans", got)
+	}
+	if got := src.fullScanCount(); got != 1 {
+		t.Errorf("only the baseline scan may be full, got %d full scans", got)
+	}
+	// Each incremental window starts where the previous scan's watermark
+	// stopped, so no ingest can slip between two scans.
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	want := []int64{-1, 1, 2, 3, 4}
+	for i, since := range src.sinceArgs {
+		if since != want[i] {
+			t.Errorf("scan %d: sinceEntryID = %d, want %d (args %v)", i, since, want[i], src.sinceArgs)
+		}
+	}
+}
+
 // TestWatcherIdleGateRunsWhenBacklog verifies the gate never strands a
 // backlog: while sessions remain owed, scans keep firing even when the
 // watermark is unchanged, so the per-scan cap can drain them over
@@ -271,6 +328,97 @@ func TestWatcherIdleGateRunsWhenBacklog(t *testing.T) {
 	w.scan(ctx)
 	if got := src.selectCallCount(); got != 3 {
 		t.Fatalf("backlog present: expected every scan to run (3), got %d", got)
+	}
+}
+
+// asstUsage is an assistant transcript entry carrying the per-turn token
+// usage the addenda metric reads (output + cache-creation).
+func asstUsage(text, ts string, outTokens, cacheCreation, inputTokens int) map[string]any {
+	return map[string]any{
+		"type":      "assistant",
+		"timestamp": ts,
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": text,
+			"usage": map[string]any{
+				"input_tokens":                inputTokens,
+				"output_tokens":               outTokens,
+				"cache_creation_input_tokens": cacheCreation,
+			},
+		},
+	}
+}
+
+// appendJSONL grows an existing fixture transcript, as a live session
+// does between ingest passes.
+func appendJSONL(t *testing.T, dir, project, sessionID string, entries []map[string]any) {
+	t.Helper()
+	f, err := os.OpenFile(
+		filepath.Join(dir, project, sessionID+".jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestWatcherIncrementalScanCatchesThresholdCrossing is the correctness
+// half of 🎯T120, driven against a real store rather than the fake: a
+// session that crosses the addenda-token budget between two scans must be
+// selected by the very next scan, even though that scan is the cheap
+// incremental one. A second session stays quiet throughout and must never
+// be selected — that is the work the incremental window skips.
+func TestWatcherIncrementalScanCatchesThresholdCrossing(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+
+	storetest.WriteJSONL(t, dir, "p", "sess-quiet", []map[string]any{
+		storetest.Msg("user", "a question with enough text here", ts(-9*time.Minute)),
+		asstUsage("small reply", ts(-8*time.Minute), 100, 0, 300),
+	})
+	storetest.WriteJSONL(t, dir, "p", "sess-grow", []map[string]any{
+		storetest.Msg("user", "another question with enough text", ts(-7*time.Minute)),
+		asstUsage("small reply", ts(-6*time.Minute), 100, 0, 300),
+	})
+	src := storetest.NewStore(t, dir)
+	if err := src.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	cs := newCountingStore()
+	compactor := New(cs, &stubNopLLM{}, Config{})
+	w := NewWatcher(src, compactor, WatcherConfig{
+		ScanInterval:        time.Hour,
+		AddendaBudgetTokens: 500,
+	})
+
+	ctx := context.Background()
+	w.scan(ctx) // baseline: both sessions below the budget
+	if got := w.LastScanCount(); got != 0 {
+		t.Fatalf("baseline scan: expected no candidates, got %d", got)
+	}
+
+	// sess-grow crosses the budget; sess-quiet is untouched.
+	appendJSONL(t, dir, "p", "sess-grow", []map[string]any{
+		storetest.Msg("user", "a follow-up question with text", ts(-2*time.Minute)),
+		asstUsage("a much longer reply", ts(-1*time.Minute), 600, 0, 900),
+	})
+	if err := src.IngestAll(); err != nil {
+		t.Fatalf("IngestAll (append): %v", err)
+	}
+
+	w.scan(ctx)
+	if got := w.LastScanCount(); got != 1 {
+		t.Fatalf("expected the crossing session on the next scan, got %d candidates", got)
+	}
+	if len(cs.compacts) != 1 || cs.compacts[0].SessionID != "sess-grow" {
+		t.Fatalf("expected sess-grow to be compacted, got %+v", cs.compacts)
 	}
 }
 

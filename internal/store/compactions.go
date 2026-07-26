@@ -252,6 +252,40 @@ func (s *Store) SelectCompactionCandidates(
 	quarantineSince time.Time,
 	limit int,
 ) ([]CompactionCandidate, int, error) {
+	return s.SelectCompactionCandidatesSince(
+		-1, budgetTokens, maxBudgetRatio, quarantineThreshold, quarantineSince, limit)
+}
+
+// SelectCompactionCandidatesSince is SelectCompactionCandidates
+// restricted to sessions that gained an entry after sinceEntryID — the
+// incremental form the compaction watcher runs once a baseline scan has
+// established an empty owed-set (🎯T120). A negative sinceEntryID means
+// "every session" and is exactly SelectCompactionCandidates.
+//
+// The restriction is sound because every input to the owed predicate is
+// monotone in ingest: addenda volume only grows when assistant entries
+// are appended; the cursor only moves forward (which lowers volume);
+// compactor_internal only goes 0→1 (MAX on upsert, never back); and the
+// ratio guard only loosens when sess_tokens grows, which again needs new
+// entries. So a session with no entry past sinceEntryID has the same
+// owed-ness it had at sinceEntryID. Given the caller's invariant "at
+// sinceEntryID nothing was owed and nothing was quarantined", the owed
+// set at any later watermark is a subset of the sessions this restriction
+// keeps — so the returned candidates *and* the backlog count are exact,
+// not approximations. Quarantine parole is the one non-monotone input,
+// which is why the caller must also require zero quarantined sessions.
+//
+// Cost: the restriction is a rowid range scan over the entries appended
+// since the last scan (typically a few hundred rows) instead of a
+// per-session re-sum across the whole entries table.
+func (s *Store) SelectCompactionCandidatesSince(
+	sinceEntryID int64,
+	budgetTokens int64,
+	maxBudgetRatio float64,
+	quarantineThreshold int,
+	quarantineSince time.Time,
+	limit int,
+) ([]CompactionCandidate, int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -265,7 +299,24 @@ func (s *Store) SelectCompactionCandidates(
 		quarantineThreshold = DefaultQuarantineThreshold
 	}
 	quarantineSinceStr := quarantineSince.UTC().Format(time.RFC3339Nano)
-	rows, err := s.readDB.Query(`
+	// The changed-session restriction rides in the CTE's FROM clause, so
+	// its placeholder binds ahead of the WHERE-clause ones. NOT INDEXED
+	// is load-bearing: left to itself SQLite serves DISTINCT session_id
+	// from idx_entries_session, scanning the whole covering index (O(all
+	// entries)) to honour a filter it cannot seek on there. Forcing the
+	// rowid path turns it into a range seek over just the entries
+	// appended since the last scan — the difference between O(index) and
+	// O(new rows) every minute.
+	changedJoin := ""
+	var args []any
+	if sinceEntryID >= 0 {
+		changedJoin = `
+		  JOIN (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > ?) chg
+		    ON chg.session_id = ss.session_id`
+		args = append(args, sinceEntryID)
+	}
+	args = append(args, maxBudgetRatio, budgetTokens, quarantineThreshold, quarantineSinceStr, limit)
+	rows, err := s.readDB.Query(fmt.Sprintf(`
 		WITH session_state AS (
 		  SELECT
 		    ss.session_id,
@@ -289,7 +340,7 @@ func (s *Store) SelectCompactionCandidates(
 		      SELECT SUM(input_tokens + output_tokens) FROM entries
 		      WHERE session_id = ss.session_id AND type = 'assistant'
 		    ), 0)                                                                                   AS sess_tokens
-		  FROM session_summary ss
+		  FROM session_summary ss%s
 		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
 		)
 		SELECT s.session_id, s.connection_id, COUNT(*) OVER () AS backlog
@@ -330,7 +381,7 @@ func (s *Store) SelectCompactionCandidates(
 		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, maxBudgetRatio, budgetTokens, quarantineThreshold, quarantineSinceStr, limit)
+	`, changedJoin), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}
