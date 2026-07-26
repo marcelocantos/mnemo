@@ -674,7 +674,7 @@ targets:
     achieved: 2026-07-26
   T117:
     name: 'Mirror data collection is driven by agent-session discovery: mnemo indexes the repos and directories its sessions are connected to, and never goes looking for repos on its own'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -693,6 +693,44 @@ targets:
     - product-principle
     - discovery
     origin: user product principle, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-26
+  T118:
+    name: A failure inside Apple Vision OCR degrades that one image, and can never abort the daemon
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'An OCR call that aborts inside the native framework does not terminate the mnemo process; ingest, compaction, mirrors and the MCP endpoint keep serving. Oracle: fault-injection test (or a fixture image known to trip the Metal path) leaves the process alive and the image marked failed.'
+    - 'The failing image is recorded as OCR-failed and is not retried indefinitely on every startup. Oracle: after a simulated abort, a second backfill pass skips that image.'
+    - 'OCR can be disabled without a code change, so a machine with a broken Metal/Vision stack can run mnemo unattended. Oracle: config flag (or auto-disable after N consecutive aborts) verified by a restart with the flag set producing no OCR calls.'
+    - The abort is visible as a fail-severity health check / log line naming the image id and the framework error, not just a stack dump.
+    context: 'Observed 2026-07-26 20:16 while restarting the daemon for 🎯T117 verification. The process died with SIGABRT raised inside cgo during Apple Vision OCR: runAppleVisionOCRNative -> _Cfunc_mnemo_ocr_recognize (internal/store/ocr_darwin.go:36), preceded by "AGX: agxa_compiler.mm:120 *** Could not open /System/Library/PrivateFrameworks/AGXCompilerCore.framework/agxa_compiler_hash" and "metal library file .../MPSNeuralNetwork.framework/Resources/default.metallib failed to open". So the machine''s Metal/MPS shader stack is broken for this path; Vision aborts the process rather than returning an error, and a cgo abort cannot be recovered in-process with recover(). Soft "image OCR failed ... VNImageRequestHandler.performRequests failed" warnings for the same subsystem had been appearing benignly for hours before it escalated to a hard abort. Impact is severe and disproportionate: one undecodable image killed ingest, the compaction watcher, all mirror streams and the MCP endpoint. A restart got past it, so it is not deterministic on the same image, which makes it worse — it is a random daemon killer. Likely shapes: run OCR in a subprocess so an abort is contained, and/or gate it behind a config flag plus an auto-disable after repeated aborts. Note there is currently NO way to turn OCR off without rebuilding.'
+    tags:
+    - ocr
+    - stability
+    - cgo
+    - darwin
+    - crash
+    origin: daemon crash observed during T117 verification, 2026-07-26
+    discovered: 2026-07-26
+  T119:
+    name: 'Image OCR succeeds at a rate explained by image content, not by how long the daemon has been running: no systematic failure cliff partway through a backfill'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A full OCR backfill over the existing corpus completes with a failure rate consistent with genuinely unrecognisable images (single-digit percent), not the ~48% observed on 2026-07-26. Oracle: clear image_ocr error rows, re-run the backfill, and compare per-block success rates.'
+    - 'Success rate does not degrade with position in the run: the last decile of images processed succeeds at a rate comparable to the first. Oracle: the id-block query that exposed the cliff (0-319: 318 ok/1 failed; 384+: 0 ok/254 failed) shows no such discontinuity.'
+    - The root cause is named and evidenced rather than assumed — whether it is per-process Metal/AGX resource exhaustion, a leak in the native recogniser, concurrency against the GPU, or something else. A one-line explanation ties the observed cliff to a mechanism.
+    - If subprocess isolation (🎯T118) alone resolves it, that is recorded as the explanation and the fix, with before/after numbers; if it does not, the residual cause is diagnosed separately.
+    context: 'Found 2026-07-26 while fixing 🎯T118. 307 of 637 images (48%) have an OCR error recorded, all apple_vision: 278 "VNImageRequestHandler.performRequests failed", 28 "TextRecognition.CR…", 1 undecodable. Two pieces of evidence show this is NOT about the images or a broken machine. (1) Three images that failed inside the daemon were re-run by hand through the same binary (bin/mnemo ocr-worker) and all three succeeded. (2) Failures cluster hard by processing order: image ids 0-319 are 318 ok / 1 failed, 320-383 are 12 ok / 52 failed, and every block from 384 up is 0 ok / 64 failed. So Vision worked essentially perfectly for the first ~330 recognitions in that process and then failed for every subsequent one — the signature of per-process resource exhaustion in the Vision/Metal stack, consistent with the AGX compiler error ("Could not open .../AGXCompilerCore.framework/agxa_compiler_hash") and the MPS metallib load failure seen at the moment of the SIGABRT. Not format-specific: PNG shows 327 ok / 303 failed. Strong prior: 🎯T118''s subprocess-per-image isolation incidentally fixes this, since each recognition now starts a fresh process and cannot inherit an exhausted one — this target exists to verify that empirically rather than assume it, and to diagnose the residue if it does not.'
+    tags:
+    - ocr
+    - darwin
+    - reliability
+    - investigation
+    origin: OCR failure-rate analysis during T118, 2026-07-26
     discovered: 2026-07-26
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
