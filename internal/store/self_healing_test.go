@@ -543,9 +543,19 @@ func TestCIRepos_UnionOfWorkspaceAndSessionMeta(t *testing.T) {
 	// derivation to produce an org/repo pair. The tempdir root may or
 	// may not contain /work/; mirror that shape under the root so the
 	// assertion is deterministic regardless.
+	//
+	// Since 🎯T116 the walker also requires a real GitHub origin — the
+	// path is a label, the remote is the evidence — so the fixture
+	// carries one. 🎯T17's intent is unchanged: a genuine checkout with
+	// no session history is still polled.
 	workRoot := filepath.Join(workspaceRoot, "work")
-	wsRepoDir := filepath.Join(workRoot, "github.com", "walkerorg", "walkerrepo")
-	mustMkdirAll(t, filepath.Join(wsRepoDir, ".git"))
+	ghRoot := filepath.Join(workRoot, "github.com")
+	wsRepoDir := filepath.Join(ghRoot, "walkerorg", "walkerrepo")
+	mkRepo(t, wsRepoDir, "git@github.com:walkerorg/walkerrepo.git")
+
+	// A directory that merely looks like a repo: `git init` and never
+	// pushed. It has no GitHub identity, so it must never be fetched.
+	mkRepo(t, filepath.Join(ghRoot, "walkerorg", "neverpushed"), "")
 
 	projectDir := t.TempDir()
 	s := newTestStore(t, projectDir)
@@ -580,6 +590,11 @@ func TestCIRepos_UnionOfWorkspaceAndSessionMeta(t *testing.T) {
 	}
 	if !foundSession {
 		t.Errorf("ciRepos missing session_meta fallback repo 'sessionorg/sessionrepo'; got %v", repos)
+	}
+	for _, r := range repos {
+		if r == "walkerorg/neverpushed" {
+			t.Errorf("ciRepos returned a never-pushed dir with no GitHub origin (🎯T116); got %v", repos)
+		}
 	}
 
 	// Non-GitHub paths (no slash) must be filtered out. Insert one

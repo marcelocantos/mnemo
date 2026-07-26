@@ -2717,15 +2717,32 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 // reachable through knownRepoRoots. This is the union of
 // workspace-walked repos (default ~/work) and session_meta-known repos,
 // so CI polling works even for projects mnemo hasn't seen through a
-// session yet. Non-GitHub paths are filtered out.
+// session yet (🎯T17).
+//
+// Identity comes from each checkout's origin remote, never from its
+// path (🎯T116). The path convention is a label; the remote is
+// evidence. A directory with no origin, or one pointing somewhere other
+// than GitHub, is not a GitHub repo and is dropped rather than fetched
+// under a name that does not exist — and a worktree or prefix-named
+// local clone resolves to the repo it actually belongs to.
 func (s *Store) ciRepos() ([]string, error) {
 	seen := map[string]bool{}
 	var repos []string
 
 	// Workspace + session_meta union via the central choke point.
 	// knownRepoRoots acquires rootsMu.RLock to read workspaceRoots.
+	//
+	// pathAlias maps each root's path-derived name to its resolved
+	// identity, so the session_meta pass below — whose repo column is
+	// path-derived by the same regex — does not reintroduce the very
+	// names this resolution exists to correct.
+	pathAlias := map[string]string{}
 	for _, rr := range s.knownRepoRoots() {
-		repo := extractRepo(rr.root)
+		pathName := extractRepo(rr.root)
+		repo := resolveGitHubRepo(rr.root)
+		if pathName != "" {
+			pathAlias[pathName] = repo // "" records "not a GitHub repo"
+		}
 		if repo == "" || !strings.Contains(repo, "/") || seen[repo] {
 			continue
 		}
@@ -2746,6 +2763,13 @@ func (s *Store) ciRepos() ([]string, error) {
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {
+			continue
+		}
+		if _, walked := pathAlias[r]; walked {
+			// This checkout was walked above and already judged: either
+			// resolved (so its true name is in the list) or established
+			// as not a GitHub repo. Re-adding the path-derived name here
+			// would undo both.
 			continue
 		}
 		if !seen[r] {
@@ -7233,13 +7257,54 @@ func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
 	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_prs WHERE repo = ?`, repo).Scan(&lastPR)
 	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_issues WHERE repo = ?`, repo).Scan(&lastIssue)
 
+	// Errors must PROPAGATE (🎯T116). Swallowing them and returning nil
+	// told the reconciler every pass succeeded, so 🎯T91's failure
+	// backoff never engaged and a repo that could never succeed was
+	// retried every interval forever — the source of thousands of
+	// identical warnings per night.
+	var errs []error
 	if err := s.fetchAndUpsertPRs(ghPath, repo, lastPR); err != nil {
-		slog.Warn("PR fetch failed", "repo", repo, "err", err)
+		if reason := permanentGitHubSkip(err); reason != "" {
+			slog.Debug("PR fetch skipped", "repo", repo, "reason", reason)
+		} else {
+			errs = append(errs, fmt.Errorf("prs: %w", err))
+		}
 	}
 	if err := s.fetchAndUpsertIssues(ghPath, repo, lastIssue); err != nil {
-		slog.Warn("issue fetch failed", "repo", repo, "err", err)
+		if reason := permanentGitHubSkip(err); reason != "" {
+			slog.Debug("issue fetch skipped", "repo", repo, "reason", reason)
+		} else {
+			errs = append(errs, fmt.Errorf("issues: %w", err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// permanentGitHubSkip reports a short reason when a gh failure is a
+// settled fact about the repo rather than a fault to retry — issues or
+// Actions switched off, or the feature not being available. Those are
+// normal states (torvalds/linux has issues disabled), so they are not
+// worth a warning and not worth counting as a failure; the other
+// sub-stream for the same repo may still succeed.
+//
+// A repo that cannot be resolved at all is deliberately NOT included:
+// that is a genuine failure, and letting it back off is the point.
+func permanentGitHubSkip(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "disabled issues"),
+		strings.Contains(msg, "issues are disabled"),
+		strings.Contains(msg, "issues disabled"):
+		return "issues disabled"
+	case strings.Contains(msg, "disabled actions"),
+		strings.Contains(msg, "actions are disabled"),
+		strings.Contains(msg, "actions disabled"):
+		return "actions disabled"
+	case strings.Contains(msg, "not available for this repository"),
+		strings.Contains(msg, "has been disabled"):
+		return "feature disabled"
+	}
+	return ""
 }
 
 // fetchAndUpsertPRs fetches PRs from GitHub and upserts into github_prs.
@@ -7251,7 +7316,7 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 		"--limit", "100",
 	).Output()
 	if err != nil {
-		return fmt.Errorf("gh pr list: %w", err)
+		return fmt.Errorf("gh pr list: %w", withStderr(err))
 	}
 
 	var prs []ghPRJSON
@@ -7303,7 +7368,7 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 		"--limit", "100",
 	).Output()
 	if err != nil {
-		return fmt.Errorf("gh issue list: %w", err)
+		return fmt.Errorf("gh issue list: %w", withStderr(err))
 	}
 
 	var issues []ghIssueJSON

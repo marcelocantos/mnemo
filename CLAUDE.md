@@ -219,9 +219,20 @@ This default exists for users operating in environments where
 unsolicited outbound calls to hosted APIs require security-team
 review. Opt-in must be deliberate; defaults are silent.
 
-**GitHub API.** Used by the PR/issue/CI backfill workers per repo
-that already appears in session history. No org-scope fan-out; no
-secret material required (relies on the local `gh` auth).
+**GitHub API.** Used by the PR/issue/CI backfill workers, per repo
+that appears in session history **or** is discovered as a real GitHub
+checkout under a configured workspace root (🎯T17 — so a project you
+have just cloned still gets CI history before you have worked in it).
+No org-scope fan-out; no secret material required (relies on the local
+`gh` auth).
+
+A directory is only fetched when it is genuinely a GitHub checkout:
+identity comes from its configured `origin` remote, never from its path
+(🎯T116). A never-pushed `git init` scaffold, a backup copy, or a
+checkout whose remote points somewhere other than GitHub produces no
+outbound call at all. Git worktrees and prefix-named local clones
+(`foo.experiment` beside `foo`) resolve to the repo they actually
+belong to, so they are fetched once, under the right name.
 
 **Federation (🎯T15 / linked instances).** Outbound calls to peer
 mnemo daemons are gated on `linked_instances` being non-empty in
