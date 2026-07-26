@@ -193,6 +193,50 @@ func TestUpgradeAddsDecisionScanState(t *testing.T) {
 	}
 }
 
+// TestUpgradeAddsImageEmbeddingAttempts pins the 🎯T121 additive
+// migration: the embed-attempt table lands on an existing DB under
+// AllowNone. It carries an FK to images and leaves image_embeddings —
+// whose vector column stays NOT NULL — untouched, which is exactly why a
+// new table was the only route to recording an embedding failure.
+func TestUpgradeAddsImageEmbeddingAttempts(t *testing.T) {
+	const priorSchema = `
+		CREATE TABLE images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			content_hash TEXT UNIQUE NOT NULL,
+			bytes BLOB NOT NULL,
+			mime_type TEXT NOT NULL
+		);
+		CREATE TABLE image_embeddings (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			dim INTEGER NOT NULL,
+			vector BLOB NOT NULL,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+	`
+	path := freshDB(t)
+	applyDDL(t, path, priorSchema)
+	if rowCount(t, path, "image_embedding_attempts") != -1 {
+		t.Fatalf("expected image_embedding_attempts absent before upgrade")
+	}
+	if err := tryUpgrade(t, path, priorSchema+`
+		CREATE TABLE image_embedding_attempts (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			status TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			last_attempt_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX idx_image_embedding_attempts_status ON image_embedding_attempts(status);
+	`); err != nil {
+		t.Fatalf("AllowNone upgrade adding image_embedding_attempts must succeed: %v", err)
+	}
+	if rowCount(t, path, "image_embedding_attempts") != 0 {
+		t.Fatalf("expected empty image_embedding_attempts after upgrade")
+	}
+}
+
 // TestUpgradeAddsUsageIndex pins the 🎯T93 additive migration: the usage
 // covering index is added to an existing entries table under AllowNone
 // (a new index, the simplest additive change).

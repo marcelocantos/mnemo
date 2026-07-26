@@ -73,6 +73,18 @@ type Config struct {
 	// for that; without it the only remedy was rebuilding.
 	DisableOCR bool `json:"disable_ocr,omitempty"`
 
+	// DisableImageEmbeddings turns the CLIP image embedder off entirely
+	// (🎯T121). The embedder shells out to `uv run --script
+	// tools/embed-clip/embed.py`, which resolves Python dependencies from
+	// PyPI and downloads CLIP model weights from the HuggingFace Hub on
+	// first use — the only outbound network call mnemo makes that is not
+	// gated on config. It is reachable only from a source checkout (the
+	// script is not in the release archives) with uv installed, so the
+	// default stays on; this is the off switch for anyone who wants that
+	// egress suppressed regardless. See CLAUDE.md § External API egress.
+	DisableImageEmbeddings bool `json:"disable_image_embeddings,omitempty"`
+
+
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
 	// that the TODO indexer matches when discovering TODO files (🎯T78),
 	// beyond the default TODO.md / todos.md names found at any depth.

@@ -255,6 +255,18 @@ CREATE TABLE image_descriptions (
 			UNIQUE(image_id)
 		);
 
+-- One row per image whose embedding has been attempted, recording the
+-- terminal outcome (🎯T121). image_embeddings.vector is NOT NULL, so a
+-- failure cannot be recorded there; without this table every failure was
+-- silently dropped and the same images were retried on every startup.
+CREATE TABLE image_embedding_attempts (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			status TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			last_attempt_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
 CREATE TABLE image_embeddings (
 			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
 			model TEXT NOT NULL,
@@ -766,6 +778,8 @@ CREATE INDEX idx_github_prs_state ON github_prs(state);
 CREATE INDEX idx_github_prs_updated ON github_prs(updated_at);
 
 CREATE INDEX idx_image_descriptions_image ON image_descriptions(image_id);
+
+CREATE INDEX idx_image_embedding_attempts_status ON image_embedding_attempts(status);
 
 CREATE INDEX idx_image_embeddings_model ON image_embeddings(model);
 

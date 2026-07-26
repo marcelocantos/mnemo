@@ -875,7 +875,8 @@ dependency and cache TTL are implementation details and may change.
 | `image_descriptions_fts` | FTS5 on name, description | Fluid |
 | `image_ocr` | image_id (PK FK), text, backend (`apple_vision`\|`tesseract`), confidence, error, created_at | Fluid |
 | `image_ocr_fts` | FTS5 on text | Fluid |
-| `image_embeddings` | image_id (PK FK), model, dim, vector (float32 BLOB), error, created_at | Fluid |
+| `image_embeddings` | image_id (PK FK), model, dim, vector (float32 BLOB), error, created_at — `error` is no longer written (🎯T121); failures live in `image_embedding_attempts` | Fluid |
+| `image_embedding_attempts` | image_id (PK FK), status (`ok`\|`failed`), attempts, error, last_attempt_at — terminal outcome per image; `vector NOT NULL` makes `image_embeddings` unable to hold a failure, and the attempt counter is what stops permanent failures being retried on every startup (🎯T121) | Fluid |
 | `reconciled_costs` | date (PK), cost_usd, fetched_at — authoritative per-day USD from Anthropic Cost Admin API; populated only when `ANTHROPIC_ADMIN_API_KEY` is set (🎯T45, v0.33.0) | Needs review |
 
 **Notes**: v0.9.0 added the `entries` table which stores every JSONL line

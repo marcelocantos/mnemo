@@ -247,6 +247,33 @@ still walks git repos, synthesis roots, and session cwds.
 mnemo daemons are gated on `linked_instances` being non-empty in
 config. Absent → zero federation calls.
 
+**PyPI + HuggingFace Hub (image embeddings, 🎯T121).** The CLIP image
+embedder shells out to `uv run --script tools/embed-clip/embed.py`.
+That subprocess resolves the script's Python dependencies
+(`sentence-transformers`, `torch`, `pillow`) from PyPI and, on first
+use, downloads the `clip-ViT-B-32` model weights (~340 MB) from the
+HuggingFace Hub — unauthenticated, so no credential of the user's is
+transmitted. This is the one egress path that is **on by default**,
+and it is documented rather than gated because both of its
+preconditions are already deliberate:
+
+1. `uv` must be on the daemon's PATH.
+2. `tools/embed-clip/embed.py` must resolve — it ships **only in the
+   source tree**, never in a release archive or the Homebrew bottle.
+
+So a packaged install cannot make this call at all: no script, no
+subprocess, no download. Reaching it requires running a daemon built
+from a source checkout with uv installed — a developer configuration,
+not a default deployment. Set `disable_image_embeddings: true` in
+`~/.mnemo/config.json` to suppress it regardless; the flag is read per
+attempt, so it takes effect without a daemon restart. Everything else
+about images (extraction, OCR, descriptions, FTS) is unaffected —
+only similarity search over embeddings goes away.
+
+Whether the embedder ran or was skipped, and why, is reported by the
+`images.embedder` check in `mnemo_doctor` / `GET /health`; per-image
+outcomes are in the `image_embedding_attempts` table.
+
 The append-only schema policy and the opt-in egress posture compose:
 restoring an older backup never silently triggers a backfill of
 data from external APIs that the user did not authorise.

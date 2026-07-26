@@ -223,6 +223,30 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			return diag.Healthy("WAL size healthy")
 		}},
 
+		// 🎯T121: whether the image embedder ran or was skipped, and why,
+		// without reading the daemon log. Never fails — an absent embedder
+		// is a normal deployment, not a fault.
+		diag.Check{Name: "images.embedder", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("store not started yet")
+			}
+			es := s.EmbedderStatus()
+			if !es.Enabled {
+				return diag.Healthy(fmt.Sprintf(
+					"image embeddings skipped (%s): %s", es.Reason, es.Detail))
+			}
+			detail := fmt.Sprintf("%s; %d embedded, %d failed, %d pending",
+				es.Detail, es.Embedded, es.Failed, es.Pending)
+			if es.Failed > 0 {
+				return diag.Warning(detail+"; last error: "+es.LastError,
+					"failed images are not retried past their attempt budget; a model-weight "+
+						"download failure clears on its own once the network allows it, or set "+
+						"disable_image_embeddings in ~/.mnemo/config.json to stop trying")
+			}
+			return diag.Healthy(detail)
+		}},
+
 		// 🎯T97.2: newer release available (warn). Uses the last
 		// Detector snapshot so the diag path itself does not force a
 		// network call — the detector worker owns polling.
