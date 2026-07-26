@@ -651,7 +651,7 @@ targets:
     discovered: 2026-07-25
   T116:
     name: The GitHub mirror addresses repos by their true GitHub identity, resolved from the checkout's origin remote, so no outbound call is made for a directory that merely looks like a repo
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -670,6 +670,29 @@ targets:
     - noise
     - hygiene
     origin: overnight soak review, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-26
+  T117:
+    name: 'Mirror data collection is driven by agent-session discovery: mnemo indexes the repos and directories its sessions are connected to, and never goes looking for repos on its own'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The mirror streams (ci, github, commits) source their repo set from session-connected roots only: a repo mnemo has never observed a session in produces no outbound fetch and no index write. Oracle: unit test asserts a workspace-walked checkout with a valid GitHub origin but no session_meta row is absent from the stream repo list.'
+    - 'Session-connected repos still resolve to their true GitHub identity (🎯T116 preserved), including worktrees and prefix-named clones. Oracle: a worktree that has session history resolves to, and is fetched as, its parent repo.'
+    - 'A session-connected repo whose checkout is absent or is not a git repo is still in scope (it is session-connected) and relies on the 🎯T116 failure backoff rather than being excluded. Oracle: such a repo appears in the list and warns at most once per backoff window.'
+    - 🎯T17's premise — walk the workspace so a project untouched by any session still gets polled — is explicitly retired, and its test updated to assert the new contract rather than the old union.
+    - 'Live measurement: after restart the github stream''s repo set equals the session-connected set (77 of the previous 147 on the current index), and no repo lacking session history is attempted. Oracle: post-restart query of mirror_status against session_meta.'
+    - 'Non-mirror discovery is untouched: docs/todos/plans/targets indexing still walks git repos, synthesis roots, and session cwds as before. Oracle: their existing tests pass unchanged.'
+    - CLAUDE.md's documented egress posture states the session-driven scope.
+    context: 'Product principle stated by the user 2026-07-26: "mnemo is not a code management tool, it''s an agent session tracking tool. We really shouldn''t be just finding every repo we think we can and trying to collect data on them. It should be driven first and foremost by discovery of agent sessions and the repos or projects/directories that they are connected to." This explicitly overrules 🎯T17, which added a workspace filesystem walk to ciRepos so a brand-new project untouched by a session could still have its CI polled — recorded in TestCIRepos_UnionOfWorkspaceAndSessionMeta. While fixing 🎯T116 I deferred to T17 and preserved the walk; the user has now reversed that premise, so the walk must stop driving mirror collection. Measured on the live index: the github stream covers 147 repos, of which only 77 have any session history — 70 are polled purely because a directory exists. 🎯T116''s identity resolution (origin remote, worktrees, prefix clones) stays and remains necessary, since session_meta.repo is itself path-derived and needs the same correction. Scope is deliberately limited to the mirror/collection streams; file discovery for docs, todos, plans and synthesis roots legitimately walks all root types and is out of scope.'
+    tags:
+    - mirrors
+    - github
+    - egress
+    - product-principle
+    - discovery
+    origin: user product principle, 2026-07-26
     discovered: 2026-07-26
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
