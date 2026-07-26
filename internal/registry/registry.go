@@ -443,9 +443,20 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				logger.Info("segment backfill complete")
 			}
 		}()
-		e.store.StartImageDescriber()
-		e.store.StartImageOCR()
-		e.store.StartImageEmbedder()
+		// Also gated on the deferred upgrade (🎯T114.1). The embedder
+		// records each attempt in image_embedding_attempts (🎯T121), a
+		// table a pending migration may still be adding — and an attempt
+		// that cannot be recorded is retried forever, which is the very
+		// thing that table exists to stop. Observed on the upgrade boot:
+		// an embed failure at 23:47:15 went unrecorded because the table
+		// did not land until 23:57:11. Descriptions and OCR ride along so
+		// all image work starts from one settled schema.
+		go func() {
+			e.store.AwaitSchemaUpgrade()
+			e.store.StartImageDescriber()
+			e.store.StartImageOCR()
+			e.store.StartImageEmbedder()
+		}()
 		if err := e.store.IngestMemories(); err != nil {
 			logger.Error("memory ingest failed", "err", err)
 		}
