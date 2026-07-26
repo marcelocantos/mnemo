@@ -323,7 +323,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			WHERE from_msg_id <= ? AND to_msg_id >= ?
 			  AND (? = '' OR session_id = ?)
 			  AND (? = 0 OR sealed = 1)
-			ORDER BY ` + SegmentMethodRank + `, level ASC, (to_msg_id - from_msg_id) ASC
+			ORDER BY `+SegmentMethodRank+`, level ASC, (to_msg_id - from_msg_id) ASC
 			LIMIT ?
 		`, q.ContainingMsgID, q.ContainingMsgID, sessionID, sessionID,
 			boolToInt(q.SealedOnly), q.Limit)

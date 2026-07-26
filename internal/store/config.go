@@ -84,7 +84,6 @@ type Config struct {
 	// egress suppressed regardless. See CLAUDE.md § External API egress.
 	DisableImageEmbeddings bool `json:"disable_image_embeddings,omitempty"`
 
-
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
 	// that the TODO indexer matches when discovering TODO files (🎯T78),
 	// beyond the default TODO.md / todos.md names found at any depth.
