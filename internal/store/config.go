@@ -66,6 +66,13 @@ type Config struct {
 	// running app — it just won't be relaunched.)
 	MenuBarApp bool `json:"menu_bar_app,omitempty"`
 
+	// DisableOCR turns image OCR off entirely (🎯T118). OCR runs in a
+	// child process so a framework abort can no longer take the daemon
+	// down, but on a machine whose Vision/Metal stack is broken every
+	// image still costs a doomed process spawn. This is the off switch
+	// for that; without it the only remedy was rebuilding.
+	DisableOCR bool `json:"disable_ocr,omitempty"`
+
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
 	// that the TODO indexer matches when discovering TODO files (🎯T78),
 	// beyond the default TODO.md / todos.md names found at any depth.

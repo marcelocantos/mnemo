@@ -148,6 +148,16 @@ func main() {
 		case "edge":
 			cmdEdge(os.Args[2:])
 			return
+		case store.OCRWorkerSubcommand:
+			// Hidden: the daemon re-execs itself to run Apple Vision in a
+			// child, so a framework abort kills only the child (🎯T118).
+			// Not in the help output — an implementation detail, not a
+			// user-facing command.
+			if err := store.RunOCRWorker(os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "ocr-worker: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 	}
 
