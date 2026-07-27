@@ -788,6 +788,13 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		defer e.workers.Done()
 		w.Run(r.baseCtx)
 	}()
+
+	// Reclaim the -wal after write bursts. Started alongside the backup
+	// worker because the two share the quiescence signal, and because the
+	// backup's own VACUUM INTO is the single longest reader on the
+	// system — the thing that lets the WAL reach its high-water mark in
+	// the first place.
+	e.store.StartWALMaintenance(r.baseCtx)
 }
 
 // startVaultWorkers launches the per-user vault periodic-sync and

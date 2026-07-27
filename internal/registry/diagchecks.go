@@ -214,11 +214,27 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			if err != nil {
 				return diag.Healthy("no WAL backlog")
 			}
+			// Size alone cannot tell a fault from a high-water mark:
+			// SQLite reuses the -wal from offset zero rather than
+			// shrinking it, so a big file usually means "was busy once",
+			// not "writes are not landing". Report it, but only call it a
+			// problem when it is still GROWING between checks — that is
+			// the shape of a reader pinning the WAL or a wedged writer.
 			const warnAt = 256 << 20 // 256 MiB
-			if fi.Size() > warnAt {
+			size := fi.Size()
+			grew := s.NoteWALSize(size)
+			if size > warnAt && grew {
 				return diag.Warning(
-					fmt.Sprintf("WAL is large (%d MiB) — a writer may be stuck or checkpoints are overdue", fi.Size()>>20),
-					"if it keeps growing, restart the daemon; a wedged worker shows up as compactor.breaker")
+					fmt.Sprintf("WAL is %d MiB and still growing — a long-running reader is "+
+						"blocking checkpoints, or a writer is stuck", size>>20),
+					"long readers (backup VACUUM INTO, image backfill) pin the WAL until they "+
+						"finish; if it keeps climbing with none running, restart the daemon — "+
+						"a wedged worker also shows up as compactor.breaker")
+			}
+			if size > warnAt {
+				return diag.Healthy(fmt.Sprintf(
+					"WAL is %d MiB but stable (space is reused, not leaked); "+
+						"maintenance truncates it when writes go quiet", size>>20))
 			}
 			return diag.Healthy("WAL size healthy")
 		}},

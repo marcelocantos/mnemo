@@ -155,6 +155,11 @@ type Store struct {
 	// no upgrade was pending. Close waits on it so we do not tear down
 	// DB handles mid-VACUUM / mid-Apply. 🎯T114.1
 	upgradeDone <-chan struct{}
+
+	// lastWALSize is the -wal size at the previous db.wal diagnostic, so
+	// the check can report growth rather than raw size. Atomic: read from
+	// the diagnostic scheduler, not under any lock.
+	lastWALSize atomic.Int64
 }
 
 // NoteActivity records that a write happened just now. The backup worker
@@ -615,6 +620,13 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 		"PRAGMA cache_size = -64000",
 		"PRAGMA mmap_size = 268435456",
 		"PRAGMA busy_timeout = 5000",
+		// Trim the -wal back to this bound whenever a checkpoint resets
+		// it. Without a limit SQLite reuses the WAL from offset zero but
+		// never shrinks the file, so it is parked at its high-water mark
+		// forever — 2.3 GB here, set during backfill bursts. Note this
+		// bounds the file at REST, not its growth: a long reader still
+		// pins the WAL and lets it balloon (see StartWALMaintenance).
+		fmt.Sprintf("PRAGMA journal_size_limit = %d", walSizeLimitBytes),
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
