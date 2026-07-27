@@ -806,6 +806,31 @@ targets:
     origin: health sweep, 2026-07-26
     discovered: 2026-07-26
     achieved: 2026-07-27
+  T122:
+    name: The daemon drains cleanly on shutdown instead of always exceeding its deadline and force-exiting
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A SIGTERM to an idle daemon completes the drain within the deadline and logs the clean-close path (wal checkpoint on close), not "drain exceeded deadline; forcing exit". Oracle: stop the daemon and grep the log for the checkpoint line.'
+    - 'A SIGTERM issued while a mirror reconcile, compaction scan or image backfill is in flight still drains cleanly: in-flight work is cancelled or awaited within the deadline rather than the process being killed. Oracle: send SIGTERM immediately after a reconcile starts and confirm a clean drain.'
+    - The drain deadline is justified by measurement rather than assumed — whatever value it takes, the slowest legitimate shutdown path is known and fits inside it, or is explicitly cancelled rather than waited on.
+    - Whatever remains genuinely un-cancellable at shutdown (e.g. a gh subprocess mid-flight) is killed deliberately, so the deadline is a backstop rather than the normal path.
+    context: |-
+      Found 2026-07-27 while chasing a 2.3 GB WAL. Every shutdown in this session — 10 of 10 across all daemon runs — ended in "drain exceeded deadline; forcing exit (crash-only recovery on next start) deadline=10s". Zero clean drains, and consequently zero executions of the Close() path.
+
+      That has a concrete cost beyond untidiness: Store.Close() is the ONLY caller of Checkpoint() (wal_checkpoint(TRUNCATE)), so the WAL truncation path never ran once. The -wal therefore sat at its high-water mark of 2.3 GB against a 21 GB database. It also means every start is a crash recovery, replaying the WAL rather than opening a clean database.
+
+      The 10s deadline looks optimistic for this workload. Candidates for what overruns it: the mirror reconcile spawns gh subprocesses per repo (a reconcile logged 1s before the drain in the observed case); the compaction candidate scan runs 2s+ and up to 2m14s under load; image OCR spawns a worker subprocess per image; and several backfill goroutines may not observe context cancellation at all. Diagnosis should establish which of those actually holds the drain rather than raising the deadline blindly.
+
+      Note the WAL symptom itself is separately mitigated: journal_size_limit is now set and a periodic truncating checkpoint runs during write lulls, so reclamation no longer depends on a clean shutdown. This target is about the drain being broken in its own right.
+    tags:
+    - shutdown
+    - reliability
+    - wal
+    - lifecycle
+    origin: WAL investigation, 2026-07-27
+    discovered: 2026-07-27
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
