@@ -242,7 +242,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				return diag.Warning(detail+"; last error: "+es.LastError,
 					"failed images are not retried past their attempt budget; a model-weight "+
 						"download failure clears on its own once the network allows it, or set "+
-						"disable_image_embeddings in ~/.mnemo/config.json to stop trying")
+						`{"image_embeddings":{"enabled":false}} in ~/.mnemo/config.json to stop trying`)
 			}
 			return diag.Healthy(detail)
 		}},

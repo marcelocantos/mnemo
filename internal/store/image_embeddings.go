@@ -62,17 +62,22 @@ type embedBackendState struct {
 }
 
 // resolveEmbedBackend reports whether the embed helper can run, and the
-// reason when it cannot. The config check comes first so an explicit
-// opt-out is reported as such rather than as a missing dependency.
-// Config is read per call (cheap, hot-reloadable) so flipping
-// disable_image_embeddings takes effect without a daemon restart; an
-// unreadable config leaves the embedder enabled, matching every other
-// optional feature's default.
+// reason when it cannot. The opt-in check comes first so a disabled
+// embedder is reported as a deliberate choice rather than as a missing
+// dependency — and so no PyPI or HuggingFace fetch can be reached by a
+// user who never asked for one (🎯T121).
+//
+// Config is read per call (cheap, hot-reloadable) so toggling
+// image_embeddings.enabled takes effect without a daemon restart. An
+// unreadable config leaves the embedder OFF: the default for this
+// feature is "do not fetch", so a config we cannot parse must not be
+// the thing that starts a download.
 func resolveEmbedBackend() embedBackendState {
-	if cfg, err := LoadConfig(); err == nil && cfg.DisableImageEmbeddings {
+	cfg, err := LoadConfig()
+	if err != nil || !cfg.ImageEmbeddings.IsEnabled() {
 		return embedBackendState{
 			reason: embedReasonDisabled,
-			detail: "image embeddings disabled by config (disable_image_embeddings)",
+			detail: `image embeddings are opt-in; set {"image_embeddings":{"enabled":true}} in ~/.mnemo/config.json`,
 		}
 	}
 	if _, err := exec.LookPath("uv"); err != nil {

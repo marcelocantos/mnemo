@@ -146,24 +146,60 @@ func TestEmbedWorthAttempting(t *testing.T) {
 }
 
 // TestEmbedderStatusReportsWhySkipped covers the 🎯T121 acceptance that
-// "skipped, and why" is retrievable without the log — here via the
-// config off switch, which must win over dependency detection.
+// "skipped, and why" is retrievable without the log — here for the
+// default state, which must win over dependency detection.
 func TestEmbedderStatusReportsWhySkipped(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(MnemoHomeEnv, home)
-	if err := WriteConfig(Config{DisableImageEmbeddings: true}); err != nil {
+	if err := WriteConfig(Config{}); err != nil {
 		t.Fatalf("WriteConfig: %v", err)
 	}
 
 	s := newTestStore(t, t.TempDir())
 	st := s.EmbedderStatus()
 	if st.Enabled {
-		t.Fatalf("embedder reports enabled despite disable_image_embeddings")
+		t.Fatalf("embedder reports enabled without an explicit opt-in")
 	}
 	if st.Reason != embedReasonDisabled {
 		t.Fatalf("reason = %q, want %q", st.Reason, embedReasonDisabled)
 	}
-	if !strings.Contains(st.Detail, "disable_image_embeddings") {
+	if !strings.Contains(st.Detail, "image_embeddings") {
 		t.Fatalf("detail %q does not name the config key", st.Detail)
+	}
+}
+
+// TestImageEmbeddingsAreOptIn is the load-bearing guard for the gate
+// (🎯T121): an absent config section must leave the embedder off, so no
+// PyPI resolution or HuggingFace weight download can be reached by a
+// user who never asked for one. Opting in flips it, subject to the
+// dependencies actually being present.
+func TestImageEmbeddingsAreOptIn(t *testing.T) {
+	t.Setenv(MnemoHomeEnv, t.TempDir())
+
+	// Default: section omitted entirely.
+	if err := WriteConfig(Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveEmbedBackend(); got.ready || got.reason != embedReasonDisabled {
+		t.Errorf("embedder must be off by default; got ready=%v reason=%q",
+			got.ready, got.reason)
+	}
+
+	// Explicitly disabled reads the same.
+	if err := WriteConfig(Config{ImageEmbeddings: ImageEmbeddingsConfig{Enabled: false}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveEmbedBackend(); got.ready {
+		t.Error("explicit enabled=false must keep the embedder off")
+	}
+
+	// Opted in: no longer gated on config. Whether it is *ready* then
+	// depends on uv and the helper script, which this test does not
+	// require — only that the refusal is no longer the config one.
+	if err := WriteConfig(Config{ImageEmbeddings: ImageEmbeddingsConfig{Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveEmbedBackend(); got.reason == embedReasonDisabled {
+		t.Error("opting in must clear the config gate")
 	}
 }
