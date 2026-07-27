@@ -808,7 +808,7 @@ targets:
     achieved: 2026-07-27
   T122:
     name: The daemon drains cleanly on shutdown instead of always exceeding its deadline and force-exiting
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -831,6 +831,32 @@ targets:
     - lifecycle
     origin: WAL investigation, 2026-07-27
     discovered: 2026-07-27
+    achieved: 2026-07-27
+  T123:
+    name: The two failure modes that were invisible to CI — a worker outrunning a deferred schema upgrade, and a shutdown that never checkpoints — are caught by automated tests rather than by watching a live daemon
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A test opens a store whose schema is behind, so the upgrade is genuinely deferred, and asserts that a worker gated on AwaitSchemaUpgrade observes the post-migration schema — i.e. a read of a newly-added column/table succeeds after it returns. The test must fail if the gate is removed.
+    - A test asserts Registry.Close completes within its grace and still closes the store when a worker goroutine refuses to exit (standing in for the un-cancellable gh/git subprocesses), so the WAL checkpoint is reached. The test must fail if the bounded wait reverts to an unconditional Wait().
+    - 'A test asserts the HTTP drain does not hang on a long-lived request: with a handler that never returns (standing in for the streamable-HTTP MCP transport), intake shutdown gives up after its grace and the connection is force-closed.'
+    - The suite runs in the normal `go test -tags sqlite_fts5 ./...` pass with no daemon, no network and no built binary required.
+    context: |-
+      Filed 2026-07-28 after auditing the session's own work. 67 test functions were added across 🎯T64.11/T116/T117/T118/T120/T121/T122 and the WAL fixes, much of it fault-injecting (SIGABRT-raising OCR worker, failing embed helper, PATH-emptied resolver). Two gaps stand out because they cover the bugs that actually recurred or hid longest.
+
+      (1) Deferred-schema-upgrade ordering has NO test, and the bug bit twice in one session: the span backfill read topic_segments.compaction_id, and the image embedder wrote image_embedding_attempts, both before the deferred migration had created them. 🎯T114.1 defers the upgrade so the daemon can serve during a multi-minute pre-migration backup, so any worker touching new schema must wait on AwaitSchemaUpgrade. It only manifests on an UPGRADE boot — a fresh test database always has the new schema — which is exactly why CI cannot see it today.
+
+      (2) The drain path has NO test. Store.Close is the only caller of the WAL checkpoint and it never executed once in this session's 11 shutdowns; the breakage was silent for the whole life of the feature and was found only by reading a live daemon's log. Both causes are unit-testable without a daemon: Registry.Close must not block unconditionally on workers that cannot be cancelled, and HTTP intake shutdown must not wait forever on a long-lived request.
+
+      Verification for both was manual this session (SIGTERM a live daemon, read the log), which is precisely the kind of oracle that does not survive into CI.
+    tags:
+    - testing
+    - regression
+    - shutdown
+    - migration
+    origin: coverage audit, 2026-07-28
+    discovered: 2026-07-28
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
