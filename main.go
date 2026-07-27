@@ -83,12 +83,29 @@ const (
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 
-	// drainDeadline caps the graceful shutdown sequence (🎯T97.1). Stopping
-	// HTTP intake, stopping workers, quiescing the read pool, and truncating
-	// the WAL should complete well within this; if it overruns we hard-exit,
-	// which is safe under mnemo's crash-only durability (the next start
-	// recovers any un-checkpointed WAL frames).
-	drainDeadline = 10 * time.Second
+	// drainIntakeGrace bounds the *courtesy* half of shutdown: letting
+	// in-flight HTTP requests finish before the listener is torn down
+	// (🎯T122). It is deliberately short because the MCP transport is
+	// long-lived by design — a streamable-HTTP session holds an open
+	// request that never completes on its own, so http.Server.Shutdown
+	// waits for it forever. Anything still connected past this grace is
+	// force-closed rather than allowed to hold the process hostage.
+	drainIntakeGrace = 2 * time.Second
+
+	// drainStoreBudget is the time reserved for the half of shutdown that
+	// actually matters for durability: stopping workers, quiescing the
+	// read pool, and truncating the WAL. It is a separate budget from
+	// drainIntakeGrace precisely so a stuck client cannot consume it —
+	// before 🎯T122 both shared one deadline, HTTP drain ate all of it,
+	// and Store.Close (the only caller of the WAL checkpoint) never ran
+	// once in practice.
+	drainStoreBudget = 15 * time.Second
+
+	// drainDeadline caps the whole sequence as a backstop. Overrunning it
+	// hard-exits, which is safe under mnemo's crash-only durability (the
+	// next start recovers any un-checkpointed WAL frames) — but it should
+	// now be genuinely exceptional rather than the normal path.
+	drainDeadline = drainIntakeGrace + drainStoreBudget
 )
 
 // summariserWorkDir returns a dedicated, always-present working
@@ -1383,20 +1400,37 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		drained := make(chan struct{})
 		go func() {
 			defer close(drained)
-			// 1. Stop intake, draining in-flight requests within the deadline.
+			// 1. Stop intake. Bounded by its OWN short grace (🎯T122) so a
+			// client that never disconnects cannot starve the durability
+			// steps below. Shutdown waits for in-flight requests, and the
+			// MCP transport keeps one open indefinitely by design, so this
+			// phase timing out is the expected case whenever a client is
+			// attached — not an error worth alarming about.
+			intakeCtx, cancelIntake := context.WithTimeout(context.Background(), drainIntakeGrace)
 			slog.Info("drain: stopping HTTP MCP intake")
-			if err := httpSrv.Shutdown(drainCtx); err != nil {
-				slog.Warn("HTTP MCP shutdown error", "err", err)
+			if err := httpSrv.Shutdown(intakeCtx); err != nil {
+				slog.Debug("HTTP MCP shutdown did not finish gracefully", "err", err)
 			}
 			slog.Info("drain: stopping HTTP server intake")
-			if err := httpServer.Shutdown(drainCtx); err != nil {
-				slog.Warn("HTTP server shutdown error", "err", err)
+			if err := httpServer.Shutdown(intakeCtx); err != nil {
+				slog.Debug("HTTP server shutdown did not finish gracefully", "err", err)
 			}
 			if fedSrv != nil {
 				slog.Info("drain: stopping federated intake")
-				if err := fedSrv.Shutdown(drainCtx); err != nil {
-					slog.Warn("federated HTTP shutdown error", "err", err)
+				if err := fedSrv.Shutdown(intakeCtx); err != nil {
+					slog.Debug("federated HTTP shutdown did not finish gracefully", "err", err)
 				}
+			}
+			cancelIntake()
+			// Force-close anything still attached. Without this a live MCP
+			// stream holds the listener open past every deadline, which is
+			// exactly how shutdown used to end in a hard exit with the WAL
+			// never checkpointed.
+			if err := httpServer.Close(); err != nil {
+				slog.Debug("HTTP server close", "err", err)
+			}
+			if fedSrv != nil {
+				_ = fedSrv.Close()
 			}
 			// 2. Release singleton background lease (🎯T97.4) so a peer
 			// backend can acquire and start ingest/compaction.

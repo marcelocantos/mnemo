@@ -1305,8 +1305,49 @@ func (r *Registry) Close() {
 		pm.Close()
 	}
 	for _, e := range entries {
-		e.workers.Wait()
-		e.vaultWorkers.Wait()
+		// Wait for workers, but never unconditionally (🎯T122). r.cancel()
+		// above signals them, yet not every worker is actually
+		// cancellable: the mirror streams shell out to `gh` and `git log`
+		// via exec.Command with no context, so a subprocess mid-flight
+		// runs to completion no matter what shutdown wants. Blocking on
+		// that starved the step below — Store.Close is the only caller of
+		// the WAL checkpoint, and before this it never ran once in
+		// practice, leaving a 2.3 GB -wal and a crash recovery on every
+		// start.
+		//
+		// Durability beats tidiness here: the process is exiting, so an
+		// abandoned subprocess is harmless (it is reparented and dies on
+		// its own), whereas a skipped checkpoint is not.
+		if !waitFor(&e.workers, workerDrainGrace) {
+			slog.Warn("drain: workers did not stop in time; checkpointing anyway",
+				"grace", workerDrainGrace)
+		}
+		if !waitFor(&e.vaultWorkers, workerDrainGrace) {
+			slog.Warn("drain: vault workers did not stop in time; checkpointing anyway",
+				"grace", workerDrainGrace)
+		}
 		_ = e.store.Close()
+	}
+}
+
+// workerDrainGrace is how long Close waits for a user's worker
+// goroutines to observe cancellation before proceeding to checkpoint
+// without them (🎯T122). Generous enough that a cancellable worker
+// finishes the iteration it is on, short enough that an un-cancellable
+// subprocess cannot consume the shutdown budget.
+const workerDrainGrace = 3 * time.Second
+
+// waitFor waits on wg for at most d, reporting whether it completed.
+func waitFor(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }
