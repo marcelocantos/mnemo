@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"os/user"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ import (
 // give up on it and still close the store.
 func TestCloseCheckpointsDespiteStuckWorker(t *testing.T) {
 	r := NewRegistry(context.Background(), store.Config{}, "")
-	s, err := r.ForUser("marcelo")
+	s, err := r.ForUser(currentUser(t))
 	if err != nil {
 		t.Fatalf("ForUser: %v", err)
 	}
@@ -84,3 +85,15 @@ func TestCloseCheckpointsDespiteStuckWorker(t *testing.T) {
 // healthy case. That is a property worth improving (making the mirror
 // subprocesses context-aware would do it) but it is not one the code
 // has today, and asserting an aspiration would just make the suite lie.
+
+// currentUser returns a username the registry can resolve a home
+// directory for. Hardcoding one works on a dev machine and fails in CI,
+// where that account does not exist.
+func currentUser(t *testing.T) string {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("cannot resolve the current user: %v", err)
+	}
+	return u.Username
+}

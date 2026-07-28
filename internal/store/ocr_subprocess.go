@@ -45,6 +45,13 @@ const OCRWorkerSubcommand = "ocr-worker"
 // image recorded as failed. A variable so tests can shrink it.
 var ocrWorkerTimeout = 60 * time.Second
 
+// ocrWorkerWaitDelay bounds how long Wait lingers after the worker has
+// been killed, waiting for descendants to release the output pipes.
+// Without it a worker that forks leaves this call blocked indefinitely
+// even though the deadline fired — the timeout would be advisory rather
+// than enforced.
+var ocrWorkerWaitDelay = 5 * time.Second
+
 // ocrConsecutiveAbortLimit is how many consecutive worker aborts are
 // tolerated before Apple Vision is disabled for the lifetime of the
 // process. Repeated aborts mean the platform's Vision stack is broken,
@@ -119,6 +126,13 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Cancelling the context kills the worker, but Wait still blocks
+	// until every inherited write end of the output pipes is closed —
+	// so anything the worker itself spawned can hold this call open long
+	// past the deadline, which is precisely the wedge the timeout exists
+	// to prevent. WaitDelay caps that: after the kill, give descendants
+	// this long to let go, then return regardless.
+	cmd.WaitDelay = ocrWorkerWaitDelay
 
 	runErr := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {

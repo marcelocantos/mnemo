@@ -211,9 +211,12 @@ func TestOCRWorkerTimeoutIsContained(t *testing.T) {
 	resetOCRState(t)
 	withWorker(t, "sleep 30")
 
-	prevTimeout := ocrWorkerTimeout
+	prevTimeout, prevDelay := ocrWorkerTimeout, ocrWorkerWaitDelay
 	ocrWorkerTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { ocrWorkerTimeout = prevTimeout })
+	// A forking `sh` keeps the output pipes open after the kill, so
+	// without a short WaitDelay this blocks for the child's full sleep.
+	ocrWorkerWaitDelay = 500 * time.Millisecond
+	t.Cleanup(func() { ocrWorkerTimeout, ocrWorkerWaitDelay = prevTimeout, prevDelay })
 
 	start := time.Now()
 	_, _, err := runAppleVisionOCRIsolated([]byte("x"))
