@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -44,6 +45,48 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 	}
 
 	reg.Register(
+		// Process boot phase: listen-first + deferred schema upgrade
+		// (🎯T114 / 🎯T114.1). PhaseReady means tools can run; Upgrade
+		// overlay means backup/apply still running concurrently.
+		diag.Check{Name: "startup.ready", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			st := boot.Get()
+			switch st.Phase {
+			case boot.PhaseReady:
+				if st.Upgrade != "" {
+					return diag.Warning(
+						"default-user store serving; schema upgrade in progress: "+st.Upgrade,
+						"tools and /health stay up — pre-migration VACUUM INTO + gzip run concurrently with the live SQLite pools; wait for apply to finish for new-schema features")
+				}
+				return diag.Healthy("default-user store ready")
+			case boot.PhaseFailed:
+				return diag.Failure(
+					"startup failed: "+st.Detail,
+					"check the daemon log; fix the underlying open/migration error and restart mnemo")
+			case boot.PhasePreMigrationBackup:
+				return diag.Warning(
+					boot.Summary(),
+					"pre-migration backup (VACUUM INTO + gzip) can take several minutes on multi-GB DBs; HTTP stays up — wait, or check the daemon log")
+			case boot.PhaseApplyingSchema:
+				return diag.Warning(
+					boot.Summary(),
+					"schema migration in progress; wait for apply + ANALYZE to finish")
+			default:
+				return diag.Warning(
+					boot.Summary(),
+					"daemon is still bringing up the default-user store; /health stays available")
+			}
+		}},
+
+		diag.Check{Name: "schema.upgrade", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			st := boot.Get()
+			if st.Upgrade == "" {
+				return diag.Healthy("no schema upgrade in progress")
+			}
+			return diag.Warning(
+				st.Upgrade,
+				"store is serving on the current schema; backup then apply run in the background (SQLite concurrent VACUUM INTO)")
+		}},
+
 		diag.Check{Name: "compactor.workdir", Tier: diag.Full, Run: func(context.Context) diag.CheckResult {
 			if workDir == "" {
 				return diag.Failure(
@@ -128,7 +171,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "ingest.backfill", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
-				return diag.Healthy("store not started yet")
+				return storeNotReadyResult("ingest.backfill")
 			}
 			if time.Since(daemonStart) < 10*time.Minute {
 				return diag.Healthy("startup backfill in progress")
@@ -152,7 +195,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "db.readable", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
-				return diag.Healthy("store not started yet")
+				return storeNotReadyResult("db.readable")
 			}
 			if _, err := s.Query("SELECT 1 AS ok"); err != nil {
 				return diag.Failure(
@@ -165,19 +208,59 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "db.wal", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
-				return diag.Healthy("store not started yet")
+				return storeNotReadyResult("db.wal")
 			}
 			fi, err := os.Stat(s.DBPath() + "-wal")
 			if err != nil {
 				return diag.Healthy("no WAL backlog")
 			}
+			// Size alone cannot tell a fault from a high-water mark:
+			// SQLite reuses the -wal from offset zero rather than
+			// shrinking it, so a big file usually means "was busy once",
+			// not "writes are not landing". Report it, but only call it a
+			// problem when it is still GROWING between checks — that is
+			// the shape of a reader pinning the WAL or a wedged writer.
 			const warnAt = 256 << 20 // 256 MiB
-			if fi.Size() > warnAt {
+			size := fi.Size()
+			grew := s.NoteWALSize(size)
+			if size > warnAt && grew {
 				return diag.Warning(
-					fmt.Sprintf("WAL is large (%d MiB) — a writer may be stuck or checkpoints are overdue", fi.Size()>>20),
-					"if it keeps growing, restart the daemon; a wedged worker shows up as compactor.breaker")
+					fmt.Sprintf("WAL is %d MiB and still growing — a long-running reader is "+
+						"blocking checkpoints, or a writer is stuck", size>>20),
+					"long readers (backup VACUUM INTO, image backfill) pin the WAL until they "+
+						"finish; if it keeps climbing with none running, restart the daemon — "+
+						"a wedged worker also shows up as compactor.breaker")
+			}
+			if size > warnAt {
+				return diag.Healthy(fmt.Sprintf(
+					"WAL is %d MiB but stable (space is reused, not leaked); "+
+						"maintenance truncates it when writes go quiet", size>>20))
 			}
 			return diag.Healthy("WAL size healthy")
+		}},
+
+		// 🎯T121: whether the image embedder ran or was skipped, and why,
+		// without reading the daemon log. Never fails — an absent embedder
+		// is a normal deployment, not a fault.
+		diag.Check{Name: "images.embedder", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("store not started yet")
+			}
+			es := s.EmbedderStatus()
+			if !es.Enabled {
+				return diag.Healthy(fmt.Sprintf(
+					"image embeddings skipped (%s): %s", es.Reason, es.Detail))
+			}
+			detail := fmt.Sprintf("%s; %d embedded, %d failed, %d pending",
+				es.Detail, es.Embedded, es.Failed, es.Pending)
+			if es.Failed > 0 {
+				return diag.Warning(detail+"; last error: "+es.LastError,
+					"failed images are not retried past their attempt budget; a model-weight "+
+						"download failure clears on its own once the network allows it, or set "+
+						`{"image_embeddings":{"enabled":false}} in ~/.mnemo/config.json to stop trying`)
+			}
+			return diag.Healthy(detail)
 		}},
 
 		// 🎯T97.2: newer release available (warn). Uses the last
@@ -256,4 +339,21 @@ func expandTilde(p string) string {
 		}
 	}
 	return p
+}
+
+// storeNotReadyResult reports boot progress when a check needs the
+// default-user store but ForUser has not finished yet.
+func storeNotReadyResult(check string) diag.CheckResult {
+	st := boot.Get()
+	switch st.Phase {
+	case boot.PhaseFailed:
+		return diag.Failure("store unavailable: "+st.Detail, "see startup.ready")
+	case boot.PhaseReady:
+		// Race: boot marked ready but registry map not visible yet.
+		return diag.Warning("store not visible yet", "retry /health shortly")
+	case boot.PhaseStarting:
+		return diag.Healthy(check + ": store not started yet")
+	default:
+		return diag.Warning(boot.Summary(), "see startup.ready")
+	}
 }

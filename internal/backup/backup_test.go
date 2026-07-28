@@ -104,6 +104,32 @@ func TestBackupRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBackupWithOnStep(t *testing.T) {
+	src := seedDB(t, 20)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, Filename(TagPreMigration, time.Now()))
+	var steps []string
+	res, err := BackupWith(src, dest, &BackupArgs{
+		OnStep: func(step string) { steps = append(steps, step) },
+	})
+	if err != nil {
+		t.Fatalf("BackupWith: %v", err)
+	}
+	if res.GzippedSize == 0 {
+		t.Fatal("empty gzip result")
+	}
+	if len(steps) < 3 {
+		t.Fatalf("want at least vacuum/integrity/gzip steps, got %v", steps)
+	}
+	joined := strings.Join(steps, " | ")
+	if !strings.Contains(joined, "VACUUM") {
+		t.Errorf("missing VACUUM step: %v", steps)
+	}
+	if !strings.Contains(joined, "gzip") {
+		t.Errorf("missing gzip step: %v", steps)
+	}
+}
+
 func TestBackupRejectsNonGzDestination(t *testing.T) {
 	src := seedDB(t, 1)
 	dir := t.TempDir()

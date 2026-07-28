@@ -215,6 +215,26 @@ By default searches only interactive sessions (excludes subagents, worktrees, ep
 			mcp.WithNumber("context_before", mcp.Description("Number of messages before each hit to include (default 3)")),
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after each hit to include (default 3)")),
 			mcp.WithString("context_filter", mcp.Description(`Filter for context messages. "substantive" (default): only non-noise user/assistant messages. "all": include everything (tool calls, system messages, noise).`)),
+			mcp.WithString("expand", mcp.Description(`Expand each hit to a topic segment (🎯T64.10). "none" (default): ±N context only. "segment": smallest enclosing sealed segment. "segment:coarse": top-level span. Default remains "none" until boundary-quality gates clear.`)),
+		),
+		mcp.NewTool("mnemo_segments",
+			mcp.WithDescription(`Query hierarchical topic segments (🎯T64.10, folded into summarisation by 🎯T64.11). Segments are precomputed topic-coherent spans over a session's substantive messages.
+
+Query shapes (provide one primary filter):
+- query: FTS over segment label/summary — the thematic search shape. Returns spans from many sessions ranked by relevance; use this to find "that thing about X" without knowing the session.
+- session_id: topic-AST of one session
+- containing_msg_id: spans that enclose a message id
+- theme_id / overlaps_theme_a + overlaps_theme_b: DORMANT. Cross-session theme clustering is off (🎯T64.11) — thematic retrieval is served by the query shape above, so these return nothing on a current index.
+
+Spans come from three layers, in precedence order: 'llm' (drawn by the summariser inside a window it compacted), 'compaction' (a window-level span projected from a compaction, covering all summarised history), and 'structural' (always-on local pass, zero egress, covers everything else). The method field on each result says which. expand on mnemo_search stays default-off until quality gates pass.`),
+			mcp.WithString("session_id", mcp.Description("Session ID to list segments for")),
+			mcp.WithString("theme_id", mcp.Description("Theme ID — return segment members")),
+			mcp.WithNumber("containing_msg_id", mcp.Description("Message id — enclosing segments")),
+			mcp.WithString("query", mcp.Description("FTS over label/summary")),
+			mcp.WithString("overlaps_theme_a", mcp.Description("First theme id for intersection query")),
+			mcp.WithString("overlaps_theme_b", mcp.Description("Second theme id for intersection query")),
+			mcp.WithBoolean("sealed_only", mcp.Description("Only sealed segments (default false)")),
+			mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
 		),
 		mcp.NewTool("mnemo_sessions",
 			mcp.WithDescription("List transcript sessions, sorted by most recent activity. By default shows only interactive sessions with at least 6 substantive messages."),
@@ -766,6 +786,7 @@ Hot-reload coverage:
   - workspace_roots, extra_project_dirs, synthesis_roots: applied live; subsequent ingest passes pick up the new roots.
   - linked_instances: persisted to disk but requires a daemon restart to take effect (the federation client is built once at startup).
   - menu_bar_app: opt-in (default false) for the macOS menu-bar Threads app. Applied live — toggling it starts/stops the daemon supervising Mnemo.app immediately, no restart (disabling won't force-quit a running app, it just won't be relaunched). The Threads daemon API — mnemo_thread_* tools, the "mnemo thread" CLI, the HTTP thread routes — stays available regardless of this flag.
+  - image_embeddings.enabled (🎯T121): opt-in (default false) for the CLIP image embedder. It shells out to "uv run --script tools/embed-clip/embed.py", which resolves PyPI dependencies and downloads CLIP model weights from the HuggingFace Hub (~2 GB of caches), so it stays off until you ask for it — same posture as cost_reconciliation. Applied live (read per attempt), no restart. Image extraction, OCR, descriptions and FTS work regardless; only embedding-based semantic/similar image search depends on this.
   - plugins (🎯T102.2): list of {name, enabled, transport, command|url|script, args?, params?}. Applied live — enable starts an instance, disable tears one down, no restart. Metadata (facets, UI, config_schema) is discovered from each plugin's manifest endpoint, not stored in config. Optional default home: ~/.mnemo/plugins/<name>/.
 
 Response includes which fields changed, which were adopted live, and which require a restart.`),
@@ -852,6 +873,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	switch name {
 	case "mnemo_search":
 		return ch.search(args)
+	case "mnemo_segments":
+		return ch.segments(args)
 	case "mnemo_sessions":
 		return ch.sessions(args)
 	case "mnemo_read_session":
@@ -998,10 +1021,20 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 	if query == "" {
 		return "query is required", true, nil
 	}
+	expand, _ := args["expand"].(string)
+	if expand == "" {
+		expand = store.DefaultSegmentExpand
+	}
 
 	results, err := h.mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly)
 	if err != nil {
 		return fmt.Sprintf("search failed: %v", err), true, nil
+	}
+	if expand != store.SegmentExpandNone && expand != "" {
+		results, err = h.mem.AttachSegmentExpand(results, expand)
+		if err != nil {
+			return fmt.Sprintf("segment expand failed: %v", err), true, nil
+		}
 	}
 	if len(results) == 0 {
 		return "No results found. Try different terms — the content may use different vocabulary than expected.", false, nil
@@ -1033,12 +1066,66 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 		for _, cm := range r.Before {
 			fmt.Fprintf(&b, "  [%s] %s\n", cm.Role, cm.Text)
 		}
+		if r.Segment != nil {
+			fmt.Fprintf(&b, "  [segment %s L%d] msgs %d–%d · %s\n",
+				r.Segment.ID, r.Segment.Level, r.Segment.FromMsgID, r.Segment.ToMsgID, r.Segment.Label)
+			if r.Segment.Summary != "" {
+				fmt.Fprintf(&b, "  [segment summary] %s\n", r.Segment.Summary)
+			}
+		}
 		fmt.Fprintf(&b, ">> [%s] %s | %s | %s | msg:%d\n>> %s\n",
 			r.Role, r.Project, sid, r.Timestamp, r.MessageID, r.Text)
 		for _, cm := range r.After {
 			fmt.Fprintf(&b, "  [%s] %s\n", cm.Role, cm.Text)
 		}
 		b.WriteByte('\n')
+	}
+	return b.String(), false, nil
+}
+
+func (h *callHandler) segments(args map[string]any) (string, bool, error) {
+	q := store.SegmentQuery{}
+	q.SessionID, _ = args["session_id"].(string)
+	q.ThemeID, _ = args["theme_id"].(string)
+	if v, ok := args["containing_msg_id"].(float64); ok && v > 0 {
+		q.ContainingMsgID = int(v)
+	}
+	q.FTSQuery, _ = args["query"].(string)
+	q.OverlapsThemeA, _ = args["overlaps_theme_a"].(string)
+	q.OverlapsThemeB, _ = args["overlaps_theme_b"].(string)
+	if v, ok := args["sealed_only"].(bool); ok {
+		q.SealedOnly = v
+	}
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		q.Limit = int(l)
+	}
+	segs, err := h.mem.QuerySegments(q)
+	if err != nil {
+		return fmt.Sprintf("segments query failed: %v", err), true, nil
+	}
+	if len(segs) == 0 {
+		return "No segments matched.", false, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Topic segments (%d)\n\n", len(segs))
+	for _, s := range segs {
+		sealed := "open"
+		if s.Sealed {
+			sealed = "sealed"
+		}
+		fmt.Fprintf(&b, "## %s · L%d · %s\n", s.ID, s.Level, sealed)
+		fmt.Fprintf(&b, "- session: `%s`\n", s.SessionID)
+		fmt.Fprintf(&b, "- range: msgs %d–%d\n", s.FromMsgID, s.ToMsgID)
+		if s.ParentID != "" {
+			fmt.Fprintf(&b, "- parent: `%s`\n", s.ParentID)
+		}
+		if s.Label != "" {
+			fmt.Fprintf(&b, "- label: %s\n", s.Label)
+		}
+		if s.Summary != "" {
+			fmt.Fprintf(&b, "- summary: %s\n", s.Summary)
+		}
+		fmt.Fprintf(&b, "- method: %s · confidence: %.2f\n\n", s.Method, s.Confidence)
 	}
 	return b.String(), false, nil
 }

@@ -29,6 +29,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/sqldeep/go/sqldeep"
 	"github.com/marcelocantos/sqlift/go/sqlift"
 	_ "github.com/mattn/go-sqlite3"
@@ -148,6 +149,17 @@ type Store struct {
 	// (worker will wait the full quiescence period before its first
 	// backup attempt). Atomic so reads and writes don't need rootsMu.
 	lastWriteAt atomic.Int64
+
+	// upgradeDone is closed when any deferred schema upgrade (pre-
+	// migration backup + sqlift.Apply) has finished, or immediately when
+	// no upgrade was pending. Close waits on it so we do not tear down
+	// DB handles mid-VACUUM / mid-Apply. 🎯T114.1
+	upgradeDone <-chan struct{}
+
+	// lastWALSize is the -wal size at the previous db.wal diagnostic, so
+	// the check can report growth rather than raw size. Atomic: read from
+	// the diagnostic scheduler, not under any lock.
+	lastWALSize atomic.Int64
 }
 
 // NoteActivity records that a write happened just now. The backup worker
@@ -315,15 +327,16 @@ type ContextMessage struct {
 
 // SearchResult is a single search hit with optional surrounding context.
 type SearchResult struct {
-	MessageID int              `json:"message_id"`
-	SessionID string           `json:"session_id"`
-	Project   string           `json:"project"`
-	Role      string           `json:"role"`
-	Text      string           `json:"text"`
-	Timestamp string           `json:"timestamp"`
-	Rank      float64          `json:"rank"`
-	Before    []ContextMessage `json:"before,omitempty"`
-	After     []ContextMessage `json:"after,omitempty"`
+	MessageID int               `json:"message_id"`
+	SessionID string            `json:"session_id"`
+	Project   string            `json:"project"`
+	Role      string            `json:"role"`
+	Text      string            `json:"text"`
+	Timestamp string            `json:"timestamp"`
+	Rank      float64           `json:"rank"`
+	Before    []ContextMessage  `json:"before,omitempty"`
+	After     []ContextMessage  `json:"after,omitempty"`
+	Segment   *SegmentExpandHit `json:"segment,omitempty"` // 🎯T64.10 expand=
 }
 
 // SessionInfo is a summary of a transcript session.
@@ -607,6 +620,13 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 		"PRAGMA cache_size = -64000",
 		"PRAGMA mmap_size = 268435456",
 		"PRAGMA busy_timeout = 5000",
+		// Trim the -wal back to this bound whenever a checkpoint resets
+		// it. Without a limit SQLite reuses the WAL from offset zero but
+		// never shrinks the file, so it is parked at its high-water mark
+		// forever — 2.3 GB here, set during backfill bursts. Note this
+		// bounds the file at REST, not its growth: a long reader still
+		// pins the WAL and lets it balloon (see StartWALMaintenance).
+		fmt.Sprintf("PRAGMA journal_size_limit = %d", walSizeLimitBytes),
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
@@ -616,29 +636,67 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 	return db, nil
 }
 
-// applySchema brings the live DB at dbPath to the shape declared in
-// schema.sql. Uses sqlift under ApplyOptions{} (= AllowNone): only pure
-// additive changes are permitted (CREATE TABLE, ADD COLUMN, CREATE
-// INDEX/VIEW/TRIGGER/VIRTUAL TABLE, and trigger body modifications).
-// Anything else — drops, rebuilds, loosening, data-dependent changes —
-// is rejected per the append-only schema policy in CLAUDE.md.
-//
-// The sqlift handle is opened exclusively for the migration and closed
-// before returning so the caller can reopen with its own PRAGMA settings.
-func applySchema(dbPath string) error {
-	// Fast path: a brand-new / empty database needs no migration diffing.
-	// sqlift's parse/extract/diff/apply only earns its keep when *upgrading*
-	// an existing schema; for a fresh DB the desired schema can be created
-	// by executing schema.sql directly. This avoids re-parsing and
-	// re-diffing the full 42 KB schema on every store.New() — the common
-	// case for tests (a fresh DB per test, 123+ in internal/store alone)
-	// and for a first-run install — and is dramatically cheaper than the
-	// cgo sqlift path, especially on Windows (🎯T90).
+// preMigrationBackup runs the pre-migration snapshot. Overridden in tests
+// to prove store.New returns while a multi-minute VACUUM+gzip would block
+// the old synchronous path (🎯T114.1).
+var preMigrationBackup = func(srcPath, destPath string, args *backup.BackupArgs) (backup.Result, error) {
+	return backup.BackupWith(srcPath, destPath, args)
+}
+
+// schemaPrep is the cheap result of prepareSchema: either the DB is at the
+// desired shape, or an upgrade (backup + apply) is still required.
+type schemaPrep struct {
+	// pendingUpgrade is true when sqlift.Diff is non-empty. The store may
+	// open and serve on the current schema immediately; upgradeSchema then
+	// runs backup → apply (insurance order) in the background.
+	pendingUpgrade bool
+}
+
+// prepareSchema creates a fresh schema when the DB is empty, or reports
+// whether an additive upgrade is still required. It does not take a
+// pre-migration backup and does not apply migrations — that is upgradeSchema.
+func prepareSchema(dbPath string) (schemaPrep, error) {
+	// Fast path: brand-new / empty database (🎯T90).
 	if created, err := applyFreshSchema(dbPath); err != nil {
-		return err
+		return schemaPrep{}, err
 	} else if created {
-		return nil
+		return schemaPrep{}, nil
 	}
+
+	sdb, err := sqlift.Open(dbPath)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift open: %w", err)
+	}
+	defer sdb.Close()
+
+	current, err := sqlift.Extract(sdb)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift extract: %w", err)
+	}
+	desired, err := sqlift.Parse(schemaSQL)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift parse schema.sql: %w", err)
+	}
+	plan, err := sqlift.Diff(current, desired)
+	if err != nil {
+		return schemaPrep{}, fmt.Errorf("sqlift diff: %w", err)
+	}
+	if plan.Empty() {
+		return schemaPrep{}, nil
+	}
+	return schemaPrep{pendingUpgrade: true}, nil
+}
+
+// upgradeSchema takes the pre-migration backup (when tables exist), then
+// applies the additive sqlift plan, then ANALYZE. Safe to run while the
+// store already holds long-lived read/write pools: VACUUM INTO uses its own
+// read-only connection (SQLite shared lock / snapshot), and AllowNone DDL is
+// additive. Insurance order is preserved: backup completes before Apply.
+//
+// Used synchronously by applySchema (tests / tools) and asynchronously by
+// store.New when a pending upgrade is deferred off the open path (🎯T114.1).
+func upgradeSchema(dbPath string) error {
+	defer boot.ClearUpgrade()
 
 	sdb, err := sqlift.Open(dbPath)
 	if err != nil {
@@ -659,32 +717,12 @@ func applySchema(dbPath string) error {
 		return fmt.Errorf("sqlift diff: %w", err)
 	}
 	if plan.Empty() {
-		// No diff — nothing to back up before, nothing to apply.
 		return nil
 	}
 
-	// Pre-migration backup. Cheap insurance even though AllowNone gates
-	// reject everything destructive: if a future sqlift bug or an
-	// unexpected interaction at apply time corrupts the live DB, this
-	// snapshot is the rollback point. Tagged pre-migration so the daily
-	// worker's retention GC can identify it; sharing the daily pool per
-	// 🎯T61 design.
-	//
-	// Skipped on a fresh DB (no existing tables) — there's nothing to
-	// protect, and every test using t.TempDir hits this path so we'd
-	// pay backup.Backup's two short-lived sql.DB opens per test for no
-	// benefit. On a real upgrade, current.Tables is populated and the
-	// backup fires.
-	//
-	// Backup uses its own read-only sqlite connection; sdb stays open
-	// throughout. Earlier versions of this hook closed sdb before the
-	// backup and reopened after — on Windows that re-open deadlocked
-	// because mattn/go-sqlite3's file handle release is asynchronous
-	// (NTFS file-lock release lags Close() return). SQLite is fine with
-	// the writer connection idle while a separate reader takes a
-	// shared lock for VACUUM INTO, so the original close-and-reopen
-	// was unnecessary on every platform — Linux/macOS just tolerated
-	// it where Windows didn't.
+	// Pre-migration backup — insurance before Apply (🎯T61). Skipped when
+	// there are no tables (nothing to protect). VACUUM INTO is concurrent-
+	// safe with live mnemo readers/writers.
 	if len(current.Tables) > 0 {
 		backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 		if err := os.MkdirAll(backupDir, 0o755); err != nil {
@@ -693,7 +731,13 @@ func applySchema(dbPath string) error {
 		} else {
 			destPath := filepath.Join(backupDir,
 				backup.Filename(backup.TagPreMigration, time.Now()))
-			res, berr := backup.Backup(dbPath, destPath)
+			reportUpgrade(boot.PhasePreMigrationBackup,
+				fmt.Sprintf("pre-migration snapshot of %s", filepath.Base(dbPath)))
+			res, berr := preMigrationBackup(dbPath, destPath, &backup.BackupArgs{
+				OnStep: func(step string) {
+					reportUpgrade(boot.PhasePreMigrationBackup, step)
+				},
+			})
 			if berr != nil {
 				slog.Warn("pre-migration backup failed; proceeding with migration anyway",
 					"err", berr)
@@ -707,20 +751,44 @@ func applySchema(dbPath string) error {
 		}
 	}
 
+	reportUpgrade(boot.PhaseApplyingSchema, "applying additive schema migration (sqlift AllowNone)")
 	if err := sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone}); err != nil {
 		return err
 	}
 
-	// 🎯T93: refresh planner statistics after a schema change. A migration
-	// that adds an index leaves it without sqlite_stat1 data, and SQLite's
-	// cost model will keep choosing the old (worse) index until ANALYZE
-	// runs — e.g. the usage covering index is ignored, reverting to a full
-	// assistant-table scan (~2.8s vs ~0.1s). Runs only here, on a real
-	// migration (rare; this path already took a pre-migration backup), so
-	// it is not a per-startup cost. Best-effort: a failure only costs
-	// planner stats, never correctness.
+	// 🎯T93: planner stats after real migration only.
+	reportUpgrade(boot.PhaseApplyingSchema, "post-migration ANALYZE (planner statistics)")
 	analyzeForPlanner(dbPath)
 	return nil
+}
+
+// reportUpgrade surfaces upgrade progress on /health. When the store is
+// already PhaseReady (deferred upgrade), only the Upgrade overlay is set so
+// tools stay "ready" while backup/apply run. Before Ready, the boot phase
+// itself moves so early /health still explains the stall.
+func reportUpgrade(phase boot.Phase, detail string) {
+	boot.SetUpgrade(detail)
+	if !boot.Ready() {
+		boot.Set(phase, detail)
+	}
+}
+
+// applySchema brings the live DB at dbPath to the shape declared in
+// schema.sql synchronously (prepare + upgrade). Used by tests and any
+// caller that needs the schema fully applied before continuing. Production
+// store.New defers upgradeSchema onto a background goroutine (🎯T114.1).
+//
+// Uses sqlift under ApplyOptions{} (= AllowNone): only pure additive
+// changes are permitted. The sqlift handle is closed before return.
+func applySchema(dbPath string) error {
+	prep, err := prepareSchema(dbPath)
+	if err != nil {
+		return err
+	}
+	if !prep.pendingUpgrade {
+		return nil
+	}
+	return upgradeSchema(dbPath)
 }
 
 // Optimize runs `PRAGMA optimize`, SQLite's lightweight, self-tuning
@@ -803,19 +871,27 @@ func applyFreshSchema(dbPath string) (bool, error) {
 }
 
 // New creates or opens a transcript store.
+//
+// Schema policy (🎯T114.1): prepareSchema runs synchronously (fresh create
+// or "is an upgrade pending?"). The long-lived pools open immediately so
+// tools can serve. When an upgrade is pending, pre-migration VACUUM+gzip
+// and sqlift.Apply run in a background goroutine — SQLite is designed for
+// concurrent VACUUM INTO against a live DB. Insurance order is preserved
+// inside that goroutine (backup finishes before Apply).
 func New(dbPath, projectDir string) (*Store, error) {
-	// Apply schema before opening the long-lived connection. Holding
-	// sqlift's connection separately keeps PRAGMA setup on the mnemo
-	// handle isolated from migration.
-	if err := applySchema(dbPath); err != nil {
+	boot.Set(boot.PhaseOpeningStore, "opening store and checking schema: "+filepath.Base(dbPath))
+	prep, prepErr := prepareSchema(dbPath)
+	if prepErr != nil {
 		// Acceptance criterion 6 of 🎯T49: an older binary against a
 		// newer mnemo.db must read without crashing. sqlift rejects the
 		// implied destructive/rebuild ops; we log and proceed. Writes
 		// against unknown schema will fail at SQLite level, which is
 		// the expected degraded-mode signal — reads continue to work.
-		slog.Warn("schema apply rejected; continuing without migration (older binary vs newer DB?)",
-			"db", dbPath, "err", err)
+		slog.Warn("schema prepare rejected; continuing without migration (older binary vs newer DB?)",
+			"db", dbPath, "err", prepErr)
+		prep = schemaPrep{}
 	}
+	boot.Set(boot.PhaseOpeningStore, "opening long-lived DB handles")
 
 	writeDB, err := openDB(dbPath, true)
 	if err != nil {
@@ -841,14 +917,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 	if n < 1 {
 		n = 1
 	}
+	done := make(chan struct{})
 	s := &Store{
-		writeDB:    writeDB,
-		readDB:     readDB,
-		dbPath:     dbPath,
-		projectDir: projectDir,
-		offsets:    make(map[string]int64),
-		imageSem:   make(chan struct{}, n),
-		exclusions: &exclusionRegistry{},
+		writeDB:     writeDB,
+		readDB:      readDB,
+		dbPath:      dbPath,
+		projectDir:  projectDir,
+		offsets:     make(map[string]int64),
+		imageSem:    make(chan struct{}, n),
+		exclusions:  &exclusionRegistry{},
+		upgradeDone: done,
 	}
 
 	rows, err := readDB.Query("SELECT path, offset FROM ingest_state")
@@ -862,11 +940,51 @@ func New(dbPath, projectDir string) (*Store, error) {
 		}
 	}
 
+	if prep.pendingUpgrade {
+		slog.Info("schema upgrade deferred to background (store serving on current schema)",
+			"db", dbPath)
+		boot.SetUpgrade("queued: pre-migration backup + schema apply")
+		go func() {
+			defer close(done)
+			if err := upgradeSchema(dbPath); err != nil {
+				// Same degrade posture as a rejected sync apply: keep
+				// serving; new code paths that need missing columns fail
+				// at SQL level until a later binary succeeds.
+				slog.Warn("background schema upgrade failed; continuing on current schema",
+					"db", dbPath, "err", err)
+			} else {
+				slog.Info("background schema upgrade complete", "db", dbPath)
+			}
+		}()
+	} else {
+		close(done)
+	}
+
 	return s, nil
+}
+
+// AwaitSchemaUpgrade blocks until any deferred schema upgrade has
+// finished (🎯T114.1 defers it so the daemon can serve during the
+// pre-migration backup, which takes minutes on a large index).
+//
+// Background workers that read columns a pending migration adds must
+// wait for this: until it returns, the store is deliberately serving on
+// the OLD schema, and touching a new column fails with "no such
+// column". Workers that only read long-standing columns need not.
+func (s *Store) AwaitSchemaUpgrade() {
+	if s.upgradeDone != nil {
+		<-s.upgradeDone
+	}
 }
 
 // Close closes the store.
 func (s *Store) Close() error {
+	// Wait for a deferred schema upgrade so we do not close handles under
+	// an in-flight VACUUM INTO or sqlift.Apply (🎯T114.1).
+	if s.upgradeDone != nil {
+		<-s.upgradeDone
+	}
+
 	// Drain order matters (🎯T97.1): quiesce the read pool first, then
 	// checkpoint the writer, then close the writer. TRUNCATE only fully
 	// resets the -wal when no other connection holds a WAL read lock, so
@@ -2607,19 +2725,44 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 	}
 }
 
-// ciRepos returns "org/repo" identifiers for every GitHub repository
-// reachable through knownRepoRoots. This is the union of
-// workspace-walked repos (default ~/work) and session_meta-known repos,
-// so CI polling works even for projects mnemo hasn't seen through a
-// session yet. Non-GitHub paths are filtered out.
+// ciRepos returns the "org/repo" identifiers the mirror streams may
+// collect data for.
+//
+// The set is driven by agent-session discovery (🎯T117): mnemo is a
+// session tracking tool, so it indexes the repos its sessions were
+// actually connected to and never goes looking for repos on its own. A
+// checkout mnemo has never seen a session in is not fetched, however
+// plausibly it is laid out. This retires 🎯T17, which walked the
+// workspace so an untouched project could still be polled — on a real
+// machine that meant 70 of 147 repos were contacted purely because a
+// directory existed.
+//
+// Within that set, identity comes from each checkout's origin remote,
+// never from its path (🎯T116). session_meta.repo is itself derived by
+// path regex, so it needs the same correction: a session in a worktree
+// resolves to the parent repo, and a session in a directory that is not
+// a GitHub checkout resolves to nothing and is dropped.
 func (s *Store) ciRepos() ([]string, error) {
+	sessionNames, err := s.sessionRepoNames()
+	if err != nil || len(sessionNames) == 0 {
+		return nil, nil
+	}
+
 	seen := map[string]bool{}
 	var repos []string
 
-	// Workspace + session_meta union via the central choke point.
-	// knownRepoRoots acquires rootsMu.RLock to read workspaceRoots.
+	// Resolve the session-connected checkouts we can find on disk.
+	// knownRepoRoots acquires rootsMu.RLock to read workspaceRoots; it
+	// is used here only to locate roots, not to widen the set — the
+	// sessionNames gate above is what bounds collection.
+	resolved := map[string]bool{}
 	for _, rr := range s.knownRepoRoots() {
-		repo := extractRepo(rr.root)
+		pathName := extractRepo(rr.root)
+		if pathName == "" || !sessionNames[pathName] {
+			continue
+		}
+		resolved[pathName] = true
+		repo := resolveGitHubRepo(rr.root)
 		if repo == "" || !strings.Contains(repo, "/") || seen[repo] {
 			continue
 		}
@@ -2627,27 +2770,41 @@ func (s *Store) ciRepos() ([]string, error) {
 		repos = append(repos, repo)
 	}
 
-	// Fallback: session_meta.repo column may carry a normalised
-	// "org/repo" for repos outside any workspace root (e.g., clones in
-	// /tmp). Include anything we haven't already captured.
+	// Session-connected repos with no checkout to inspect — a clone that
+	// has since been deleted, or a directory that was never a git repo.
+	// They stay in scope because a session did happen there, and there
+	// is no local evidence to resolve them by; the 🎯T116 failure
+	// backoff is what stops an impossible one being retried.
+	for name := range sessionNames {
+		if resolved[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		repos = append(repos, name)
+	}
+	return repos, nil
+}
+
+// sessionRepoNames returns the distinct path-derived "org/repo" names
+// mnemo has observed agent sessions in. This is the discovery signal
+// that bounds all mirror collection (🎯T117).
+func (s *Store) sessionRepoNames() (map[string]bool, error) {
 	rows, err := s.readDB.Query(
 		`SELECT DISTINCT repo FROM session_meta WHERE repo != '' AND repo LIKE '%/%'`,
 	)
 	if err != nil {
-		return repos, nil
+		return nil, err
 	}
 	defer rows.Close()
+	names := map[string]bool{}
 	for rows.Next() {
 		var r string
 		if err := rows.Scan(&r); err != nil {
 			continue
 		}
-		if !seen[r] {
-			seen[r] = true
-			repos = append(repos, r)
-		}
+		names[r] = true
 	}
-	return repos, nil
+	return names, rows.Err()
 }
 
 // SearchCI searches CI runs with optional FTS query, repo filter, conclusion filter, and recency window.
@@ -2994,10 +3151,21 @@ func (s *Store) IngestAll() error {
 	// table existed).
 	backfillDecisions(s.writeDB)
 
-	// Extract and store images from all ingested entries and messages.
-	// Runs synchronously (fast — no API calls). Description generation
-	// happens separately in the background worker started by StartImageDescriber.
-	backfillImages(s)
+	// 🎯T64.10 structural segmentation and full-corpus image extract are
+	// NOT run inline here. Both can take many minutes on a multi-GB DB
+	// and used to block every subsequent startup stream
+	// (docs/todos/plans/…), so ingest_status never got a post-boot
+	// last_backfill stamp and ingest.backfill falsely failed after the
+	// 10‑minute grace. The registry schedules SegmentAllSessions after
+	// IngestAll returns; image backfill runs in a goroutine below.
+	// Per-session SegmentSession / targeted image extract still run on
+	// live Watch appends.
+
+	// Full-corpus image extract (inline base64 + path refs). No API
+	// calls, but the LIKE scans over a large entries/messages table
+	// still dominate cold start — keep it off the critical path so
+	// stream backfills can stamp last_backfill promptly.
+	go backfillImages(s)
 
 	// Git commits and GitHub PRs/issues are no longer backfilled at
 	// boot: the "commits" and "github" mirror streams are
@@ -6389,6 +6557,18 @@ func (s *Store) ingestFile(path string) error {
 	repo := extractRepo(metaCwd)
 	detectDecisions(s.writeDB, sessionID, repo)
 
+	// 🎯T64.10: incremental structural segmentation for this session only.
+	// Nothing clusters here (🎯T64.11) — this pass is bounded by the
+	// session's own message count, so a transcript append costs one
+	// segmentation, never a corpus-wide recompute.
+	if err := s.SegmentSession(sessionID); err != nil {
+		sid := sessionID
+		if len(sid) > 8 {
+			sid = sid[:8]
+		}
+		slog.Warn("segment session failed", "session", sid, "err", err)
+	}
+
 	// Extract and store any images from newly ingested entries.
 	// Uses a targeted query so only new entries need scanning.
 	go func() {
@@ -7104,13 +7284,54 @@ func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
 	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_prs WHERE repo = ?`, repo).Scan(&lastPR)
 	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_issues WHERE repo = ?`, repo).Scan(&lastIssue)
 
+	// Errors must PROPAGATE (🎯T116). Swallowing them and returning nil
+	// told the reconciler every pass succeeded, so 🎯T91's failure
+	// backoff never engaged and a repo that could never succeed was
+	// retried every interval forever — the source of thousands of
+	// identical warnings per night.
+	var errs []error
 	if err := s.fetchAndUpsertPRs(ghPath, repo, lastPR); err != nil {
-		slog.Warn("PR fetch failed", "repo", repo, "err", err)
+		if reason := permanentGitHubSkip(err); reason != "" {
+			slog.Debug("PR fetch skipped", "repo", repo, "reason", reason)
+		} else {
+			errs = append(errs, fmt.Errorf("prs: %w", err))
+		}
 	}
 	if err := s.fetchAndUpsertIssues(ghPath, repo, lastIssue); err != nil {
-		slog.Warn("issue fetch failed", "repo", repo, "err", err)
+		if reason := permanentGitHubSkip(err); reason != "" {
+			slog.Debug("issue fetch skipped", "repo", repo, "reason", reason)
+		} else {
+			errs = append(errs, fmt.Errorf("issues: %w", err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// permanentGitHubSkip reports a short reason when a gh failure is a
+// settled fact about the repo rather than a fault to retry — issues or
+// Actions switched off, or the feature not being available. Those are
+// normal states (torvalds/linux has issues disabled), so they are not
+// worth a warning and not worth counting as a failure; the other
+// sub-stream for the same repo may still succeed.
+//
+// A repo that cannot be resolved at all is deliberately NOT included:
+// that is a genuine failure, and letting it back off is the point.
+func permanentGitHubSkip(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "disabled issues"),
+		strings.Contains(msg, "issues are disabled"),
+		strings.Contains(msg, "issues disabled"):
+		return "issues disabled"
+	case strings.Contains(msg, "disabled actions"),
+		strings.Contains(msg, "actions are disabled"),
+		strings.Contains(msg, "actions disabled"):
+		return "actions disabled"
+	case strings.Contains(msg, "not available for this repository"),
+		strings.Contains(msg, "has been disabled"):
+		return "feature disabled"
+	}
+	return ""
 }
 
 // fetchAndUpsertPRs fetches PRs from GitHub and upserts into github_prs.
@@ -7122,7 +7343,7 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 		"--limit", "100",
 	).Output()
 	if err != nil {
-		return fmt.Errorf("gh pr list: %w", err)
+		return fmt.Errorf("gh pr list: %w", withStderr(err))
 	}
 
 	var prs []ghPRJSON
@@ -7174,7 +7395,7 @@ func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
 		"--limit", "100",
 	).Output()
 	if err != nil {
-		return fmt.Errorf("gh issue list: %w", err)
+		return fmt.Errorf("gh issue list: %w", withStderr(err))
 	}
 
 	var issues []ghIssueJSON

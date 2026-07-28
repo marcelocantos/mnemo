@@ -24,6 +24,23 @@ type fakeStore struct {
 	// these to drive the budget-guard logic.
 	sessionIn  int64
 	sessionOut int64
+	// segments records every span index the compactor persisted
+	// (🎯T64.11), so tests can assert on what segmentation the
+	// summarisation pass produced.
+	segments []store.CompactionSegments
+	// segmentsErr, when set, makes PutCompactionSegments fail — used to
+	// prove a span-write failure never fails the compaction itself.
+	segmentsErr error
+}
+
+func (f *fakeStore) PutCompactionSegments(seg store.CompactionSegments) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.segmentsErr != nil {
+		return f.segmentsErr
+	}
+	f.segments = append(f.segments, seg)
+	return nil
 }
 
 func (f *fakeStore) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]store.SessionMessage, error) {

@@ -26,6 +26,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/plugin"
@@ -73,10 +74,15 @@ type Registry struct {
 	// leaving the registry with two live exporters per user. mu is
 	// still acquired in fine-grained sections inside Reload; reloadMu
 	// is the coarse-grained guard.
-	reloadMu          sync.Mutex
-	baseCtx           context.Context
-	cancel            context.CancelFunc
-	stores            map[string]*userEntry
+	reloadMu sync.Mutex
+	baseCtx  context.Context
+	cancel   context.CancelFunc
+	stores   map[string]*userEntry
+	// creating is single-flight for in-progress ForUser constructions.
+	// store.New (schema + pre-migration backup) can take minutes on a
+	// large DB; we must not hold mu across that window or /health and
+	// other registry methods block for the whole backup.
+	creating          map[string]chan struct{}
 	cfg               store.Config
 	summariserWorkDir string
 	compactorModel    string
@@ -127,6 +133,7 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 		baseCtx:           ctx,
 		cancel:            cancel,
 		stores:            map[string]*userEntry{},
+		creating:          map[string]chan struct{}{},
 		cfg:               cfg,
 		summariserWorkDir: summariserWorkDir,
 		compactorModel:    "sonnet",
@@ -186,17 +193,65 @@ func (r *Registry) SignalEvaluator() *plugin.SignalEvaluator {
 //
 // Callers that must never silently index SYSTEM's profile should
 // reject the empty username up-front via DefaultUsername.
+//
+// Heavy work (store.New → applySchema → pre-migration backup) runs
+// *outside* r.mu so /health and other registry methods stay responsive
+// during multi-minute startups. Concurrent first-access for the same
+// username single-flights via r.creating.
 func (r *Registry) ForUser(username string) (*store.Store, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	for {
+		r.mu.Lock()
+		if r.stores == nil {
+			r.mu.Unlock()
+			return nil, fmt.Errorf("registry is closed")
+		}
+		if e, ok := r.stores[username]; ok {
+			s := e.store
+			r.mu.Unlock()
+			return s, nil
+		}
+		if wait, ok := r.creating[username]; ok {
+			r.mu.Unlock()
+			<-wait
+			continue // re-check stores / closed after peer finishes
+		}
+		done := make(chan struct{})
+		r.creating[username] = done
+		cfg := r.cfg
+		r.mu.Unlock()
 
-	if r.stores == nil {
-		return nil, fmt.Errorf("registry is closed")
+		entry, err := r.openUserStore(username, cfg)
+		r.mu.Lock()
+		delete(r.creating, username)
+		close(done)
+		if r.stores == nil {
+			r.mu.Unlock()
+			if entry != nil && entry.store != nil {
+				entry.store.Close()
+			}
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("registry is closed")
+		}
+		if err != nil {
+			r.mu.Unlock()
+			return nil, err
+		}
+		// Another path cannot have inserted the same user while we held
+		// the creating slot; still guard closed-races above.
+		r.stores[username] = entry
+		boot.Set(boot.PhaseStartingWorkers, "starting per-user workers for "+username)
+		r.startWorkers(username, entry.projectDir, entry)
+		st := entry.store
+		r.mu.Unlock()
+		return st, nil
 	}
-	if e, ok := r.stores[username]; ok {
-		return e.store, nil
-	}
+}
 
+// openUserStore builds a store + vault entry without holding r.mu.
+// The caller owns single-flight and the insert into r.stores.
+func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry, error) {
 	home, err := store.ResolveHomeFor(username)
 	if err != nil {
 		return nil, err
@@ -216,15 +271,15 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store for %q: %w", username, err)
 	}
-	s.SetWorkspaceRoots(r.cfg.ResolvedWorkspaceRoots())
-	s.SetExtraProjectDirs(r.cfg.ExtraProjectDirs)
+	s.SetWorkspaceRoots(cfg.ResolvedWorkspaceRoots())
+	s.SetExtraProjectDirs(cfg.ExtraProjectDirs)
 	s.SetCodexRoots(store.CodexRootsFor(home)) // 🎯T99: index ~/.codex rollouts
 	s.SetGrokRoots(store.GrokRootsFor(home))   // 🎯T110: index ~/.grok sessions
-	s.SetTodoGlobs(r.cfg.TodoGlobs)
+	s.SetTodoGlobs(cfg.TodoGlobs)
 
-	synthRoots := r.cfg.ResolvedSynthesisRoots()
+	synthRoots := cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
-	if vaultPath := r.cfg.ResolvedVaultPath(home); vaultPath != "" {
+	if vaultPath := cfg.ResolvedVaultPath(home); vaultPath != "" {
 		// Exclude the vault path from ingest walkers before any
 		// Ingest* call runs. Without this, a vault sitting inside a
 		// synthesis root or repo docs/ tree would have its generated
@@ -233,8 +288,8 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 		s.RegisterExcludedPath(vaultPath, "vault_path")
 		s.SetVaultPath(vaultPath) // 🎯T68.6: vault divergence + GC machinery needs the path
 		exp, err := vault.New(s, vaultPath, vault.Options{
-			Layout:        r.cfg.ResolvedVaultLayout(vaultPath),
-			SoakWarnAfter: r.cfg.ResolvedVaultLayoutSoakWarnAfter(),
+			Layout:        cfg.ResolvedVaultLayout(vaultPath),
+			SoakWarnAfter: cfg.ResolvedVaultLayoutSoakWarnAfter(),
 		})
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
@@ -244,10 +299,7 @@ func (r *Registry) ForUser(username string) (*store.Store, error) {
 	}
 	s.SetSynthesisRoots(synthRoots)
 
-	e := &userEntry{store: s, vault: vaultExp, homeDir: home, projectDir: projectDir}
-	r.stores[username] = e
-	r.startWorkers(username, projectDir, e)
-	return s, nil
+	return &userEntry{store: s, vault: vaultExp, homeDir: home, projectDir: projectDir}, nil
 }
 
 // SetUpgradeDetector wires the 🎯T97.2 release detector for diag checks.
@@ -376,9 +428,35 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				"sessions", stats.TotalSessions,
 				"messages", stats.TotalMessages)
 		}
-		e.store.StartImageDescriber()
-		e.store.StartImageOCR()
-		e.store.StartImageEmbedder()
+		// 🎯T64.10: structural topic segments in the background so they
+		// never delay docs/todos/plans backfill stamps (ingest.backfill
+		// health check keys off ingest_status.last_backfill).
+		go func() {
+			// Wait out any deferred schema upgrade first (🎯T114.1): the
+			// pass projects compactions into spans via topic_segments.
+			// compaction_id, a column a pending migration may still be
+			// adding while the store serves on the old schema.
+			e.store.AwaitSchemaUpgrade()
+			if err := e.store.SegmentAllSessions(); err != nil {
+				logger.Warn("segment backfill failed", "err", err)
+			} else {
+				logger.Info("segment backfill complete")
+			}
+		}()
+		// Also gated on the deferred upgrade (🎯T114.1). The embedder
+		// records each attempt in image_embedding_attempts (🎯T121), a
+		// table a pending migration may still be adding — and an attempt
+		// that cannot be recorded is retried forever, which is the very
+		// thing that table exists to stop. Observed on the upgrade boot:
+		// an embed failure at 23:47:15 went unrecorded because the table
+		// did not land until 23:57:11. Descriptions and OCR ride along so
+		// all image work starts from one settled schema.
+		go func() {
+			e.store.AwaitSchemaUpgrade()
+			e.store.StartImageDescriber()
+			e.store.StartImageOCR()
+			e.store.StartImageEmbedder()
+		}()
 		if err := e.store.IngestMemories(); err != nil {
 			logger.Error("memory ingest failed", "err", err)
 		}
@@ -710,6 +788,13 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		defer e.workers.Done()
 		w.Run(r.baseCtx)
 	}()
+
+	// Reclaim the -wal after write bursts. Started alongside the backup
+	// worker because the two share the quiescence signal, and because the
+	// backup's own VACUUM INTO is the single longest reader on the
+	// system — the thing that lets the WAL reach its high-water mark in
+	// the first place.
+	e.store.StartWALMaintenance(r.baseCtx)
 }
 
 // startVaultWorkers launches the per-user vault periodic-sync and
@@ -722,10 +807,10 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 // them to the same cancellation as the periodic-sync/watcher pair.
 // Returns nil when e.vault is nil (no workers started).
 //
-// PRECONDITION: caller MUST hold r.mu. ForUser owns it via its defer
-// for the entire Store-construction path; swapVault re-acquires it
-// after building the new exporter. Re-acquiring inside this function
-// would self-deadlock the ForUser path.
+// PRECONDITION: caller MUST hold r.mu. ForUser holds it only around
+// startWorkers (not during store.New); swapVault re-acquires it after
+// building the new exporter. Re-acquiring inside this function would
+// self-deadlock those paths.
 //
 // The vault pointer is captured locally so a concurrent hot-swap that
 // replaces e.vault does not race with the goroutines already running
@@ -1220,8 +1305,49 @@ func (r *Registry) Close() {
 		pm.Close()
 	}
 	for _, e := range entries {
-		e.workers.Wait()
-		e.vaultWorkers.Wait()
+		// Wait for workers, but never unconditionally (🎯T122). r.cancel()
+		// above signals them, yet not every worker is actually
+		// cancellable: the mirror streams shell out to `gh` and `git log`
+		// via exec.Command with no context, so a subprocess mid-flight
+		// runs to completion no matter what shutdown wants. Blocking on
+		// that starved the step below — Store.Close is the only caller of
+		// the WAL checkpoint, and before this it never ran once in
+		// practice, leaving a 2.3 GB -wal and a crash recovery on every
+		// start.
+		//
+		// Durability beats tidiness here: the process is exiting, so an
+		// abandoned subprocess is harmless (it is reparented and dies on
+		// its own), whereas a skipped checkpoint is not.
+		if !waitFor(&e.workers, workerDrainGrace) {
+			slog.Warn("drain: workers did not stop in time; checkpointing anyway",
+				"grace", workerDrainGrace)
+		}
+		if !waitFor(&e.vaultWorkers, workerDrainGrace) {
+			slog.Warn("drain: vault workers did not stop in time; checkpointing anyway",
+				"grace", workerDrainGrace)
+		}
 		_ = e.store.Close()
+	}
+}
+
+// workerDrainGrace is how long Close waits for a user's worker
+// goroutines to observe cancellation before proceeding to checkpoint
+// without them (🎯T122). Generous enough that a cancellable worker
+// finishes the iteration it is on, short enough that an un-cancellable
+// subprocess cannot consume the shutdown budget.
+const workerDrainGrace = 3 * time.Second
+
+// waitFor waits on wg for at most d, reporting whether it completed.
+func waitFor(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }

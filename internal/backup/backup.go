@@ -56,6 +56,14 @@ func Filename(tag Tag, t time.Time) string {
 	return fmt.Sprintf("mnemo-%s-%s.db.gz", tag, t.UTC().Format("20060102T150405Z"))
 }
 
+// BackupArgs configures optional Backup behaviour. Zero value is fine.
+type BackupArgs struct {
+	// OnStep is called with a short human label at each long stage
+	// (vacuum_into, integrity_check, gzip). Used by pre-migration so
+	// /health can show which multi-minute step is in progress. Nil is OK.
+	OnStep func(step string)
+}
+
 // Backup snapshots the SQLite database at srcPath into destPath. destPath
 // must end in .db.gz (caller's responsibility — typically constructed via
 // filepath.Join(dir, Filename(tag, time.Now()))). destPath's parent
@@ -74,7 +82,17 @@ func Filename(tag Tag, t time.Time) string {
 // cleaned up). The compressed backup at destPath either exists fully or
 // does not exist at all.
 func Backup(srcPath, destPath string) (Result, error) {
+	return BackupWith(srcPath, destPath, nil)
+}
+
+// BackupWith is Backup plus optional progress callbacks (see BackupArgs).
+func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 	start := time.Now()
+	step := func(s string) {
+		if args != nil && args.OnStep != nil {
+			args.OnStep(s)
+		}
+	}
 	if filepath.Ext(destPath) != ".gz" {
 		return Result{}, fmt.Errorf("destPath must end in .gz: %s", destPath)
 	}
@@ -95,6 +113,7 @@ func Backup(srcPath, destPath string) (Result, error) {
 	}
 	defer os.Remove(tmpDBPath)
 
+	step("VACUUM INTO (consistent snapshot)")
 	if err := vacuumInto(srcPath, tmpDBPath); err != nil {
 		return Result{}, err
 	}
@@ -104,10 +123,12 @@ func Backup(srcPath, destPath string) (Result, error) {
 		return Result{}, fmt.Errorf("stat tmpdb: %w", err)
 	}
 
+	step("integrity_check on snapshot")
 	if err := integrityCheck(tmpDBPath); err != nil {
 		return Result{}, err
 	}
 
+	step(fmt.Sprintf("gzipping %d MB snapshot", rawInfo.Size()/(1<<20)))
 	gzSize, err := gzipFile(tmpDBPath, destPath)
 	if err != nil {
 		return Result{}, err

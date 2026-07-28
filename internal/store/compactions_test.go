@@ -543,6 +543,86 @@ func TestSelectCompactionCandidatesQuarantine(t *testing.T) {
 	}
 }
 
+// TestSelectCompactionCandidatesSince covers the 🎯T120 incremental
+// form: restricted to sessions that gained an entry past a watermark, it
+// returns exactly the sessions that crossed the budget in that window
+// and nothing else — including the backlog count, which must not
+// re-count sessions the caller already knows are quiet.
+func TestSelectCompactionCandidatesSince(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	// Both start below the budget of 500.
+	writeJSONL(t, dir, "p", "sess-quiet", []map[string]any{
+		msg("user", "a question with enough text here", now.Add(-9*time.Minute).Format(time.RFC3339)),
+		asstTok("small reply", now.Add(-8*time.Minute).Format(time.RFC3339), 100, 0, 300),
+	})
+	writeJSONL(t, dir, "p", "sess-grow", []map[string]any{
+		msg("user", "another question with enough text", now.Add(-7*time.Minute).Format(time.RFC3339)),
+		asstTok("small reply", now.Add(-6*time.Minute).Format(time.RFC3339), 100, 0, 300),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+	if ids := candidateIDs(t, s, 500, 0.10); len(ids) != 0 {
+		t.Fatalf("baseline: nothing should be owed yet, got %v", ids)
+	}
+	watermark, err := s.CompactionScanWatermark()
+	if err != nil {
+		t.Fatalf("CompactionScanWatermark: %v", err)
+	}
+
+	// sess-grow crosses the budget; sess-quiet is untouched.
+	appendJSONL(t, dir, "p", "sess-grow", []map[string]any{
+		msg("user", "a follow-up question with text", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		asstTok("a much longer reply", now.Add(-1*time.Minute).Format(time.RFC3339), 600, 0, 900),
+	})
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll (append): %v", err)
+	}
+
+	cands, backlog, err := s.SelectCompactionCandidatesSince(
+		watermark, 500, 0.10, DefaultQuarantineThreshold,
+		now.Add(-DefaultQuarantineCooldown), 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidatesSince: %v", err)
+	}
+	if len(cands) != 1 || cands[0].SessionID != "sess-grow" {
+		t.Fatalf("expected only sess-grow past the watermark, got %+v", cands)
+	}
+	if backlog != 1 {
+		t.Errorf("backlog = %d, want 1", backlog)
+	}
+
+	// The window is exclusive of everything already scanned: re-running
+	// at the new watermark yields nothing, even though sess-grow is still
+	// owed — the caller's contract is that it acts on what it was handed.
+	after, err := s.CompactionScanWatermark()
+	if err != nil {
+		t.Fatalf("CompactionScanWatermark: %v", err)
+	}
+	cands, _, err = s.SelectCompactionCandidatesSince(
+		after, 500, 0.10, DefaultQuarantineThreshold,
+		now.Add(-DefaultQuarantineCooldown), 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidatesSince (drained): %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("no entries past the new watermark, so no candidates; got %+v", cands)
+	}
+
+	// A negative watermark is the unrestricted query.
+	cands, _, err = s.SelectCompactionCandidatesSince(
+		-1, 500, 0.10, DefaultQuarantineThreshold,
+		now.Add(-DefaultQuarantineCooldown), 100)
+	if err != nil {
+		t.Fatalf("SelectCompactionCandidatesSince (full): %v", err)
+	}
+	if len(cands) != 1 || cands[0].SessionID != "sess-grow" {
+		t.Errorf("full scan should still see sess-grow, got %+v", cands)
+	}
+}
+
 func TestChainCompactionsNoChain(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 

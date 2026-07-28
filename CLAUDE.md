@@ -219,13 +219,67 @@ This default exists for users operating in environments where
 unsolicited outbound calls to hosted APIs require security-team
 review. Opt-in must be deliberate; defaults are silent.
 
-**GitHub API.** Used by the PR/issue/CI backfill workers per repo
-that already appears in session history. No org-scope fan-out; no
-secret material required (relies on the local `gh` auth).
+**GitHub API.** Used by the PR/issue/CI backfill workers, and driven by
+**agent-session discovery** (🎯T117). mnemo is a session tracking tool,
+not a code management tool: it collects data for the repos its sessions
+were connected to, and never goes looking for repos on its own. A
+checkout mnemo has not seen a session in is never contacted, however
+plausibly it is laid out. (This retires 🎯T17, which additionally walked
+the workspace so an untouched project could be polled — on a real
+machine that meant 70 of 147 repos were contacted purely because a
+directory existed.) No org-scope fan-out; no secret material required
+(relies on the local `gh` auth).
+
+Within that set, a repo is only fetched when it is genuinely a GitHub
+checkout: identity comes from its configured `origin` remote, never
+from its path (🎯T116). A never-pushed `git init` scaffold, a backup
+copy, or a checkout whose remote points somewhere other than GitHub
+produces no outbound call. Git worktrees and prefix-named local clones
+(`foo.experiment` beside `foo`) resolve to the repo they actually
+belong to, so a session in a worktree collects for its parent repo,
+once, under the right name.
+
+The same session-driven bound applies to the local `commits` stream.
+File discovery for docs, todos, plans and targets is separate and
+still walks git repos, synthesis roots, and session cwds.
 
 **Federation (🎯T15 / linked instances).** Outbound calls to peer
 mnemo daemons are gated on `linked_instances` being non-empty in
 config. Absent → zero federation calls.
+
+**PyPI + HuggingFace Hub (image embeddings, 🎯T20).** Disabled by
+default. The CLIP image embedder shells out to `uv run --script
+tools/embed-clip/embed.py`; that subprocess resolves the script's
+Python dependencies (`sentence-transformers`, `torch`, `pillow`) from
+PyPI and, on first use, downloads the `clip-ViT-B-32` model weights
+(~340 MB) from the HuggingFace Hub, unauthenticated. In practice the
+caches land around 1.6 GB (uv) plus ~580 MB (HuggingFace).
+
+Nothing is fetched until you opt in (🎯T121):
+
+```json
+{ "image_embeddings": { "enabled": true } }
+```
+
+Same posture, and the same reasoning, as `cost_reconciliation`: having
+`uv` installed is not consent to download a couple of gigabytes from
+two package hosts. With the section absent — or the config unreadable —
+no embedding subprocess is spawned at all, so there is no PyPI
+resolution and no weight download regardless of what is installed. The
+flag is read per attempt, so toggling it takes effect without a daemon
+restart.
+
+Two further preconditions apply once enabled: `uv` must be on the
+daemon's PATH, and `tools/embed-clip/embed.py` must resolve — it ships
+**only in the source tree**, never in a release archive or the Homebrew
+bottle. A packaged install therefore cannot make this call even when
+opted in.
+
+Only embedding-backed image search (`semantic` / `similar`) depends on
+this. Image extraction, OCR, AI descriptions and FTS are unaffected.
+Whether the embedder ran or was skipped, and why, is reported by the
+`images.embedder` check in `mnemo_doctor` / `GET /health`; per-image
+outcomes are in the `image_embedding_attempts` table.
 
 The append-only schema policy and the opt-in egress posture compose:
 restoring an older backup never silently triggers a backfill of

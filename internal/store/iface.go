@@ -8,6 +8,11 @@ import "time"
 // Backend is the interface for querying the transcript store.
 type Backend interface {
 	Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]SearchResult, error)
+	// AttachSegmentExpand annotates hits with enclosing sealed segments
+	// (🎯T64.10). mode "none"/"" is a no-op.
+	AttachSegmentExpand(results []SearchResult, mode string) ([]SearchResult, error)
+	// QuerySegments answers mnemo_segments shapes (🎯T64.10).
+	QuerySegments(q SegmentQuery) ([]TopicSegment, error)
 	ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]SessionInfo, error)
 	ReadSession(sessionID string, role string, offset int, limit int) ([]SessionMessage, error)
 	Query(query string, args ...any) ([]map[string]any, error)

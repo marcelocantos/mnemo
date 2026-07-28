@@ -46,6 +46,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/marcelocantos/mnemo/internal/api"
+	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/edgeproxy"
@@ -82,13 +83,83 @@ const (
 	defaultAddr          = ":19419"
 	defaultFederatedAddr = ":19420"
 
-	// drainDeadline caps the graceful shutdown sequence (🎯T97.1). Stopping
-	// HTTP intake, stopping workers, quiescing the read pool, and truncating
-	// the WAL should complete well within this; if it overruns we hard-exit,
-	// which is safe under mnemo's crash-only durability (the next start
-	// recovers any un-checkpointed WAL frames).
-	drainDeadline = 10 * time.Second
+	// drainIntakeGrace bounds the *courtesy* half of shutdown: letting
+	// in-flight HTTP requests finish before the listener is torn down
+	// (🎯T122). It is deliberately short because the MCP transport is
+	// long-lived by design — a streamable-HTTP session holds an open
+	// request that never completes on its own, so http.Server.Shutdown
+	// waits for it forever. Anything still connected past this grace is
+	// force-closed rather than allowed to hold the process hostage.
+	drainIntakeGrace = 2 * time.Second
+
+	// drainStoreBudget is the time reserved for the half of shutdown that
+	// actually matters for durability: stopping workers, quiescing the
+	// read pool, and truncating the WAL. It is a separate budget from
+	// drainIntakeGrace precisely so a stuck client cannot consume it —
+	// before 🎯T122 both shared one deadline, HTTP drain ate all of it,
+	// and Store.Close (the only caller of the WAL checkpoint) never ran
+	// once in practice.
+	drainStoreBudget = 15 * time.Second
+
+	// drainDeadline caps the whole sequence as a backstop. Overrunning it
+	// hard-exits, which is safe under mnemo's crash-only durability (the
+	// next start recovers any un-checkpointed WAL frames) — but it should
+	// now be genuinely exceptional rather than the normal path.
+	drainDeadline = drainIntakeGrace + drainStoreBudget
 )
+
+// intakeStopper is anything that can stop accepting new work
+// gracefully, bounded by a context — http.Server and the MCP
+// streamable-HTTP server both qualify.
+type intakeStopper interface {
+	Shutdown(context.Context) error
+}
+
+// intakeCloser is anything that can be torn down immediately.
+type intakeCloser interface {
+	Close() error
+}
+
+// drainIntake stops accepting new work, gives in-flight requests until
+// grace to finish, then force-closes whatever is still attached
+// (🎯T122).
+//
+// The BOUNDED grace is the load-bearing part. http.Server.Shutdown
+// waits for active requests, and mnemo's MCP transport is long-lived by
+// design: a streamable-HTTP session holds an open request that never
+// completes on its own. So with any client attached — mcpbridge always
+// is — Shutdown returns only when its context expires. Previously that
+// context was the whole drain deadline, so intake consumed all of it
+// and Store.Close (the only caller of the WAL checkpoint) never ran.
+//
+// The force-close afterwards is hygiene rather than the fix: Shutdown
+// has already stopped the listener by then, so this just severs the
+// connection still hanging off it instead of leaving it to the process
+// exit.
+//
+// Shutdown returning an error here is therefore the EXPECTED case, not
+// an alarm: it means the grace elapsed with a client still connected.
+func drainIntake(grace time.Duration, graceful []intakeStopper, force []intakeCloser) {
+	slog.Info("drain: stopping intake", "grace", grace)
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	for _, s := range graceful {
+		if s == nil {
+			continue
+		}
+		if err := s.Shutdown(ctx); err != nil {
+			slog.Debug("drain: intake did not stop gracefully", "err", err)
+		}
+	}
+	for _, c := range force {
+		if c == nil {
+			continue
+		}
+		if err := c.Close(); err != nil {
+			slog.Debug("drain: intake close", "err", err)
+		}
+	}
+}
 
 // summariserWorkDir returns a dedicated, always-present working
 // directory for the compactor/reviewer's `claude -p` subprocesses
@@ -146,6 +217,16 @@ func main() {
 			return
 		case "edge":
 			cmdEdge(os.Args[2:])
+			return
+		case store.OCRWorkerSubcommand:
+			// Hidden: the daemon re-execs itself to run Apple Vision in a
+			// child, so a framework abort kills only the child (🎯T118).
+			// Not in the help output — an implementation detail, not a
+			// user-facing command.
+			if err := store.RunOCRWorker(os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "ocr-worker: %v\n", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}
@@ -974,23 +1055,16 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// without an explicit ?user=<name> query parameter. On a Windows
 	// Service deployment (running as LocalSystem) there is no
 	// sensible default, so every request MUST carry a user.
+	//
+	// Eager ForUser is deferred until *after* ListenAndServe so /health
+	// (and the rest of the HTTP surface) is available during multi-minute
+	// pre-migration backups and schema apply. See eagerOpenDefaultUser
+	// below the listener start.
 	defaultUser, defErr := store.DefaultUsername()
 	if defErr != nil {
 		slog.Info("no default user — requests must include ?user=<name>", "reason", defErr)
 	} else {
 		slog.Info("default user", "user", defaultUser)
-		// Eager-start the default user's per-user workers (compactor,
-		// reviewer, CI poller, backup worker, etc.) at daemon boot. Without
-		// this, ForUser is only invoked when the first MCP tool call lands
-		// — so a daemon nobody pokes never starts its backup worker, never
-		// runs ingest, etc. (🎯T62).
-		//
-		// Multi-user lazy startup still works: ForUser(otherUser) for a
-		// non-default user keeps firing on demand.
-		if _, err := reg.ForUser(defaultUser); err != nil {
-			slog.Error("eager startup failed for default user", "user", defaultUser, "err", err)
-			return err
-		}
 	}
 
 	// Self-diagnostics (🎯T83). A registry of health checks (summariser
@@ -1000,13 +1074,16 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// suite hourly. A fail-severity transition fires an opt-out OS
 	// notification that deep-links to the dashboard health page. The same
 	// registry backs the /health endpoint and the mnemo_doctor tool.
+	// Built before the store opens so /health can report boot phases
+	// (startup.ready) during pre-migration backup.
 	daemonStart := time.Now()
 	diagReg := reg.BuildDiagRegistry(defaultUser, daemonStart)
 	dashHost := addr
 	if strings.HasPrefix(addr, ":") {
 		dashHost = "localhost" + addr
 	}
-	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/#health")
+	// /health content-negotiates HTML for browsers (notification clicks).
+	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/health")
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}
@@ -1281,8 +1358,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Run the local HTTP server in a goroutine so we can react to ctx
 	// cancellation (triggered by the Windows Service handler on SCM
 	// Stop, or never triggered in the foreground case).
+	//
+	// Listen BEFORE eager store open: pre-migration backup can take
+	// minutes on a multi-GB mnemo.db. /health must answer throughout
+	// and report the boot phase (startup.ready).
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
+	boot.Set(boot.PhaseListening, "HTTP listener up on "+addr+"; opening default-user store")
 
 	// Start the menu-bar shim supervisor (🎯T85.5). It honours menu_bar_app
 	// (initial value set above) and reacts to live toggles via Put, so the
@@ -1310,11 +1392,50 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		}
 	}
 
-	select {
-	case err := <-errCh:
-		slog.Error("HTTP MCP server failed", "err", err)
-		return err
-	case <-ctx.Done():
+	// Eager-start the default user's per-user workers (compactor,
+	// reviewer, CI poller, backup worker, etc.) at daemon boot (🎯T62).
+	// Runs after ListenAndServe so health stays available during
+	// store.New → applySchema → pre-migration VACUUM+gzip.
+	// Multi-user lazy startup still works: ForUser(otherUser) on demand.
+	// Open in a goroutine so an immediate Listen failure is not masked
+	// by a multi-minute backup.
+	openErrCh := make(chan error, 1)
+	if defErr == nil {
+		go func() {
+			openErrCh <- eagerOpenDefaultUser(reg, defaultUser)
+		}()
+	} else {
+		// Windows Service / no default identity: ready means "listener
+		// up; stores open on first ?user= request".
+		boot.Set(boot.PhaseReady, "listening; no default user (open stores on demand)")
+		openErrCh <- nil
+	}
+
+	// Wait until the default-user store is open (or open is skipped),
+	// or until the HTTP server fails / ctx cancels. Once open succeeds,
+	// keep serving until Listen fails or ctx cancels.
+	for {
+		select {
+		case err := <-errCh:
+			slog.Error("HTTP MCP server failed", "err", err)
+			return err
+		case err := <-openErrCh:
+			if err != nil {
+				slog.Error("eager startup failed for default user", "user", defaultUser, "err", err)
+				_ = httpServer.Close()
+				if fedSrv != nil {
+					_ = fedSrv.Close()
+				}
+				return err
+			}
+			// Store ready — ignore further openErrCh (nil channel pattern:
+			// reassign so subsequent loop iterations only wait on err/ctx).
+			openErrCh = nil
+			continue
+		case <-ctx.Done():
+			// drain below
+		}
+
 		slog.Info("mnemo serve draining", "deadline", drainDeadline)
 		// Ordered graceful drain (🎯T97.1), bounded by drainDeadline:
 		//   1. stop intake      — refuse new MCP/HTTP/federated requests,
@@ -1332,21 +1453,19 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		drained := make(chan struct{})
 		go func() {
 			defer close(drained)
-			// 1. Stop intake, draining in-flight requests within the deadline.
-			slog.Info("drain: stopping HTTP MCP intake")
-			if err := httpSrv.Shutdown(drainCtx); err != nil {
-				slog.Warn("HTTP MCP shutdown error", "err", err)
-			}
-			slog.Info("drain: stopping HTTP server intake")
-			if err := httpServer.Shutdown(drainCtx); err != nil {
-				slog.Warn("HTTP server shutdown error", "err", err)
-			}
+			// 1. Stop intake. Bounded by its OWN short grace (🎯T122) so a
+			// client that never disconnects cannot starve the durability
+			// steps below. Shutdown waits for in-flight requests, and the
+			// MCP transport keeps one open indefinitely by design, so this
+			// phase timing out is the expected case whenever a client is
+			// attached — not an error worth alarming about.
+			graceful := []intakeStopper{httpSrv, httpServer}
+			force := []intakeCloser{httpServer}
 			if fedSrv != nil {
-				slog.Info("drain: stopping federated intake")
-				if err := fedSrv.Shutdown(drainCtx); err != nil {
-					slog.Warn("federated HTTP shutdown error", "err", err)
-				}
+				graceful = append(graceful, fedSrv)
+				force = append(force, fedSrv)
 			}
+			drainIntake(drainIntakeGrace, graceful, force)
 			// 2. Release singleton background lease (🎯T97.4) so a peer
 			// backend can acquire and start ingest/compaction.
 			slog.Info("drain: releasing background lease")
@@ -1366,6 +1485,21 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			return nil // unreachable; os.Exit does not return
 		}
 	}
+}
+
+// eagerOpenDefaultUser opens the default user's store and starts its
+// workers (🎯T62). Called after the HTTP listener is up so /health can
+// report boot.Phase* while store.New runs pre-migration backup / schema
+// apply. Sets boot.PhaseReady on success or boot.Fail on error.
+func eagerOpenDefaultUser(reg *registry.Registry, defaultUser string) error {
+	boot.Set(boot.PhaseOpeningStore, "eager-open default user "+defaultUser)
+	if _, err := reg.ForUser(defaultUser); err != nil {
+		boot.Fail(err)
+		return err
+	}
+	boot.Set(boot.PhaseReady, "default-user store ready")
+	slog.Info("default-user store ready", "user", defaultUser)
+	return nil
 }
 
 // atomicTime is a mutex-guarded time.Time for MCP activity tracking.

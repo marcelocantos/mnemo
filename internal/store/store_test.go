@@ -38,6 +38,24 @@ func writeJSONL(t *testing.T, dir, project, sessionID string, entries []map[stri
 	return path
 }
 
+// appendJSONL adds lines to an existing fixture transcript, simulating a
+// live session growing between ingest passes.
+func appendJSONL(t *testing.T, dir, project, sessionID string, entries []map[string]any) {
+	t.Helper()
+	path := filepath.Join(dir, project, sessionID+".jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func msg(typ, text, ts string) map[string]any {
 	return map[string]any{
 		"type":      typ,

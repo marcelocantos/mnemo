@@ -654,12 +654,28 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// health serves GET /health → diag.Report (JSON).
-// When no DiagRunner has been wired (h.diags == nil) it returns 503 with a
-// minimal error payload so the dashboard can degrade gracefully.
+// health serves GET /health → diag.Report.
+// Browsers (Accept: text/html) get a human-readable HTML page; API clients
+// and the dashboard fetch() get JSON. Overrides: ?format=html|json.
+// When no DiagRunner has been wired (h.diags == nil) it returns 503 so the
+// dashboard can degrade gracefully.
 // A full-tier run is triggered on each request; callers should poll at ~30 s.
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
+	html := wantsHTML(r)
 	if h.diags == nil {
+		if html {
+			writeHealthHTML(w, diag.Report{
+				GeneratedAt: time.Now().UTC(),
+				Fail:        1,
+				Results: []diag.Result{{
+					Name:     "diag.registry",
+					Severity: "fail",
+					Tier:     "fast",
+					Detail:   "diag registry not yet wired",
+				}},
+			}, http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -668,5 +684,11 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	report := h.diags.Run(r.Context(), true, time.Now().UTC())
+	if html {
+		// 200 even when checks fail — the page itself rendered; severity
+		// is in the body (and matches mnemo_doctor / JSON shape).
+		writeHealthHTML(w, report, http.StatusOK)
+		return
+	}
 	writeJSON(w, report)
 }

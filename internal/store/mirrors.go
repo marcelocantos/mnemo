@@ -35,10 +35,19 @@ type mirrorReconciler struct {
 func (s *Store) mirrorReconcilers() []mirrorReconciler {
 	// Resolve commit repo name → on-disk root once. A repo without a
 	// local checkout (gh-only) simply has no commits stream.
+	//
+	// Bounded by session discovery like the gh streams (🎯T117): mnemo
+	// indexes the history of repos its sessions were connected to, not
+	// of every checkout it can find on disk.
+	sessionNames, err := s.sessionRepoNames()
+	if err != nil {
+		slog.Warn("mirror: session repo discovery failed", "err", err)
+		sessionNames = map[string]bool{}
+	}
 	commitRoots := map[string]string{}
 	var commitNames []string
 	for _, rr := range s.knownRepoRoots() {
-		if rr.repo == "" || commitRoots[rr.repo] != "" {
+		if rr.repo == "" || commitRoots[rr.repo] != "" || !sessionNames[rr.repo] {
 			continue
 		}
 		commitRoots[rr.repo] = rr.root

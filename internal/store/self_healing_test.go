@@ -528,58 +528,83 @@ func TestLoadConfig_MalformedJSON(t *testing.T) {
 	}
 }
 
-// TestCIRepos_UnionOfWorkspaceAndSessionMeta verifies that ciRepos
-// returns the union of (a) GitHub repos discovered via the workspace
-// walker and (b) repos known through session_meta.repo. This matters
-// for CI polling — before 🎯T17, ciRepos only looked at session_meta,
-// so a brand-new project that hadn't been touched by a Claude Code
-// session couldn't have its CI runs polled.
-func TestCIRepos_UnionOfWorkspaceAndSessionMeta(t *testing.T) {
+// TestCIRepos_DrivenBySessionDiscovery pins the collection contract.
+//
+// 🎯T17 originally made ciRepos the UNION of a workspace filesystem walk
+// and session_meta, so a project untouched by any session could still be
+// polled. 🎯T117 retires that: mnemo is a session tracking tool, so
+// discovery of sessions — not discovery of directories — decides what it
+// collects. A real, well-formed checkout with no session history is now
+// deliberately absent.
+//
+// Within the session-connected set, identity still comes from the origin
+// remote rather than the path (🎯T116).
+func TestCIRepos_DrivenBySessionDiscovery(t *testing.T) {
 	workspaceRoot := t.TempDir()
 
-	// Workspace-side: a github.com repo the walker will discover.
-	// extractRepo() uses a regex that matches /work/github.com/org/repo,
-	// so the path has to contain /work/ for the walker's repo-name
-	// derivation to produce an org/repo pair. The tempdir root may or
-	// may not contain /work/; mirror that shape under the root so the
-	// assertion is deterministic regardless.
+	// extractRepo() matches /work/github.com/org/repo, so the fixture
+	// mirrors that shape under the tempdir for deterministic naming.
 	workRoot := filepath.Join(workspaceRoot, "work")
-	wsRepoDir := filepath.Join(workRoot, "github.com", "walkerorg", "walkerrepo")
-	mustMkdirAll(t, filepath.Join(wsRepoDir, ".git"))
+	ghRoot := filepath.Join(workRoot, "github.com")
+
+	// A genuine GitHub checkout that no session ever touched. Under
+	// 🎯T17 this was polled; under 🎯T117 it must not be.
+	mkRepo(t, filepath.Join(ghRoot, "walkerorg", "walkerrepo"),
+		"git@github.com:walkerorg/walkerrepo.git")
+
+	// A session-connected checkout, and a worktree of it that is where
+	// the session actually ran — its identity must resolve to the parent.
+	parent := mkRepo(t, filepath.Join(ghRoot, "sessionorg", "sessionrepo"),
+		"git@github.com:sessionorg/sessionrepo.git")
+	mkWorktree(t, filepath.Join(ghRoot, "sessionorg", "sessionrepo-feature"), parent)
+
+	// A session-connected directory that is not a GitHub checkout at all.
+	mkRepo(t, filepath.Join(ghRoot, "sessionorg", "neverpushed"), "")
 
 	projectDir := t.TempDir()
 	s := newTestStore(t, projectDir)
 	s.SetWorkspaceRoots([]string{workRoot})
 
-	// Session_meta-side: a separate org/repo that is NOT on disk
-	// anywhere under the workspace root. ciRepos must still surface
-	// it from the session_meta.repo column fallback.
-	if _, err := s.writeDB.Exec(
-		"INSERT INTO session_meta (session_id, repo) VALUES (?, ?)",
-		"sess-ci-fallback", "sessionorg/sessionrepo",
-	); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct{ sess, repo string }{
+		{"sess-worktree", "sessionorg/sessionrepo-feature"},
+		{"sess-neverpushed", "sessionorg/neverpushed"},
+		{"sess-offdisk", "sessionorg/goneaway"},
+	} {
+		if _, err := s.writeDB.Exec(
+			"INSERT INTO session_meta (session_id, repo) VALUES (?, ?)",
+			tc.sess, tc.repo,
+		); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	repos, err := s.ciRepos()
 	if err != nil {
 		t.Fatalf("ciRepos failed: %v", err)
 	}
-
-	foundWalker, foundSession := false, false
+	got := map[string]bool{}
 	for _, r := range repos {
-		if r == "walkerorg/walkerrepo" {
-			foundWalker = true
-		}
-		if r == "sessionorg/sessionrepo" {
-			foundSession = true
-		}
+		got[r] = true
 	}
-	if !foundWalker {
-		t.Errorf("ciRepos missing workspace-walked repo 'walkerorg/walkerrepo'; got %v", repos)
+
+	// A session in a worktree collects for the repo it belongs to.
+	if !got["sessionorg/sessionrepo"] {
+		t.Errorf("missing worktree's parent repo 'sessionorg/sessionrepo'; got %v", repos)
 	}
-	if !foundSession {
-		t.Errorf("ciRepos missing session_meta fallback repo 'sessionorg/sessionrepo'; got %v", repos)
+	if got["sessionorg/sessionrepo-feature"] {
+		t.Errorf("worktree collected under its path name instead of its identity; got %v", repos)
+	}
+	// Session-connected but unresolvable: kept, and left to the backoff.
+	if !got["sessionorg/goneaway"] {
+		t.Errorf("session-connected repo with no checkout should stay in scope; got %v", repos)
+	}
+	// Session-connected but not a GitHub checkout: nothing to fetch.
+	if got["sessionorg/neverpushed"] {
+		t.Errorf("a session directory that is not a GitHub checkout must not be fetched; got %v", repos)
+	}
+	// The headline reversal.
+	if got["walkerorg/walkerrepo"] {
+		t.Errorf("walked a repo with no session history (🎯T117 retires 🎯T17's union); got %v", repos)
 	}
 
 	// Non-GitHub paths (no slash) must be filtered out. Insert one

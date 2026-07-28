@@ -665,7 +665,11 @@ Checks: `compactor.workdir` (the summariser's working dir exists and is
 writable), `claude.path` (the `claude` binary is on the daemon's PATH),
 `ingest.roots` (configured roots resolve), `compactor.breaker` (the
 compaction circuit-breaker has not tripped), `ingest.backfill` (the
-indexer has backfilled since the daemon started), `db.readable`.
+indexer has backfilled since the daemon started), `db.readable`,
+`images.embedder` (🎯T121 — whether the CLIP image embedder ran or was
+skipped and why: disabled by config, no `uv`, no helper script, or
+running with per-outcome counts; failures are never retried past their
+attempt budget, and are also queryable in `image_embedding_attempts`).
 
 Three surfaces expose the same report:
 - **`mnemo_doctor`** (MCP) — runs the full suite on demand: the single

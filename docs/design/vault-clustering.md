@@ -710,6 +710,22 @@ Custom templates can override.
 
 ### Cross-repo derivation
 
+> **Superseded as a dependency (2026-07-28, 🎯T64.12).** What follows
+> describes deriving cross-repo pages *from themes*. That remains a
+> valid way to produce them once themes exist, but it is no longer the
+> definition of the construct. Themes and cross-repo are orthogonal:
+> a theme may be entirely single-repo, and work plainly spans repos
+> without any clustering involved. Treating derivation as the
+> definition made cross-repo unreachable while the clustering engine is
+> unbuilt — and 🎯T64.11 has since retired clustering from the segment
+> path and left `themes` / `theme_members` dormant, on the principle
+> that thematic retrieval is a search problem rather than a clustering
+> problem. Cross-repo is now 🎯T64.12 and must work with the engine
+> switched off; a multi-repo theme becomes one input among several
+> rather than the sole source. The weighting concern below still
+> applies to whatever signal replaces it: casual co-mention should not
+> become a cross-repo view.
+
 A theme with `len(JSON(repos)) ≥ 2` AND `weight ≥ 4.0` triggers
 emission of a cross-repo page at `_mnemo/cross-repo/<slug>.md` in
 addition to the theme page. The cross-repo page renders the same

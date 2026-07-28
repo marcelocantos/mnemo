@@ -589,6 +589,157 @@ targets:
     origin: manual
     discovered: 2026-07-14
     achieved: 2026-07-14
+  T114:
+    name: HTTP and /health are available from process start; boot phases (pre-migration backup, schema apply) are reported while the store opens
+    status: achieved
+    value: 80.0
+    cost: 15.0
+    actual_cost: 8.0
+    acceptance:
+    - ListenAndServe starts before eager ForUser / store.New
+    - GET /health responds during multi-minute pre-migration VACUUM+gzip
+    - /health startup.ready (or equivalent) reports current boot phase including backup substeps
+    - Registry.ForUser does not hold the registry mutex across store.New
+    - Unit tests cover boot status and backup OnStep
+    context: 'Eager ForUser blocked ListenAndServe for the entire pre-migration backup of multi-GB mnemo.db (~4+ minutes). Health API could not work during that window. Fix: listen-first + boot status + unlock ForUser during New.'
+    tags:
+    - startup
+    - health
+    - ux
+    origin: manual
+    discovered: 2026-07-25
+    achieved: 2026-07-25
+  T114.1:
+    name: Pre-migration backup runs concurrently with a live store; tools serve during VACUUM INTO + gzip
+    status: achieved
+    value: 85.0
+    cost: 20.0
+    actual_cost: 12.0
+    acceptance:
+    - store.New returns and accepts queries without waiting for pre-migration backup
+    - Pre-migration VACUUM INTO + gzip run in a background goroutine against the open DB
+    - Schema apply runs after backup completes (insurance order preserved)
+    - /health reports serving + upgrade-in-progress rather than store-unavailable
+    - Unit test proves New returns while a blocked backup would hang the old path
+    context: 'Listen-first fixed HTTP; store open still serialized behind multi-minute backup. SQLite VACUUM INTO is designed for concurrent use (shared lock / snapshot). User correctly pushed: mnemo should not be unavailable in any sense during backup.'
+    tags:
+    - startup
+    - health
+    - sqlite
+    - ux
+    origin: manual
+    discovered: 2026-07-25
+    achieved: 2026-07-25
+  T115:
+    name: Agents can load a session via one session parameter that accepts an id, a project/repo, or latest/recent shorthand
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'mnemo_read_session (and mnemo_compacted_session if shared) take a single session argument (name may stay session_id for compatibility, or rename to session with alias) whose value is interpreted by content: session UUID/prefix → that session; bare project/repo path fragment → newest matching interactive session; reserved tokens like latest or recent (optionally with project, e.g. latest:mnemo or latest mnemo) → resolve by recency + optional scope'
+    - Resolution rules are documented in the tool description with examples matching natural speech ("latest mnemo", "marcelocantos/mnemo", full/prefix id) so agents do not need a two-step mnemo_sessions plan
+    - Ambiguous matches return a short ranked list or a clear error; zero matches are explicit; exact id always wins over repo-name collision heuristics
+    - Default body for non-id resolution is the compacted view when available (or documented opt-in view=); raw message read remains available
+    - Unit tests cover id, prefix, repo-as-session, latest-with-repo, empty, and id-vs-repo disambiguation
+    context: 'Refined 2026-07-25: do not add parallel which/repo params. One field — session — becomes session_id or which+scope internally depending on contents (UUID/prefix vs project/repo vs latest/recent). Keeps the tool surface small and matches how users already speak. Still distinct from thematic search.'
+    tags:
+    - mcp
+    - tools
+    - discoverability
+    - sessions
+    origin: 'session discussion 2026-07-25: latest-session-for-project tool affordance'
+    discovered: 2026-07-25
+  T116:
+    name: The GitHub mirror addresses repos by their true GitHub identity, resolved from the checkout's origin remote, so no outbound call is made for a directory that merely looks like a repo
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The gh-backed mirror streams only fetch for directories that are genuinely GitHub checkouts: identity is resolved from the checkout''s configured origin remote, not from its path. A directory with no remote, or a non-GitHub remote, is never fetched. Oracle: unit test asserts a workspace dir with no origin, and one with a non-GitHub origin, are both absent from the gh repo list.'
+    - 'Identity resolution handles the two legitimate layouts: a git worktree resolves to its parent repo (its shared config already carries the parent''s origin), and a local clone whose directory name is prefixed by a sibling repo resolves to that sibling. Oracle: fixture with a worktree dir and a ''foo.experiment'' clone both resolve to ''org/foo''.'
+    - 'Resolution reads .git/config directly rather than shelling out to git per repo per pass, so a ~200-repo workspace costs no subprocesses. Oracle: reconcile pass spawns no git processes for identity.'
+    - 'pollGitHubForRepo propagates fetch errors instead of returning nil, so the existing 🎯T91 recordMirrorFailure backoff engages. Oracle: test asserts a failing fetch records a mirror failure and the repo is skipped while inside the backoff window.'
+    - 'A repo whose issues (or Actions) are disabled is treated as a permanent, quiet skip for that sub-stream rather than a recurring warning; a repo that cannot be resolved at all is a real failure and backs off. Oracle: table test over representative gh stderr messages.'
+    - '🎯T17''s intent is preserved: a real GitHub checkout discovered by the workspace walk is still polled even with no session history. Oracle: the existing union test still passes, with its fixture given a real origin.'
+    - CLAUDE.md's documented GitHub egress posture matches the implemented scope.
+    context: 'Found 2026-07-26 while reviewing an overnight soak of the T64.11 daemon: ~2,500 WARN lines from the GitHub mirror over 46 repos. Root cause is that repo identity is derived from the directory path (regex /work/github.com/<org>/<repo>) and never checked against the checkout''s actual origin remote, so anything shaped like a repo gets PR/issue/CI fetches. Breakdown of the 46: 18 with no remote at all (empty `git init` scaffolds like hellojava/brain1/lit/relay — 0 commits, 0 sessions), 14 whose path name differs from their true repo (all git worktrees — rustuml-activity/-class/-state etc. of marcelocantos/rustuml, mnemo-rel of mnemo, esfera2-webgpu of esfera2 — plus prefix-named local clones yourworld.defunct -> yourworld, frozen.old -> frozen, hms.bak -> hms), 1 with a non-GitHub (Windows path) remote, 2 stale session_meta rows for dirs no longer on disk, and 11 real repos failing for other reasons (torvalds/linux: "has disabled issues"). NOTE: an earlier framing of this target proposed restricting the gh streams to session history only; that was wrong — TestCIRepos_UnionOfWorkspaceAndSessionMeta records that 🎯T17 deliberately ADDED the workspace walk so a brand-new project untouched by a session can still have CI polled. Requiring a real GitHub origin achieves the same noise elimination without reversing T17, since every noisy entry is either not a GitHub checkout or resolvable to its true repo. Tertiary defect: pollGitHubForRepo logs both fetch errors and returns nil unconditionally, so T91''s recordMirrorFailure never fires and all 46 retry every 15 min forever — that is why the noise never decays. Open question deliberately left out of scope: vendored third-party checkouts (google/dawn, torvalds/linux) are real repos and would still be polled; restricting to orgs seen in session history would drop them.'
+    tags:
+    - mirrors
+    - github
+    - egress
+    - noise
+    - hygiene
+    origin: overnight soak review, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-26
+  T117:
+    name: 'Mirror data collection is driven by agent-session discovery: mnemo indexes the repos and directories its sessions are connected to, and never goes looking for repos on its own'
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The mirror streams (ci, github, commits) source their repo set from session-connected roots only: a repo mnemo has never observed a session in produces no outbound fetch and no index write. Oracle: unit test asserts a workspace-walked checkout with a valid GitHub origin but no session_meta row is absent from the stream repo list.'
+    - 'Session-connected repos still resolve to their true GitHub identity (🎯T116 preserved), including worktrees and prefix-named clones. Oracle: a worktree that has session history resolves to, and is fetched as, its parent repo.'
+    - 'A session-connected repo whose checkout is absent or is not a git repo is still in scope (it is session-connected) and relies on the 🎯T116 failure backoff rather than being excluded. Oracle: such a repo appears in the list and warns at most once per backoff window.'
+    - 🎯T17's premise — walk the workspace so a project untouched by any session still gets polled — is explicitly retired, and its test updated to assert the new contract rather than the old union.
+    - 'Live measurement: after restart the github stream''s repo set equals the session-connected set (77 of the previous 147 on the current index), and no repo lacking session history is attempted. Oracle: post-restart query of mirror_status against session_meta.'
+    - 'Non-mirror discovery is untouched: docs/todos/plans/targets indexing still walks git repos, synthesis roots, and session cwds as before. Oracle: their existing tests pass unchanged.'
+    - CLAUDE.md's documented egress posture states the session-driven scope.
+    context: 'Product principle stated by the user 2026-07-26: "mnemo is not a code management tool, it''s an agent session tracking tool. We really shouldn''t be just finding every repo we think we can and trying to collect data on them. It should be driven first and foremost by discovery of agent sessions and the repos or projects/directories that they are connected to." This explicitly overrules 🎯T17, which added a workspace filesystem walk to ciRepos so a brand-new project untouched by a session could still have its CI polled — recorded in TestCIRepos_UnionOfWorkspaceAndSessionMeta. While fixing 🎯T116 I deferred to T17 and preserved the walk; the user has now reversed that premise, so the walk must stop driving mirror collection. Measured on the live index: the github stream covers 147 repos, of which only 77 have any session history — 70 are polled purely because a directory exists. 🎯T116''s identity resolution (origin remote, worktrees, prefix clones) stays and remains necessary, since session_meta.repo is itself path-derived and needs the same correction. Scope is deliberately limited to the mirror/collection streams; file discovery for docs, todos, plans and synthesis roots legitimately walks all root types and is out of scope.'
+    tags:
+    - mirrors
+    - github
+    - egress
+    - product-principle
+    - discovery
+    origin: user product principle, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-26
+  T118:
+    name: A failure inside Apple Vision OCR degrades that one image, and can never abort the daemon
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'An OCR call that aborts inside the native framework does not terminate the mnemo process; ingest, compaction, mirrors and the MCP endpoint keep serving. Oracle: fault-injection test (or a fixture image known to trip the Metal path) leaves the process alive and the image marked failed.'
+    - 'The failing image is recorded as OCR-failed and is not retried indefinitely on every startup. Oracle: after a simulated abort, a second backfill pass skips that image.'
+    - 'OCR can be disabled without a code change, so a machine with a broken Metal/Vision stack can run mnemo unattended. Oracle: config flag (or auto-disable after N consecutive aborts) verified by a restart with the flag set producing no OCR calls.'
+    - The abort is visible as a fail-severity health check / log line naming the image id and the framework error, not just a stack dump.
+    context: 'Observed 2026-07-26 20:16 while restarting the daemon for 🎯T117 verification. The process died with SIGABRT raised inside cgo during Apple Vision OCR: runAppleVisionOCRNative -> _Cfunc_mnemo_ocr_recognize (internal/store/ocr_darwin.go:36), preceded by "AGX: agxa_compiler.mm:120 *** Could not open /System/Library/PrivateFrameworks/AGXCompilerCore.framework/agxa_compiler_hash" and "metal library file .../MPSNeuralNetwork.framework/Resources/default.metallib failed to open". So the machine''s Metal/MPS shader stack is broken for this path; Vision aborts the process rather than returning an error, and a cgo abort cannot be recovered in-process with recover(). Soft "image OCR failed ... VNImageRequestHandler.performRequests failed" warnings for the same subsystem had been appearing benignly for hours before it escalated to a hard abort. Impact is severe and disproportionate: one undecodable image killed ingest, the compaction watcher, all mirror streams and the MCP endpoint. A restart got past it, so it is not deterministic on the same image, which makes it worse — it is a random daemon killer. Likely shapes: run OCR in a subprocess so an abort is contained, and/or gate it behind a config flag plus an auto-disable after repeated aborts. Note there is currently NO way to turn OCR off without rebuilding.'
+    tags:
+    - ocr
+    - stability
+    - cgo
+    - darwin
+    - crash
+    origin: daemon crash observed during T117 verification, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-26
+  T119:
+    name: 'Image OCR succeeds at a rate explained by image content, not by how long the daemon has been running: no systematic failure cliff partway through a backfill'
+    status: converging
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A full OCR backfill over the existing corpus completes with a failure rate consistent with genuinely unrecognisable images (single-digit percent), not the ~48% observed on 2026-07-26. Oracle: clear image_ocr error rows, re-run the backfill, and compare per-block success rates.'
+    - 'Success rate does not degrade with position in the run: the last decile of images processed succeeds at a rate comparable to the first. Oracle: the id-block query that exposed the cliff (0-319: 318 ok/1 failed; 384+: 0 ok/254 failed) shows no such discontinuity.'
+    - The root cause is named and evidenced rather than assumed — whether it is per-process Metal/AGX resource exhaustion, a leak in the native recogniser, concurrency against the GPU, or something else. A one-line explanation ties the observed cliff to a mechanism.
+    - If subprocess isolation (🎯T118) alone resolves it, that is recorded as the explanation and the fix, with before/after numbers; if it does not, the residual cause is diagnosed separately.
+    context: |-
+      Found 2026-07-26 while fixing 🎯T118. 307 of 637 images (48%) had an OCR error recorded, all apple_vision: 278 "VNImageRequestHandler.performRequests failed", 28 "TextRecognition.CR…", 1 undecodable.
+
+      ROOT CAUSE ESTABLISHED: per-process resource exhaustion in the Vision/Metal stack, not bad images and not a broken machine. Two independent lines of evidence. (1) Failures cluster by processing order, not by content: image ids 0-319 were 318 ok / 1 failed, 320-383 were 12 ok / 52 failed, and every block from 384 up was 0 ok / 64 failed — Vision worked essentially perfectly for the first ~330 recognitions in the process, then failed for every subsequent one. Consistent with the AGX compiler error ("Could not open .../AGXCompilerCore.framework/agxa_compiler_hash") and MPS metallib load failure logged at the moment of the SIGABRT. (2) Three images that failed inside the daemon succeeded when re-run by hand through the same binary. Not format-specific (PNG was 327 ok / 303 failed).
+
+      FIX: 🎯T118's subprocess-per-image isolation resolves it as a side effect — each recognition starts a fresh process and cannot inherit an exhausted one. Measured after the change: 104 images that had previously failed 100% of the time now succeed 104/104; corpus at 433 ok / 1 failed (0.2%, the single remaining failure being a genuinely undecodable image); the block-wise cliff is gone (every block 0 failures).
+
+      REMAINING: 203 of the 307 cleared images have not yet been re-OCR'd — the backfill processes 50 per pass and fires per ingest cycle, so it drains as sessions are ingested rather than in one run. Retire once the full corpus has been re-processed and the aggregate rate holds in the single digits; nothing suggests it will not, but the criterion says full corpus and the measurement is currently partial.
+    tags:
+    - ocr
+    - darwin
+    - reliability
+    - investigation
+    origin: OCR failure-rate analysis during T118, 2026-07-26
+    discovered: 2026-07-26
   T12:
     name: GitHub activity (PRs, issues, reviews) indexed cross-repo with FTS and session correlation
     status: achieved
@@ -610,6 +761,126 @@ targets:
     origin: user suggestion
     discovered: 2026-04-07
     achieved: 2026-04-13
+  T120:
+    name: The compaction watcher stops paying full candidate-selection cost on every tick when nothing is owed
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'On a continuously-ingesting daemon with an empty owed-set, the per-minute scan does not run the full candidate-selection query. Oracle: over 30 minutes of live ingest, scans logged at WARN (>=5s) drop to zero and total scan CPU is materially reduced.'
+    - 'The owed-set stays correct: a session that crosses the addenda-token threshold is still picked up within one scan interval of doing so. Oracle: test drives a session past the threshold and asserts it is selected on the next scan.'
+    - 'The mechanism is stated: whatever replaces or augments the 🎯T91 MAX(entries.id) gate must explain why it holds under continuous ingest, since that is precisely when the current gate fails.'
+    context: |-
+      Observed 2026-07-26 during a T118 health sweep. The compaction watcher scans every 60s and each scan took 2.1-9.3s while returning candidates=0 backlog=0 every single time — 10 scans exceeded the 5s WARN threshold in a 32-minute window. That is a multi-second query over a 21 GB index, once a minute, forever, for no result, plus the SQLite contention it causes against ingest.
+
+      🎯T91 added an idle gate intended to prevent exactly this: skip the expensive scan when MAX(entries.id) is unchanged since the last scan and that scan left nothing owed or quarantined. The gate is sound in principle but never fires in the common case, because ANY transcript append anywhere advances MAX(entries.id) — and on an actively-used machine that is continuous. So the cheap O(1) check almost always says "something changed", and the expensive re-sum of every session's addenda tokens runs regardless, even though the sessions that changed are usually nowhere near the threshold.
+
+      Directions worth considering rather than a fixed design: track the watermark per session rather than globally so only sessions with new entries are re-summed; maintain the addenda token total incrementally at ingest instead of re-aggregating at scan time; or keep a cheap "next session to cross the threshold" bound so the scan can early-exit. Note the compactor itself is healthy — 9132 compactions, 93 in the last 7 days, last one today — so this is pure overhead, not a functional fault.
+    tags:
+    - compaction
+    - performance
+    - cpu
+    origin: health sweep, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-27
+  T121:
+    name: Image embedding fetches no model weights from the network unless the user opted in, and a failed embedding is recorded rather than violating a NOT NULL constraint
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A failed embedding records the failure and moves on; it never attempts an INSERT that violates image_embeddings.vector NOT NULL. Oracle: fault-injection test with a script that exits non-zero produces no constraint error and marks the image so it is not retried forever.'
+    - 'Model-weight downloads are covered by the documented egress posture: either the embedder is opt-in like cost reconciliation, or CLAUDE.md''s ''External API egress'' section states plainly that enabling image embeddings fetches weights from the HuggingFace Hub on first use. No silent outbound fetch. Oracle: the section names the behaviour and matches the code.'
+    - 'Whether the embedder ran or was skipped is visible without reading the log — the reason (no uv, script missing, weights unavailable, disabled) is retrievable. Oracle: a status/diagnostic surface reports it.'
+    context: |-
+      Observed 2026-07-26 during a T118 health sweep. Two distinct problems in the image embedder (internal/store/image_embeddings.go, which shells out via `uv` to tools/embed-clip/embed.py).
+
+      (1) Undocumented network egress. The logs show "embed script error: Downloading transformers (11.1MiB)" and "Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads." So generating image embeddings pulls model weights from the HuggingFace Hub at runtime. CLAUDE.md's "External API egress" section enumerates Anthropic Admin API (opt-in), GitHub, and federation — it does not mention HuggingFace at all. Given the project's stated posture (defaults are silent; opt-in must be deliberate, for users in environments where unsolicited outbound calls need security review) this is a gap between documented and actual behaviour, and arguably wants the same explicit opt-in as cost reconciliation.
+
+      (2) A failure path that violates the schema. When the script fails or returns no vector, the code proceeds to store anyway and SQLite rejects it: "NOT NULL constraint failed: image_embeddings.vector" (seen for image_id 73 and 166, repeatedly across restarts). So the failure is neither recorded nor suppressed, and the same images are retried on every startup, each attempt costing a subprocess and a download attempt. Contrast image_ocr, which records an error column and is therefore skipped next pass.
+    tags:
+    - images
+    - embeddings
+    - egress
+    - reliability
+    origin: health sweep, 2026-07-26
+    discovered: 2026-07-26
+    achieved: 2026-07-27
+  T122:
+    name: The daemon drains cleanly on shutdown instead of always exceeding its deadline and force-exiting
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A SIGTERM to an idle daemon completes the drain within the deadline and logs the clean-close path (wal checkpoint on close), not "drain exceeded deadline; forcing exit". Oracle: stop the daemon and grep the log for the checkpoint line.'
+    - 'A SIGTERM issued while a mirror reconcile, compaction scan or image backfill is in flight still drains cleanly: in-flight work is cancelled or awaited within the deadline rather than the process being killed. Oracle: send SIGTERM immediately after a reconcile starts and confirm a clean drain.'
+    - The drain deadline is justified by measurement rather than assumed — whatever value it takes, the slowest legitimate shutdown path is known and fits inside it, or is explicitly cancelled rather than waited on.
+    - Whatever remains genuinely un-cancellable at shutdown (e.g. a gh subprocess mid-flight) is killed deliberately, so the deadline is a backstop rather than the normal path.
+    context: |-
+      Found 2026-07-27 while chasing a 2.3 GB WAL. Every shutdown in this session — 10 of 10 across all daemon runs — ended in "drain exceeded deadline; forcing exit (crash-only recovery on next start) deadline=10s". Zero clean drains, and consequently zero executions of the Close() path.
+
+      That has a concrete cost beyond untidiness: Store.Close() is the ONLY caller of Checkpoint() (wal_checkpoint(TRUNCATE)), so the WAL truncation path never ran once. The -wal therefore sat at its high-water mark of 2.3 GB against a 21 GB database. It also means every start is a crash recovery, replaying the WAL rather than opening a clean database.
+
+      The 10s deadline looks optimistic for this workload. Candidates for what overruns it: the mirror reconcile spawns gh subprocesses per repo (a reconcile logged 1s before the drain in the observed case); the compaction candidate scan runs 2s+ and up to 2m14s under load; image OCR spawns a worker subprocess per image; and several backfill goroutines may not observe context cancellation at all. Diagnosis should establish which of those actually holds the drain rather than raising the deadline blindly.
+
+      Note the WAL symptom itself is separately mitigated: journal_size_limit is now set and a periodic truncating checkpoint runs during write lulls, so reclamation no longer depends on a clean shutdown. This target is about the drain being broken in its own right.
+    tags:
+    - shutdown
+    - reliability
+    - wal
+    - lifecycle
+    origin: WAL investigation, 2026-07-27
+    discovered: 2026-07-27
+    achieved: 2026-07-27
+  T123:
+    name: The two failure modes that were invisible to CI — a worker outrunning a deferred schema upgrade, and a shutdown that never checkpoints — are caught by automated tests rather than by watching a live daemon
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A test opens a store whose schema is behind, so the upgrade is genuinely deferred, and asserts that a worker gated on AwaitSchemaUpgrade observes the post-migration schema — i.e. a read of a newly-added column/table succeeds after it returns. The test must fail if the gate is removed.
+    - A test asserts Registry.Close completes within its grace and still closes the store when a worker goroutine refuses to exit (standing in for the un-cancellable gh/git subprocesses), so the WAL checkpoint is reached. The test must fail if the bounded wait reverts to an unconditional Wait().
+    - 'A test asserts the HTTP drain does not hang on a long-lived request: with a handler that never returns (standing in for the streamable-HTTP MCP transport), intake shutdown gives up after its grace and the connection is force-closed.'
+    - The suite runs in the normal `go test -tags sqlite_fts5 ./...` pass with no daemon, no network and no built binary required.
+    context: |-
+      Filed 2026-07-28 after auditing the session's own work. 67 test functions were added across 🎯T64.11/T116/T117/T118/T120/T121/T122 and the WAL fixes, much of it fault-injecting (SIGABRT-raising OCR worker, failing embed helper, PATH-emptied resolver). Two gaps stand out because they cover the bugs that actually recurred or hid longest.
+
+      (1) Deferred-schema-upgrade ordering has NO test, and the bug bit twice in one session: the span backfill read topic_segments.compaction_id, and the image embedder wrote image_embedding_attempts, both before the deferred migration had created them. 🎯T114.1 defers the upgrade so the daemon can serve during a multi-minute pre-migration backup, so any worker touching new schema must wait on AwaitSchemaUpgrade. It only manifests on an UPGRADE boot — a fresh test database always has the new schema — which is exactly why CI cannot see it today.
+
+      (2) The drain path has NO test. Store.Close is the only caller of the WAL checkpoint and it never executed once in this session's 11 shutdowns; the breakage was silent for the whole life of the feature and was found only by reading a live daemon's log. Both causes are unit-testable without a daemon: Registry.Close must not block unconditionally on workers that cannot be cancelled, and HTTP intake shutdown must not wait forever on a long-lived request.
+
+      Verification for both was manual this session (SIGTERM a live daemon, read the log), which is precisely the kind of oracle that does not survive into CI.
+    tags:
+    - testing
+    - regression
+    - shutdown
+    - migration
+    origin: coverage audit, 2026-07-28
+    discovered: 2026-07-28
+    achieved: 2026-07-28
+  T124:
+    name: Mirror stream work is cancellable and silent about directories that are not git repos, so shutdown does not have to abandon it
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The gh and git subprocesses spawned by the mirror streams take a context (exec.CommandContext), so cancelling the worker context terminates them rather than letting them run to completion. Oracle: a test cancels mid-fetch and asserts the call returns promptly with a cancellation error.'
+    - 'Registry.Close returns well inside workerDrainGrace when the only work in flight is mirror work — i.e. the bounded wait added by 🎯T122 becomes a genuine backstop rather than something the healthy path relies on. Oracle: the test deleted during 🎯T123 (Close is prompt when workers stop) can be reinstated and passes.'
+    - 'A session-connected directory that is not a git repo produces no recurring warning from the commits stream. Oracle: over an hour of runtime, ''git log failed ... exit status 128'' appears at most once per repo, or not at all.'
+    - The commits stream, like the gh streams, skips a path it has established is not a git checkout rather than re-shelling every pass.
+    context: |-
+      Filed 2026-07-28 during a pre-PR pass over the graph. Two related loose ends this session surfaced but did not fix.
+
+      (1) The mirror streams shell out via exec.Command with NO context: fetchAndUpsertPRs / fetchAndUpsertIssues (gh pr list, gh issue list), pollCIForRepo (gh run list), and ingestGitCommits (git log). Cancellation therefore does not reach them, so a subprocess in flight runs to completion no matter what shutdown wants. That is why 🎯T122 had to bound Registry.Close's worker wait and abandon workers rather than await them — and why a test asserting Close is prompt for well-behaved workers had to be deleted in 🎯T123 (it failed: the daemon's own workers take >3s to notice cancellation). Making these context-aware removes the need to abandon anything and turns the grace back into a true backstop.
+
+      (2) The commits stream re-runs `git log` every pass against session-connected directories that were never git repos, producing recurring "git log failed ... exit status 128" warnings — observed for Health-Management-Systems/fundguard, marcelocantos/quixy and marcelocantos/vendep, three per reconcile pass, indefinitely. 🎯T116/🎯T117 gave the gh streams identity resolution and failure backoff; the local commits stream got the session-scoping but not the equivalent "this is not a checkout, stop asking" handling.
+    tags:
+    - mirrors
+    - shutdown
+    - noise
+    - cancellation
+    origin: pre-PR graph pass, 2026-07-28
+    discovered: 2026-07-28
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
@@ -2288,9 +2559,10 @@ targets:
     achieved: 2026-05-23
   T64.10:
     name: Sessions are segmented into hierarchical, overlapping topic spans that feed the clustering engine as a message-level corpus, so a search hit expands to its enclosing conversation and a theme resolves to its spans across sessions
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    actual_cost: 8.0
     acceptance:
     - A segmentation pass produces topic_segments rows with nested (parent_id/level) and, where warranted, overlapping intervals; Tier 1 (structural) is the default and runs with zero egress and no stored vectors.
     - Segments participate in clustering as doc_kind='segment' and appear as theme_members; each segment has exactly one primary theme and zero-or-more secondary themes above the similarity threshold.
@@ -2312,6 +2584,52 @@ targets:
     - clustering
     origin: manual
     discovered: 2026-07-01
+    achieved: 2026-07-25
+  T64.11:
+    name: 'Topic segmentation is an enrichment of the summarisation engine: the compactor''s LLM pass emits per-session span documents (boundaries + labels + summaries) that search indexes directly, and global clustering is off the hot path'
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The compactor's LLM pass also emits topic spans ({from,to,label,summary} anchored to message ranges) for each window it summarises; spans are persisted as additive schema under sqlift AllowNone (no destructive change to topic_segments/themes).
+    - 'ClusterSealedSegments is no longer invoked from ingest, SegmentAllSessions, or the live-segment debounce path; the themes/theme_members dendrogram schema goes dormant (no writes on the hot path). Oracle: grep/test asserts no call sites on the ingest path, and a soak run shows no theme rewrites.'
+    - Structural segmentation remains the always-on provisional layer for sessions not yet compacted; once the compactor emits spans for a range, those spans supersede structural ones for retrieval in that range.
+    - mnemo_search expand="segment" and mnemo_segments resolve from compactor-emitted spans when present, falling back to structural spans; expand="none" remains byte-identical to today.
+    - 'Thematic retrieval is a search problem over span documents: span label/summary text is FTS-indexed and a query returns matching spans across sessions ranked by score, with no dependency on precomputed themes.'
+    - 'Daemon CPU stays bounded during backfill: a full segment backfill run completes without the O(n^3) recluster pass; profile shows no ClusterSealedSegments frames.'
+    context: 'Pivot from T64.10''s shipped design, decided in the Grok session of 2026-07-25 (session 019f6ab2, topic grok:grok-build-plan). Findings: (1) ClusterSealedSegments — single-link agglomerative over all sealed segments with full delete-and-rewrite per pass — is roughly cubic in sealed-segment count and pegged the daemon CPU during backfill; (2) cross-session theme clustering is not needed for the product goal — thematic/semantic search is a search-engine problem over per-session span documents; (3) LLM span-finding is the same job the compactor already does (read a contiguous transcript chunk, emit structured JSON with message-range anchors), so it folds into summarisation rather than standing up a second LLM pipeline — reusing the compactor''s watcher, newest-first ordering, budget, quarantine, and cursor machinery. This deliberately reverses the topic-segmentation.md non-goal separating compaction spans from topic segments. Structural segmentation stays as the zero-egress provisional sketch; the dendrogram/theme machinery becomes dormant future analytics, not the retrieval substrate.'
+    tags:
+    - segmentation
+    - summarisation
+    - compaction
+    - search
+    - performance
+    origin: Grok session 019f6ab2 design discussion, 2026-07-25
+    discovered: 2026-07-25
+    achieved: 2026-07-25
+  T64.12:
+    name: 'Cross-repo: work that spans repositories is surfaced as such, without requiring a clustering engine to exist'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Cross-repo views are produced with the clustering engine switched off entirely. Oracle: with themes empty (the current state), a cross-repo surface still identifies genuine multi-repo work. If it returns nothing, the construct is still coupled to themes.'
+    - 'At least one non-theme signal drives it — candidates, none mandated: a session whose cwd or activity spans repos, an entity referenced from several repos (target, decision, file, commit, PR), or a search whose top results span repos. The chosen signal is stated and its false-positive behaviour is characterised.'
+    - A theme that happens to span repos is ONE input among several, never the definition. If 🎯T64.8 ships, multi-repo themes enrich this surface; if it never ships, the surface still works.
+    - Casual co-mention does not become a cross-repo view. Some threshold or weighting keeps the output to work genuinely spanning repos — the vault-clustering design's weight >= 4.0 exists for this reason and the same concern applies to whatever replaces it.
+    - The surface is reachable from the tools agents actually use, not only as a vault page.
+    context: |-
+      Split out of 🎯T64.8 on 2026-07-28. Themes and cross-repo were bundled as one target because docs/design/vault-clustering.md defines cross-repo pages as a derived view over themes: "A theme with len(JSON(repos)) >= 2 AND weight >= 4.0 triggers emission of a cross-repo page at _mnemo/cross-repo/<slug>.md… No separate cross_repos table — cross-repo pages are a derived view over themes."
+
+      They are orthogonal constructs that interact. A theme can be entirely single-repo; work can obviously span repos with no clustering involved. Deriving one from the other was an implementation convenience that hardened into a dependency, and it left cross-repo unreachable while the engine is unbuilt — which matters now that 🎯T64.11 has retired clustering from the segment path and left themes/theme_members dormant on the principle that thematic retrieval is a search problem.
+
+      Note the interaction is worth keeping once both exist: a multi-repo theme is good evidence of cross-repo work. The requirement is only that it not be the sole source. Marcelo's own workspace makes the non-theme signals concrete — sessions in worktrees of one repo, forks filed under another org (anz-bank/decimal whose origin is marcelocantos/decimal), and vendored sub-repos (sqldeep/vendor/deepparser) all represent genuine multi-repo structure that 🎯T116's identity resolution already has to reason about.
+    tags:
+    - vault
+    - cross-repo
+    - discovery
+    origin: split from T64.8, 2026-07-28
+    discovered: 2026-07-28
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: achieved
@@ -2409,7 +2727,7 @@ targets:
     origin: PR
     discovered: 2026-05-22
   T64.8:
-    name: Themes + cross-repo (clustering engine)
+    name: 'Themes: documents cluster into named, navigable themes via a clustering engine that is local by default'
     status: identified
     value: 5.0
     cost: 0.0
@@ -2419,12 +2737,19 @@ targets:
     - Label quality gates all four pass — centroid-closeness (must be the centroid-closest vault_user member), ≥ 200-token body, daily-note filename exclusion, title-content token overlap. mnemo_vault_themes_inspect reports which gate fired when a user-anchor candidate was rejected.
     - 'cluster_embeddings cache PK is (doc_kind, entity_id, content_hash, provider, model, model_version); switching models triggers clean re-embed; mnemo_vault_recluster(force_reembed: true) supported.'
     - Cluster IDs derived from sha1(sorted member set), stable within a fixed (provider, model, model_version) fingerprint.
-    - Cross-repo pages derived from themes with len(repos) ≥ 2 AND weight ≥ 4.0.
     - Theme retirement at vault_clustering.retire_after (180 days default) moves to _mnemo/themes/_archive/; pin via mnemo_vault_themes_pin exempts. Cluster ID survives archive→active round-trip if membership is stable.
     - New tables — themes, theme_members, cluster_embeddings, themes_fts, cluster_runs, theme_overrides, theme_pins — all additive per 🎯T49.
     - New MCP tools — mnemo_vault_recluster, mnemo_vault_themes_inspect, mnemo_vault_themes_pin — work end-to-end. Stubs for themes_split / themes_merge land config-rejecting placeholders.
-    - All 19 acceptance criteria in docs/design/vault-clustering.md pass.
-    context: The research-shaped slice; carries the most risk. Subordinate design doc (docs/design/vault-clustering.md) is the canonical spec. Heuristic engine ships fully offline. Embeddings engine is opt-in per 🎯T63 egress posture; labelling engine is an independent opt-in (two-key matrix). HDBSCAN deferred to a follow-up slice.
+    - The clustering-engine criteria in docs/design/vault-clustering.md pass. Cross-repo derivation is explicitly NOT in scope here — it is its own target.
+    - 'The cost profile is understood before this is called done: 🎯T64.11 retired segment clustering because a full single-link rebuild per pass was super-quadratic in corpus size and dominated backfill CPU. A document-level engine must show it does not reproduce that, or be incremental.'
+    context: |-
+      Re-scoped 2026-07-28: this was "Themes + cross-repo (clustering engine)", bundling two orthogonal constructs. They interact — a theme that happens to span repos is interesting — but neither depends on the other: themes can be single-repo, and cross-repo work can be surfaced without any clustering at all. Cross-repo now has its own target.
+
+      The bundling came from docs/design/vault-clustering.md, which defines cross-repo pages as a derived view over themes ("A theme with len(repos) >= 2 AND weight >= 4.0 triggers emission of a cross-repo page… No separate cross_repos table"). That derivation is a possible implementation, not the definition of the construct, and it made cross-repo unreachable while the clustering engine is unbuilt.
+
+      That coupling became load-bearing after 🎯T64.11, which retired clustering from the segment path on the principle that thematic retrieval is a search problem rather than a clustering problem, and left themes/theme_members dormant. Under the old bundling, cross-repo was blocked behind an engine that is currently switched off.
+
+      The research-shaped slice; carries the most risk. Heuristic engine ships fully offline. Embeddings engine is opt-in per 🎯T63 egress posture; labelling engine is an independent opt-in (two-key matrix). HDBSCAN deferred to a follow-up slice.
     depends_on:
     - T64.7
     origin: PR

@@ -19,10 +19,14 @@ const ocrBatchSize = 50
 var ocrOnce sync.Once
 
 // ocrBackend returns the backend to use: "apple_vision", "tesseract", or "".
-// apple_vision is in-process via CGO on macOS; tesseract shells out; empty
-// means neither is available.
+// Both shell out — apple_vision to this binary re-executed as a worker
+// (🎯T118), tesseract to the tesseract CLI. Empty means OCR is off,
+// either because no backend exists or because the user disabled it.
 func ocrBackend() string {
-	if appleVisionAvailable {
+	if ocrDisabledByConfig() {
+		return ""
+	}
+	if appleVisionAvailable && !ocrDisabled.Load() {
 		return "apple_vision"
 	}
 	if _, err := exec.LookPath("tesseract"); err == nil {
@@ -36,7 +40,10 @@ func ocrBackend() string {
 func runOCR(imageBytes []byte, backend string) (string, *float64, error) {
 	switch backend {
 	case "apple_vision":
-		return runAppleVisionOCRNative(imageBytes)
+		// Isolated in a child process: Vision aborts the caller when the
+		// platform's Metal stack is broken, and a cgo abort cannot be
+		// recovered in-process (🎯T118).
+		return runAppleVisionOCRIsolated(imageBytes)
 	case "tesseract":
 		return runTesseractOCR(imageBytes)
 	default:

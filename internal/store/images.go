@@ -238,16 +238,19 @@ func extToMime(ext string) string {
 // backfillImages processes all existing entries and messages for images.
 // Pass 1: entries.raw with inline base64 image blocks.
 // Pass 2: messages with image-extension file paths.
+// Both passes walk newest-first so recent content is searchable first
+// (same recency bias as IngestAll and SelectCompactionCandidates).
 // This is idempotent — image_occurrences has UNIQUE constraints.
 func backfillImages(s *Store) {
 
 	start := time.Now()
 
-	// Pass 1: entries with inline image blocks.
+	// Pass 1: entries with inline image blocks (newest first).
 	rows, err := s.readDB.Query(`
 		SELECT e.id, e.session_id, e.raw, COALESCE(e.timestamp, datetime('now'))
 		FROM entries e
-		WHERE e.raw LIKE '%"type":"image"%'`)
+		WHERE e.raw LIKE '%"type":"image"%'
+		ORDER BY e.timestamp DESC, e.id DESC`)
 	if err != nil {
 		slog.Warn("backfill images pass1 query failed", "err", err)
 		return
@@ -274,7 +277,7 @@ func backfillImages(s *Store) {
 		inlineCount++
 	}
 
-	// Pass 2: messages with image file paths.
+	// Pass 2: messages with image file paths (newest first).
 	msgRows, err := s.readDB.Query(`
 		SELECT m.id, m.entry_id, m.session_id, m.tool_file_path,
 		       COALESCE(m.timestamp, datetime('now'))
@@ -283,7 +286,8 @@ func backfillImages(s *Store) {
 		   OR LOWER(m.tool_file_path) LIKE '%.jpg'
 		   OR LOWER(m.tool_file_path) LIKE '%.jpeg'
 		   OR LOWER(m.tool_file_path) LIKE '%.gif'
-		   OR LOWER(m.tool_file_path) LIKE '%.webp'`)
+		   OR LOWER(m.tool_file_path) LIKE '%.webp'
+		ORDER BY m.timestamp DESC, m.id DESC`)
 	if err != nil {
 		slog.Warn("backfill images pass2 query failed", "err", err)
 		return

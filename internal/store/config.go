@@ -66,6 +66,23 @@ type Config struct {
 	// running app — it just won't be relaunched.)
 	MenuBarApp bool `json:"menu_bar_app,omitempty"`
 
+	// DisableOCR turns image OCR off entirely (🎯T118). OCR runs in a
+	// child process so a framework abort can no longer take the daemon
+	// down, but on a machine whose Vision/Metal stack is broken every
+	// image still costs a doomed process spawn. This is the off switch
+	// for that; without it the only remedy was rebuilding.
+	DisableOCR bool `json:"disable_ocr,omitempty"`
+
+	// ImageEmbeddings gates the CLIP image embedder (🎯T20, gated by
+	// 🎯T121). Disabled by default: the embedder shells out to `uv run
+	// --script tools/embed-clip/embed.py`, which resolves Python
+	// dependencies from PyPI and downloads CLIP model weights from the
+	// HuggingFace Hub on first use. That is unsolicited egress plus a
+	// couple of GB of caches, so it waits for a deliberate opt-in — the
+	// same posture as CostReconciliation, and for the same reason.
+	// See CLAUDE.md § External API egress.
+	ImageEmbeddings ImageEmbeddingsConfig `json:"image_embeddings,omitempty"`
+
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
 	// that the TODO indexer matches when discovering TODO files (🎯T78),
 	// beyond the default TODO.md / todos.md names found at any depth.
@@ -375,6 +392,26 @@ type CostReconciliationConfig struct {
 // IsEnabled reports whether the reconciler should run. False by
 // default (zero-value config = no Admin API calls).
 func (c CostReconciliationConfig) IsEnabled() bool { return c.Enabled }
+
+// ImageEmbeddingsConfig gates the CLIP image embedder (🎯T121). A
+// zero-value ImageEmbeddingsConfig — the section omitted from
+// config.json — means disabled, on the same reasoning as
+// CostReconciliationConfig: the safe default for a feature that fetches
+// from PyPI and the HuggingFace Hub is "do not fetch".
+//
+// Only embedding-backed image search (semantic / similar) depends on
+// this. Image extraction, OCR, AI descriptions and FTS are unaffected.
+type ImageEmbeddingsConfig struct {
+	// Enabled opts in to the embedder. When false (the zero value and
+	// documented default) no embedding subprocess is spawned, so no
+	// PyPI resolution and no model-weight download happen regardless of
+	// whether uv and the helper script are present.
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// IsEnabled reports whether the image embedder should run. False by
+// default (zero-value config = no PyPI / HuggingFace fetches).
+func (c ImageEmbeddingsConfig) IsEnabled() bool { return c.Enabled }
 
 // BackupConfig controls the periodic backup worker. Field defaults are
 // resolved via the Effective* methods so a zero-value BackupConfig (the
