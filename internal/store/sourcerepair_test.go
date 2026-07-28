@@ -109,6 +109,43 @@ func TestRepairSessionSources(t *testing.T) {
 	}
 }
 
+// TestSourceFromPathIgnoresEmbeddedIds guards against the corruption a
+// substring match would cause.
+//
+// Grok url-encodes the working directory into its session directory
+// name. When that cwd happens to be a Claude scratchpad, another
+// session's uuid ends up INSIDE a grok path:
+//
+//	~/.grok/sessions/%2F…%2Fclaude-501%2F…%2Fa359b7fb-…%2Fscratchpad/<grok-id>/updates.jsonl
+//
+// A repair that located sessions by "path contains this id" would find
+// the Claude session there and retag it grok — silently corrupting a
+// perfectly good row. Observed for real: a359b7fb-83a5-42e2-8aaf-
+// 738d1826a58b is a Claude session that a naive query flagged as grok.
+// Provenance must come from path STRUCTURE, never substring.
+func TestSourceFromPathIgnoresEmbeddedIds(t *testing.T) {
+	const (
+		claudeID = "a359b7fb-83a5-42e2-8aaf-738d1826a58b"
+		grokID   = "019f4f4a-6237-7241-8431-d54cbcbbbcf4"
+	)
+	path := "/Users/a/.grok/sessions/%2Fprivate%2Ftmp%2Fclaude-501%2F-Users-a-jevons%2F" +
+		claudeID + "%2Fscratchpad/" + grokID + "/updates.jsonl"
+
+	src, id, ok := sourceFromPath(path)
+	if !ok {
+		t.Fatal("grok path not recognised")
+	}
+	if src != "grok" {
+		t.Errorf("source = %q, want grok", src)
+	}
+	if id == claudeID {
+		t.Fatal("resolved to the Claude session id embedded in the cwd — this would retag a Claude session as grok")
+	}
+	if id != grokID {
+		t.Errorf("session id = %q, want the directory id %q", id, grokID)
+	}
+}
+
 // TestRepairKeepsSessionsThatHaveMessages: a stem-keyed row is only a
 // phantom when it is empty. Every Claude session is legitimately named by
 // its filename stem, and deleting those would be catastrophic.
