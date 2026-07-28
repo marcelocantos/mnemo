@@ -26,6 +26,11 @@ import (
 // The stuck goroutine below stands in for that subprocess. Close must
 // give up on it and still close the store.
 func TestCloseCheckpointsDespiteStuckWorker(t *testing.T) {
+	// Isolate the store: ForUser resolves the user's REAL home, so
+	// without this the test opens ~/.mnemo/mnemo.db — the live database,
+	// alongside a possibly-running daemon — and checkpoints it on Close.
+	t.Setenv(store.MnemoHomeEnv, t.TempDir())
+
 	r := NewRegistry(context.Background(), store.Config{}, "")
 	s, err := r.ForUser(currentUser(t))
 	if err != nil {
