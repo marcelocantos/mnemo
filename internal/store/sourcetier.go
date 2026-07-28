@@ -6,7 +6,6 @@ package store
 import (
 	"database/sql"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -178,9 +177,19 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 		default:
 			continue // live; no tag change
 		}
-		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-		if sessionID == "" || sessionID == filepath.Base(path) {
-			continue // didn't match the .jsonl convention
+		// Derive the id the way the file's OWN parser does (🎯T127).
+		// Taking the filename stem is right only for Claude transcripts:
+		// a Codex rollout is rollout-<ts>-<uuid>.jsonl and a Grok
+		// transcript is <id>/updates.jsonl, so the stem is a name no
+		// session has. Because the upsert below will happily CREATE a row
+		// ("a tag may be the first row for a session"), getting this wrong
+		// does not merely mis-tag — it invents a phantom session, keyed by
+		// a filename, holding no messages, tagged claude by schema
+		// default. Four such rows existed in the wild, and they came back
+		// after every repair until this was fixed.
+		sessionID, ok := sessionIDFromPath(path)
+		if !ok {
+			continue
 		}
 		candidates = append(candidates, tagUpdate{sessionID, newStatus})
 	}

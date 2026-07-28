@@ -3,7 +3,11 @@
 
 package store
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestSourceFromPath(t *testing.T) {
 	tests := []struct {
@@ -143,6 +147,40 @@ func TestSourceFromPathIgnoresEmbeddedIds(t *testing.T) {
 	}
 	if id != grokID {
 		t.Errorf("session id = %q, want the directory id %q", id, grokID)
+	}
+}
+
+// TestReconcileSourceStateDoesNotInventSessions covers what actually kept
+// the phantoms alive (🎯T127).
+//
+// The repair deleted four rows on every daemon start and found them back
+// on the next — because ReconcileSourceState maps a drifted file to a
+// session by filename stem and its upsert CREATES rows ("a tag may be the
+// first row for a session"). For a Codex rollout that stem names no
+// session, so tagging a deleted file invented one.
+//
+// A deleted transcript is the trigger, so the fixture deletes it.
+func TestReconcileSourceStateDoesNotInventSessions(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const stem = "rollout-2026-06-20T20-10-47-019ee482-f152-7141-9b36-4ae6705019b1"
+	// A path under .codex that no longer exists on disk → drift → tag.
+	gone := filepath.Join(t.TempDir(), ".codex", "sessions", stem+".jsonl")
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO ingest_state (path, offset) VALUES (?, 10)`, gone); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.ReconcileSourceState(time.Now()); err != nil {
+		t.Fatalf("ReconcileSourceState: %v", err)
+	}
+
+	var phantom int
+	if err := s.readDB.QueryRow(
+		`SELECT COUNT(*) FROM session_meta WHERE session_id = ?`, stem).Scan(&phantom); err != nil {
+		t.Fatal(err)
+	}
+	if phantom != 0 {
+		t.Error("tagging a drifted Codex transcript invented a filename-keyed session")
 	}
 }
 

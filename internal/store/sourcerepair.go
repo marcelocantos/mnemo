@@ -50,6 +50,33 @@ func sourceFromPath(path string) (source, sessionID string, ok bool) {
 	return "", "", false
 }
 
+// sessionIDFromPath returns the session id a transcript belongs to, using
+// the same derivation its own parser uses. Reports false for a path under
+// no known root, or one that does not name a session at all.
+//
+// Anything that maps a file to a session must go through this. Deriving
+// the id independently — historically, by taking the filename stem — is
+// what produced phantom sessions: correct for Claude, wrong for Codex
+// (rollout-<ts>-<uuid>.jsonl) and Grok (<id>/updates.jsonl).
+func sessionIDFromPath(path string) (string, bool) {
+	if _, id, ok := sourceFromPath(path); ok && id != "" {
+		return id, true
+	}
+	// Unrecognised root: fall back to the Claude convention (basename
+	// minus .jsonl), which is what this always did. The fallback is not
+	// laziness — extra_project_dirs (🎯T15) deliberately puts real Claude
+	// transcripts outside ~/.claude/projects, e.g. a Windows VM's
+	// directory over SMB, and silently skipping those would stop drift
+	// tagging for them. Codex and Grok are recognised by filename shape
+	// as well as by root, so they never reach here.
+	base := filepath.Base(path)
+	stem := strings.TrimSuffix(base, ".jsonl")
+	if stem == "" || stem == base {
+		return "", false
+	}
+	return stem, true
+}
+
 // RepairSessionSources recomputes session provenance from ingest paths and
 // clears out phantom sessions, returning how many of each it touched.
 //
