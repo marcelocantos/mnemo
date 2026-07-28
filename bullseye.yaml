@@ -883,17 +883,17 @@ targets:
     discovered: 2026-07-28
   T125:
     name: 'A session can be resumed from a loose description: mnemo opens the preferred terminal in the directory that owns it and picks the conversation back up'
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - A loose reference resolves to a session without the user knowing its id — a repo/project fragment, "latest", or an id/prefix. This is 🎯T115's resolver; this target consumes it rather than growing a second one.
-    - The terminal opens in the session's OWN directory (session_meta.cwd), not the current one, and resumes that conversation rather than starting a fresh one — e.g. `claude --resume <id>` for a Claude session.
-    - 'Source-aware: session_meta.source distinguishes claude / codex / grok (30736 / 345 / 369 on the current index) and each has a different resume invocation. A source with no known resume command fails with a message naming it, rather than silently opening a bare shell.'
-    - The terminal is a preference, not a hardcoded assumption. iTerm2 is the default on macOS (reusing internal/iterm's focus-or-spawn), but the choice is configurable and an unsupported/absent terminal fails with a clear message rather than a cryptic osascript error.
-    - A session whose cwd no longer exists — or was a temp dir like /private/var/folders/... — is reported as such and does not silently open somewhere unrelated. Real data has both cases.
-    - Reachable both as an MCP tool (agent says "resume the mnemo session about the WAL") and from the CLI (`mnemo resume <ref>`), since the need often arises when no agent session is running — that is the whole premise.
-    - Testable without a live terminal, following internal/iterm's existing overridable-runner pattern; no test opens a window.
+    - 'A loose reference resolves to a session without the user knowing its id — a repo/project fragment, "latest", "latest:<scope>", or an id/prefix. DONE: ResolveSessionRef, verified against the live 31k-session index.'
+    - The terminal opens in the session's OWN directory (session_meta.cwd) and resumes that conversation rather than starting a fresh one. DONE via iterm.GoArgs.Command running `claude --resume <id>`.
+    - 'Source-aware: a source with no known resume command fails naming it rather than silently opening a bare shell. DONE — claude resumes, codex/grok refuse by name.'
+    - A session whose cwd no longer exists, or was a temp dir, is reported as such. DONE.
+    - Each session gets its own tab rather than stealing one belonging to another session sharing the same working directory. DONE via GoArgs.TagKey.
+    - 'NOT DONE — CLI form (`mnemo resume <ref>`). The MCP tool covers the agent-mediated case, but the premise ("no session id handy") also arises with no agent running. Blocked on there being no read-only store open: store.New runs migrations and can trigger a multi-minute pre-migration backup, which a convenience command must never do while the daemon holds the database. Needs either a read-only constructor or a resolver that takes a plain *sql.DB.'
+    - Terminal choice is a preference rather than an iTerm2 assumption — MOVED to 🎯T126 at Marcelo's direction ("Let's just implement iTerm2 for now").
     context: |-
       Requested 2026-07-28: "I often want to resume a conversation, but don't have a session id handy."
 
