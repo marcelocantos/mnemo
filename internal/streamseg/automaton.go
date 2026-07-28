@@ -328,6 +328,54 @@ func (a *Automaton) trimTail() {
 	a.state.Tail = append([]segment.Message(nil), kept...)
 }
 
+// SealAllOpen closes every remaining open span at `to`, bypassing the
+// seal-lookahead, and returns them for persistence.
+//
+// For use only when the transcript has ENDED. Lookahead exists to avoid
+// sealing a topic the conversation might return to; once there is no more
+// conversation there is nothing to return, so holding a span open only
+// discards it. Before this existed, every span still open when a session
+// stopped was silently lost — and a session's final stretch is often its
+// most active, so the live tier went quiet exactly where it mattered most.
+//
+// Spans are sealed with whatever summary the caller supplied via a final
+// seal event; those with none fall back to their label, which is thin but
+// honest and still beats no span at all.
+func (a *Automaton) SealAllOpen(to int) []Sealed {
+	if len(a.state.Open) == 0 {
+		return nil
+	}
+	out := make([]Sealed, 0, len(a.state.Open))
+	for _, sp := range a.OpenSpans() {
+		end := to
+		if end < sp.From {
+			end = sp.From
+		}
+		out = append(out, Sealed{
+			From:    sp.From,
+			To:      end,
+			Label:   sp.Label,
+			Summary: sp.Label,
+		})
+		a.rememberSealedRef(sp.Ref, sp.From, end)
+		delete(a.state.Open, sp.Ref)
+		if end > a.state.SealedThrough {
+			a.state.SealedThrough = end
+		}
+	}
+	a.trimTail()
+	return out
+}
+
+// LastTailID reports the highest message id the automaton has seen, which
+// is where a force-seal should land.
+func (a *Automaton) LastTailID() int {
+	if n := len(a.state.Tail); n > 0 {
+		return a.state.Tail[n-1].ID
+	}
+	return a.state.SealedThrough
+}
+
 // NeedsRestart reports whether the agent's context budget is spent. The
 // automaton's state is unaffected: restarting is re-seeding a fresh agent
 // from the same working set, which is precisely why that set is bounded.

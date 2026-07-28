@@ -164,6 +164,26 @@ producing plausible-looking output.
 
 **Chosen: sonnet, drip 12, K=3.**
 
+### The two-session result was flattering
+
+Re-run over six gold sessions, with the end-of-transcript force-seal in
+place, the same point scores **meanPk 0.445** against a naive baseline of
+**0.555** on the same six. So the real margin is about 20%, not the ~2x
+the two-session run suggested.
+
+That is why the quality bar was not declared on two sessions, and the
+caution was right. A four-point comparison needs far less data than a
+claim that a tier is good enough to displace another.
+
+The mechanism behind the gap matters more than the number: **on real
+transcripts the summariser under-seals.** It opens spans and holds them.
+Sessions that hindsight cut into four or five spans produce one, and the
+automaton hits its context budget repeatedly with `sealed_through` still
+at zero — visible directly in the sweep log. The synthetic ten-message
+probe seals cleanly; long, tool-heavy real transcripts do not. Whatever
+fixes this is a prompt or seal-policy change, not a model change: haiku
+under-seals worse, and sonnet under-seals too.
+
 ### The low-effort prior was wrong
 
 This design predicted that a small model would suffice, "since
@@ -208,11 +228,33 @@ the live tier is silent exactly where a conversation stopped, which is
 often where it was most active. Force-sealing open spans at transcript end
 is the obvious fix and is not yet done.
 
-### Why structural spans have not been retired
+### The quality bar, and what it decided
 
-🎯T132.4's last criterion holds structural spans in retrieval until stream
-spans clear a stated bar. Two things block calling that now: this sweep
-covers 2 sessions, which is enough to choose between four points but not
-enough to declare a quality bar cleared; and there is no way to enumerate
-which spans came from which configuration, so nothing could act on the
-decision anyway. That enumeration is 🎯T134.
+**The bar: beat the naive baseline by a clear margin, meanPk <= 0.40
+against a measured baseline of 0.555.**
+
+**Stream spans do not clear it** (0.445). So structural spans are retired
+where an *llm* span covers them — the hindsight tier everything here is
+scored against, and demonstrably better — and are **not** retired in
+favour of stream spans. `streamRetiresStructural` is the gate; flip it
+when a sweep earns it.
+
+Retiring good structural coverage in favour of a tier that under-segments
+would be a regression dressed as progress, and the ordering in this design
+exists precisely to prevent that.
+
+### DefaultSegmentExpand stays `none`, on coverage rather than quality
+
+Measured over the live index:
+
+| | count | share |
+|---|---:|---:|
+| sessions total | 32,153 | |
+| with llm or stream spans | 509 | **1.6%** |
+| with structural spans | 31,480 | 97.9% |
+
+Turning expansion on today would serve a structural span in ~98% of
+cases — the tier measured at the naive floor. The blocker is not that the
+good tiers are bad; it is that they have reached almost nothing. The
+trigger for revisiting is therefore **coverage**, not another sweep: when
+llm/stream coverage passes roughly half of sessions, re-decide.
