@@ -810,6 +810,37 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	e.store.StartWALMaintenance(r.baseCtx)
 
 	r.startStreamSegWatcher(e)
+	r.startStructuralRetirementBackfill(e)
+}
+
+// startStructuralRetirementBackfill demotes structural spans that a better
+// span already covers, once, in the background (🎯T132.4).
+//
+// Retirement otherwise fires only when a compaction is written, so every
+// session compacted BEFORE this shipped would keep its structural spans
+// winning retrieval forever — a compacted session is not owed again, so
+// nothing would ever revisit it. That makes the one-shot pass a
+// correctness requirement rather than an accelerator.
+//
+// Idempotent: it only touches rows whose superseded_by is still NULL, so
+// re-running costs one indexed UPDATE that matches nothing.
+func (r *Registry) startStructuralRetirementBackfill(e *userEntry) {
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		// The column this writes arrives with a deferred migration
+		// (🎯T114.1); running before it lands would fail on a column
+		// that does not exist yet.
+		e.store.AwaitSchemaUpgrade()
+		n, err := e.store.RetireStructuralSpansCovered("")
+		if err != nil {
+			slog.Warn("structural retirement backfill failed", "err", err)
+			return
+		}
+		if n > 0 {
+			slog.Info("retired structural spans covered by better ones", "count", n)
+		}
+	}()
 }
 
 // startStreamSegWatcher launches the live topic-span watcher (🎯T132.2),
