@@ -176,6 +176,69 @@ mnemo               # listen on :19419 (default)
 mnemo --addr :8080  # custom port
 ```
 
+## Upgrading
+
+**macOS / Linux (Homebrew)**:
+
+```bash
+brew upgrade marcelocantos/tap/mnemo
+brew services restart mnemo
+```
+
+The restart is not optional. `brew upgrade` replaces the binary on
+disk but leaves the running daemon on the old one, so skipping it
+looks like a successful upgrade that changed nothing.
+
+**Windows**: download the current installer from the
+[latest release](https://github.com/marcelocantos/mnemo/releases/latest)
+and run it — the same installer used for a fresh install. It stops the
+service, replaces the binary, and restarts it.
+
+You do **not** need to re-register the MCP server or re-run
+`register-mcp`: the registration is a stable URL. A running agent
+session reconnects on its own once the daemon is back.
+
+Confirm the new binary is the one actually serving:
+
+```bash
+mnemo --version
+```
+
+or check the `upgrade.available` entry in `mnemo_doctor` / `GET /health`,
+which reports the running version against the latest release.
+
+### The first start after an upgrade may take a while
+
+When a release changes the database schema, mnemo takes a
+**pre-migration backup before applying it** — a full compressed
+snapshot, so an upgrade can never be the thing that loses data. On a
+large index that is not quick: roughly 11 minutes for a 21 GB
+database.
+
+The daemon serves throughout, on the *old* schema, and says so:
+
+```
+schema upgrade deferred to background (store serving on current schema)
+```
+
+`mnemo_doctor`'s `schema.upgrade` check reports the same thing. This is
+normal, and it is the one moment worth **not** restarting the daemon —
+let the backup and migration finish. Search and the MCP tools keep
+working the whole time.
+
+### Auto-upgrade (opt-in)
+
+```json
+{ "auto_upgrade": { "enabled": true, "quiescence": "5m" } }
+```
+
+Off by default. When enabled, mnemo watches for new releases and
+applies them during a quiet window, preserving open connections. Only
+**Homebrew non-Windows** installs actually auto-apply; every other
+install (Windows, source builds) stays notify-only regardless of this
+setting, surfacing the new release through `upgrade.available` and
+leaving the upgrade to you.
+
 ## Registering as an MCP server
 
 **Claude Code** (global install to `~/.claude.json`):

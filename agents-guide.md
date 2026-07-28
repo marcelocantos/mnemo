@@ -129,6 +129,41 @@ nothing meaningful, which agents misread as "server not ready".
 Call `mnemo_stats`. It should return session and message counts. If it
 fails with a connection error, the server may not be running.
 
+## Upgrading mnemo
+
+If the user asks you to upgrade mnemo:
+
+```bash
+brew upgrade marcelocantos/tap/mnemo
+brew services restart mnemo          # REQUIRED — see below
+```
+
+On **Windows**, there is no brew path: download the installer from
+https://github.com/marcelocantos/mnemo/releases/latest and run it. It
+stops the service, replaces the binary and restarts it.
+
+Three things that trip agents up here:
+
+1. **`brew upgrade` alone does nothing visible.** It replaces the
+   binary on disk while the old daemon keeps running. Without the
+   restart you will report a successful upgrade that did not take
+   effect. Confirm with `mnemo --version`, or the `upgrade.available`
+   check in `mnemo_doctor`, which compares running against latest.
+2. **Do not re-register the MCP server.** The registration is a stable
+   URL; `register-mcp` is for first-time setup only. A running agent
+   session reconnects on its own.
+3. **The first start afterwards can take many minutes, and that is
+   normal.** If the release changes the schema, mnemo takes a full
+   pre-migration backup before applying it — around 11 minutes on a
+   21 GB index. The daemon serves on the old schema throughout and
+   logs `schema upgrade deferred to background`; `mnemo_doctor`'s
+   `schema.upgrade` check says the same. **Do not restart it to "fix"
+   this** — let the migration finish. Tools keep working meanwhile.
+
+`auto_upgrade` in `~/.mnemo/config.json` opts into applying releases
+automatically during a quiet window, but only for Homebrew non-Windows
+installs; anything else stays notify-only.
+
 ## MCP Tools
 
 ### mnemo_search
