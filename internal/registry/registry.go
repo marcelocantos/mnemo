@@ -32,6 +32,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/streamseg"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
 	"github.com/marcelocantos/mnemo/internal/vault"
 )
@@ -807,6 +808,54 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	// system — the thing that lets the WAL reach its high-water mark in
 	// the first place.
 	e.store.StartWALMaintenance(r.baseCtx)
+
+	r.startStreamSegWatcher(e)
+}
+
+// startStreamSegWatcher launches the live topic-span watcher (🎯T132.2),
+// but only when the user has asked for it.
+//
+// The gate is not a formality. Enabling this runs a PERSISTENT Claude
+// Code agent per live session, so it is continuous subscription spend
+// proportional to how much the user is working, and it attaches a second
+// agent to sessions they did not ask it to watch. Same posture as
+// cost reconciliation and image embeddings: an ambient capability is not
+// consent. With the config section absent, LiveSessions is never polled
+// and no summariser process is ever spawned.
+func (r *Registry) startStreamSegWatcher(e *userEntry) {
+	full, err := store.LoadConfig()
+	if err != nil {
+		return // unreadable config is not consent
+	}
+	cfg := full.StreamingSegmentation
+	if !cfg.Enabled {
+		return
+	}
+	workDir, mkErr := os.MkdirTemp("", "mnemo-streamseg-")
+	if mkErr != nil {
+		slog.Warn("streaming segmentation not started: no working directory", "err", mkErr)
+		return
+	}
+	w := &streamseg.Watcher{
+		Live:          e.store,
+		Store:         e.store,
+		DripSize:      cfg.DripSize,
+		MaxConcurrent: cfg.MaxConcurrent,
+		NewSummariser: func(string) streamseg.Summariser {
+			return streamseg.NewClaudiaSummariser(workDir, cfg.Model)
+		},
+	}
+	slog.Info("streaming segmentation enabled",
+		"model", cfg.Model, "drip_size", cfg.DripSize, "max_concurrent", cfg.MaxConcurrent)
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		// The schema carries method='stream' and superseded_by; a
+		// watcher that outran a deferred upgrade would write into
+		// columns that do not exist yet (the 🎯T114.1 hazard).
+		e.store.AwaitSchemaUpgrade()
+		w.Run(r.baseCtx)
+	}()
 }
 
 // startVaultWorkers launches the per-user vault periodic-sync and

@@ -83,6 +83,16 @@ type Config struct {
 	// See CLAUDE.md § External API egress.
 	ImageEmbeddings ImageEmbeddingsConfig `json:"image_embeddings,omitempty"`
 
+	// StreamingSegmentation gates the live topic-span watcher (🎯T132).
+	// Disabled by default, and the reason is stronger than for the other
+	// gated features: enabling it runs a PERSISTENT Claude Code agent
+	// per live session, summarising the conversation as it happens. That
+	// is continuous subscription spend proportional to how much you are
+	// working, and it attaches a second agent to sessions you did not
+	// ask it to watch. Same posture as CostReconciliation and
+	// ImageEmbeddings — an ambient capability is not consent.
+	StreamingSegmentation StreamingSegmentationConfig `json:"streaming_segmentation,omitempty"`
+
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
 	// that the TODO indexer matches when discovering TODO files (🎯T78),
 	// beyond the default TODO.md / todos.md names found at any depth.
@@ -1179,4 +1189,24 @@ func (c Config) ResolvedSynthesisRoots() []string {
 		out = append(out, r)
 	}
 	return out
+}
+
+// StreamingSegmentationConfig gates and tunes the live topic-span
+// watcher (🎯T132). A zero value — the section omitted entirely — means
+// no watcher runs and no agent is ever spawned.
+type StreamingSegmentationConfig struct {
+	// Enabled must be set explicitly. With it false, LiveSessions is
+	// never polled and no summariser process exists.
+	Enabled bool `json:"enabled"`
+	// Model overrides the summariser model. Empty uses claudia's
+	// default. The prior is that a small model suffices — this is
+	// extraction, not hard thinking — but 🎯T132.4's sweep is what
+	// turns that prior into a measured choice.
+	Model string `json:"model,omitempty"`
+	// DripSize is how many substantive messages accumulate before the
+	// summariser is asked. Smaller means fresher spans and more calls.
+	DripSize int `json:"drip_size,omitempty"`
+	// MaxConcurrent bounds how many live sessions are watched at once,
+	// because each one is a Claude process. Zero uses the default.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
 }
