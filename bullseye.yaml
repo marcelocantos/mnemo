@@ -944,6 +944,102 @@ targets:
     - config
     origin: split from T125, 2026-07-28
     discovered: 2026-07-28
+  T127:
+    name: Every indexed session carries the source that actually produced it, and no session exists that has no messages
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'session_meta.source names the agent that produced the session. Oracle: no session whose transcript came from ~/.codex is tagged claude; today 019ee482-f152-7141-9b36-4ae6705019b1 is a Codex session tagged claude.'
+    - 'No session_meta row exists with zero messages. Oracle: `SELECT COUNT(*) FROM session_meta sm WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sm.session_id)` returns 0; today it returns 4.'
+    - A Codex rollout is indexed under its session id, not its filename. The four rollout-<timestamp>-<uuid> rows are filename-derived duplicates of rows that already exist under the embedded uuid.
+    - Existing mis-tagged and phantom rows are corrected or removed, not just prevented going forward — they are already in the index.
+    context: |-
+      Found 2026-07-28 while checking whether session resume (🎯T125) can trust session_meta.source to pick the right agent. It cannot, in two ways.
+
+      (1) Mis-tagged source. `019ee482-f152-7141-9b36-4ae6705019b1` is a Codex session but carries source='claude'. Resume branches on source, so a mis-tagged session would be handed to `claude --resume` — the wrong agent, silently.
+
+      (2) Phantom rows. Four session_meta rows have ids of the form rollout-2026-06-20T20-10-47-<uuid> and ZERO messages. Those ids are Codex rollout FILENAMES (~/.codex/sessions/... rollout files), and the uuid embedded at the end already exists as its own session_meta row. So each phantom is a filename-derived duplicate of a real session.
+
+      Counts on the live index: source claude/uuid 30732, codex/uuid 345, grok/uuid 371, claude/rollout-* 4 — that last bucket is the bug, visible as an id-shape/source mismatch.
+
+      Not currently user-visible in resume, by luck rather than design: ResolveSessionRef's recency and repo paths require substantive_msgs >= 2 so phantoms never surface there, and an exact-id hit on one degrades into "session has no recorded working directory". But it is wrong data, it makes source untrustworthy as a routing key, and 🎯T127's ChatGPT resume depends on source being right.
+    tags:
+    - ingest
+    - codex
+    - data-quality
+    - sessions
+    origin: discovered while scoping session resume, 2026-07-28
+    discovered: 2026-07-28
+  T128:
+    name: A ChatGPT session (formerly Codex CLI) can be reopened from mnemo the same way a Claude one can
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_session_go resumes a session whose source is the OpenAI CLI, opening in that session's own working directory, instead of today's refusal-by-name.
+    - The resume invocation is discovered from the shipping CLI rather than guessed — the binary is not installed on this machine, and inventing syntax would produce a command that looks plausible and does the wrong thing. Record what was verified and against which CLI version.
+    - The session id mnemo stores is the one the CLI accepts. Codex-source ids are clean UUIDs today (019ee369-54e2-7203-afce-ddde7bfe1723), which is promising, but must be confirmed against the resume command rather than assumed.
+    - 'The rename is handled: Codex has been folded into ChatGPT, so both the historical `codex` source tag on 345 indexed sessions and whatever the current CLI reports must resolve to the same resume path.'
+    - A session that genuinely cannot be resumed (CLI absent, unsupported version) fails naming the reason, keeping 🎯T125's rule that mnemo never opens a bare shell and calls it success.
+    context: |-
+      Requested 2026-07-28 alongside 🎯T129, filed separately because the two are orthogonal — different CLIs, independent invocations, either can ship without the other.
+
+      FEASIBILITY IS GENUINELY IN DOUBT, and Marcelo flagged as much when filing ("Codex/chatgpt might not be feasible, so don't worry too much about do-ability. Just file the target."). Evidence gathered the same day supports the doubt, so start here before spending effort:
+
+      - Neither `codex` nor `chatgpt` is on PATH on this machine, so no resume invocation could be verified. Contrast 🎯T129, where `grok --help` documents it outright.
+      - More importantly, the indexed sessions may not be CLI sessions at all. Every rollout file opens with a session_meta record carrying `originator` and `source`. Sampling 25 rollout files under ~/.codex gave: 16 × originator="Codex Desktop", source="vscode", and 9 × originator="Codex Desktop", source={"subagent":...}. ZERO CLI sessions in the sample. If that holds across the 345 indexed sessions, "reopen this in a terminal" may have no meaning for them — the conversation lived in an IDE, not a shell.
+
+      So the first acceptance criterion is really a question: establish whether a terminal resume of these sessions exists at all. A clean, evidenced "no — these are Desktop/IDE sessions and the CLI cannot adopt them" is a perfectly good outcome, and better than an invented command that runs and does something else. If that is the answer, retire this and have mnemo_session_go say so by name.
+
+      The useful raw material, if it does turn out feasible: the rollout's first record is
+      {"type":"session_meta","payload":{"id":"<uuid>","cwd":"...","originator":"...","cli_version":"...","source":"..."}}
+      so the authoritative session id, working directory and provenance are all available from the file itself. The 345 sessions tagged source='codex' already carry those clean UUID ids.
+
+      Depends on 🎯T127: resume branches on session_meta.source, and source is currently unreliable — at least one Codex session is tagged 'claude', which would route it to the wrong agent.
+    depends_on:
+    - T127
+    tags:
+    - sessions
+    - chatgpt
+    - codex
+    - resume
+    - terminal
+    origin: user request, 2026-07-28
+    discovered: 2026-07-28
+  T129:
+    name: A Grok CLI session can be reopened from mnemo the same way a Claude one can
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_session_go resumes a session whose source is grok, opening in that session's own working directory, instead of today's refusal-by-name.
+    - 'The invocation is `grok --resume <session-id>` (`-r`), verified against the installed CLI: its help states "Resume a session by ID or title, or the most recent if omitted... UUID-shaped values always mean IDs". mnemo''s grok ids are UUIDs, so they should be accepted as ids rather than matched as titles — confirm rather than assume.'
+    - 'The working directory is load-bearing here, not just nice: grok stores sessions per-cwd (~/.grok/sessions/<url-encoded-cwd>/) and resolves non-id references against the CURRENT directory. Opening in the session''s own cwd — which 🎯T125 already does — is what makes resume find the right conversation.'
+    - Resume must not silently fork. grok has --fork-session / --session-id semantics for creating a new id when resuming; the default path should continue the original session, and any deviation is stated.
+    - A grok session whose recorded cwd no longer exists fails clearly, consistent with 🎯T125 — grok's own lookup is cwd-scoped, so a missing directory is more consequential here than for Claude.
+    context: |-
+      Requested 2026-07-28 alongside 🎯T128, filed separately because the two are orthogonal: different CLIs, independent invocations, neither blocks the other.
+
+      Unlike the OpenAI case, this one is already evidenced. `grok` IS installed (/Users/marcelo/.grok/bin/grok) and its help documents the exact affordance:
+
+          -r, --resume [<SESSION_ID_OR_TITLE>]
+              Resume a session by ID or title, or the most recent if omitted.
+              Non-ID values match session titles for the current directory
+              (ignoring letter case; a sole renamed match wins among
+              duplicates, otherwise ambiguity errors; UUID-shaped values
+              always mean IDs)
+
+      371 sessions carry source='grok' with UUID ids and real cwds, so the pieces line up. The cwd detail is the interesting one: grok's session store is keyed by url-encoded working directory (~/.grok/sessions/%2FUsers%2F...), and title-based resume is scoped to the current directory. 🎯T125 already opens in the session's own cwd for unrelated reasons (a conversation is about a working tree), which happens to be exactly what grok needs.
+
+      Does NOT depend on 🎯T127 the way 🎯T128 does — no grok session is currently mis-tagged; all 371 are correctly source='grok'.
+    tags:
+    - sessions
+    - grok
+    - resume
+    - terminal
+    origin: user request, 2026-07-28
+    discovered: 2026-07-28
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
