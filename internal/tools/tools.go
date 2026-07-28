@@ -853,7 +853,7 @@ Use this when someone wants to pick a conversation back up but does not have its
 
 Reopening happens in the session's OWN working directory, not the caller's: a conversation is about a working tree, and resuming it elsewhere gives the agent context that contradicts its own transcript. A directory that no longer exists is reported rather than silently substituted.
 
-Requires iTerm2 and the daemon's Automation permission (as mnemo_thread_go does). Claude Code sessions only for now — Codex and Grok sessions are indexed but have no known resume invocation, and are refused by name rather than opened as a bare shell. Returns {action: focused|spawned, path, session_id, repo, topic, command}.`),
+Requires iTerm2 and the daemon's Automation permission (as mnemo_thread_go does). Resumes Claude Code and Grok CLI sessions (claude --resume / grok --resume). Codex/ChatGPT sessions are indexed but have no verified terminal resume — they appear to be Desktop/IDE conversations rather than CLI ones — so they are refused by name rather than opened as a bare shell. Returns {action: focused|spawned, path, session_id, repo, topic, command}.`),
 			mcp.WithString("session", mcp.Description(`Which session to reopen: an id/prefix, a repo or project fragment, "latest", or "latest:<scope>". Omit for the most recent session.`)),
 		),
 	}

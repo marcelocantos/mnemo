@@ -167,11 +167,29 @@ func TestResumeCommandIsSourceAware(t *testing.T) {
 		t.Errorf("untagged session should default to claude: %v", err)
 	}
 
-	for _, src := range []string{"codex", "grok"} {
-		if _, err := (SessionRef{SessionID: "abc", Source: src}).ResumeCommand(); err == nil {
-			t.Errorf("%s has no known resume command; it must refuse rather than guess", src)
-		} else if !strings.Contains(err.Error(), src) {
-			t.Errorf("refusal should name the source, got: %v", err)
-		}
+	// Grok resumes by id (🎯T129): `-r, --resume [<SESSION_ID_OR_TITLE>]`,
+	// and its help states UUID-shaped values always mean IDs — which
+	// mnemo's grok ids are.
+	grok, err := (SessionRef{SessionID: "019f4f4a-6237-7241-8431-d54cbcbbbcf4", Source: "grok"}).ResumeCommand()
+	if err != nil {
+		t.Fatalf("grok sessions are resumable: %v", err)
+	}
+	if !strings.HasPrefix(grok, "grok --resume ") {
+		t.Errorf("grok resume command = %q, want `grok --resume <id>`", grok)
+	}
+	// Must not fork: --fork-session/--session-id create a NEW id when
+	// resuming, which would silently branch the conversation instead of
+	// continuing it.
+	if strings.Contains(grok, "--fork-session") || strings.Contains(grok, "--session-id") {
+		t.Errorf("resume must continue the original session, not fork it: %q", grok)
+	}
+
+	// Codex/ChatGPT has no verified terminal resume (🎯T128) — the indexed
+	// sessions look like Desktop/IDE conversations, not CLI ones. Refusing
+	// by name beats inventing a command that runs and does something else.
+	if _, err := (SessionRef{SessionID: "abc", Source: "codex"}).ResumeCommand(); err == nil {
+		t.Error("codex has no verified resume command; it must refuse rather than guess")
+	} else if !strings.Contains(err.Error(), "codex") {
+		t.Errorf("refusal should name the source, got: %v", err)
 	}
 }

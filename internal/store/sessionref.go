@@ -203,6 +203,19 @@ func (r SessionRef) ResumeCommand() (string, error) {
 	switch strings.ToLower(strings.TrimSpace(r.Source)) {
 	case "", "claude":
 		return "claude --resume " + r.SessionID, nil
+	case "grok":
+		// `grok --resume <id>` (🎯T129). Its help: "Resume a session by ID
+		// or title... UUID-shaped values always mean IDs" — mnemo's grok
+		// ids are UUIDs, so they are taken as ids rather than matched as
+		// titles. Plain --resume continues the original session; the
+		// forking behaviour is behind --fork-session, which is
+		// deliberately not used here.
+		//
+		// grok's own session store is keyed by working directory, and
+		// non-id references resolve against the CURRENT directory — so
+		// running this in the session's own cwd (which the caller already
+		// does) is what makes it find the right conversation.
+		return "grok --resume " + r.SessionID, nil
 	default:
 		return "", fmt.Errorf(
 			"no known resume command for %s sessions — mnemo can reopen Claude Code sessions today; "+
