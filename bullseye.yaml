@@ -1210,6 +1210,64 @@ targets:
     - pk-windowdiff
     origin: subdivide(🎯T132)
     discovered: 2026-07-28
+  T133:
+    name: A span whose conclusion later work overturned is marked as superseded, even when the overturning happened in a different session
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Supersession is detectable ACROSS sessions, not only within one. 🎯T132 only ever writes the edge inside a single session: the streaming watcher supersedes spans it can still see in its own working set, and finalisation supersedes the stream spans it redrew in that session''s own window. Nothing looks at a span drawn in one session against work done in another.'
+    - 'The motivating case resolves: the 🎯T39 FD_ACCEPT example. Segment search serves a confident pre-fix conclusion (''fd I/O not functional on Windows'') from an old session, while the session that overturned it is a different session entirely. After this, the old span is flagged superseded and the corrective span is reachable from it.'
+    - Detection is bounded rather than all-pairs. 31k sessions of spans cannot be compared pairwise; candidate pairs come from a cheap signal (FTS/label overlap, shared repo, temporal order) and only candidates are judged.
+    - A supersession is only written with a stated reason, and the judgement is recorded so it can be reviewed. An automatic 'this overturns that' with no rationale is a claim no one can check and would quietly corrupt ranking.
+    - 'Nothing is deleted, consistent with 🎯T132.1: the superseded span keeps its row and its content, and retrieval demotes rather than hides it.'
+    context: |-
+      Raised by Marcelo 2026-07-28 while reviewing 🎯T132: "whether it covers backfilling of previously filled summaries/spans that are no longer considered correct". It does not, and the gap is worth naming precisely.
+
+      🎯T132's supersession is intra-session by construction. The watcher can only overturn a span still in its bounded working set — that is the whole point of the bounded state — and finalisation only supersedes the stream spans lying inside the window it just redrew. Neither mechanism can see across sessions, so a conclusion reached in session A and overturned in session B stays live and confident forever.
+
+      This is not hypothetical: it is the exact example that motivated 🎯T131. That target's context records segment search serving pre-🎯T39-era conclusions ("fd I/O not functional on Windows") because the sessions that overturned them had no spans. 🎯T131 fixed the ELIGIBILITY half — those sessions can now be compacted and will get spans. But once they have spans, nothing marks the older, wrong one as superseded. The stale claim still ranks; there are simply now two contradictory spans instead of one.
+
+      Note this is distinct from the sibling gap of spans drawn by a method or operating point since superseded (stale DERIVATION rather than stale CONCLUSION), which needs a version stamp that does not exist yet.
+
+      Scoping caution: the naive shape — ask a model whether any span overturns any other — is O(n^2) over ~31k sessions and is not viable. The design has to be candidate-generation first, judgement second, which is why this is its own target rather than a criterion bolted onto 🎯T132.
+    tags:
+    - segmentation
+    - supersession
+    - cross-session
+    - retrieval
+    - staleness
+    origin: manual
+    discovered: 2026-07-28
+  T134:
+    name: Spans record how they were derived, so ones drawn by a method or operating point since improved can be found and redrawn
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A span records enough about its derivation to identify it later: the method already exists, but not the model, effort, drip size, seal-lookahead, or prompt version that produced it. Today two stream spans drawn a year and three operating points apart are indistinguishable in the table.'
+    - Spans drawn by a derivation now known to be worse can be ENUMERATED — 'every stream span from before the 🎯T132.4 operating point', 'every structural span in a session that now has llm coverage' — without re-reading transcripts to work it out.
+    - 'Redrawing is incremental and interruptible, and never worsens coverage: a span is replaced only once its replacement exists, so a failed or abandoned pass leaves the old span standing rather than a gap.'
+    - The cost of a full redraw is knowable before starting it, in the same terms as 🎯T131's cost policy — sessions, messages, and estimated summariser volume.
+    - Structural spans in sessions that have since gained llm or stream coverage are the first population this retires, since that is the clearest case of a derivation superseded by a better one.
+    context: |-
+      Raised by Marcelo 2026-07-28 alongside 🎯T133, from the same question about backfilling spans "no longer considered correct". There are two distinct readings of that phrase and they need different machinery, so they are separate targets.
+
+      🎯T133 is about a stale CONCLUSION: the span was drawn correctly, and later work proved the claim wrong. This target is about a stale DERIVATION: the claim may be fine, but a better method now exists and the span should be redrawn.
+
+      The blocker is that derivation is currently unrecorded. topic_segments carries `method` and `computed_at` and nothing else about provenance — no model, no effort, no drip size, no seal-lookahead, no prompt version. So after 🎯T132.4 picks an operating point there will be no way to ask "which spans predate it", and the only honest answer would be to redraw everything. That is exactly the position 🎯T131 was in for compaction eligibility, and it cost a full-corpus pass to get out of.
+
+      Cheapest useful first slice: a nullable derivation column (append-only schema policy permits it) written by the stream and llm writers, plus a query that enumerates spans by derivation. Redrawing can follow once the population is nameable.
+
+      The structural tier is the obvious first population to retire this way, and it connects to 🎯T132.4's last criterion — structural spans leave retrieval once stream spans clear a stated bar, and this is the mechanism that would actually remove them.
+    tags:
+    - segmentation
+    - provenance
+    - backfill
+    - schema
+    - staleness
+    origin: manual
+    discovered: 2026-07-28
   T14:
     name: File-history-snapshots surfaced as queryable tool
     status: achieved
