@@ -839,6 +839,7 @@ func (r *Registry) startStreamSegWatcher(e *userEntry) {
 	w := &streamseg.Watcher{
 		Live:          e.store,
 		Store:         e.store,
+		WorkDir:       workDir,
 		DripSize:      cfg.DripSize,
 		MaxConcurrent: cfg.MaxConcurrent,
 		NewSummariser: func(string) streamseg.Summariser {

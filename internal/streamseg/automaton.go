@@ -100,10 +100,14 @@ type Config struct {
 	RestartTokens int
 }
 
-// Defaults chosen to be defensible rather than tuned — 🎯T132.4's sweep
-// is what turns them into measured choices. MaxTail matches the drip
-// scale, SealLookahead matches the structural layer's existing rule so
-// the two tiers do not disagree about what "settled" means.
+// Defaults. SealLookahead is now a MEASURED choice (🎯T132.4): the sweep
+// over model x drip x K picked sonnet / drip 12 / K=3, at meanPk 0.267
+// against a 0.55-0.65 naive baseline. See the operating-point section of
+// docs/design/streaming-segmentation.md.
+//
+// K=3 also happens to match the structural layer's existing rule, so the
+// two tiers do not disagree about what "settled" means — but it is kept
+// because it measured well, not because it matched.
 const (
 	DefaultMaxTail         = 40
 	DefaultSealLookahead   = 3

@@ -16,7 +16,11 @@ import (
 // life of a session, so an open handle is authoritative liveness rather
 // than a heuristic.
 type LiveSource interface {
-	LiveSessions() map[string]int
+	// LiveWatchableSessions excludes mnemo's own summariser sessions.
+	// The watcher must never call plain LiveSessions: a summariser is a
+	// Claude Code process writing its own transcript, so it appears in
+	// the live set and watching it spawns another (🎯T132.2).
+	LiveWatchableSessions(summariserWorkDir string) map[string]int
 }
 
 // Watcher follows every live session, running one Runner per session and
@@ -30,8 +34,12 @@ type Watcher struct {
 	NewSummariser func(sessionID string) Summariser
 	Cfg           Config
 	DripSize      int
-	// Poll is how often the live set is re-read. LiveSessions is itself
-	// TTL-cached, so this is cheap.
+	// WorkDir is where spawned summarisers run. Passed to the live-set
+	// filter so their own sessions are excluded by cwd, which closes the
+	// race before ingest has stamped them.
+	WorkDir string
+	// Poll is how often the live set is re-read. The underlying live-set
+	// read is TTL-cached, so this is cheap.
 	Poll time.Duration
 	// MaxConcurrent bounds how many sessions are watched at once. A
 	// machine with a dozen live sessions should not spawn a dozen
@@ -81,7 +89,7 @@ func (w *Watcher) Run(ctx context.Context) {
 // session would keep paying a summariser to re-examine a transcript that
 // can no longer change.
 func (w *Watcher) reconcile(ctx context.Context) {
-	live := w.Live.LiveSessions()
+	live := w.Live.LiveWatchableSessions(w.WorkDir)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
