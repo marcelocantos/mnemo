@@ -946,7 +946,7 @@ targets:
     discovered: 2026-07-28
   T127:
     name: Every indexed session carries the source that actually produced it, and no session exists that has no messages
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -972,6 +972,7 @@ targets:
     - sessions
     origin: discovered while scoping session resume, 2026-07-28
     discovered: 2026-07-28
+    achieved: 2026-07-28
   T128:
     name: A ChatGPT session (formerly Codex CLI) can be reopened from mnemo the same way a Claude one can
     status: identified
