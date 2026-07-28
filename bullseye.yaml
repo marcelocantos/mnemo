@@ -1063,6 +1063,34 @@ targets:
     origin: user suggestion
     discovered: 2026-04-07
     achieved: 2026-04-10
+  T130:
+    name: The cloud Windows CI job finishes with real margin against its timeout, so its verdict reflects the code rather than runner luck
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - The windows-latest job's wall-clock has headroom against the workflow timeout — not a run that happens to land under the ceiling, but one whose slowest package finishes well inside it.
+    - 'The pass/fail flip is gone: repeated runs of the same commit agree. Today they do not — run 30324247982 (25a7da4c) FAILED with internal/store hitting the 1200s ceiling, and run 30343804960 (8d3f028) PASSED, on code differing only by this release''s changes.'
+    - 'The cause is named rather than absorbed by raising the timeout again. internal/vault took 673s and internal/store exhausted 1200s on the runner, against 12.9s and 30.9s respectively on an M4 Max — a ~40x gap that a slower CPU alone does not explain. Candidate mechanisms: Defender real-time scanning of the temp SQLite files each newTestStore creates, per-test DB file creation cost on NTFS, or CGO/SQLite sync behaviour on that filesystem.'
+    - Whatever the fix, the local Parallels VM gate (scripts/win-validate.sh) remains the authoritative Windows signal; this target is about making the advisory cloud job trustworthy, not about promoting it back to required.
+    context: |-
+      Discovered during the v0.70.0 release, 2026-07-28.
+
+      The mnemo gate profile (🎯T100) already demotes the cloud Windows job to advisory precisely because it is a 15-18 min CGO/SQLite long pole, and that decision stands. But an advisory job that flips between pass and fail on essentially the same code is worse than a slow one: it trains the reader to ignore it, so a genuine Windows regression would land unnoticed behind a shrug of "that job is always red".
+
+      The two data points are from this release. The pre-release master run failed at exactly the 1200s ceiling; the post-merge master run passed. The 20-minute timeout was itself already a raise — ci.yml carries a comment that the default 10m per-package ceiling "was already running ~9-10m on master before any schema growth", so the ceiling has been chased upward once already and the margin has been eaten again.
+
+      Raising it a third time is the tempting non-fix. The 40x local-to-runner gap is the thing to explain: internal/store runs 30.9s on the dev Mac and exhausts 1200s on the runner. Both create many short-lived SQLite databases via newTestStore, which is exactly the workload Defender's real-time scanning punishes, so that is the first hypothesis to test — but it is a hypothesis, not a diagnosis.
+
+      Related: 🎯T90 (fresh-DB schema creation bypasses sqlift) was an earlier attack on the same surface and did help, but evidently not enough.
+    tags:
+    - ci
+    - windows
+    - flaky
+    - performance
+    - test-infrastructure
+    origin: manual
+    discovered: 2026-07-28
   T14:
     name: File-history-snapshots surfaced as queryable tool
     status: achieved
