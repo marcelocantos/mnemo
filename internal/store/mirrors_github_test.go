@@ -15,6 +15,7 @@ import (
 // argv, so it can behave differently for "pr" and "issue".
 func fakeGh(t *testing.T, script string) string {
 	t.Helper()
+	requirePOSIXShell(t)
 	path := filepath.Join(t.TempDir(), "gh")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
 		t.Fatal(err)

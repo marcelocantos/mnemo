@@ -128,6 +128,7 @@ func TestPermanentGitHubSkip(t *testing.T) {
 // the reason reaches the error text. exec's ExitError stringifies to
 // "exit status 1" and hides stderr, where gh puts the explanation.
 func TestWithStderrSurfacesReason(t *testing.T) {
+	requirePOSIXShell(t)
 	err := exec.Command("sh", "-c", "echo 'has disabled issues' >&2; exit 1").Run()
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,9 +109,25 @@ func TestOCREmptyBytesRejectedWithoutSpawn(t *testing.T) {
 	}
 }
 
+// requirePOSIXShell skips a test whose fixture drives /bin/sh.
+//
+// The Windows pre-merge gate runs the whole suite on the Parallels VM,
+// and these fixtures (a worker that raises SIGABRT, a fake gh script)
+// have no cmd.exe equivalent worth maintaining. What they cover —
+// containment of an aborting subprocess, error classification — is
+// platform-independent, so skipping there loses no coverage of
+// Windows-specific behaviour.
+func requirePOSIXShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture drives a POSIX shell; the behaviour under test is platform-independent")
+	}
+}
+
 // withWorker swaps in a fake OCR worker for the duration of a test.
 func withWorker(t *testing.T, script string) {
 	t.Helper()
+	requirePOSIXShell(t)
 	prev := ocrWorkerCommand
 	ocrWorkerCommand = func(ctx context.Context) (*exec.Cmd, error) {
 		return exec.CommandContext(ctx, "sh", "-c", script), nil
