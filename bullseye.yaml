@@ -881,6 +881,69 @@ targets:
     - cancellation
     origin: pre-PR graph pass, 2026-07-28
     discovered: 2026-07-28
+  T125:
+    name: 'A session can be resumed from a loose description: mnemo opens the preferred terminal in the directory that owns it and picks the conversation back up'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A loose reference resolves to a session without the user knowing its id — a repo/project fragment, "latest", or an id/prefix. This is 🎯T115's resolver; this target consumes it rather than growing a second one.
+    - The terminal opens in the session's OWN directory (session_meta.cwd), not the current one, and resumes that conversation rather than starting a fresh one — e.g. `claude --resume <id>` for a Claude session.
+    - 'Source-aware: session_meta.source distinguishes claude / codex / grok (30736 / 345 / 369 on the current index) and each has a different resume invocation. A source with no known resume command fails with a message naming it, rather than silently opening a bare shell.'
+    - The terminal is a preference, not a hardcoded assumption. iTerm2 is the default on macOS (reusing internal/iterm's focus-or-spawn), but the choice is configurable and an unsupported/absent terminal fails with a clear message rather than a cryptic osascript error.
+    - A session whose cwd no longer exists — or was a temp dir like /private/var/folders/... — is reported as such and does not silently open somewhere unrelated. Real data has both cases.
+    - Reachable both as an MCP tool (agent says "resume the mnemo session about the WAL") and from the CLI (`mnemo resume <ref>`), since the need often arises when no agent session is running — that is the whole premise.
+    - Testable without a live terminal, following internal/iterm's existing overridable-runner pattern; no test opens a window.
+    context: |-
+      Requested 2026-07-28: "I often want to resume a conversation, but don't have a session id handy."
+
+      This is much less new work than it looks, because the hard part already exists. 🎯T85.2 built internal/iterm.Go(ctx, GoArgs{Path, Name, NoResume}) — focus-the-tagged-tab-or-spawn-a-new-one running `claude` in a directory — and exposes it as mnemo_thread_go. That machinery is already abstracted behind an overridable runner so it is testable without iTerm2. This target is the same capability keyed on a SESSION rather than a THREAD.
+
+      Two things genuinely differ from thread_go and are where the work is:
+
+      1. It must run a RESUME command, not a bare `claude`. iterm.GoArgs currently has no way to pass a command; loginCommand/spawnCommand build it internally. That needs a seam.
+      2. Resume syntax is per-source. mnemo indexes three (claude, codex, grok), and they do not share a CLI.
+
+      The resolution half is 🎯T115, already filed: one `session` parameter that accepts an id/prefix, a repo fragment, or latest/recent. The premise here ("don't have a session id handy") is precisely that problem, so this depends on it rather than duplicating it.
+
+      Note the user's phrasing — "the user's preferred shell (iTerm2 is mine)" — signals the terminal should be a preference rather than baked in. mnemo_thread_go hardcodes iTerm2 today; generalising the seam would benefit both, though it need not be done in one step.
+
+      Real data to design against: session cwds include deleted directories (repos gone from disk, e.g. rubrew/targets) and ephemeral temp paths (/private/var/folders/...), so "open where the session lived" has to handle the case where that no longer means anything.
+    depends_on:
+    - T115
+    tags:
+    - sessions
+    - cli
+    - mcp
+    - terminal
+    - discoverability
+    origin: user request, 2026-07-28
+    discovered: 2026-07-28
+  T126:
+    name: Terminal integration is a preference rather than an iTerm2 assumption, so opening a thread or resuming a session works beyond one macOS app
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The terminal is selected from configuration with a sensible per-platform default, rather than every call site assuming iTerm2. Oracle: a config value selects a different terminal and both mnemo_thread_go and session resume honour it.'
+    - 'At least one non-iTerm2 target works end-to-end — candidates: Terminal.app, Ghostty, WezTerm, kitty on macOS; a Linux terminal for a Linux daemon. Which ones ship is a product call, not fixed here.'
+    - An unsupported or absent terminal fails with a message naming it and what to configure, not a cryptic osascript error or a silent no-op.
+    - The focus-or-spawn behaviour — reuse the tab already tagged for this thread/session rather than piling up windows — is preserved wherever the target terminal can express it, and its absence is stated rather than silently degrading.
+    - internal/iterm's overridable-runner pattern generalises so each backend stays testable without opening a window.
+    context: |-
+      Split out of 🎯T125 on 2026-07-28 at Marcelo's direction: "Let's just implement iTerm2 for now. File a target to broaden support."
+
+      Today iTerm2 is assumed, not chosen. internal/iterm drives it via osascript and mnemo_thread_go (🎯T85.2) hardcodes that path; 🎯T125's session-resume does the same. That is fine for a single-user macOS tool and wrong the moment anyone else uses mnemo, or Marcelo changes terminal — the failure mode today is a cryptic osascript error rather than "you have no supported terminal configured".
+
+      The seam already half-exists: internal/iterm.Go takes a GoArgs struct and runs its AppleScript through an overridable `runner`, which is what makes it testable without a live terminal. Generalising means lifting that into a backend interface rather than inventing new machinery.
+
+      Worth noting the focus-or-spawn behaviour (tag a tab, reuse it next time) is genuinely iTerm2-flavoured — some terminals cannot express it. The criterion is that degradation is stated, not silent.
+    tags:
+    - terminal
+    - portability
+    - config
+    origin: split from T125, 2026-07-28
+    discovered: 2026-07-28
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved
