@@ -32,16 +32,30 @@ const (
 	// SegmentMethodLLM is a topic span the summariser drew inside a
 	// window it was already reading (Payload.Spans).
 	SegmentMethodLLM = "llm"
+	// SegmentMethodStream is a provisional span drawn live by the
+	// streaming watcher as the conversation happens (🎯T132). It ranks
+	// above structural — a span closed because the conversation closed
+	// the topic beats one inferred from idle gaps — and below the batch
+	// methods, which see the stretch whole and get the last word.
+	SegmentMethodStream = "stream"
 )
 
 // SegmentMethodRank orders methods by retrieval precedence, lowest
 // first. Inlined into ORDER BY clauses so the best available span for a
 // message wins without deleting the weaker ones — structural spans stay
 // as coverage for ranges no summariser has reached.
-const SegmentMethodRank = `CASE method
-		WHEN '` + SegmentMethodLLM + `' THEN 0
-		WHEN '` + SegmentMethodCompaction + `' THEN 1
-		ELSE 2 END`
+//
+// A superseded span sorts below every live one regardless of method
+// (🎯T132.1): being overturned is a stronger signal than how the span was
+// drawn. It is demoted rather than filtered, because the record that a
+// conclusion was once held — and by which method — is the point of
+// keeping the edge at all.
+const SegmentMethodRank = `CASE
+		WHEN superseded_by IS NOT NULL THEN 9
+		WHEN method = '` + SegmentMethodLLM + `' THEN 0
+		WHEN method = '` + SegmentMethodCompaction + `' THEN 1
+		WHEN method = '` + SegmentMethodStream + `' THEN 2
+		ELSE 3 END`
 
 // Levels for compaction-derived spans. The window span is the coarse
 // extent (expand="segment:coarse"); the summariser's topic spans nest
