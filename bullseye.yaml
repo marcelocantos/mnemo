@@ -946,24 +946,25 @@ targets:
     discovered: 2026-07-28
   T127:
     name: Every indexed session carries the source that actually produced it, and no session exists that has no messages
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - 'session_meta.source names the agent that produced the session. Oracle: no session whose transcript came from ~/.codex is tagged claude; today 019ee482-f152-7141-9b36-4ae6705019b1 is a Codex session tagged claude.'
-    - 'No session_meta row exists with zero messages. Oracle: `SELECT COUNT(*) FROM session_meta sm WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.session_id = sm.session_id)` returns 0; today it returns 4.'
-    - A Codex rollout is indexed under its session id, not its filename. The four rollout-<timestamp>-<uuid> rows are filename-derived duplicates of rows that already exist under the embedded uuid.
-    - Existing mis-tagged and phantom rows are corrected or removed, not just prevented going forward — they are already in the index.
+    - session_meta.source names the agent that actually produced the session, recomputed from the ingest path rather than trusted from write time. DONE in code (RepairSessionSources); NOT YET APPLIED to the live index — 182 of the 527 sessions under ~/.codex are still tagged claude there until the daemon next starts on this build.
+    - 'Filename-derived phantom rows are removed: a stem-keyed session that holds no messages AND duplicates a real session under its embedded uuid. Four exist (rollout-<ts>-<uuid>). DONE in code.'
+    - Deletion stays narrow. The index holds 39 message-less session_meta rows, but only those 4 are filename duplicates — the other 35 are uuid-keyed with real cwds (24 claude, 11 grok), ordinary sessions that produced nothing substantive. Removing them would be data loss, and a test pins that a Claude session named by its own stem survives. (This corrects the original criterion, which wrongly demanded zero message-less rows.)
+    - 'The hole is closed, not just mopped: ingestFile routes Codex/Grok transcripts to their own parsers instead of deriving a session id from the filename, and writes source explicitly rather than relying on the schema default. DONE.'
+    - 'Verified on the live index after the repair runs: sessions under ~/.codex tagged codex, no rollout-* rows remain, grok untouched at 371.'
     context: |-
-      Found 2026-07-28 while checking whether session resume (🎯T125) can trust session_meta.source to pick the right agent. It cannot, in two ways.
+      Diagnosed and largely fixed 2026-07-28, prompted by Marcelo asking whether the correct tag could be inferred from the jsonl path. It can — decisively — and that is now the mechanism.
 
-      (1) Mis-tagged source. `019ee482-f152-7141-9b36-4ae6705019b1` is a Codex session but carries source='claude'. Resume branches on source, so a mis-tagged session would be handed to `claude --resume` — the wrong agent, silently.
+      Root cause. session_meta.source is written only at ingest time, and ingest is offset-based: once a file is fully consumed it is never re-parsed, so a wrong source is never repaired. Codex ingest and the source column landed together (🎯T99, commit cbb824e, 2026-06-30). Anything consumed before that went through ingestFile — the Claude-format path — which upserts session_meta WITHOUT a source column, letting the schema default 'claude' stand, and derives the session id from the FILENAME STEM. For a Codex rollout that yields rollout-<ts>-<uuid>, a phantom that duplicates the real uuid-keyed session and holds no messages. The mis-tagged example's transcript starts 2026-06-20, ten days before the feature existed.
 
-      (2) Phantom rows. Four session_meta rows have ids of the form rollout-2026-06-20T20-10-47-<uuid> and ZERO messages. Those ids are Codex rollout FILENAMES (~/.codex/sessions/... rollout files), and the uuid embedded at the end already exists as its own session_meta row. So each phantom is a filename-derived duplicate of a real session.
+      Scale is larger than first thought: 182 of 527 sessions under ~/.codex are tagged claude (35%), not the single case that surfaced it. Grok is clean (371/372). The 4 phantoms are all files that exist in BOTH ~/.codex/sessions and ~/.codex/archived_sessions — Codex moved them and mnemo ingested each path.
 
-      Counts on the live index: source claude/uuid 30732, codex/uuid 345, grok/uuid 371, claude/rollout-* 4 — that last bucket is the bug, visible as an id-shape/source mismatch.
+      Why it matters beyond tidiness: 🎯T125 resume branches on source, so 182 Codex sessions would be handed to `claude --resume` — the wrong agent, silently.
 
-      Not currently user-visible in resume, by luck rather than design: ResolveSessionRef's recency and repo paths require substantive_msgs >= 2 so phantoms never surface there, and an exact-id hit on one degrades into "session has no recorded working directory". But it is wrong data, it makes source untrustworthy as a routing key, and 🎯T127's ChatGPT resume depends on source being right.
+      Implementation note worth keeping: the repair walks ingest_state (hundreds of rows) rather than session_meta (31k). A verification query written the other way round — joining session_meta to ingest_state with LIKE — did not finish in two minutes.
     tags:
     - ingest
     - codex
