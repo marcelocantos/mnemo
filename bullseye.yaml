@@ -2607,6 +2607,29 @@ targets:
     origin: Grok session 019f6ab2 design discussion, 2026-07-25
     discovered: 2026-07-25
     achieved: 2026-07-25
+  T64.12:
+    name: 'Cross-repo: work that spans repositories is surfaced as such, without requiring a clustering engine to exist'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Cross-repo views are produced with the clustering engine switched off entirely. Oracle: with themes empty (the current state), a cross-repo surface still identifies genuine multi-repo work. If it returns nothing, the construct is still coupled to themes.'
+    - 'At least one non-theme signal drives it — candidates, none mandated: a session whose cwd or activity spans repos, an entity referenced from several repos (target, decision, file, commit, PR), or a search whose top results span repos. The chosen signal is stated and its false-positive behaviour is characterised.'
+    - A theme that happens to span repos is ONE input among several, never the definition. If 🎯T64.8 ships, multi-repo themes enrich this surface; if it never ships, the surface still works.
+    - Casual co-mention does not become a cross-repo view. Some threshold or weighting keeps the output to work genuinely spanning repos — the vault-clustering design's weight >= 4.0 exists for this reason and the same concern applies to whatever replaces it.
+    - The surface is reachable from the tools agents actually use, not only as a vault page.
+    context: |-
+      Split out of 🎯T64.8 on 2026-07-28. Themes and cross-repo were bundled as one target because docs/design/vault-clustering.md defines cross-repo pages as a derived view over themes: "A theme with len(JSON(repos)) >= 2 AND weight >= 4.0 triggers emission of a cross-repo page at _mnemo/cross-repo/<slug>.md… No separate cross_repos table — cross-repo pages are a derived view over themes."
+
+      They are orthogonal constructs that interact. A theme can be entirely single-repo; work can obviously span repos with no clustering involved. Deriving one from the other was an implementation convenience that hardened into a dependency, and it left cross-repo unreachable while the engine is unbuilt — which matters now that 🎯T64.11 has retired clustering from the segment path and left themes/theme_members dormant on the principle that thematic retrieval is a search problem.
+
+      Note the interaction is worth keeping once both exist: a multi-repo theme is good evidence of cross-repo work. The requirement is only that it not be the sole source. Marcelo's own workspace makes the non-theme signals concrete — sessions in worktrees of one repo, forks filed under another org (anz-bank/decimal whose origin is marcelocantos/decimal), and vendored sub-repos (sqldeep/vendor/deepparser) all represent genuine multi-repo structure that 🎯T116's identity resolution already has to reason about.
+    tags:
+    - vault
+    - cross-repo
+    - discovery
+    origin: split from T64.8, 2026-07-28
+    discovered: 2026-07-28
   T64.2:
     name: '`_mnemo/` namespace + vault_layout config'
     status: achieved
@@ -2704,7 +2727,7 @@ targets:
     origin: PR
     discovered: 2026-05-22
   T64.8:
-    name: Themes + cross-repo (clustering engine)
+    name: 'Themes: documents cluster into named, navigable themes via a clustering engine that is local by default'
     status: identified
     value: 5.0
     cost: 0.0
@@ -2714,12 +2737,19 @@ targets:
     - Label quality gates all four pass — centroid-closeness (must be the centroid-closest vault_user member), ≥ 200-token body, daily-note filename exclusion, title-content token overlap. mnemo_vault_themes_inspect reports which gate fired when a user-anchor candidate was rejected.
     - 'cluster_embeddings cache PK is (doc_kind, entity_id, content_hash, provider, model, model_version); switching models triggers clean re-embed; mnemo_vault_recluster(force_reembed: true) supported.'
     - Cluster IDs derived from sha1(sorted member set), stable within a fixed (provider, model, model_version) fingerprint.
-    - Cross-repo pages derived from themes with len(repos) ≥ 2 AND weight ≥ 4.0.
     - Theme retirement at vault_clustering.retire_after (180 days default) moves to _mnemo/themes/_archive/; pin via mnemo_vault_themes_pin exempts. Cluster ID survives archive→active round-trip if membership is stable.
     - New tables — themes, theme_members, cluster_embeddings, themes_fts, cluster_runs, theme_overrides, theme_pins — all additive per 🎯T49.
     - New MCP tools — mnemo_vault_recluster, mnemo_vault_themes_inspect, mnemo_vault_themes_pin — work end-to-end. Stubs for themes_split / themes_merge land config-rejecting placeholders.
-    - All 19 acceptance criteria in docs/design/vault-clustering.md pass.
-    context: The research-shaped slice; carries the most risk. Subordinate design doc (docs/design/vault-clustering.md) is the canonical spec. Heuristic engine ships fully offline. Embeddings engine is opt-in per 🎯T63 egress posture; labelling engine is an independent opt-in (two-key matrix). HDBSCAN deferred to a follow-up slice.
+    - The clustering-engine criteria in docs/design/vault-clustering.md pass. Cross-repo derivation is explicitly NOT in scope here — it is its own target.
+    - 'The cost profile is understood before this is called done: 🎯T64.11 retired segment clustering because a full single-link rebuild per pass was super-quadratic in corpus size and dominated backfill CPU. A document-level engine must show it does not reproduce that, or be incremental.'
+    context: |-
+      Re-scoped 2026-07-28: this was "Themes + cross-repo (clustering engine)", bundling two orthogonal constructs. They interact — a theme that happens to span repos is interesting — but neither depends on the other: themes can be single-repo, and cross-repo work can be surfaced without any clustering at all. Cross-repo now has its own target.
+
+      The bundling came from docs/design/vault-clustering.md, which defines cross-repo pages as a derived view over themes ("A theme with len(repos) >= 2 AND weight >= 4.0 triggers emission of a cross-repo page… No separate cross_repos table"). That derivation is a possible implementation, not the definition of the construct, and it made cross-repo unreachable while the clustering engine is unbuilt.
+
+      That coupling became load-bearing after 🎯T64.11, which retired clustering from the segment path on the principle that thematic retrieval is a search problem rather than a clustering problem, and left themes/theme_members dormant. Under the old bundling, cross-repo was blocked behind an engine that is currently switched off.
+
+      The research-shaped slice; carries the most risk. Heuristic engine ships fully offline. Embeddings engine is opt-in per 🎯T63 egress posture; labelling engine is an independent opt-in (two-key matrix). HDBSCAN deferred to a follow-up slice.
     depends_on:
     - T64.7
     origin: PR
