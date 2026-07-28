@@ -134,6 +134,7 @@ func RunPoint(ctx context.Context, p SweepPoint, g GoldSession, mk func(SweepPoi
 		Store:     rs,
 		Summ:      summ,
 		DripSize:  p.DripSize,
+		Model:     p.Model,
 		Cfg:       Config{SealLookahead: p.SealLookahead},
 	}
 	if err := r.Start(); err != nil {
@@ -167,6 +168,14 @@ func RunPoint(ctx context.Context, p SweepPoint, g GoldSession, mk func(SweepPoi
 	}
 	if res.Err == nil && res.Drips >= maxDrips {
 		res.Err = fmt.Errorf("replay did not converge after %d drips: the cursor is not advancing", maxDrips)
+	}
+
+	// A replayed transcript has ended by definition, so close out the
+	// open spans exactly as a real session would (🎯T132.4). Without
+	// this the sweep measures a segmenter that discards its final spans
+	// and scores every configuration worse than it actually is.
+	if err := r.Finish(ctx); err != nil && res.Err == nil {
+		res.Err = err
 	}
 
 	for _, sp := range rs.spans {

@@ -195,7 +195,20 @@ func (s *Store) PutCompactionSegments(seg CompactionSegments) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Structural spans this window now covers stop winning retrieval
+	// (🎯T132.4). Done after the commit rather than inside it: retirement
+	// is an optimisation of ranking, and failing it must not roll back
+	// the spans we just paid a summariser to produce.
+	if n, err := s.RetireStructuralSpansCovered(seg.SessionID); err != nil {
+		slog.Warn("structural retirement failed", "session", seg.SessionID, "err", err)
+	} else if n > 0 {
+		slog.Debug("retired structural spans", "session", seg.SessionID, "count", n)
+	}
+	return nil
 }
 
 // supersedeStreamSpansIn points every stream span overlapping a

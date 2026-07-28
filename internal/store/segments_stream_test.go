@@ -231,3 +231,122 @@ func TestLiveWatchableSessionsWithoutWorkDir(t *testing.T) {
 		t.Errorf("empty workdir excluded everything: %v", got)
 	}
 }
+
+// TestSpanDerivationIsRecordedAndEnumerable is 🎯T134's first slice, and
+// the thing 🎯T132.4 was blocked on.
+//
+// Without a derivation stamp there is no way to ask which spans predate an
+// operating point, so the only honest answer to "redraw the stale ones" is
+// "redraw everything" — the position 🎯T131 was in for compaction
+// eligibility, which cost a full-corpus pass to escape.
+func TestSpanDerivationIsRecordedAndEnumerable(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	if err := s.PutStreamSpans([]StreamSpan{
+		{SessionID: "s1", FromMsgID: 1, ToMsgID: 10, Label: "a", Derivation: "stream/sonnet/d12/k3/p1"},
+		{SessionID: "s1", FromMsgID: 11, ToMsgID: 20, Label: "b", Derivation: "stream/sonnet/d12/k3/p1"},
+		{SessionID: "s2", FromMsgID: 1, ToMsgID: 5, Label: "c", Derivation: "stream/haiku/d24/k3/p1"},
+		// Drawn before provenance existed.
+		{SessionID: "s3", FromMsgID: 1, ToMsgID: 8, Label: "d"},
+	}); err != nil {
+		t.Fatalf("PutStreamSpans: %v", err)
+	}
+
+	got, err := s.SpanDerivation()
+	if err != nil {
+		t.Fatalf("SpanDerivation: %v", err)
+	}
+	if n := got["stream stream/sonnet/d12/k3/p1"]; n != 2 {
+		t.Errorf("sonnet population = %d, want 2", n)
+	}
+	if n := got["stream stream/haiku/d24/k3/p1"]; n != 1 {
+		t.Errorf("haiku population = %d, want 1", n)
+	}
+	// An unstamped span must be its own population, not silently folded
+	// into another — "never recorded" and "recorded as nothing" are
+	// different facts, and the first is the one a redraw must target.
+	if n := got["stream (unrecorded)"]; n != 1 {
+		t.Errorf("unrecorded population = %d, want 1; got %v", n, got)
+	}
+}
+
+// TestRetireStructuralSpansOnlyWhereCovered is 🎯T132.4's retirement rule.
+//
+// The structural tier was never a segmenter — it cuts on idle gaps and
+// turn cadence, a proxy for topic change rather than a reading of one — so
+// once something better covers the same messages it should stop winning
+// retrieval. But retiring structural spans a better tier has NOT reached
+// would trade a weak signal for no signal, which is precisely the failure
+// the "structural leaves last" ordering exists to prevent.
+func TestRetireStructuralSpansOnlyWhereCovered(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	// Structural coverage across the whole session.
+	insertSpan(t, s, "st_covered", "sess-r", 1, 20, SegmentMethodStructural, "cadence guess A", "", "")
+	insertSpan(t, s, "st_uncovered", "sess-r", 100, 120, SegmentMethodStructural, "cadence guess B", "", "")
+	// Stream coverage over the uncovered range: must NOT retire it while
+	// the stream tier is below the bar (streamRetiresStructural).
+	insertSpan(t, s, "stream_weak", "sess-r", 100, 118, SegmentMethodStream, "live guess", "", "")
+	// Something better, over the first range only.
+	insertSpan(t, s, "llm_good", "sess-r", 5, 18, SegmentMethodLLM, "actual topic", "", "")
+
+	n, err := s.RetireStructuralSpansCovered("sess-r")
+	if err != nil {
+		t.Fatalf("RetireStructuralSpansCovered: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("retired %d spans, want 1", n)
+	}
+
+	var covered, uncovered string
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(superseded_by,'') FROM topic_segments WHERE id='st_covered'`).Scan(&covered); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(superseded_by,'') FROM topic_segments WHERE id='st_uncovered'`).Scan(&uncovered); err != nil {
+		t.Fatal(err)
+	}
+	if covered != "llm_good" {
+		t.Errorf("covered structural span superseded_by=%q, want llm_good", covered)
+	}
+	if uncovered != "" {
+		t.Error("a structural span was retired in favour of a STREAM span while the " +
+			"stream tier is below the quality bar (measured meanPk 0.445 vs a 0.555 " +
+			"naive baseline); that is a regression dressed as progress")
+	}
+
+	// Retirement is demotion, not deletion: the row survives.
+	var n2 int
+	if err := s.readDB.QueryRow(
+		`SELECT COUNT(*) FROM topic_segments WHERE method=?`, SegmentMethodStructural).Scan(&n2); err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 2 {
+		t.Errorf("structural rows = %d, want 2 — retirement deleted instead of demoting", n2)
+	}
+}
+
+// TestRetiredStructuralSpansLoseRetrieval: the point of retiring is that
+// the better span wins. Verified through the real ranking rather than by
+// inspecting the column.
+func TestRetiredStructuralSpansLoseRetrieval(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	insertSpan(t, s, "st_x", "sess-q", 1, 30, SegmentMethodStructural, "cadence guess", "", "")
+	insertSpan(t, s, "llm_x", "sess-q", 5, 25, SegmentMethodLLM, "real topic", "", "")
+
+	if _, err := s.RetireStructuralSpansCovered("sess-q"); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.QuerySegments(SegmentQuery{SessionID: "sess-q", ContainingMsgID: 15, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) == 0 || segs[0].ID != "llm_x" {
+		t.Fatalf("best span for msg 15 = %v, want llm_x", segs)
+	}
+	if len(segs) < 2 {
+		t.Error("the retired structural span vanished from results entirely; it should " +
+			"still be reachable, just ranked below")
+	}
+}

@@ -34,6 +34,8 @@ type Watcher struct {
 	NewSummariser func(sessionID string) Summariser
 	Cfg           Config
 	DripSize      int
+	// Model is recorded on the spans produced, for 🎯T134's enumeration.
+	Model string
 	// WorkDir is where spawned summarisers run. Passed to the live-set
 	// filter so their own sessions are excluded by cwd, which closes the
 	// race before ingest has stamped them.
@@ -118,6 +120,7 @@ func (w *Watcher) reconcile(ctx context.Context) {
 			Summ:      w.NewSummariser(id),
 			Cfg:       w.Cfg,
 			DripSize:  w.DripSize,
+			Model:     w.Model,
 		}
 		slog.Info("stream segmentation started", "session", id)
 		go func(id string) {

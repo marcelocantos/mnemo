@@ -641,7 +641,19 @@ CREATE TABLE topic_segments (
 			-- relaxed. Superseded spans are retained and flagged rather than
 			-- deleted: the stream-vs-finalisation divergence is the freshness
 			-- metric, and deleting the loser would delete the measurement.
-			superseded_by TEXT
+			superseded_by TEXT,
+			-- How this span was drawn (🎯T134): method/model/drip/lookahead
+			-- /prompt-version, e.g. 'stream/sonnet/d12/k3/p1'.
+			--
+			-- Without it there is no way to ask which spans predate an
+			-- operating point, so the only honest answer to "redraw the
+			-- stale ones" is "redraw everything" — the position 🎯T131 was
+			-- in for compaction eligibility, which cost a full-corpus pass
+			-- to escape. NULL means drawn before provenance was recorded,
+			-- which is itself a usable population.
+			--
+			-- Nullable ADD COLUMN, permitted under sqlift AllowNone.
+			derivation TEXT
 		);
 
 CREATE INDEX topic_segments_by_session ON topic_segments (session_id, from_msg_id, to_msg_id);

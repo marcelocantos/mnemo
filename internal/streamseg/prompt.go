@@ -86,3 +86,29 @@ func renderDrip(a *Automaton, fresh []segment.Message) string {
 // log can otherwise exceed the whole drip budget by itself, and the
 // bounded-state argument holds only if each term is bounded.
 const maxDripMessageChars = 4000
+
+// renderClosing asks the summariser to seal what it still has open,
+// because the conversation has ended.
+//
+// Kept separate from renderDrip: there are no new messages to show, and
+// the instruction is the opposite of the usual one. Every drip so far has
+// told the model to hold a span open when unsure; this tells it that
+// waiting is no longer an option.
+func renderClosing(a *Automaton) string {
+	var b strings.Builder
+	if s := a.State().RollingSummary; s != "" {
+		b.WriteString("Settled so far:\n")
+		b.WriteString(s)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Spans you have open:\n")
+	for _, sp := range a.OpenSpans() {
+		fmt.Fprintf(&b, "  %s from #%d — %s\n", sp.Ref, sp.From, sp.Label)
+	}
+	fmt.Fprintf(&b, "\nThe conversation has ENDED at message #%d. "+
+		"There will be no more messages.\n\n"+
+		"Seal every span above now, at #%d or earlier, each with a summary of what "+
+		"was concluded. Do not open anything new. Reply with seal events only.\n",
+		a.LastTailID(), a.LastTailID())
+	return b.String()
+}

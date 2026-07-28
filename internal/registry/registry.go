@@ -842,6 +842,7 @@ func (r *Registry) startStreamSegWatcher(e *userEntry) {
 		WorkDir:       workDir,
 		DripSize:      cfg.DripSize,
 		MaxConcurrent: cfg.MaxConcurrent,
+		Model:         cfg.Model,
 		NewSummariser: func(string) streamseg.Summariser {
 			return streamseg.NewClaudiaSummariser(workDir, cfg.Model)
 		},

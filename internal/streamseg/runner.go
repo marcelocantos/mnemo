@@ -46,8 +46,12 @@ type Runner struct {
 	Cfg       Config
 	// DripSize is how many substantive messages are gathered before the
 	// summariser is asked. Small drips mean fresher spans and more
-	// calls; 🎯T132.4's sweep decides the operating point.
+	// calls; 🎯T132.4's sweep chose 12.
 	DripSize int
+	// Model is recorded in the derivation stamp (🎯T134). It does not
+	// select the model — the Summariser was built with it — but a span
+	// that cannot say which model drew it cannot be redrawn selectively.
+	Model string
 
 	auto *Automaton
 }
@@ -62,6 +66,11 @@ type Runner struct {
 // segmentation with extra steps: the whole value of the tier is spans
 // landing while the conversation is still going.
 const DefaultDripSize = 12
+
+// finishBudget bounds the closing call. It runs on a detached context
+// after cancellation, so it needs its own deadline or a wedged summariser
+// would keep a "stopped" session alive indefinitely.
+const finishBudget = 2 * time.Minute
 
 // Start prepares the runner, recovering from whatever is already durable.
 //
@@ -147,18 +156,40 @@ func (r *Runner) Step(ctx context.Context) (int, error) {
 	return len(fresh), nil
 }
 
+// PromptVersion changes whenever SystemPrompt changes in a way that could
+// move boundaries. It is part of the derivation key, so a prompt revision
+// makes the spans it produced findable and redrawable (🎯T134) instead of
+// silently mixed in with the ones before it.
+const PromptVersion = 1
+
+// derivation is the configuration fingerprint stamped on every span this
+// runner writes: method/model/drip/lookahead/prompt-version.
+func (r *Runner) derivation() string {
+	model := r.Model
+	if model == "" {
+		model = "default"
+	}
+	k := r.Cfg.SealLookahead
+	if k <= 0 {
+		k = DefaultSealLookahead
+	}
+	return fmt.Sprintf("stream/%s/d%d/k%d/p%d", model, r.DripSize, k, PromptVersion)
+}
+
 func (r *Runner) persist(sealed []Sealed) error {
 	if len(sealed) == 0 {
 		return nil
 	}
+	deriv := r.derivation()
 	spans := make([]store.StreamSpan, 0, len(sealed))
 	for _, s := range sealed {
 		spans = append(spans, store.StreamSpan{
-			SessionID: r.SessionID,
-			FromMsgID: s.From,
-			ToMsgID:   s.To,
-			Label:     s.Label,
-			Summary:   s.Summary,
+			SessionID:  r.SessionID,
+			FromMsgID:  s.From,
+			ToMsgID:    s.To,
+			Label:      s.Label,
+			Summary:    s.Summary,
+			Derivation: deriv,
 		})
 	}
 	return r.Store.PutStreamSpans(spans)
@@ -193,6 +224,58 @@ func (r *Runner) applySupersedes() error {
 	return nil
 }
 
+// Finish closes out a session whose transcript has ended.
+//
+// It gives the summariser one last chance to seal its open spans properly
+// — that call is what produces real summaries rather than bare labels —
+// and then force-seals whatever remains. Without it every span still open
+// when a session stopped was discarded, and a session's last stretch is
+// often its most active.
+//
+// Safe to call more than once; with nothing open it does nothing and
+// costs no model call.
+func (r *Runner) Finish(ctx context.Context) error {
+	if r.auto == nil || len(r.auto.OpenSpans()) == 0 {
+		return nil
+	}
+
+	// One closing prompt. A failure here is not fatal: the force-seal
+	// below still salvages the spans, just with thinner summaries.
+	if reply, err := r.Summ.Ask(ctx, renderClosing(r.auto)); err == nil {
+		if sealed := r.auto.Apply(ParseEvents(reply)); len(sealed) > 0 {
+			if err := r.persist(sealed); err != nil {
+				return err
+			}
+		}
+	} else {
+		slog.Warn("closing drip failed; force-sealing with labels only",
+			"session", r.SessionID, "err", err)
+	}
+
+	if err := r.persist(r.auto.SealAllOpen(r.auto.LastTailID())); err != nil {
+		return err
+	}
+
+	// The session is over and its stream spans are final, so structural
+	// coverage they overlap can stop winning retrieval (🎯T132.4).
+	if rt, ok := r.Store.(structuralRetirer); ok {
+		if n, err := rt.RetireStructuralSpansCovered(r.SessionID); err != nil {
+			slog.Warn("structural retirement failed", "session", r.SessionID, "err", err)
+		} else if n > 0 {
+			slog.Info("retired structural spans covered by stream spans",
+				"session", r.SessionID, "count", n)
+		}
+	}
+	return nil
+}
+
+// structuralRetirer is optional on SpanStore: the replay store used by the
+// sweep has no structural spans to retire, and should not be made to
+// pretend otherwise.
+type structuralRetirer interface {
+	RetireStructuralSpansCovered(sessionID string) (int, error)
+}
+
 // Run drives Step until the context is cancelled, backing off when the
 // session is quiet. It returns nil on cancellation — a watched session
 // going quiet is the normal ending, not a failure.
@@ -214,6 +297,16 @@ func (r *Runner) Run(ctx context.Context, idle time.Duration) error {
 		}
 		select {
 		case <-ctx.Done():
+			// The watcher cancels when a session leaves the live set,
+			// so this is the normal end of a conversation and the point
+			// at which open spans must be salvaged. A detached context
+			// is used deliberately: ctx is already cancelled, and the
+			// closing call is the whole reason we are here.
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishBudget)
+			defer cancel()
+			if err := r.Finish(fctx); err != nil {
+				slog.Warn("finishing session spans failed", "session", r.SessionID, "err", err)
+			}
 			return nil
 		case <-time.After(wait):
 		}

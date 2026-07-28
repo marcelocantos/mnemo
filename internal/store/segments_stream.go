@@ -29,6 +29,10 @@ type StreamSpan struct {
 	ToMsgID   int
 	Label     string
 	Summary   string
+	// Derivation records the configuration that drew this span (🎯T134),
+	// so a later pass can name and redraw the spans an improved operating
+	// point supersedes.
+	Derivation string
 }
 
 // PutStreamSpans upserts sealed stream spans for a session.
@@ -55,14 +59,15 @@ func (s *Store) PutStreamSpans(spans []StreamSpan) error {
 			INSERT INTO topic_segments (
 				id, session_id, from_msg_id, to_msg_id, level, parent_id,
 				method, confidence, sealed, label, summary, repo,
-				first_ts, last_ts, computed_at
-			) VALUES (?, ?, ?, ?, ?, NULL, ?, 0.7, 1, ?, ?, '', '', '', ?)
+				first_ts, last_ts, computed_at, derivation
+			) VALUES (?, ?, ?, ?, ?, NULL, ?, 0.7, 1, ?, ?, '', '', '', ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				label = excluded.label,
 				summary = excluded.summary,
-				computed_at = excluded.computed_at
+				computed_at = excluded.computed_at,
+				derivation = excluded.derivation
 		`, id, sp.SessionID, sp.FromMsgID, sp.ToMsgID, segmentLevelTopic,
-			SegmentMethodStream, sp.Label, sp.Summary, now); err != nil {
+			SegmentMethodStream, sp.Label, sp.Summary, now, nullIfEmpty(sp.Derivation)); err != nil {
 			return fmt.Errorf("stream span upsert: %w", err)
 		}
 	}
@@ -394,4 +399,123 @@ func summariserCWDClause(workDir string) string {
 		return ""
 	}
 	return ` OR cwd LIKE ?`
+}
+
+// streamRetiresStructural gates whether stream spans may retire
+// structural coverage. Off: the stream tier has not cleared the quality
+// bar (see RetireStructuralSpansCovered). This is a measured decision, not
+// caution — re-run cmd/streamseg-sweep and flip it when the numbers earn
+// it.
+const streamRetiresStructural = false
+
+// nullIfEmpty keeps an unknown derivation as SQL NULL rather than an empty
+// string, so "never recorded" and "recorded as nothing" stay distinct
+// populations.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// SpanDerivation counts spans by how they were drawn (🎯T134).
+//
+// This is what makes a redraw scopeable: it names the populations and
+// prices the work before any of it starts, in the same terms as 🎯T131's
+// cost policy. A NULL derivation is reported as "(unrecorded)" — spans
+// drawn before provenance existed, which is a real population and the
+// largest one at first.
+func (s *Store) SpanDerivation() (map[string]int, error) {
+	rows, err := s.readDB.Query(`
+		SELECT method, COALESCE(derivation, '(unrecorded)'), COUNT(*)
+		FROM topic_segments GROUP BY method, derivation`)
+	if err != nil {
+		return nil, fmt.Errorf("span derivation: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var method, deriv string
+		var n int
+		if err := rows.Scan(&method, &deriv, &n); err != nil {
+			return nil, err
+		}
+		out[method+" "+deriv] = n
+	}
+	return out, rows.Err()
+}
+
+// RetireStructuralSpansCovered demotes structural spans in sessions that
+// have since gained a better-drawn span over the same range (🎯T132.4,
+// 🎯T134).
+//
+// Retirement is supersession, not deletion. The structural tier was never
+// a segmenter — it cuts on idle gaps and turn cadence, a proxy for topic
+// change rather than a reading of one — so once something better covers
+// the same messages, the structural span should stop winning retrieval.
+// But it stays in the table: it is still the only record of what the
+// cheap local pass thought, and we have only just begun judging that.
+//
+// Only structural spans a better tier ACTUALLY OVERLAPS are touched. A
+// session summarised in part still needs structural coverage for the
+// parts nothing better has reached; retiring those would trade a weak
+// signal for no signal, which is the failure the "structural leaves last"
+// ordering exists to prevent.
+//
+// WHY ONLY llm, NOT stream. 🎯T132.4 required that structural spans retire
+// only once stream spans clear a stated quality bar. The bar: beat the
+// naive fixed-period baseline by a clear margin, meanPk <= 0.40 against a
+// measured baseline of 0.555. Stream spans DO NOT clear it. Over six gold
+// sessions the chosen operating point scores 0.445 — better than blind
+// cutting, but only by about 20%, and an earlier two-session run that
+// suggested 0.267 was flattering rather than representative.
+//
+// The mechanism is worse than the number: on real transcripts the
+// summariser under-seals. It opens spans and holds them, so sessions
+// produce one span where hindsight drew four, and the automaton hits its
+// context budget repeatedly with sealed_through still at zero. Retiring
+// good structural coverage in favour of that would be a regression
+// dressed as progress.
+//
+// So llm spans — the hindsight tier this is all scored against — retire
+// structural coverage today, and stream spans do not. Flip
+// streamRetiresStructural once a sweep shows the bar cleared.
+func (s *Store) RetireStructuralSpansCovered(sessionID string) (int, error) {
+	better := []any{SegmentMethodLLM, SegmentMethodLLM}
+	if streamRetiresStructural {
+		better = []any{SegmentMethodLLM, SegmentMethodStream}
+	}
+
+	res, err := s.writeDB.Exec(`
+		UPDATE topic_segments AS st
+		SET superseded_by = (
+			SELECT better.id FROM topic_segments better
+			WHERE better.session_id = st.session_id
+			  AND better.method IN (?, ?)
+			  AND better.from_msg_id <= st.to_msg_id
+			  AND better.to_msg_id   >= st.from_msg_id
+			ORDER BY (CASE better.method WHEN ? THEN 0 ELSE 1 END),
+			         (better.to_msg_id - better.from_msg_id)
+			LIMIT 1
+		)
+		WHERE st.method = ?
+		  AND st.superseded_by IS NULL
+		  AND (? = '' OR st.session_id = ?)
+		  AND EXISTS (
+			SELECT 1 FROM topic_segments better
+			WHERE better.session_id = st.session_id
+			  AND better.method IN (?, ?)
+			  AND better.from_msg_id <= st.to_msg_id
+			  AND better.to_msg_id   >= st.from_msg_id
+		  )`,
+		better[0], better[1],
+		SegmentMethodLLM,
+		SegmentMethodStructural,
+		sessionID, sessionID,
+		better[0], better[1])
+	if err != nil {
+		return 0, fmt.Errorf("retire structural spans: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

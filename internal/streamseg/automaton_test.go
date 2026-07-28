@@ -214,3 +214,45 @@ func TestSupersedesAreQueuedNotApplied(t *testing.T) {
 		t.Error("draining twice returned the same event — the caller would persist it twice")
 	}
 }
+
+// TestSealAllOpenSalvagesSpansAtTranscriptEnd is the 🎯T132.4 gap.
+//
+// Only sealed spans persist, so a span still open when a session stops was
+// discarded outright. A session's final stretch is often its most active,
+// which made the live tier quiet exactly where it mattered most — and the
+// sweep measured every configuration worse than it really was as a result.
+func TestSealAllOpenSalvagesSpansAtTranscriptEnd(t *testing.T) {
+	a := New("sess", Config{SealLookahead: 99}, nil) // lookahead can never be met
+	a.Ingest(mkMsgs(1, 20))
+	a.Apply([]Event{{Kind: EventOpen, Ref: "t1", From: 1, Label: "unfinished topic"}})
+
+	// Normal sealing is impossible here: the lookahead will never be
+	// satisfied, which is the shape of a session that simply stopped.
+	if sealed := a.Apply([]Event{{Kind: EventSeal, Ref: "t1", To: 10, Summary: "x"}}); len(sealed) != 0 {
+		t.Fatal("lookahead should have held this seal")
+	}
+
+	got := a.SealAllOpen(a.LastTailID())
+	if len(got) != 1 {
+		t.Fatalf("SealAllOpen returned %d spans, want 1 — the span was lost", len(got))
+	}
+	if got[0].From != 1 || got[0].To != 20 {
+		t.Errorf("span = [%d,%d], want [1,20]", got[0].From, got[0].To)
+	}
+	if got[0].Label != "unfinished topic" || got[0].Summary == "" {
+		t.Errorf("force-sealed span lost its label/summary: %+v", got[0])
+	}
+	if len(a.OpenSpans()) != 0 {
+		t.Error("span still open after SealAllOpen")
+	}
+}
+
+// TestSealAllOpenIsANoOpWithNothingOpen: Finish is called on every session
+// end, so the common case must cost nothing.
+func TestSealAllOpenIsANoOpWithNothingOpen(t *testing.T) {
+	a := New("sess", Config{}, nil)
+	a.Ingest(mkMsgs(1, 5))
+	if got := a.SealAllOpen(5); got != nil {
+		t.Errorf("expected no spans, got %d", len(got))
+	}
+}
