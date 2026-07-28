@@ -1192,14 +1192,16 @@ targets:
     discovered: 2026-07-28
   T132.4:
     name: The streaming operating point is chosen by measurement, and structural spans leave retrieval only once stream spans beat them
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - A grid over model tier x effort x drip size x seal-lookahead K is run, with boundaries scored by the existing Pk/WindowDiff against high-effort hindsight gold, and label/summary quality judged separately from boundary placement
-    - The chosen operating point is documented with measured cost per active-session-day — the prior is that low effort wins, since summarisation here is extraction rather than hard thinking, and the sweep exists to falsify that rather than confirm it
-    - Structural spans retire from retrieval (or reduce to unsummarised-gap markers) ONLY after stream spans clear a stated quality bar — the same bar that has kept DefaultSegmentExpand at none
-    - DefaultSegmentExpand's default is revisited in light of the result, since the reason it is off is precisely the quality the structural layer could not reach
+    - 'A grid is run and scored with the existing Pk/WindowDiff against hindsight gold. PARTIALLY DONE. model x drip x K was run (sonnet/haiku, drip 12/24, K=3) over 2 gold sessions via cmd/streamseg-sweep, scored against llm-method spans. Pk/WindowDiff now have their first production caller. NOT done: the EFFORT axis (claudia''s TaskConfig exposes no effort setting; it is a Claude Code /effort mode, so varying it needs a different mechanism), and label/summary quality judged SEPARATELY from boundary placement — only boundaries are scored today.'
+    - 'The chosen operating point is documented with measured cost. DONE: sonnet / drip 12 / K=3, meanPk 0.267 against a 0.55-0.65 naive baseline, recorded in docs/design/streaming-segmentation.md and now the code defaults. Cost measured per drip (in~45,000 out~830 for an 840-byte payload) and per session (~12 drips ~540k input for 150 messages). Cost per active-session-DAY is stated as a scaling rather than measured, since that needs observed sessions/day the watcher has not yet run long enough to provide.'
+    - 'The low-effort prior is falsified rather than confirmed. DONE, and this was the point of running it: haiku is worse than sonnet at every drip size and produces nothing at drip 24. Mechanism identified by direct probe — haiku emits valid JSONL and opens spans but rarely seals them, and only sealed spans persist, so few drips plus low seal propensity converges on zero output.'
+    - 'NOT DONE — structural spans retire from retrieval once stream spans clear a stated bar. Two things block it, and neither is effort: 2 sessions is enough to choose between four points but not to declare a quality bar cleared, and there is no way to enumerate which spans came from which configuration, so nothing could act on the decision. That enumeration is 🎯T134, which this now depends on.'
+    - NOT DONE — DefaultSegmentExpand revisited. It stays 'none' until the bar above is actually cleared; flipping it on the strength of a 2-session sweep would be exactly the unearned confidence the bar exists to prevent.
+    - DISCOVERED, not yet fixed — a span still open when a transcript ends is lost, because only sealed spans persist. Batch finalisation covers the region so retrieval has no hole, but the live tier is silent precisely where a conversation stopped, which is often where it was most active. Force-sealing at transcript end is the obvious fix.
     context: Sub-target 4 of 🎯T132, deliberately last. Pk and WindowDiff already exist in internal/segment/structural.go, fully implemented and tested, with no production caller — a scoring harness with nothing to score. This gives them the job. Retiring the structural tier is last because removing the current provisional layer before stream spans have demonstrably beaten it trades a weak signal for no signal.
     depends_on:
     - T132.3
@@ -1222,15 +1224,25 @@ targets:
     - A supersession is only written with a stated reason, and the judgement is recorded so it can be reviewed. An automatic 'this overturns that' with no rationale is a claim no one can check and would quietly corrupt ranking.
     - 'Nothing is deleted, consistent with 🎯T132.1: the superseded span keeps its row and its content, and retrieval demotes rather than hides it.'
     context: |-
-      Raised by Marcelo 2026-07-28 while reviewing 🎯T132: "whether it covers backfilling of previously filled summaries/spans that are no longer considered correct". It does not, and the gap is worth naming precisely.
+      Raised by Marcelo 2026-07-28 while reviewing 🎯T132: does it cover backfilling spans "no longer considered correct"? It does not. 🎯T132's supersession is intra-session by construction — the watcher can only overturn spans in its own bounded working set, and finalisation only supersedes stream spans inside the window it just redrew. A conclusion reached in session A and overturned in session B stays live and confident forever.
 
-      🎯T132's supersession is intra-session by construction. The watcher can only overturn a span still in its bounded working set — that is the whole point of the bounded state — and finalisation only supersedes the stream spans lying inside the window it just redrew. Neither mechanism can see across sessions, so a conclusion reached in session A and overturned in session B stays live and confident forever.
+      This is the exact case that motivated 🎯T131, whose context records segment search serving pre-🎯T39 conclusions ("fd I/O not functional on Windows"). 🎯T131 fixed ELIGIBILITY — those sessions can now get spans — but nothing marks the older wrong one superseded, so the result is two contradictory spans rather than one correct one.
 
-      This is not hypothetical: it is the exact example that motivated 🎯T131. That target's context records segment search serving pre-🎯T39-era conclusions ("fd I/O not functional on Windows") because the sessions that overturned them had no spans. 🎯T131 fixed the ELIGIBILITY half — those sessions can now be compacted and will get spans. But once they have spans, nothing marks the older, wrong one as superseded. The stale claim still ranks; there are simply now two contradictory spans instead of one.
+      Distinct from 🎯T134, which is stale DERIVATION (a better method now exists) rather than stale CONCLUSION (later work proved the claim wrong).
 
-      Note this is distinct from the sibling gap of spans drawn by a method or operating point since superseded (stale DERIVATION rather than stale CONCLUSION), which needs a version stamp that does not exist yet.
+      WITNESS — one viable approach, recorded so this is a build target rather than research. The implementer is free to better it.
 
-      Scoping caution: the naive shape — ask a model whether any span overturns any other — is O(n^2) over ~31k sessions and is not viable. The design has to be candidate-generation first, judgement second, which is why this is its own target rather than a criterion bolted onto 🎯T132.
+      The naive shape is "ask a model whether any span overturns any other": 383 llm spans today is ~73k pairs, and it grows quadratically. Not viable. Three steps make it linear-ish:
+
+      1. CANDIDATE GENERATION, using infrastructure that already exists. topic_segments_fts is an external-content FTS5 table over (label, summary). For each span S, query it for spans sharing terms with S, restricted to the same repo and to last_ts LATER than S's. Take the top K (K≈5) by FTS rank. That is one FTS query per span, not a pairwise scan, and turns O(n^2) into O(n·K).
+
+      2. JUDGEMENT, one call per SPAN rather than per pair. Send S plus all K candidates in a single Task-mode prompt: "Here is a conclusion and five later ones from the same repo. Which, if any, overturn it? Reply JSONL with a reason, or nothing." 383 calls, not 1900. At the ~45k-input fixed overhead measured in 🎯T132.2 that is a bounded, knowable cost before starting — and it shrinks further by only judging spans in repos with activity after the span's own timestamp.
+
+      3. WRITE the superseded_by edge with the model's stated reason, into a column that already exists (🎯T132.1). Nothing is deleted; retrieval demotes.
+
+      Runs as a reconciler under the existing 🎯T68 convergence data plane, so it is incremental, restartable, and re-runs only where divergence appears.
+
+      Cheaper first slice if the full pass is not yet warranted: run candidate generation only for spans actually returned by a search, and queue the judgement asynchronously. That bounds work to what someone actually looked at, at the cost of the first viewer seeing the stale span once.
     tags:
     - segmentation
     - supersession
@@ -1251,15 +1263,23 @@ targets:
     - The cost of a full redraw is knowable before starting it, in the same terms as 🎯T131's cost policy — sessions, messages, and estimated summariser volume.
     - Structural spans in sessions that have since gained llm or stream coverage are the first population this retires, since that is the clearest case of a derivation superseded by a better one.
     context: |-
-      Raised by Marcelo 2026-07-28 alongside 🎯T133, from the same question about backfilling spans "no longer considered correct". There are two distinct readings of that phrase and they need different machinery, so they are separate targets.
+      Raised by Marcelo 2026-07-28 alongside 🎯T133, from the same question about backfilling spans "no longer considered correct". Two readings, different machinery, so two targets. 🎯T133 is a stale CONCLUSION: the span was drawn correctly and later work proved the claim wrong. This is a stale DERIVATION: the claim may be fine, but a better method now exists.
 
-      🎯T133 is about a stale CONCLUSION: the span was drawn correctly, and later work proved the claim wrong. This target is about a stale DERIVATION: the claim may be fine, but a better method now exists and the span should be redrawn.
+      The blocker is that derivation is unrecorded. topic_segments carries method and computed_at and nothing else about provenance — no model, no effort, no drip size, no seal-lookahead, no prompt version. After 🎯T132.4 picks an operating point there will be no way to ask which spans predate it, and the only honest answer would be "redraw everything". That is the position 🎯T131 was in for compaction eligibility, and getting out of it cost a full-corpus pass.
 
-      The blocker is that derivation is currently unrecorded. topic_segments carries `method` and `computed_at` and nothing else about provenance — no model, no effort, no drip size, no seal-lookahead, no prompt version. So after 🎯T132.4 picks an operating point there will be no way to ask "which spans predate it", and the only honest answer would be to redraw everything. That is exactly the position 🎯T131 was in for compaction eligibility, and it cost a full-corpus pass to get out of.
+      WITNESS — one viable approach, so this is a build target rather than research.
 
-      Cheapest useful first slice: a nullable derivation column (append-only schema policy permits it) written by the stream and llm writers, plus a query that enumerates spans by derivation. Redrawing can follow once the population is nameable.
+      1. A nullable `derivation TEXT` column on topic_segments, holding a compact stable key: method/model/drip/lookahead/prompt-version, e.g. `stream/sonnet/d12/k3/p1` or `llm/sonnet/p2`. Nullable ADD COLUMN, which sqlift permits under AllowNone, so this stays inside the append-only schema policy with no gate relaxed — the same move 🎯T132.1 made for superseded_by, already proven against a database built from the previous schema. NULL means "drawn before provenance was recorded", which is itself a usable population.
 
-      The structural tier is the obvious first population to retire this way, and it connects to 🎯T132.4's last criterion — structural spans leave retrieval once stream spans clear a stated bar, and this is the mechanism that would actually remove them.
+      2. Writers stamp it: PutStreamSpans takes the runner's config, PutCompactionSegments stamps the compactor's model and prompt version. Both already know these values; they simply discard them today.
+
+      3. Enumeration is then a plain query — SELECT derivation, COUNT(*) FROM topic_segments GROUP BY derivation — which both names the populations and prices the redraw before it starts, in the same terms as 🎯T131's cost policy.
+
+      4. Redraw as a reconciler under the 🎯T68 data plane, selecting spans whose derivation is not in the current-best set. Write the replacement BEFORE clearing the old row, so an interrupted pass leaves the old span standing rather than a gap. Idempotent, since span ids are extent-derived.
+
+      5. First population to retire: structural spans in sessions that have since gained llm or stream coverage. That is the clearest case of a derivation superseded by a better one, and it is the mechanism 🎯T132.4's last criterion needs in order to actually remove structural spans from retrieval rather than merely deciding they should go.
+
+      Cheapest useful slice is steps 1-3 alone: recording provenance and being able to name the populations is independently valuable, and it is the part that must exist before any redraw can be scoped at all.
     tags:
     - segmentation
     - provenance
