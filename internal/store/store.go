@@ -864,8 +864,34 @@ func applyFreshSchema(dbPath string) (bool, error) {
 		return false, nil // existing schema — defer to sqlift's migration
 	}
 
-	if _, err := db.Exec(schemaSQL); err != nil {
+	// One transaction for the whole schema, not 221 of them (🎯T130).
+	//
+	// schema.sql holds 221 CREATE statements. Executed bare, each runs in
+	// its own implicit transaction, and each of those ends in an fsync
+	// under SQLite's default synchronous=FULL. The test suites build 183
+	// fresh stores, so that is ~40,000 fsyncs per CI run.
+	//
+	// Where the disk makes fsync nearly free — APFS on the dev Mac, the
+	// Parallels VM's NVMe — this is invisible. On the GitHub runner's
+	// virtual disk it is milliseconds each, and the arithmetic lands
+	// squarely on the observed cost: internal/store took 1055s there
+	// against 23s locally, a 45x gap that no amount of CPU difference
+	// explains.
+	//
+	// Batching costs no durability: one transaction is atomic where 221
+	// were not, so a crash mid-create now leaves no half-built schema for
+	// sqlift to misread as an existing one. synchronous is deliberately
+	// left alone — the fsync COUNT was the problem, not fsync itself.
+	tx, err := db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin fresh-schema apply: %w", err)
+	}
+	if _, err := tx.Exec(schemaSQL); err != nil {
+		tx.Rollback()
 		return false, fmt.Errorf("apply schema.sql directly: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit fresh schema: %w", err)
 	}
 	return true, nil
 }

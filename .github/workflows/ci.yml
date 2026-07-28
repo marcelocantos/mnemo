@@ -74,22 +74,23 @@ jobs:
         with:
           go-version-file: mnemo/go.mod
 
-      # 🎯T130. The test suite creates ~180 short-lived on-disk SQLite
-      # databases (one per newTestStore / storetest.NewStore call), each
-      # with its own -wal and -shm, under RUNNER_TEMP. Defender scans every
-      # one of those file creations synchronously, and that — not Windows,
-      # and not CGO — is what makes this job 20-40x slower here than the
-      # same suite on the local Parallels Win11 VM, which runs identical
-      # flags and packages in 1-2 minutes.
+      # 🎯T130. Defender exclusion for the paths the suite writes.
       #
-      # The evidence this is worth doing rather than raising the timeout a
-      # third time: the ceiling was already moved 10m -> 20m once, and the
-      # job still crosses it at random (run 30324247982 failed, 30343804960
-      # passed, on near-identical code). A flapping advisory job trains the
-      # reader to ignore it, which is worse than a slow one.
+      # HONEST RESULT: this was the leading hypothesis for the job's
+      # slowness and it was WRONG. Measured — all four exclusions applied
+      # cleanly (run 30355204617) and the job went 22m42s -> 21m25s, which
+      # is inside run-to-run noise. internal/store still took 1055s against
+      # 23s locally, the same 45x gap as before.
       #
-      # Scoped to the paths the suite actually writes, not a blanket
-      # disable, and confined to a throwaway CI runner.
+      # The actual cause was fsync COUNT during schema creation, fixed in
+      # applyFreshSchema (internal/store/store.go): 221 CREATE statements
+      # were each running in their own implicit transaction, ~40,000
+      # fsyncs per CI run across 183 fresh test stores.
+      #
+      # Kept because it is free, scoped, and confined to a throwaway
+      # runner — and because leaving it documents the refutation, so the
+      # next person investigating this job does not spend the afternoon
+      # re-testing Defender.
       - name: Exclude test scratch paths from Defender (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
