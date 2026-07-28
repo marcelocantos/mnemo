@@ -6345,6 +6345,20 @@ var (
 var testMidStreamCommitOffset func(int64)
 
 func (s *Store) ingestFile(path string) error {
+	// Route rather than mangle (🎯T127). This is the Claude-format parser:
+	// it derives the session id from the FILENAME STEM and upserts
+	// session_meta without a source, so a foreign transcript reaching it
+	// produces a phantom session — stem-keyed, message-less, and tagged
+	// 'claude' by schema default. Four such rows exist in the wild from
+	// before Codex ingest landed. The caller already routes; this makes
+	// the invariant local so a future caller cannot reintroduce it.
+	if isCodexRollout(path) {
+		return s.ingestCodexFile(path)
+	}
+	if isGrokUpdates(path) {
+		return s.ingestGrokFile(path)
+	}
+
 	s.mu.Lock()
 	offset := s.offsets[path]
 	s.mu.Unlock()
@@ -6523,8 +6537,14 @@ func (s *Store) ingestFile(path string) error {
 	if metaCwd != "" || metaBranch != "" || metaTopic != "" || metaCompactorInternal == 1 {
 		repo := extractRepo(metaCwd)
 		workType := classifyWorkType(metaBranch)
-		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+		// source is stated explicitly rather than left to the schema
+		// default (🎯T127). Relying on the default made "produced by
+		// Claude" indistinguishable from "nobody said", which is how
+		// foreign sessions came to be tagged claude and stayed that way —
+		// ingest is offset-based, so nothing ever re-reads a consumed file
+		// to correct it.
+		ws.tx.Exec(`INSERT INTO session_meta (session_id, repo, cwd, git_branch, work_type, topic, compactor_internal, source)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'claude')
 			ON CONFLICT(session_id) DO UPDATE SET
 				repo = CASE WHEN excluded.repo != '' THEN excluded.repo ELSE session_meta.repo END,
 				cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE session_meta.cwd END,
