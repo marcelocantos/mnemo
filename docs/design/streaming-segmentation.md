@@ -143,3 +143,76 @@ dependency order — each independently shippable and independently useful:
 Retiring the structural tier is deliberately last. It is the current
 provisional layer, and removing it before stream spans have demonstrably
 beaten it would trade a weak signal for no signal.
+
+## Measured operating point (🎯T132.4)
+
+Replay sweep over 2 gold sessions with ≥3 llm-method spans, scored with
+Pk/WindowDiff against those spans as hindsight gold. `streamseg-sweep`
+reproduces it; `--dry-run` exercises the harness with no model calls.
+
+| point | meanPk | meanWD | spans | drips | wall |
+|---|---:|---:|---:|---:|---|
+| **sonnet, drip 12, K=3** | **0.267** | 0.293 | 3.5 | 12.5 | 7m42s |
+| sonnet, drip 24, K=3 | 0.332 | 0.332 | 3.5 | 6.5 | 3m50s |
+| haiku, drip 12, K=3 | 0.366 | 0.409 | 3.5 | 12.5 | 6m31s |
+| haiku, drip 24, K=3 | 1.000 | 1.000 | 0.0 | 6.5 | 3m37s |
+
+Lower is better; both metrics are in [0,1]. The naive fixed-period
+baseline (`--dry-run`) scores 0.55–0.65, so sonnet at drip 12 is roughly
+twice as good as cutting blind — the tier is earning its keep, not just
+producing plausible-looking output.
+
+**Chosen: sonnet, drip 12, K=3.**
+
+### The low-effort prior was wrong
+
+This design predicted that a small model would suffice, "since
+summarisation is extraction rather than hard thinking", and the sweep
+existed to falsify that rather than confirm it. It falsified it. Haiku is
+worse than sonnet at every drip size, and at drip 24 it produces nothing
+at all.
+
+The mechanism is specific, and it is not a parsing problem: haiku emits
+valid JSONL and opens spans, but rarely seals them. Probed directly, a
+24-message drip returned exactly one `open` and no `seal`. Because only
+sealed spans persist — an open span is working state, not a claim — a
+configuration with few drips and a low propensity to seal converges on
+zero output. At drip 12 the extra opportunities let it close 3.5 spans
+per session; at drip 24 it closes none.
+
+### Cost
+
+Per drip, measured: **in≈45,000, out≈830** for an 840-byte payload. The
+fixed overhead — Claude Code's own system prompt, tool definitions and
+CLAUDE.md — dominates the drip content by roughly 50x.
+
+The consequence matters more than the number: **cost tracks call count,
+not drip size**. Doubling the drip halves the calls and therefore nearly
+halves the cost, which is why drip 24 runs in half the wall-clock of drip
+12. That pulls directly against freshness, which is the entire point of
+streaming. Drip 12 is chosen accepting roughly double the cost of drip 24
+for a 0.065 Pk improvement and, more importantly, for spans that land
+while the conversation is still going.
+
+At drip 12 a 150-message session costs ~12 drips ≈ 540k input tokens.
+Scale by sessions per day; the watcher's `max_concurrent` is the ceiling
+on how much of that can run at once.
+
+### Known gap this surfaced
+
+A span still open when a transcript ends is lost — the automaton only
+persists sealed spans. For a session that ends mid-topic, the stream tier
+contributes nothing for that final stretch. Batch finalisation covers the
+region at session close (🎯T132.3), so retrieval does not have a hole; but
+the live tier is silent exactly where a conversation stopped, which is
+often where it was most active. Force-sealing open spans at transcript end
+is the obvious fix and is not yet done.
+
+### Why structural spans have not been retired
+
+🎯T132.4's last criterion holds structural spans in retrieval until stream
+spans clear a stated bar. Two things block calling that now: this sweep
+covers 2 sessions, which is enough to choose between four points but not
+enough to declare a quality bar cleared; and there is no way to enumerate
+which spans came from which configuration, so nothing could act on the
+decision anyway. That enumeration is 🎯T134.

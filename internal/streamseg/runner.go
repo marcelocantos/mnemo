@@ -52,9 +52,15 @@ type Runner struct {
 	auto *Automaton
 }
 
-// DefaultDripSize is deliberately modest: the point of streaming is
-// freshness, and a large drip is just batch segmentation with extra
-// steps.
+// DefaultDripSize is the measured operating point (🎯T132.4), not a
+// guess. The sweep found drip 12 beats drip 24 on boundary quality
+// (meanPk 0.267 vs 0.332) at roughly double the cost, because cost tracks
+// CALL COUNT rather than payload — the ~45k fixed per-call overhead
+// dominates an 840-byte drip by ~50x.
+//
+// Drip 12 is chosen accepting that, because a large drip is batch
+// segmentation with extra steps: the whole value of the tier is spans
+// landing while the conversation is still going.
 const DefaultDripSize = 12
 
 // Start prepares the runner, recovering from whatever is already durable.
