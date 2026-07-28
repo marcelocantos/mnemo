@@ -310,6 +310,7 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_tool_result` | Raw tool-result payload by `(session_id, tool_use_id)` — supports byte offset + truncation |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
+| `mnemo_session_go` | Reopen a past conversation: resolve a loose reference (id/prefix, repo fragment, `latest`, `latest:<scope>`) and resume it in an iTerm2 tab in the directory that session ran in. Claude Code and Grok CLI; Codex/ChatGPT refused by name |
 
 ### Cross-project knowledge
 

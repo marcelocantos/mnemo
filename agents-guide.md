@@ -482,6 +482,45 @@ Parameters:
 - `addenda_limit` — max addenda messages past the cursor to include
   (default 200)
 
+### mnemo_session_go
+
+Reopen a past conversation. Resolves a loose reference to one session,
+opens an iTerm2 tab in the directory that session ran in, and resumes it
+there.
+
+Reach for this when someone wants to pick a conversation back up but
+doesn't have its id — which is the normal case. The usual flow is a
+dialogue: find the session with `mnemo_search` or `mnemo_sessions`, then
+reopen it. An exact id always wins, so handing back an id you just
+discovered does the obvious thing.
+
+Parameters:
+- `session` — how to find it. Omitted, `"latest"`, or `"recent"` for the
+  most recent substantive session; `"latest:<scope>"` (or
+  `"latest <scope>"`) for the newest in a matching repo or project;
+  a session id or unique prefix for that exact session; anything else is
+  treated as a repo/project fragment and matches the newest one.
+
+It reopens in the session's **own** working directory, never the
+caller's. A conversation is about a working tree, so resuming it
+somewhere else hands the agent context that contradicts its own
+transcript. A recorded directory that no longer exists — a deleted repo,
+or a temp dir that has since evaporated — is reported as such rather
+than silently substituted.
+
+Each session gets its own tab rather than stealing one belonging to
+another session that happens to share a working directory.
+
+Claude Code and Grok CLI sessions resume (`claude --resume <id>` and
+`grok --resume <id>`; neither forks). Codex/ChatGPT sessions are indexed
+but have no verified terminal resume — they appear to be Desktop/IDE
+conversations rather than CLI ones — so they are refused by name rather
+than opened as a bare shell.
+
+Requires iTerm2 and the daemon's Automation permission, as
+`mnemo_thread_go` does. Returns `{action: focused|spawned, path,
+session_id, repo, topic, command}`.
+
 ### mnemo_self
 
 Discover the calling session's ID. Two-phase nonce protocol:
