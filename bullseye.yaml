@@ -834,7 +834,7 @@ targets:
     achieved: 2026-07-27
   T123:
     name: The two failure modes that were invisible to CI — a worker outrunning a deferred schema upgrade, and a shutdown that never checkpoints — are caught by automated tests rather than by watching a live daemon
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -856,6 +856,30 @@ targets:
     - shutdown
     - migration
     origin: coverage audit, 2026-07-28
+    discovered: 2026-07-28
+    achieved: 2026-07-28
+  T124:
+    name: Mirror stream work is cancellable and silent about directories that are not git repos, so shutdown does not have to abandon it
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The gh and git subprocesses spawned by the mirror streams take a context (exec.CommandContext), so cancelling the worker context terminates them rather than letting them run to completion. Oracle: a test cancels mid-fetch and asserts the call returns promptly with a cancellation error.'
+    - 'Registry.Close returns well inside workerDrainGrace when the only work in flight is mirror work — i.e. the bounded wait added by 🎯T122 becomes a genuine backstop rather than something the healthy path relies on. Oracle: the test deleted during 🎯T123 (Close is prompt when workers stop) can be reinstated and passes.'
+    - 'A session-connected directory that is not a git repo produces no recurring warning from the commits stream. Oracle: over an hour of runtime, ''git log failed ... exit status 128'' appears at most once per repo, or not at all.'
+    - The commits stream, like the gh streams, skips a path it has established is not a git checkout rather than re-shelling every pass.
+    context: |-
+      Filed 2026-07-28 during a pre-PR pass over the graph. Two related loose ends this session surfaced but did not fix.
+
+      (1) The mirror streams shell out via exec.Command with NO context: fetchAndUpsertPRs / fetchAndUpsertIssues (gh pr list, gh issue list), pollCIForRepo (gh run list), and ingestGitCommits (git log). Cancellation therefore does not reach them, so a subprocess in flight runs to completion no matter what shutdown wants. That is why 🎯T122 had to bound Registry.Close's worker wait and abandon workers rather than await them — and why a test asserting Close is prompt for well-behaved workers had to be deleted in 🎯T123 (it failed: the daemon's own workers take >3s to notice cancellation). Making these context-aware removes the need to abandon anything and turns the grace back into a true backstop.
+
+      (2) The commits stream re-runs `git log` every pass against session-connected directories that were never git repos, producing recurring "git log failed ... exit status 128" warnings — observed for Health-Management-Systems/fundguard, marcelocantos/quixy and marcelocantos/vendep, three per reconcile pass, indefinitely. 🎯T116/🎯T117 gave the gh streams identity resolution and failure backoff; the local commits stream got the session-scoping but not the equivalent "this is not a checkout, stop asking" handling.
+    tags:
+    - mirrors
+    - shutdown
+    - noise
+    - cancellation
+    origin: pre-PR graph pass, 2026-07-28
     discovered: 2026-07-28
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
