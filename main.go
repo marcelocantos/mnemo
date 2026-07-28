@@ -108,6 +108,59 @@ const (
 	drainDeadline = drainIntakeGrace + drainStoreBudget
 )
 
+// intakeStopper is anything that can stop accepting new work
+// gracefully, bounded by a context — http.Server and the MCP
+// streamable-HTTP server both qualify.
+type intakeStopper interface {
+	Shutdown(context.Context) error
+}
+
+// intakeCloser is anything that can be torn down immediately.
+type intakeCloser interface {
+	Close() error
+}
+
+// drainIntake stops accepting new work, gives in-flight requests until
+// grace to finish, then force-closes whatever is still attached
+// (🎯T122).
+//
+// The BOUNDED grace is the load-bearing part. http.Server.Shutdown
+// waits for active requests, and mnemo's MCP transport is long-lived by
+// design: a streamable-HTTP session holds an open request that never
+// completes on its own. So with any client attached — mcpbridge always
+// is — Shutdown returns only when its context expires. Previously that
+// context was the whole drain deadline, so intake consumed all of it
+// and Store.Close (the only caller of the WAL checkpoint) never ran.
+//
+// The force-close afterwards is hygiene rather than the fix: Shutdown
+// has already stopped the listener by then, so this just severs the
+// connection still hanging off it instead of leaving it to the process
+// exit.
+//
+// Shutdown returning an error here is therefore the EXPECTED case, not
+// an alarm: it means the grace elapsed with a client still connected.
+func drainIntake(grace time.Duration, graceful []intakeStopper, force []intakeCloser) {
+	slog.Info("drain: stopping intake", "grace", grace)
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	for _, s := range graceful {
+		if s == nil {
+			continue
+		}
+		if err := s.Shutdown(ctx); err != nil {
+			slog.Debug("drain: intake did not stop gracefully", "err", err)
+		}
+	}
+	for _, c := range force {
+		if c == nil {
+			continue
+		}
+		if err := c.Close(); err != nil {
+			slog.Debug("drain: intake close", "err", err)
+		}
+	}
+}
+
 // summariserWorkDir returns a dedicated, always-present working
 // directory for the compactor/reviewer's `claude -p` subprocesses
 // (🎯T82). The summariser is stateless — it summarises the prompt text,
@@ -1406,32 +1459,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			// MCP transport keeps one open indefinitely by design, so this
 			// phase timing out is the expected case whenever a client is
 			// attached — not an error worth alarming about.
-			intakeCtx, cancelIntake := context.WithTimeout(context.Background(), drainIntakeGrace)
-			slog.Info("drain: stopping HTTP MCP intake")
-			if err := httpSrv.Shutdown(intakeCtx); err != nil {
-				slog.Debug("HTTP MCP shutdown did not finish gracefully", "err", err)
-			}
-			slog.Info("drain: stopping HTTP server intake")
-			if err := httpServer.Shutdown(intakeCtx); err != nil {
-				slog.Debug("HTTP server shutdown did not finish gracefully", "err", err)
-			}
+			graceful := []intakeStopper{httpSrv, httpServer}
+			force := []intakeCloser{httpServer}
 			if fedSrv != nil {
-				slog.Info("drain: stopping federated intake")
-				if err := fedSrv.Shutdown(intakeCtx); err != nil {
-					slog.Debug("federated HTTP shutdown did not finish gracefully", "err", err)
-				}
+				graceful = append(graceful, fedSrv)
+				force = append(force, fedSrv)
 			}
-			cancelIntake()
-			// Force-close anything still attached. Without this a live MCP
-			// stream holds the listener open past every deadline, which is
-			// exactly how shutdown used to end in a hard exit with the WAL
-			// never checkpointed.
-			if err := httpServer.Close(); err != nil {
-				slog.Debug("HTTP server close", "err", err)
-			}
-			if fedSrv != nil {
-				_ = fedSrv.Close()
-			}
+			drainIntake(drainIntakeGrace, graceful, force)
 			// 2. Release singleton background lease (🎯T97.4) so a peer
 			// backend can acquire and start ingest/compaction.
 			slog.Info("drain: releasing background lease")
