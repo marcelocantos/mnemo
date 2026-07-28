@@ -215,6 +215,9 @@ func main() {
 		case "thread":
 			cmdThread(os.Args[2:])
 			return
+		case "resume":
+			cmdResume(os.Args[2:])
+			return
 		case "edge":
 			cmdEdge(os.Args[2:])
 			return
