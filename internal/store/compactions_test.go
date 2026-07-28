@@ -677,3 +677,88 @@ func TestChainCompactionsWalksChain(t *testing.T) {
 			got[0].Summary, got[1].Summary)
 	}
 }
+
+// TestSelectCompactionCandidatesTokenlessSession is the 🎯T131 regression.
+//
+// Grok and Codex transcripts carry no per-turn usage, so the owed metric —
+// SUM(output_tokens + cache_creation_tokens) — is exactly zero for them at
+// any conversation length. Those sessions were therefore never owed and
+// never appeared in the backlog, so mnemo_compactor_status reported zero
+// while an entire source class was invisible to it.
+//
+// msg() omits `usage`, which is precisely that shape. The session must
+// become owed once its substantive message count crosses the fallback
+// floor, and must stay quiet below it.
+func TestSelectCompactionCandidatesTokenlessSession(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	// Budget of 5 fallback-messages, stated in tokens so the test exercises
+	// the real threshold arithmetic rather than a message count sneaked in
+	// by the back door.
+	budget := 5 * FallbackTokensPerMessage
+
+	var short []map[string]any
+	for i := 0; i < 4; i++ {
+		short = append(short, msg("user", "a question with real content", old.Add(time.Duration(i)*time.Minute).Format(time.RFC3339)))
+	}
+	writeJSONL(t, dir, "p", "sess-quiet", short)
+
+	var long []map[string]any
+	for i := 0; i < 12; i++ {
+		long = append(long, msg("user", "a question with real content", old.Add(time.Duration(i)*time.Minute).Format(time.RFC3339)))
+	}
+	writeJSONL(t, dir, "p", "sess-tokenless", long)
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	// Sanity: the fixture really does carry no usage metadata. If this
+	// ever fails the test is passing for the wrong reason.
+	var sessTokens int64
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM entries
+		 WHERE session_id = 'sess-tokenless'`).Scan(&sessTokens); err != nil {
+		t.Fatal(err)
+	}
+	if sessTokens != 0 {
+		t.Fatalf("fixture carries token metadata (%d) — it no longer reproduces the bug", sessTokens)
+	}
+
+	ids := candidateIDs(t, s, budget, 0.10)
+	if !ids["sess-tokenless"] {
+		t.Error("a token-less session past the fallback floor must be owed (🎯T131)")
+	}
+	if ids["sess-quiet"] {
+		t.Error("a token-less session below the fallback floor must not be owed")
+	}
+}
+
+// TestAddendaTokensTokenlessSession pins the Go-level twin to the same
+// rule. AddendaTokens backs mnemo_compacted_session; if it kept reporting
+// zero while the candidate query considered the session owed, the tool
+// would claim a session held no addenda while the watcher compacted it.
+func TestAddendaTokensTokenlessSession(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	var entries []map[string]any
+	for i := 0; i < 6; i++ {
+		entries = append(entries, msg("user", "a question with real content", old.Add(time.Duration(i)*time.Minute).Format(time.RFC3339)))
+	}
+	writeJSONL(t, dir, "p", "sess-tl-addenda", entries)
+
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	got, err := s.AddendaTokens("sess-tl-addenda", 0)
+	if err != nil {
+		t.Fatalf("AddendaTokens: %v", err)
+	}
+	if want := 6 * FallbackTokensPerMessage; got != want {
+		t.Errorf("AddendaTokens = %d, want %d (6 substantive messages via the fallback)", got, want)
+	}
+}

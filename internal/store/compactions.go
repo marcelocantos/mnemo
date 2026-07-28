@@ -339,8 +339,12 @@ func (s *Store) SelectCompactionCandidatesSince(
 		    COALESCE((
 		      SELECT SUM(input_tokens + output_tokens) FROM entries
 		      WHERE session_id = ss.session_id AND type = 'assistant'
-		    ), 0)                                                                                   AS sess_tokens
-		  FROM session_summary ss%s
+		    ), 0)                                                                                   AS sess_tokens,
+		    COALESCE((
+		      SELECT COUNT(*) FROM messages
+		      WHERE session_id = ss.session_id AND is_noise = 0
+		    ), 0)                                                                                   AS sess_msgs
+		  FROM session_summary ss%[1]s
 		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
 		)
 		SELECT s.session_id, s.connection_id, COUNT(*) OVER () AS backlog
@@ -350,23 +354,46 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  -- excluded by the ingest-stamped flag, not by cwd prefix.
 		  s.compactor_internal = 0
 		  -- Runaway backstop: skip sessions whose summariser cost has
-		  -- already met the configured ratio. Unmeasurable sessions
-		  -- (zero session tokens) are allowed through.
-		  AND (s.sess_tokens = 0 OR s.comp_tokens * 1.0 / s.sess_tokens < ?)
+		  -- already met the configured ratio. Measured against the
+		  -- ESTIMATED session volume so a token-less session is capped
+		  -- too — the old form short-circuited on sess_tokens = 0, which
+		  -- let exactly the sessions this query newly admits run with no
+		  -- spend ceiling at all. Zero estimate (no tokens, no messages)
+		  -- still passes; the owed predicate rejects it a line later.
+		  AND (CASE WHEN s.sess_tokens > 0 THEN s.sess_tokens
+		            ELSE s.sess_msgs * %[2]d END = 0
+		       OR s.comp_tokens * 1.0 /
+		          (CASE WHEN s.sess_tokens > 0 THEN s.sess_tokens
+		                ELSE s.sess_msgs * %[2]d END) < ?)
 		  -- Unified floor + re-compaction trigger: owed when the addenda
-		  -- token volume past the cursor meets the budget. The cursor
-		  -- (a messages.id) is mapped to its entries.id so the sum ranges
+		  -- volume past the cursor meets the budget. The cursor (a
+		  -- messages.id) is mapped to its entries.id so the sum ranges
 		  -- over assistant entries strictly after the compacted span;
 		  -- cursor 0 (no compaction) makes this the whole-session volume.
-		  AND COALESCE((
-		    SELECT SUM(e.output_tokens + e.cache_creation_tokens)
-		    FROM entries e
-		    WHERE e.session_id = s.session_id
-		      AND e.type = 'assistant'
-		      AND e.id > COALESCE((
-		        SELECT m.entry_id FROM messages m WHERE m.id = s.cursor_msg_id
+		  --
+		  -- Sessions whose transcripts carry no usage metadata (🎯T131 —
+		  -- grok and codex both) fall back to a message-count estimate.
+		  -- The discriminator is whether the SESSION has token metadata
+		  -- (sess_tokens), never whether the past-cursor sum is zero: a
+		  -- fully-caught-up Claude session legitimately sums to zero past
+		  -- its cursor, and switching THAT to a message count would make
+		  -- every compacted session owed again, forever.
+		  AND (CASE WHEN s.sess_tokens > 0 THEN COALESCE((
+		        SELECT SUM(e.output_tokens + e.cache_creation_tokens)
+		        FROM entries e
+		        WHERE e.session_id = s.session_id
+		          AND e.type = 'assistant'
+		          AND e.id > COALESCE((
+		            SELECT m.entry_id FROM messages m WHERE m.id = s.cursor_msg_id
+		          ), 0)
 		      ), 0)
-		  ), 0) >= ?
+		      ELSE COALESCE((
+		        SELECT COUNT(*) FROM messages m
+		        WHERE m.session_id = s.session_id
+		          AND m.is_noise = 0
+		          AND m.id > s.cursor_msg_id
+		      ), 0) * %[2]d
+		      END) >= ?
 		  -- Durable quarantine (🎯T77): skip sessions that have failed at
 		  -- least the threshold number of times and whose last failure is
 		  -- still within the cooldown window. The row is deleted on any
@@ -381,7 +408,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, changedJoin), args...)
+	`, changedJoin, FallbackTokensPerMessage), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}
@@ -421,6 +448,30 @@ func (s *Store) CompactionScanWatermark() (int64, error) {
 // whose whole-session volume is below it is never compacted. Tied to the
 // compaction context window; tunable via WatcherConfig.AddendaBudgetTokens.
 const DefaultAddendaBudgetTokens int64 = 50_000
+
+// FallbackTokensPerMessage converts a substantive-message count into a
+// token-volume estimate, for sessions whose transcripts carry no usage
+// metadata at all (🎯T131).
+//
+// Grok and Codex transcripts record no per-turn usage, so the owed metric —
+// SUM(output_tokens + cache_creation_tokens) — sums to exactly zero for them
+// however long the conversation is. Those sessions were therefore never
+// owed, at any length, and the backlog reported zero while an entire source
+// class was invisible to it: a self-owned gate input. At the time of writing
+// that was 292 Codex and 208 Grok sessions past 50 substantive messages.
+//
+// The value is measured, not chosen. Across the 22,319 indexed sessions that
+// DO carry usage metadata, pooled volume over substantive message count is
+// ~4,255 tokens/message (the per-session mean is 13,430 and the median
+// 10,731, both inflated by short sessions that re-cache a large prompt;
+// pooled is the estimator that answers "N messages is worth how many
+// tokens" corpus-wide). Rounded DOWN to 4,000, which is the conservative
+// direction: a lower rate demands more messages before a session is owed.
+//
+// At the default 50k budget that puts the fallback floor at ~13 substantive
+// messages past the cursor. Re-derive it if the corpus mix shifts materially
+// — the query in the 🎯T131 notes reproduces the measurement.
+const FallbackTokensPerMessage int64 = 4_000
 
 // DefaultQuarantineThreshold is how many failures (hard failures plus
 // non-payload deferrals) a session may accrue before the candidate
@@ -486,7 +537,33 @@ func (s *Store) QuarantinedCount(threshold int, since time.Time) int {
 // answers both "is this session above the size floor?" and "how much
 // has accrued since the last compaction?" (🎯T72). It is the Go-level
 // twin of the predicate inlined in SelectCompactionCandidates.
+//
+// It carries the 🎯T131 fallback for the same reason and by the same rule:
+// a session whose transcript records no usage metadata is measured by
+// substantive message count instead. The two must move together — this
+// value is what mnemo_compacted_session reports, and a version that
+// disagreed with the candidate predicate would say a session holds no
+// addenda while the watcher was busy compacting it.
 func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error) {
+	var sessTokens int64
+	if err := s.readDB.QueryRow(`
+		SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
+		FROM entries WHERE session_id = ? AND type = 'assistant'
+	`, sessionID).Scan(&sessTokens); err != nil {
+		return 0, fmt.Errorf("addenda tokens (session volume): %w", err)
+	}
+
+	if sessTokens == 0 {
+		var msgs int64
+		if err := s.readDB.QueryRow(`
+			SELECT COUNT(*) FROM messages
+			WHERE session_id = ? AND is_noise = 0 AND id > ?
+		`, sessionID, cursorMsgID).Scan(&msgs); err != nil {
+			return 0, fmt.Errorf("addenda tokens (message count): %w", err)
+		}
+		return msgs * FallbackTokensPerMessage, nil
+	}
+
 	var tokens int64
 	err := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(e.output_tokens + e.cache_creation_tokens), 0)
