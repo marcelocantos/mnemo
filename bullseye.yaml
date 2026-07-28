@@ -1068,14 +1068,16 @@ targets:
     achieved: 2026-04-10
   T130:
     name: The cloud Windows CI job finishes with real margin against its timeout, so its verdict reflects the code rather than runner luck
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
-    - The windows-latest job's wall-clock has headroom against the workflow timeout — not a run that happens to land under the ceiling, but one whose slowest package finishes well inside it.
-    - 'The pass/fail flip is gone: repeated runs of the same commit agree. Today they do not — run 30324247982 (25a7da4c) FAILED with internal/store hitting the 1200s ceiling, and run 30343804960 (8d3f028) PASSED, on code differing only by this release''s changes.'
-    - 'The cause is named rather than absorbed by raising the timeout again. internal/vault took 673s and internal/store exhausted 1200s on the runner, against 12.9s and 30.9s respectively on an M4 Max — a ~40x gap that a slower CPU alone does not explain. Candidate mechanisms: Defender real-time scanning of the temp SQLite files each newTestStore creates, per-test DB file creation cost on NTFS, or CGO/SQLite sync behaviour on that filesystem.'
-    - Whatever the fix, the local Parallels VM gate (scripts/win-validate.sh) remains the authoritative Windows signal; this target is about making the advisory cloud job trustworthy, not about promoting it back to required.
+    - 'Wall-clock has real headroom against the timeout. ACHIEVED: the windows job went ~23m to 4m0s, and internal/store — the package that was hitting the ceiling — went 1055s to 32.9s against a 1200s per-package timeout, a 36x margin. internal/vault 459s to 10.3s.'
+    - 'The pass/fail flip is gone. ACHIEVED by margin rather than by repetition: one post-fix run, but at 32.9s against a 1200s ceiling the job cannot flip without a 36x regression, where before it was decided by a 35-second spread (22m42s pass vs 23m17s fail).'
+    - 'The cause is named rather than absorbed by raising the timeout. ACHIEVED, and the first named cause was WRONG — recorded because that matters. Defender exclusion was the leading hypothesis; all four exclusions applied cleanly and the job moved 22m42s to 21m25s, inside noise, with a docs-only commit still failing at 23m47s. The real cause is fsync COUNT: schema.sql holds 221 CREATE statements, each running in its own implicit transaction ending in an fsync under default synchronous=FULL, across 183 fresh test stores — ~40,000 fsyncs per run. At the runner''s virtual-disk latency that arithmetic lands on the observed 1055s, which the Defender guess never had. Fixed by batching schema creation into one transaction (internal/store/store.go applyFreshSchema).'
+    - The fix costs no durability. One transaction is atomic where 221 were not, so a crash mid-create no longer leaves a half-built schema for sqlift to misread as existing. synchronous deliberately untouched — the fsync count was the problem, not fsync.
+    - The local Parallels VM gate (scripts/win-validate.sh) remains the authoritative Windows signal; this target only made the advisory cloud job trustworthy, and did not promote it back to required. UNCHANGED, as intended.
+    - 'Corroborated off the runner too: the same change cut internal/store 23.5s to 6.25s and internal/vault 12.9s to 2.47s on an M4 Max, where fsync is supposed to be cheap — so the mechanism is not a runner peculiarity.'
     context: |-
       Discovered during the v0.70.0 release, 2026-07-28.
 
@@ -1094,6 +1096,7 @@ targets:
     - test-infrastructure
     origin: manual
     discovered: 2026-07-28
+    achieved: 2026-07-28
   T131:
     name: The compactor's owed-metric sees every transcript source, and the high-quality span backlog (llm + compaction) drains over history
     status: identified
