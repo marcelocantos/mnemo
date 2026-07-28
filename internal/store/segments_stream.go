@@ -169,3 +169,98 @@ type StreamMessage struct {
 	Text      string
 	Timestamp string
 }
+
+// FreshnessDiff quantifies how much hindsight moved the boundaries the
+// streaming watcher drew live (🎯T132.3).
+//
+// The measurement is free, and deliberately so. Because a superseded
+// span is demoted rather than deleted, both the live view and the
+// finalised one are still in the table, so the divergence between them
+// can be computed at any time without instrumenting anything. Where
+// hindsight routinely redraws a streaming boundary, that gap IS the cost
+// of freshness for that session.
+//
+// Pk and WindowDiff are the standard text-segmentation penalties (lower
+// is better, both in [0,1]); they already existed in internal/segment
+// with no production caller, having been written for a scoring harness
+// that had nothing to score.
+type FreshnessDiff struct {
+	SessionID   string  `json:"session_id"`
+	StreamSpans int     `json:"stream_spans"`
+	FinalSpans  int     `json:"final_spans"`
+	Superseded  int     `json:"superseded"`
+	Pk          float64 `json:"pk"`
+	WindowDiff  float64 `json:"window_diff"`
+}
+
+// StreamFreshnessDiff compares the stream boundaries against the
+// finalised ones for a session. Returns a zero diff when the session has
+// no spans of either kind — nothing was live-segmented, so there is no
+// freshness to price.
+func (s *Store) StreamFreshnessDiff(sessionID string) (FreshnessDiff, error) {
+	out := FreshnessDiff{SessionID: sessionID}
+
+	boundaries := func(method string) ([]int, int, error) {
+		rows, err := s.readDB.Query(`
+			SELECT from_msg_id, to_msg_id FROM topic_segments
+			WHERE session_id = ? AND method = ?
+			ORDER BY from_msg_id
+		`, sessionID, method)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer rows.Close()
+		var cuts []int
+		n := 0
+		for rows.Next() {
+			var from, to int
+			if err := rows.Scan(&from, &to); err != nil {
+				return nil, 0, err
+			}
+			cuts = append(cuts, to)
+			n++
+		}
+		return cuts, n, rows.Err()
+	}
+
+	streamCuts, streamN, err := boundaries(SegmentMethodStream)
+	if err != nil {
+		return out, fmt.Errorf("freshness diff (stream): %w", err)
+	}
+	finalCuts, finalN, err := boundaries(SegmentMethodLLM)
+	if err != nil {
+		return out, fmt.Errorf("freshness diff (final): %w", err)
+	}
+	out.StreamSpans, out.FinalSpans = streamN, finalN
+
+	if err := s.readDB.QueryRow(`
+		SELECT COUNT(*) FROM topic_segments
+		WHERE session_id = ? AND method = ? AND superseded_by IS NOT NULL
+	`, sessionID, SegmentMethodStream).Scan(&out.Superseded); err != nil {
+		return out, fmt.Errorf("freshness diff (superseded): %w", err)
+	}
+
+	if streamN == 0 || finalN == 0 {
+		return out, nil
+	}
+
+	// The scorers work over a message index, so the span extent is
+	// normalised to the highest boundary either side proposed.
+	n := 0
+	for _, c := range append(append([]int{}, streamCuts...), finalCuts...) {
+		if c > n {
+			n = c
+		}
+	}
+	if n == 0 {
+		return out, nil
+	}
+	// Window of half the mean final span, the usual Pk convention.
+	window := n / (2 * finalN)
+	if window < 1 {
+		window = 1
+	}
+	out.Pk = segment.Pk(n, finalCuts, streamCuts, window)
+	out.WindowDiff = segment.WindowDiff(n, finalCuts, streamCuts, window)
+	return out, nil
+}

@@ -183,7 +183,48 @@ func (s *Store) PutCompactionSegments(seg CompactionSegments) error {
 		}
 	}
 
+	// Finalisation supersedes the live spans it redrew (🎯T132.3).
+	//
+	// Batch has hindsight: it sees the whole window at once, where the
+	// streaming watcher had to decide with only the past available. So
+	// the batch span wins at retrieval — but the stream span is kept and
+	// merely demoted, because the divergence between what the stream
+	// believed and what hindsight concluded IS the cost of freshness,
+	// and deleting the loser would delete the measurement.
+	if err := supersedeStreamSpansIn(tx, seg.SessionID, seg.FromMsgID, seg.ToMsgID, windowID); err != nil {
+		return err
+	}
+
 	return tx.Commit()
+}
+
+// supersedeStreamSpansIn points every stream span overlapping a
+// finalised window at the span that redrew it.
+//
+// Overlap, not containment: a stream span that straddles the window edge
+// was still drawn without the hindsight this window has, and leaving it
+// ranked alongside the finalised spans would let a half-informed
+// boundary win for the half of its range inside the window.
+//
+// Already-superseded rows are left alone. The first finaliser to reach a
+// span is the one whose hindsight actually replaced it; overwriting the
+// edge on a later pass would rewrite history to point at whichever
+// compaction ran most recently.
+func supersedeStreamSpansIn(tx *sql.Tx, sessionID string, from, to int64, bySpanID string) error {
+	_, err := tx.Exec(`
+		UPDATE topic_segments
+		SET superseded_by = ?
+		WHERE session_id = ?
+		  AND method = ?
+		  AND superseded_by IS NULL
+		  AND id != ?
+		  AND from_msg_id <= ?
+		  AND to_msg_id >= ?
+	`, bySpanID, sessionID, SegmentMethodStream, bySpanID, to, from)
+	if err != nil {
+		return fmt.Errorf("supersede stream spans: %w", err)
+	}
+	return nil
 }
 
 // compactionSegmentRow is the insert shape for a compaction-derived
