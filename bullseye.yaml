@@ -1091,6 +1091,20 @@ targets:
     - test-infrastructure
     origin: manual
     discovered: 2026-07-28
+  T131:
+    name: The compactor's owed-metric sees every transcript source, and the high-quality span backlog (llm + compaction) drains over history
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - SelectCompactionCandidates treats zero/NULL token sums as 'token metadata unavailable' and falls back to a content-volume estimate (message count or bytes-derived), making grok-ingested sessions eligible; the ~535 zero-token sessions >50 messages surface in the backlog count and drain via normal scans
+    - 'Probe passes: mnemo_segments query "Windows listen hang" returns an llm- or compaction-method span from the 019f7d73… session (ranking above stale spans NOT required — that is the supersession target''s job)'
+    - mnemo_compactor_status backlog is computed under the corrected metric — no transcript source class is silently excluded from owed-ness
+    - 'A recorded cost policy for deep history: which eras/sessions get full llm re-summarisation vs window-projection only, with estimated summariser spend for the chosen policy'
+    - 'Existing compactor tests green plus a regression test: a session with entries but zero token metadata becomes owed once its content volume crosses the fallback threshold'
+    context: '2026-07-28 investigation (CSP session, hands-on probing + source read of internal/store/compactions.go, internal/store/segments_compaction.go, internal/compact/compact.go): the 🎯T72 owed-metric is SUM(output_tokens + cache_creation_tokens) over assistant entries past the cursor, but grok-ingested sessions carry zero token metadata — e.g. session 019f7d73… (the 🎯T39 FD_ACCEPT fix in csp, 2,591 entries) sums to exactly 0 and is permanently never owed. 535 sessions with >50 messages share this blind spot, so compactor_status reports backlog: 0 while an entire source class is invisible — a self-owned gate input. Consequence: segment search serves confident pre-T39-era conclusions ("fd I/O not functional on Windows") while the sessions that overturned them have no spans. BackfillCompactionSegments cannot reach these sessions (it only projects existing compactions; these have none) — eligibility must be fixed first, then the watcher''s existing no-recency-floor drain does the rest. Coverage today: 31,454 sessions, 8,866 compacted, only 139 compactions carry llm spans (feature younger than most compactions). Span quality where the llm layer has run is verified good (decision-closed, findable labels). Out of scope here: structural-layer label/pollution fixes, and stale-vs-live ranking/supersession — those are separate targets; this one is eligibility + catch-up policy.'
+    origin: 2026-07-28 mnemo segmentation baseline investigation (CSP code-smell session fork)
+    discovered: 2026-07-28
   T14:
     name: File-history-snapshots surfaced as queryable tool
     status: achieved
