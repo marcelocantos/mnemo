@@ -179,6 +179,10 @@ func (f *fakeBackend) CompactionsForConnection(connectionID string) ([]store.Com
 func (f *fakeBackend) ListCompactions(sessionID string, limit int) ([]store.Compaction, error) {
 	panic("unexpected ListCompactions call")
 }
+func (f *fakeBackend) ResolveSessionRef(ref string) (store.SessionRef, error) {
+	panic("unexpected ResolveSessionRef call")
+}
+
 func (f *fakeBackend) CompactedView(sessionID string, addendaLimit int) (*store.SessionCompactedView, error) {
 	panic("unexpected CompactedView call")
 }

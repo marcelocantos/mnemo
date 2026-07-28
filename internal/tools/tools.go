@@ -842,6 +842,20 @@ Omitting "inbox" lists every inbox touched within the window (default 30 days), 
 			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (resolved under the threads root) or an absolute/~ path.")),
 			mcp.WithBoolean("no_resume", mcp.Description("Always spawn a fresh, untagged, ephemeral tab (plain `claude`) instead of focus-or-spawn.")),
 		),
+		mcp.NewTool("mnemo_session_go",
+			mcp.WithDescription(`Reopen a past conversation (🎯T125): resolve a loose reference to one session, open an iTerm2 tab in the directory that session ran in, and resume it there.
+
+Use this when someone wants to pick a conversation back up but does not have its id — which is the normal case. The "session" argument is interpreted by content:
+- omitted, "latest", "recent" — the most recent substantive session
+- "latest:<scope>" or "latest <scope>" — most recent in a matching repo/project, e.g. "latest mnemo"
+- a session id or unique prefix — that session (an exact id always wins)
+- anything else — treated as a repo/project fragment, newest match
+
+Reopening happens in the session's OWN working directory, not the caller's: a conversation is about a working tree, and resuming it elsewhere gives the agent context that contradicts its own transcript. A directory that no longer exists is reported rather than silently substituted.
+
+Requires iTerm2 and the daemon's Automation permission (as mnemo_thread_go does). Claude Code sessions only for now — Codex and Grok sessions are indexed but have no known resume invocation, and are refused by name rather than opened as a bare shell. Returns {action: focused|spawned, path, session_id, repo, topic, command}.`),
+			mcp.WithString("session", mcp.Description(`Which session to reopen: an id/prefix, a repo or project fragment, "latest", or "latest:<scope>". Omit for the most recent session.`)),
+		),
 	}
 }
 
@@ -993,6 +1007,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.threadArchive(args)
 	case "mnemo_thread_go":
 		return ch.threadGo(args)
+	case "mnemo_session_go":
+		return ch.sessionGo(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}

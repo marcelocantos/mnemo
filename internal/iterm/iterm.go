@@ -58,6 +58,23 @@ type GoArgs struct {
 	// NoResume forces a fresh, untagged tab (plain `claude`, no user.thread),
 	// deliberately ephemeral so a later Go cannot re-match it.
 	NoResume bool
+
+	// Command replaces the default `claude --continue || claude` run in the
+	// new session — e.g. `claude --resume <id>` when reopening a specific
+	// past conversation (🎯T125) rather than whatever this directory was
+	// last doing. Empty keeps the thread behaviour.
+	//
+	// It is interpolated into a single-quoted shell script (see
+	// loginCommand), so it must contain no single quotes; Go rejects it
+	// rather than emitting a script that would mis-parse.
+	Command string
+
+	// TagKey overrides the identity used for focus-or-spawn matching.
+	// Empty means "tag by Path", which is right for threads: one directory,
+	// one tab. It is wrong for sessions, where several past conversations
+	// can share a working directory and each deserves its own tab rather
+	// than stealing a sibling's.
+	TagKey string
 }
 
 // Result is the outcome of Go.
@@ -76,7 +93,17 @@ func Go(ctx context.Context, args GoArgs) (Result, error) {
 	if strings.TrimSpace(args.Path) == "" {
 		return Result{}, fmt.Errorf("empty thread path")
 	}
-	tag := base64.StdEncoding.EncodeToString([]byte(args.Path))
+	// loginCommand wraps the script in single quotes, so a single quote
+	// anywhere in the command would terminate it early and hand iTerm2 a
+	// truncated script. Refuse rather than emit that.
+	if strings.Contains(args.Command, "'") {
+		return Result{}, fmt.Errorf("command may not contain a single quote: %q", args.Command)
+	}
+	tagKey := args.TagKey
+	if tagKey == "" {
+		tagKey = args.Path
+	}
+	tag := base64.StdEncoding.EncodeToString([]byte(tagKey))
 
 	if !args.NoResume {
 		out, err := runner(ctx, findScript(tag))
@@ -185,6 +212,13 @@ func spawnCommand(args GoArgs) string {
 		return cd + " && claude"
 	}
 	badgeB64 := base64.StdEncoding.EncodeToString([]byte(Badge + " " + args.Name))
+	if args.Command != "" {
+		// An explicit command names exactly which conversation to reopen, so
+		// the `--continue` fallback below (whatever this directory did last)
+		// would be actively wrong here.
+		setBadge := `printf "\033]1337;SetBadgeFormat=%s\007" ` + badgeB64
+		return cd + " && " + setBadge + "; " + args.Command
+	}
 	// SetBadgeFormat takes a base64 value; \033 (ESC) and \007 (BEL) bound the
 	// OSC sequence and are interpreted by printf (the backslashes survive the
 	// double quotes literally).
