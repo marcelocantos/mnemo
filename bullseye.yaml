@@ -881,6 +881,167 @@ targets:
     - cancellation
     origin: pre-PR graph pass, 2026-07-28
     discovered: 2026-07-28
+  T125:
+    name: 'A session can be resumed from a loose description: mnemo opens the preferred terminal in the directory that owns it and picks the conversation back up'
+    status: converging
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A loose reference resolves to a session without the user knowing its id — a repo/project fragment, "latest", "latest:<scope>", or an id/prefix. DONE: ResolveSessionRef, verified against the live 31k-session index.'
+    - The terminal opens in the session's OWN directory (session_meta.cwd) and resumes that conversation rather than starting a fresh one. DONE via iterm.GoArgs.Command running `claude --resume <id>`.
+    - 'Source-aware: a source with no known resume command fails naming it rather than silently opening a bare shell. DONE — claude resumes, codex/grok refuse by name.'
+    - A session whose cwd no longer exists, or was a temp dir, is reported as such. DONE.
+    - Each session gets its own tab rather than stealing one belonging to another session sharing the same working directory. DONE via GoArgs.TagKey.
+    - 'NOT DONE — CLI form (`mnemo resume <ref>`). The MCP tool covers the agent-mediated case, but the premise ("no session id handy") also arises with no agent running. Blocked on there being no read-only store open: store.New runs migrations and can trigger a multi-minute pre-migration backup, which a convenience command must never do while the daemon holds the database. Needs either a read-only constructor or a resolver that takes a plain *sql.DB.'
+    - Terminal choice is a preference rather than an iTerm2 assumption — MOVED to 🎯T126 at Marcelo's direction ("Let's just implement iTerm2 for now").
+    context: |-
+      Requested 2026-07-28: "I often want to resume a conversation, but don't have a session id handy."
+
+      This is much less new work than it looks, because the hard part already exists. 🎯T85.2 built internal/iterm.Go(ctx, GoArgs{Path, Name, NoResume}) — focus-the-tagged-tab-or-spawn-a-new-one running `claude` in a directory — and exposes it as mnemo_thread_go. That machinery is already abstracted behind an overridable runner so it is testable without iTerm2. This target is the same capability keyed on a SESSION rather than a THREAD.
+
+      Two things genuinely differ from thread_go and are where the work is:
+
+      1. It must run a RESUME command, not a bare `claude`. iterm.GoArgs currently has no way to pass a command; loginCommand/spawnCommand build it internally. That needs a seam.
+      2. Resume syntax is per-source. mnemo indexes three (claude, codex, grok), and they do not share a CLI.
+
+      The resolution half is 🎯T115, already filed: one `session` parameter that accepts an id/prefix, a repo fragment, or latest/recent. The premise here ("don't have a session id handy") is precisely that problem, so this depends on it rather than duplicating it.
+
+      Note the user's phrasing — "the user's preferred shell (iTerm2 is mine)" — signals the terminal should be a preference rather than baked in. mnemo_thread_go hardcodes iTerm2 today; generalising the seam would benefit both, though it need not be done in one step.
+
+      Real data to design against: session cwds include deleted directories (repos gone from disk, e.g. rubrew/targets) and ephemeral temp paths (/private/var/folders/...), so "open where the session lived" has to handle the case where that no longer means anything.
+    depends_on:
+    - T115
+    tags:
+    - sessions
+    - cli
+    - mcp
+    - terminal
+    - discoverability
+    origin: user request, 2026-07-28
+    discovered: 2026-07-28
+  T126:
+    name: Terminal integration is a preference rather than an iTerm2 assumption, so opening a thread or resuming a session works beyond one macOS app
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The terminal is selected from configuration with a sensible per-platform default, rather than every call site assuming iTerm2. Oracle: a config value selects a different terminal and both mnemo_thread_go and session resume honour it.'
+    - 'At least one non-iTerm2 target works end-to-end — candidates: Terminal.app, Ghostty, WezTerm, kitty on macOS; a Linux terminal for a Linux daemon. Which ones ship is a product call, not fixed here.'
+    - An unsupported or absent terminal fails with a message naming it and what to configure, not a cryptic osascript error or a silent no-op.
+    - The focus-or-spawn behaviour — reuse the tab already tagged for this thread/session rather than piling up windows — is preserved wherever the target terminal can express it, and its absence is stated rather than silently degrading.
+    - internal/iterm's overridable-runner pattern generalises so each backend stays testable without opening a window.
+    context: |-
+      Split out of 🎯T125 on 2026-07-28 at Marcelo's direction: "Let's just implement iTerm2 for now. File a target to broaden support."
+
+      Today iTerm2 is assumed, not chosen. internal/iterm drives it via osascript and mnemo_thread_go (🎯T85.2) hardcodes that path; 🎯T125's session-resume does the same. That is fine for a single-user macOS tool and wrong the moment anyone else uses mnemo, or Marcelo changes terminal — the failure mode today is a cryptic osascript error rather than "you have no supported terminal configured".
+
+      The seam already half-exists: internal/iterm.Go takes a GoArgs struct and runs its AppleScript through an overridable `runner`, which is what makes it testable without a live terminal. Generalising means lifting that into a backend interface rather than inventing new machinery.
+
+      Worth noting the focus-or-spawn behaviour (tag a tab, reuse it next time) is genuinely iTerm2-flavoured — some terminals cannot express it. The criterion is that degradation is stated, not silent.
+    tags:
+    - terminal
+    - portability
+    - config
+    origin: split from T125, 2026-07-28
+    discovered: 2026-07-28
+  T127:
+    name: Every indexed session carries the source that actually produced it, and no session exists that has no messages
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - session_meta.source names the agent that actually produced the session, recomputed from the ingest path rather than trusted from write time. DONE in code (RepairSessionSources); NOT YET APPLIED to the live index — 182 of the 527 sessions under ~/.codex are still tagged claude there until the daemon next starts on this build.
+    - 'Filename-derived phantom rows are removed: a stem-keyed session that holds no messages AND duplicates a real session under its embedded uuid. Four exist (rollout-<ts>-<uuid>). DONE in code.'
+    - Deletion stays narrow. The index holds 39 message-less session_meta rows, but only those 4 are filename duplicates — the other 35 are uuid-keyed with real cwds (24 claude, 11 grok), ordinary sessions that produced nothing substantive. Removing them would be data loss, and a test pins that a Claude session named by its own stem survives. (This corrects the original criterion, which wrongly demanded zero message-less rows.)
+    - 'The hole is closed, not just mopped: ingestFile routes Codex/Grok transcripts to their own parsers instead of deriving a session id from the filename, and writes source explicitly rather than relying on the schema default. DONE.'
+    - 'Verified on the live index after the repair runs: sessions under ~/.codex tagged codex, no rollout-* rows remain, grok untouched at 371.'
+    context: |-
+      Diagnosed and largely fixed 2026-07-28, prompted by Marcelo asking whether the correct tag could be inferred from the jsonl path. It can — decisively — and that is now the mechanism.
+
+      Root cause. session_meta.source is written only at ingest time, and ingest is offset-based: once a file is fully consumed it is never re-parsed, so a wrong source is never repaired. Codex ingest and the source column landed together (🎯T99, commit cbb824e, 2026-06-30). Anything consumed before that went through ingestFile — the Claude-format path — which upserts session_meta WITHOUT a source column, letting the schema default 'claude' stand, and derives the session id from the FILENAME STEM. For a Codex rollout that yields rollout-<ts>-<uuid>, a phantom that duplicates the real uuid-keyed session and holds no messages. The mis-tagged example's transcript starts 2026-06-20, ten days before the feature existed.
+
+      Scale is larger than first thought: 182 of 527 sessions under ~/.codex are tagged claude (35%), not the single case that surfaced it. Grok is clean (371/372). The 4 phantoms are all files that exist in BOTH ~/.codex/sessions and ~/.codex/archived_sessions — Codex moved them and mnemo ingested each path.
+
+      Why it matters beyond tidiness: 🎯T125 resume branches on source, so 182 Codex sessions would be handed to `claude --resume` — the wrong agent, silently.
+
+      Implementation note worth keeping: the repair walks ingest_state (hundreds of rows) rather than session_meta (31k). A verification query written the other way round — joining session_meta to ingest_state with LIKE — did not finish in two minutes.
+    tags:
+    - ingest
+    - codex
+    - data-quality
+    - sessions
+    origin: discovered while scoping session resume, 2026-07-28
+    discovered: 2026-07-28
+    achieved: 2026-07-28
+  T128:
+    name: A ChatGPT session (formerly Codex CLI) can be reopened from mnemo the same way a Claude one can
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - mnemo_session_go resumes a session whose source is the OpenAI CLI, opening in that session's own working directory, instead of today's refusal-by-name.
+    - The resume invocation is discovered from the shipping CLI rather than guessed — the binary is not installed on this machine, and inventing syntax would produce a command that looks plausible and does the wrong thing. Record what was verified and against which CLI version.
+    - The session id mnemo stores is the one the CLI accepts. Codex-source ids are clean UUIDs today (019ee369-54e2-7203-afce-ddde7bfe1723), which is promising, but must be confirmed against the resume command rather than assumed.
+    - 'The rename is handled: Codex has been folded into ChatGPT, so both the historical `codex` source tag on 345 indexed sessions and whatever the current CLI reports must resolve to the same resume path.'
+    - A session that genuinely cannot be resumed (CLI absent, unsupported version) fails naming the reason, keeping 🎯T125's rule that mnemo never opens a bare shell and calls it success.
+    context: |-
+      Requested 2026-07-28 alongside 🎯T129, filed separately because the two are orthogonal — different CLIs, independent invocations, either can ship without the other.
+
+      FEASIBILITY IS GENUINELY IN DOUBT, and Marcelo flagged as much when filing ("Codex/chatgpt might not be feasible, so don't worry too much about do-ability. Just file the target."). Evidence gathered the same day supports the doubt, so start here before spending effort:
+
+      - Neither `codex` nor `chatgpt` is on PATH on this machine, so no resume invocation could be verified. Contrast 🎯T129, where `grok --help` documents it outright.
+      - More importantly, the indexed sessions may not be CLI sessions at all. Every rollout file opens with a session_meta record carrying `originator` and `source`. Sampling 25 rollout files under ~/.codex gave: 16 × originator="Codex Desktop", source="vscode", and 9 × originator="Codex Desktop", source={"subagent":...}. ZERO CLI sessions in the sample. If that holds across the 345 indexed sessions, "reopen this in a terminal" may have no meaning for them — the conversation lived in an IDE, not a shell.
+
+      So the first acceptance criterion is really a question: establish whether a terminal resume of these sessions exists at all. A clean, evidenced "no — these are Desktop/IDE sessions and the CLI cannot adopt them" is a perfectly good outcome, and better than an invented command that runs and does something else. If that is the answer, retire this and have mnemo_session_go say so by name.
+
+      The useful raw material, if it does turn out feasible: the rollout's first record is
+      {"type":"session_meta","payload":{"id":"<uuid>","cwd":"...","originator":"...","cli_version":"...","source":"..."}}
+      so the authoritative session id, working directory and provenance are all available from the file itself. The 345 sessions tagged source='codex' already carry those clean UUID ids.
+
+      Depends on 🎯T127: resume branches on session_meta.source, and source is currently unreliable — at least one Codex session is tagged 'claude', which would route it to the wrong agent.
+    depends_on:
+    - T127
+    tags:
+    - sessions
+    - chatgpt
+    - codex
+    - resume
+    - terminal
+    origin: user request, 2026-07-28
+    discovered: 2026-07-28
+  T129:
+    name: A Grok CLI session can be reopened from mnemo the same way a Claude one can
+    status: converging
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'mnemo_session_go resumes a grok-source session in that session''s own working directory. DONE in code: ResumeCommand emits `grok --resume <id>` and mnemo_session_go opens in session_meta.cwd.'
+    - 'The invocation is verified against the installed CLI rather than guessed. DONE: grok --help documents `-r, --resume [<SESSION_ID_OR_TITLE>]` and that UUID-shaped values always mean IDs; mnemo''s 371 grok ids are UUIDs.'
+    - 'Resume continues rather than forks. DONE: --fork-session/--session-id are not used, pinned by test.'
+    - A grok session whose recorded cwd no longer exists fails clearly. DONE via the shared 🎯T125 cwd check.
+    - 'NOT YET DONE — end-to-end confirmation against a real grok session: open one and verify grok adopts the id and restores the conversation, rather than starting a fresh one that merely looks right. Unit tests cover the command construction, not grok''s acceptance of it.'
+    context: |-
+      Requested 2026-07-28 alongside 🎯T128, filed separately because the two are orthogonal: different CLIs, independent invocations, neither blocks the other.
+
+      Unlike the OpenAI case, this one is already evidenced. `grok` IS installed (/Users/marcelo/.grok/bin/grok) and its help documents the exact affordance:
+
+          -r, --resume [<SESSION_ID_OR_TITLE>]
+              Resume a session by ID or title, or the most recent if omitted.
+              Non-ID values match session titles for the current directory
+              (ignoring letter case; a sole renamed match wins among
+              duplicates, otherwise ambiguity errors; UUID-shaped values
+              always mean IDs)
+
+      371 sessions carry source='grok' with UUID ids and real cwds, so the pieces line up. The cwd detail is the interesting one: grok's session store is keyed by url-encoded working directory (~/.grok/sessions/%2FUsers%2F...), and title-based resume is scoped to the current directory. 🎯T125 already opens in the session's own cwd for unrelated reasons (a conversation is about a working tree), which happens to be exactly what grok needs.
+
+      Does NOT depend on 🎯T127 the way 🎯T128 does — no grok session is currently mis-tagged; all 371 are correctly source='grok'.
+    tags:
+    - sessions
+    - grok
+    - resume
+    - terminal
+    origin: user request, 2026-07-28
+    discovered: 2026-07-28
   T13:
     name: CI/CD run history indexed cross-repo with failure pattern detection
     status: achieved

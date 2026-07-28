@@ -4,10 +4,39 @@ Copyright 2026 Marcelo Cantos
 This product is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full licence text.
 
-This product includes software developed by third parties:
+This product includes software developed by third parties. The list
+below covers every third-party module in the shipped binary's build
+closure (`go list -tags sqlite_fts5 -deps ./...`), which is what the
+BSD and MIT notice-retention terms attach to.
 
+  github.com/dlclark/regexp2 — MIT License
+  github.com/dop251/goja — MIT License
   github.com/fsnotify/fsnotify — BSD 3-Clause License
+  github.com/go-sourcemap/sourcemap — BSD 2-Clause License
+  github.com/google/jsonschema-go — MIT License
+  github.com/google/pprof — Apache License 2.0
   github.com/google/uuid — BSD 3-Clause License
-  github.com/mark3labs/mcp-go — Apache License 2.0
+  github.com/mark3labs/mcp-go — MIT License
   github.com/mattn/go-sqlite3 — MIT License
-  golang.org/x/image — BSD 3-Clause License (Go Authors)
+  github.com/spf13/cast — MIT License
+  github.com/yosida95/uritemplate — BSD 3-Clause License
+  github.com/yuin/goldmark — MIT License
+  golang.org/x/image — BSD 3-Clause License (The Go Authors)
+  golang.org/x/sys — BSD 3-Clause License (The Go Authors)
+  golang.org/x/text — BSD 3-Clause License (The Go Authors)
+  gopkg.in/yaml.v3 — MIT License and Apache License 2.0
+
+github.com/mattn/go-sqlite3 embeds the SQLite amalgamation, which is in
+the public domain.
+
+The following are the author's own modules, licensed Apache 2.0:
+
+  github.com/marcelocantos/claudia
+  github.com/marcelocantos/sqldeep
+  github.com/marcelocantos/sqlift
+
+The optional CLIP image-embedding feature (off by default; see
+`image_embeddings` in the config) shells out to a Python script that
+resolves its own dependencies via `uv` at runtime and downloads the
+clip-ViT-B-32 weights from Hugging Face. Those components are not
+bundled or distributed with mnemo.

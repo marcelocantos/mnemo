@@ -1,0 +1,195 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"strings"
+	"testing"
+)
+
+// seedSession inserts a session with enough shape to be resolvable.
+func seedSession(t *testing.T, s *Store, id, repo, project, cwd, source, lastMsg string, msgs int) {
+	t.Helper()
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, repo, cwd, source) VALUES (?, ?, ?, ?)`,
+		id, repo, cwd, source,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// session_summary is a view over messages, so give it messages to
+	// summarise rather than trying to insert into the view.
+	for i := range msgs {
+		if _, err := s.writeDB.Exec(
+			`INSERT INTO messages (session_id, project, role, text, timestamp, type)
+			 VALUES (?, ?, 'user', ?, ?, 'text')`,
+			id, project, "body", lastMsg,
+		); err != nil {
+			t.Fatalf("seed message %d: %v", i, err)
+		}
+	}
+}
+
+func TestResolveSessionRef(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	seedSession(t, s, "aaaaaaaa-1111-2222-3333-444444444444",
+		"marcelocantos/mnemo", "-Users-a-mnemo", "/w/mnemo", "claude", "2026-07-01T00:00:00Z", 5)
+	seedSession(t, s, "bbbbbbbb-1111-2222-3333-444444444444",
+		"squz/yourworld", "-Users-a-yourworld", "/w/yourworld", "claude", "2026-07-20T00:00:00Z", 5)
+	seedSession(t, s, "cccccccc-1111-2222-3333-444444444444",
+		"marcelocantos/mnemo", "-Users-a-mnemo", "/w/mnemo2", "codex", "2026-07-25T00:00:00Z", 5)
+
+	tests := []struct {
+		name string
+		ref  string
+		want string // expected session id prefix
+	}{
+		{"empty means newest overall", "", "cccccccc"},
+		{"latest means newest overall", "latest", "cccccccc"},
+		{"recent is a synonym", "recent", "cccccccc"},
+		{"latest:scope narrows by repo", "latest:yourworld", "bbbbbbbb"},
+		{"latest scope with a space, as people speak", "latest yourworld", "bbbbbbbb"},
+		{"a bare repo fragment resolves to its newest", "yourworld", "bbbbbbbb"},
+		{"a repo with several sessions gives the newest", "mnemo", "cccccccc"},
+		{"a full id resolves exactly", "aaaaaaaa-1111-2222-3333-444444444444", "aaaaaaaa"},
+		{"an id prefix resolves", "aaaaaaaa", "aaaaaaaa"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.ResolveSessionRef(tc.ref)
+			if err != nil {
+				t.Fatalf("ResolveSessionRef(%q): %v", tc.ref, err)
+			}
+			if !strings.HasPrefix(got.SessionID, tc.want) {
+				t.Errorf("ResolveSessionRef(%q) = %s, want prefix %s", tc.ref, got.SessionID, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveSessionRefNonUUIDIds guards the flow this feature exists for:
+// discover a session id by talking to mnemo, then ask to open THAT one.
+//
+// Not every id is a UUID. Codex rollouts are
+// `rollout-2026-06-20T20-10-47-<uuid>` — 4 of them on the live index —
+// and an earlier hex-shaped heuristic rejected them outright, sending a
+// perfectly good id down the repo-fragment path where it matched nothing.
+// An exact id must resolve whatever it looks like.
+func TestResolveSessionRefNonUUIDIds(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const rollout = "rollout-2026-06-20T20-10-47-019ee482-f152-7141-9b36-4ae6705019b1"
+	seedSession(t, s, rollout, "", "-p", "/w/codex", "claude", "2026-06-20T00:00:00Z", 4)
+	seedSession(t, s, "ffffffff-0000-0000-0000-000000000001",
+		"o/other", "-p", "/w/other", "claude", "2026-07-30T00:00:00Z", 4)
+
+	got, err := s.ResolveSessionRef(rollout)
+	if err != nil {
+		t.Fatalf("an exact id must resolve regardless of shape: %v", err)
+	}
+	if got.SessionID != rollout {
+		t.Errorf("resolved to %s, want the rollout id", got.SessionID)
+	}
+
+	// And a prefix of it, since that is what a human would paste.
+	got, err = s.ResolveSessionRef("rollout-2026-06-20")
+	if err != nil {
+		t.Fatalf("a prefix of a non-UUID id should resolve: %v", err)
+	}
+	if got.SessionID != rollout {
+		t.Errorf("prefix resolved to %s, want the rollout id", got.SessionID)
+	}
+}
+
+// TestResolveSessionRefAmbiguousPrefix: guessing here would silently open
+// the wrong conversation, which is the one outcome worse than an error.
+func TestResolveSessionRefAmbiguousPrefix(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	seedSession(t, s, "dddddddd-1111-0000-0000-000000000001",
+		"o/r", "-p", "/w/a", "claude", "2026-07-01T00:00:00Z", 3)
+	seedSession(t, s, "dddddddd-1111-0000-0000-000000000002",
+		"o/r", "-p", "/w/b", "claude", "2026-07-02T00:00:00Z", 3)
+
+	_, err := s.ResolveSessionRef("dddddddd")
+	if err == nil {
+		t.Fatal("an id prefix matching two sessions must not silently pick one")
+	}
+	if !strings.Contains(err.Error(), "longer prefix") {
+		t.Errorf("error should say how to disambiguate, got: %v", err)
+	}
+}
+
+// TestResolveSessionRefNoMatch: zero matches must be explicit, and the
+// message should point at the forms that do work.
+func TestResolveSessionRefNoMatch(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	seedSession(t, s, "eeeeeeee-1111-0000-0000-000000000001",
+		"o/r", "-p", "/w/a", "claude", "2026-07-01T00:00:00Z", 3)
+
+	if _, err := s.ResolveSessionRef("nothing-like-this"); err == nil {
+		t.Fatal("expected an error for a reference matching nothing")
+	}
+}
+
+// TestResolveSessionRefSkipsTrivialSessions: resuming a one-message
+// session is never what "latest" meant.
+func TestResolveSessionRefSkipsTrivialSessions(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	seedSession(t, s, "11111111-0000-0000-0000-000000000001",
+		"o/real", "-p", "/w/real", "claude", "2026-07-01T00:00:00Z", 5)
+	seedSession(t, s, "22222222-0000-0000-0000-000000000002",
+		"o/trivial", "-p", "/w/trivial", "claude", "2026-07-30T00:00:00Z", 1)
+
+	got, err := s.ResolveSessionRef("latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(got.SessionID, "22222222") {
+		t.Error("latest picked a one-message session over a substantive older one")
+	}
+}
+
+// TestResumeCommandIsSourceAware: mnemo indexes three agents that do not
+// share a CLI. Opening a bare shell for a Codex session would look like
+// success while doing something else entirely.
+func TestResumeCommandIsSourceAware(t *testing.T) {
+	claude := SessionRef{SessionID: "abc", Source: "claude"}
+	cmd, err := claude.ResumeCommand()
+	if err != nil {
+		t.Fatalf("claude session must be resumable: %v", err)
+	}
+	if !strings.Contains(cmd, "--resume abc") {
+		t.Errorf("resume command = %q, want it to resume the id", cmd)
+	}
+
+	// An empty source is a Claude session from before source tagging.
+	if _, err := (SessionRef{SessionID: "abc"}).ResumeCommand(); err != nil {
+		t.Errorf("untagged session should default to claude: %v", err)
+	}
+
+	// Grok resumes by id (🎯T129): `-r, --resume [<SESSION_ID_OR_TITLE>]`,
+	// and its help states UUID-shaped values always mean IDs — which
+	// mnemo's grok ids are.
+	grok, err := (SessionRef{SessionID: "019f4f4a-6237-7241-8431-d54cbcbbbcf4", Source: "grok"}).ResumeCommand()
+	if err != nil {
+		t.Fatalf("grok sessions are resumable: %v", err)
+	}
+	if !strings.HasPrefix(grok, "grok --resume ") {
+		t.Errorf("grok resume command = %q, want `grok --resume <id>`", grok)
+	}
+	// Must not fork: --fork-session/--session-id create a NEW id when
+	// resuming, which would silently branch the conversation instead of
+	// continuing it.
+	if strings.Contains(grok, "--fork-session") || strings.Contains(grok, "--session-id") {
+		t.Errorf("resume must continue the original session, not fork it: %q", grok)
+	}
+
+	// Codex/ChatGPT has no verified terminal resume (🎯T128) — the indexed
+	// sessions look like Desktop/IDE conversations, not CLI ones. Refusing
+	// by name beats inventing a command that runs and does something else.
+	if _, err := (SessionRef{SessionID: "abc", Source: "codex"}).ResumeCommand(); err == nil {
+		t.Error("codex has no verified resume command; it must refuse rather than guess")
+	} else if !strings.Contains(err.Error(), "codex") {
+		t.Errorf("refusal should name the source, got: %v", err)
+	}
+}

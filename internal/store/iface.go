@@ -62,6 +62,10 @@ type Backend interface {
 	CompactionsForConnection(connectionID string) ([]Compaction, error)
 	ListCompactions(sessionID string, limit int) ([]Compaction, error)
 	CompactedView(sessionID string, addendaLimit int) (*SessionCompactedView, error)
+
+	// ResolveSessionRef turns a loose reference — an id or prefix, a repo
+	// fragment, "latest", "latest:<scope>" — into one session (🎯T115).
+	ResolveSessionRef(ref string) (SessionRef, error)
 	SessionTokens(sessionID string) (int64, int64, error)
 	CompactionTokens(sessionID string) (int64, int64, error)
 	RecordConnectionOpen(connectionID string, pid int, acceptedAt time.Time)

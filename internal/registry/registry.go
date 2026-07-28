@@ -431,6 +431,18 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		// 🎯T64.10: structural topic segments in the background so they
 		// never delay docs/todos/plans backfill stamps (ingest.backfill
 		// health check keys off ingest_status.last_backfill).
+		// Recompute session provenance from ingest paths (🎯T127). Cheap —
+		// it walks ingest_state, not session_meta — and idempotent, so it
+		// costs nothing once the index is clean. It runs every start
+		// because the data it repairs was written by code that no longer
+		// exists, and nothing else will ever revisit those rows: ingest is
+		// offset-based, so a consumed file is never re-parsed.
+		if retagged, removed, err := e.store.RepairSessionSources(); err != nil {
+			logger.Warn("session provenance repair failed", "err", err)
+		} else if retagged > 0 || removed > 0 {
+			logger.Info("session provenance repaired",
+				"retagged", retagged, "phantoms_removed", removed)
+		}
 		go func() {
 			// Wait out any deferred schema upgrade first (🎯T114.1): the
 			// pass projects compactions into spans via topic_segments.
