@@ -350,3 +350,36 @@ func TestRetiredStructuralSpansLoseRetrieval(t *testing.T) {
 			"still be reachable, just ranked below")
 	}
 }
+
+// TestRetireStructuralSpansAcrossAllSessions covers the backfill form.
+//
+// Retirement otherwise fires only when a compaction is written, so every
+// session compacted before it shipped would keep structural spans winning
+// forever — a compacted session is never owed again, so nothing would
+// revisit it. The empty session id means "all sessions", and it must stay
+// idempotent because it runs on every daemon start.
+func TestRetireStructuralSpansAcrossAllSessions(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	insertSpan(t, s, "st_a", "sess-1", 1, 20, SegmentMethodStructural, "guess a", "", "")
+	insertSpan(t, s, "llm_a", "sess-1", 5, 15, SegmentMethodLLM, "topic a", "", "")
+	insertSpan(t, s, "st_b", "sess-2", 1, 20, SegmentMethodStructural, "guess b", "", "")
+	insertSpan(t, s, "llm_b", "sess-2", 2, 18, SegmentMethodLLM, "topic b", "", "")
+	insertSpan(t, s, "st_c", "sess-3", 1, 20, SegmentMethodStructural, "guess c", "", "")
+
+	n, err := s.RetireStructuralSpansCovered("")
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("retired %d, want 2 (sess-3 has no better coverage)", n)
+	}
+
+	again, err := s.RetireStructuralSpansCovered("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Errorf("second pass retired %d more; the backfill runs on every daemon "+
+			"start and must be idempotent", again)
+	}
+}
