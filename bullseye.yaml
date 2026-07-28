@@ -1009,15 +1009,15 @@ targets:
     discovered: 2026-07-28
   T129:
     name: A Grok CLI session can be reopened from mnemo the same way a Claude one can
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
-    - mnemo_session_go resumes a session whose source is grok, opening in that session's own working directory, instead of today's refusal-by-name.
-    - 'The invocation is `grok --resume <session-id>` (`-r`), verified against the installed CLI: its help states "Resume a session by ID or title, or the most recent if omitted... UUID-shaped values always mean IDs". mnemo''s grok ids are UUIDs, so they should be accepted as ids rather than matched as titles — confirm rather than assume.'
-    - 'The working directory is load-bearing here, not just nice: grok stores sessions per-cwd (~/.grok/sessions/<url-encoded-cwd>/) and resolves non-id references against the CURRENT directory. Opening in the session''s own cwd — which 🎯T125 already does — is what makes resume find the right conversation.'
-    - Resume must not silently fork. grok has --fork-session / --session-id semantics for creating a new id when resuming; the default path should continue the original session, and any deviation is stated.
-    - A grok session whose recorded cwd no longer exists fails clearly, consistent with 🎯T125 — grok's own lookup is cwd-scoped, so a missing directory is more consequential here than for Claude.
+    - 'mnemo_session_go resumes a grok-source session in that session''s own working directory. DONE in code: ResumeCommand emits `grok --resume <id>` and mnemo_session_go opens in session_meta.cwd.'
+    - 'The invocation is verified against the installed CLI rather than guessed. DONE: grok --help documents `-r, --resume [<SESSION_ID_OR_TITLE>]` and that UUID-shaped values always mean IDs; mnemo''s 371 grok ids are UUIDs.'
+    - 'Resume continues rather than forks. DONE: --fork-session/--session-id are not used, pinned by test.'
+    - A grok session whose recorded cwd no longer exists fails clearly. DONE via the shared 🎯T125 cwd check.
+    - 'NOT YET DONE — end-to-end confirmation against a real grok session: open one and verify grok adopts the id and restores the conversation, rather than starting a fresh one that merely looks right. Unit tests cover the command construction, not grok''s acceptance of it.'
     context: |-
       Requested 2026-07-28 alongside 🎯T128, filed separately because the two are orthogonal: different CLIs, independent invocations, neither blocks the other.
 
