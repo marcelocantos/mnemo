@@ -68,6 +68,39 @@ func TestResolveSessionRef(t *testing.T) {
 	}
 }
 
+// TestResolveSessionRefNonUUIDIds guards the flow this feature exists for:
+// discover a session id by talking to mnemo, then ask to open THAT one.
+//
+// Not every id is a UUID. Codex rollouts are
+// `rollout-2026-06-20T20-10-47-<uuid>` — 4 of them on the live index —
+// and an earlier hex-shaped heuristic rejected them outright, sending a
+// perfectly good id down the repo-fragment path where it matched nothing.
+// An exact id must resolve whatever it looks like.
+func TestResolveSessionRefNonUUIDIds(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const rollout = "rollout-2026-06-20T20-10-47-019ee482-f152-7141-9b36-4ae6705019b1"
+	seedSession(t, s, rollout, "", "-p", "/w/codex", "claude", "2026-06-20T00:00:00Z", 4)
+	seedSession(t, s, "ffffffff-0000-0000-0000-000000000001",
+		"o/other", "-p", "/w/other", "claude", "2026-07-30T00:00:00Z", 4)
+
+	got, err := s.ResolveSessionRef(rollout)
+	if err != nil {
+		t.Fatalf("an exact id must resolve regardless of shape: %v", err)
+	}
+	if got.SessionID != rollout {
+		t.Errorf("resolved to %s, want the rollout id", got.SessionID)
+	}
+
+	// And a prefix of it, since that is what a human would paste.
+	got, err = s.ResolveSessionRef("rollout-2026-06-20")
+	if err != nil {
+		t.Fatalf("a prefix of a non-UUID id should resolve: %v", err)
+	}
+	if got.SessionID != rollout {
+		t.Errorf("prefix resolved to %s, want the rollout id", got.SessionID)
+	}
+}
+
 // TestResolveSessionRefAmbiguousPrefix: guessing here would silently open
 // the wrong conversation, which is the one outcome worse than an error.
 func TestResolveSessionRefAmbiguousPrefix(t *testing.T) {

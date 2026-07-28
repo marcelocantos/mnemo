@@ -5,7 +5,6 @@ package store
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -28,12 +27,6 @@ type SessionRef struct {
 	LastMsg string `json:"last_msg,omitempty"`
 	Topic   string `json:"topic,omitempty"`
 }
-
-// sessionIDShape matches the id forms a session can be named by: a full
-// UUID or a hex prefix of one. Deliberately strict — a bare word like
-// "mnemo" must fall through to the repo interpretation rather than being
-// tried as an id first.
-var sessionIDShape = regexp.MustCompile(`^[0-9a-fA-F][0-9a-fA-F-]{5,}$`)
 
 // ResolveSessionRef turns a loose reference into exactly one session.
 //
@@ -62,15 +55,28 @@ func (s *Store) ResolveSessionRef(ref string) (SessionRef, error) {
 		return s.newestSession("")
 	}
 
-	// An id or prefix. Exact match wins outright; a prefix must be unique.
-	if sessionIDShape.MatchString(ref) {
-		if hit, err := s.sessionByID(ref); err == nil {
+	// An exact id always wins, whatever it looks like. Do NOT gate this on
+	// a shape heuristic: mnemo's ids are not all UUIDs — Codex rollouts are
+	// `rollout-2026-06-20T20-10-47-<uuid>` — so any hex-shaped test
+	// rejects real ids and sends them down the repo path, where they match
+	// nothing. This is the flow that matters most (discover an id by
+	// talking to mnemo, then ask to open it), and the lookup is one cheap
+	// indexed equality, so just try it for every reference.
+	if hit, err := s.sessionByExactID(ref); err == nil {
+		return hit, nil
+	}
+
+	// A prefix of an id, when the reference is long enough to plausibly be
+	// one. Ambiguity here is reported rather than guessed — picking one of
+	// several would silently open the wrong conversation.
+	if len(ref) >= 6 && !strings.ContainsAny(ref, " \t") {
+		hit, err := s.sessionByIDPrefix(ref)
+		if err == nil {
 			return hit, nil
-		} else if !isNoSessionMatch(err) {
+		}
+		if !isNoSessionMatch(err) {
 			return SessionRef{}, err
 		}
-		// Not an id after all (e.g. a repo that looks hex-ish) — fall
-		// through to the repo interpretation rather than failing.
 	}
 
 	hit, err := s.newestSession(ref)
@@ -109,8 +115,8 @@ func isNoSessionMatch(err error) bool {
 const sessionRefCols = `sm.session_id, COALESCE(sm.repo,''), COALESCE(sm.cwd,''),
 	COALESCE(sm.source,'claude'), COALESCE(ss.last_msg,''), COALESCE(sm.topic,'')`
 
-// sessionByID resolves an exact id, or a unique prefix of one.
-func (s *Store) sessionByID(ref string) (SessionRef, error) {
+// sessionByExactID resolves a reference that is exactly a session id.
+func (s *Store) sessionByExactID(ref string) (SessionRef, error) {
 	var out SessionRef
 	err := s.readDB.QueryRow(`
 		SELECT `+sessionRefCols+`
@@ -118,10 +124,15 @@ func (s *Store) sessionByID(ref string) (SessionRef, error) {
 		LEFT JOIN session_summary ss ON ss.session_id = sm.session_id
 		WHERE sm.session_id = ?
 	`, ref).Scan(&out.SessionID, &out.Repo, &out.CWD, &out.Source, &out.LastMsg, &out.Topic)
-	if err == nil {
-		return out, nil
+	if err != nil {
+		return SessionRef{}, fmt.Errorf("%w for id %q", errNoSessionMatch, ref)
 	}
+	return out, nil
+}
 
+// sessionByIDPrefix resolves a unique prefix of a session id, reporting
+// the candidates when several match.
+func (s *Store) sessionByIDPrefix(ref string) (SessionRef, error) {
 	rows, err := s.readDB.Query(`
 		SELECT `+sessionRefCols+`
 		FROM session_meta sm
