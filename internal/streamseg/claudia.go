@@ -6,113 +6,125 @@ package streamseg
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/marcelocantos/claudia"
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
-// claudiaSummariser drives a long-lived Claude Code session (🎯T132.2).
+// claudiaSummariser runs one drip per claudia Task (🎯T132.2).
 //
-// This is the first use of claudia's Session mode in mnemo. Everything
-// else — the compactor, the reviewer — uses one-shot Task mode
-// deliberately, so the summariser stays stateless and trivially
-// terminable. Streaming needs the opposite: a conversation that
-// accumulates, because the model's own memory of the spans it opened is
-// what makes each drip cheap.
+// This was first built on claudia's Session mode — a persistent agent in a
+// tmux window — on the theory that the model's own memory of the spans it
+// had opened was what made each drip cheap. Measuring it showed both
+// halves of that to be wrong.
 //
-// The tmux substrate matters here rather than being incidental. The agent
-// survives the consumer dying, so a daemon restart does not orphan a
-// half-summarised session; and the crash-recovery path exists anyway,
-// because the alternative to it is paying the summariser twice.
+// It does not work. Session mode's Send drives the Claude Code TUI through
+// tmux keystrokes, and a multi-line drip of a few KB is detected by the
+// TUI as a PASTE. Pasted content sits in the composer unsubmitted, so the
+// model never sees it and WaitForResponse waits forever. Observed
+// directly: three drips queued as "[Pasted text #1 +17 lines]" and a
+// 40-minute timeout with no reply.
+//
+// And it was never needed. renderDrip restates the rolling summary and the
+// open spans on every drip — deliberately, so that a restarted agent needs
+// no special first prompt — which means the model is already stateless
+// between drips. The bounded state lives in the automaton, not in the
+// conversation.
+//
+// So each drip is a fresh Task, exactly as the compactor and reviewer do
+// it. That is the only claudia path with production evidence behind it,
+// and it makes the linear-cost property trivially true rather than argued:
+// nothing accumulates anywhere.
 type claudiaSummariser struct {
 	workDir string
 	model   string
 
-	mu    sync.Mutex
-	agent *claudia.Agent
-	// seed is prepended to the first drip of a fresh agent, carrying the
-	// system prompt. Session mode has no separate system-prompt channel,
-	// so it rides the first message.
-	seedSent bool
+	mu       sync.Mutex
+	calls    int
+	inTokens int
+	outTok   int
+	costUSD  float64
 }
 
-// NewClaudiaSummariser creates a summariser backed by a persistent agent.
-// workDir should be a stable scratch directory: the agent is a Claude
-// Code process and will otherwise treat whatever directory it lands in as
-// the project under discussion.
+// NewClaudiaSummariser returns a summariser that runs one claude task per
+// drip in workDir. An empty model uses claudia's default.
 func NewClaudiaSummariser(workDir, model string) Summariser {
 	return &claudiaSummariser{workDir: workDir, model: model}
 }
 
-func (c *claudiaSummariser) ensure(ctx context.Context) (*claudia.Agent, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.agent != nil && c.agent.Alive() {
-		return c.agent, nil
-	}
-	ag, err := claudia.Start(claudia.Config{
-		WorkDir: c.workDir,
-		Model:   c.model,
-		// The summariser reads a transcript that is handed to it; it has
-		// no business touching the filesystem or the network, and a
-		// watcher that could spawn sub-agents would be a recursion
-		// hazard against the very sessions it is watching.
-		DisallowTools: []string{
-			"Bash", "Edit", "Write", "Read", "WebFetch", "WebSearch", "Task",
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("start streaming summariser: %w", err)
-	}
-	if err := ag.WaitReady(ctx); err != nil {
-		ag.Stop()
-		return nil, fmt.Errorf("streaming summariser not ready: %w", err)
-	}
-	c.agent = ag
-	c.seedSent = false
-	return ag, nil
-}
-
 func (c *claudiaSummariser) Ask(ctx context.Context, drip string) (string, error) {
-	ag, err := c.ensure(ctx)
+	// The marker keeps the summariser's own transcript out of the
+	// compaction candidate set at ingest (session_meta.compactor_internal),
+	// which is the same recursion guard the compactor relies on. Without
+	// it a summariser session becomes a session to be summarised.
+	combined := store.CompactorMarker + "\n\n" + SystemPrompt + "\n\n" + drip
+	combined = sanitizePrompt(combined)
+
+	task := claudia.NewTask(claudia.TaskConfig{WorkDir: c.workDir, Model: c.model})
+	ch, err := task.Run(ctx, combined)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("claudia: run task: %w", err)
 	}
-	msg := drip
-	c.mu.Lock()
-	if !c.seedSent {
-		msg = store.CompactorMarker + "\n\n" + SystemPrompt + "\n\n" + drip
-		c.seedSent = true
-	}
-	c.mu.Unlock()
 
-	if err := ag.Send(msg); err != nil {
-		return "", err
+	var text strings.Builder
+	for ev := range ch {
+		switch ev.Type {
+		case claudia.TaskEventText:
+			text.WriteString(ev.Content)
+		case claudia.TaskEventResult:
+			c.mu.Lock()
+			c.calls++
+			c.inTokens += ev.Usage.InputTokens +
+				ev.Usage.CacheCreationInputTokens +
+				ev.Usage.CacheReadInputTokens
+			c.outTok += ev.Usage.OutputTokens
+			c.costUSD += ev.CostUSD
+			c.mu.Unlock()
+		case claudia.TaskEventError:
+			return "", fmt.Errorf("claudia: %s", ev.ErrorMsg)
+		}
 	}
-	return ag.WaitForResponse(ctx)
+	return text.String(), nil
 }
 
-// Restart drops the conversation and starts a fresh agent. The runner
-// re-seeds from the automaton's bounded state, so this reclaims the
-// context budget without losing a span.
-func (c *claudiaSummariser) Restart(ctx context.Context) error {
-	c.mu.Lock()
-	if c.agent != nil {
-		c.agent.Stop()
-		c.agent = nil
-	}
-	c.seedSent = false
-	c.mu.Unlock()
-	_, err := c.ensure(ctx)
-	return err
-}
+// Restart is a no-op under Task mode: there is no accumulated context to
+// reclaim, because there is no conversation. The runner still calls it
+// when the automaton's budget estimate fills, which costs nothing and
+// keeps the seam for any future implementation that does hold state.
+func (c *claudiaSummariser) Restart(context.Context) error { return nil }
 
-func (c *claudiaSummariser) Close() {
+func (c *claudiaSummariser) Close() {}
+
+// Usage reports what this summariser has spent, for the operating-point
+// sweep (🎯T132.4). Cost per active-session-day is an acceptance
+// criterion there, and it cannot be reconstructed after the fact.
+func (c *claudiaSummariser) Usage() (calls, inTokens, outTokens int, costUSD float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.agent != nil {
-		c.agent.Stop()
-		c.agent = nil
-	}
+	return c.calls, c.inTokens, c.outTok, c.costUSD
+}
+
+// UsageReporter is implemented by summarisers that can account for their
+// own spend. The sweep type-asserts for it rather than widening
+// Summariser, so a scripted or fake summariser need not pretend to have
+// costs.
+type UsageReporter interface {
+	Usage() (calls, inTokens, outTokens int, costUSD float64)
+}
+
+// sanitizePrompt strips control characters that break the exec boundary.
+// A NUL byte anywhere in the prompt makes the call fail with EINVAL, and
+// a transcript drip is arbitrary user content that can contain anything.
+func sanitizePrompt(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }

@@ -3,7 +3,10 @@
 
 package store
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestFinalisationSupersedesStreamSpans is the 🎯T132.3 acceptance.
 //
@@ -120,5 +123,111 @@ func TestFreshnessDiffIsZeroWithoutStreamSpans(t *testing.T) {
 	}
 	if diff.Pk != 0 || diff.WindowDiff != 0 || diff.StreamSpans != 0 {
 		t.Errorf("expected an empty diff, got %+v", diff)
+	}
+}
+
+// TestLiveWatchableSessionsExcludesSummarisers is the recursion guard
+// (🎯T132.2), and it exists because v0.72.0 shipped without one.
+//
+// A summariser is a Claude Code process: it writes its own transcript and
+// holds it open, so LiveSessions reports it exactly like a user session.
+// A watcher that followed one would spawn another summariser, whose
+// session is also live. The concurrency cap bounds that but does not stop
+// it — the cap simply fills with summarisers while real sessions starve.
+func TestLiveWatchableSessionsExcludesSummarisers(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	workDir := "/tmp/mnemo-streamseg-abc"
+
+	// A real user session.
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, cwd, compactor_internal) VALUES ('user-1', '/Users/x/work/repo', 0)`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// A summariser already stamped by ingest — the durable signal.
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, cwd, compactor_internal) VALUES ('summ-stamped', ?, 1)`, workDir,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// A summariser ingest has seen but NOT yet stamped: this is the race
+	// the cwd check exists to close. compactor_internal is still 0.
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, cwd, compactor_internal) VALUES ('summ-unstamped', ?, 0)`, workDir,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// A summariser from a PREVIOUS daemon run: stamped, but its cwd is an
+	// older temp directory this process knows nothing about. claudia's
+	// tmux substrate keeps agents alive across a daemon restart, so this
+	// is a real state, and it is the case only compactor_internal can
+	// catch. Without it the watcher adopts the orphans of its own
+	// predecessor.
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, cwd, compactor_internal)
+		 VALUES ('summ-previous-run', '/tmp/mnemo-streamseg-OLD', 1)`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	s.liveMu.Lock()
+	s.liveCache = map[string]int{
+		"user-1": 100, "summ-stamped": 200, "summ-unstamped": 300, "summ-previous-run": 400}
+	s.liveCacheTime = time.Now()
+	s.liveMu.Unlock()
+
+	got := s.LiveWatchableSessions(workDir)
+
+	if _, ok := got["user-1"]; !ok {
+		t.Error("a real user session was excluded — the watcher would follow nothing")
+	}
+	if _, ok := got["summ-stamped"]; ok {
+		t.Error("a stamped summariser session survived the filter (compactor_internal ignored)")
+	}
+	if _, ok := got["summ-unstamped"]; ok {
+		t.Error("an unstamped summariser survived — the cwd check is what closes the " +
+			"window before ingest stamps it, and it is not working")
+	}
+	if _, ok := got["summ-previous-run"]; ok {
+		t.Error("a summariser from a previous daemon run survived — only " +
+			"compactor_internal can catch it, since its cwd is a temp dir this " +
+			"process never created")
+	}
+}
+
+// TestLiveWatchableSessionsKeepsUnknownSessions: a session ingest has not
+// caught up with yet must still be watchable. Excluding it would mean the
+// watcher never follows a session until after it has been indexed, which
+// is precisely the freshness the streaming tier exists to provide.
+func TestLiveWatchableSessionsKeepsUnknownSessions(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	s.liveMu.Lock()
+	s.liveCache = map[string]int{"brand-new": 111}
+	s.liveCacheTime = time.Now()
+	s.liveMu.Unlock()
+
+	got := s.LiveWatchableSessions("/tmp/mnemo-streamseg-xyz")
+	if _, ok := got["brand-new"]; !ok {
+		t.Error("a session with no session_meta row was excluded; the watcher would " +
+			"only ever see sessions that are already indexed")
+	}
+}
+
+// TestLiveWatchableSessionsWithoutWorkDir: an empty working directory must
+// not degrade into `cwd LIKE '%'` and exclude every session on the machine.
+func TestLiveWatchableSessionsWithoutWorkDir(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, cwd, compactor_internal) VALUES ('user-2', '/Users/x/repo', 0)`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	s.liveMu.Lock()
+	s.liveCache = map[string]int{"user-2": 42}
+	s.liveCacheTime = time.Now()
+	s.liveMu.Unlock()
+
+	if got := s.LiveWatchableSessions(""); len(got) != 1 {
+		t.Errorf("empty workdir excluded everything: %v", got)
 	}
 }

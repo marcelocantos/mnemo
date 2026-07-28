@@ -6,6 +6,9 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/segment"
@@ -244,23 +247,151 @@ func (s *Store) StreamFreshnessDiff(sessionID string) (FreshnessDiff, error) {
 		return out, nil
 	}
 
-	// The scorers work over a message index, so the span extent is
-	// normalised to the highest boundary either side proposed.
-	n := 0
-	for _, c := range append(append([]int{}, streamCuts...), finalCuts...) {
-		if c > n {
-			n = c
-		}
+	// Pk and WindowDiff are defined over a sequence of units and walk
+	// every index from 0 to n. Cuts here are messages.id — a GLOBAL
+	// rowid, not a position in this session — so using them directly
+	// would make n the largest rowid in the database (order 10^6 for a
+	// session of a few dozen messages). That is both ruinously slow and
+	// meaningless, since nearly every window would land in the empty
+	// space between two ids. Map to ordinal position first.
+	ord, err := s.substantiveOrdinals(sessionID)
+	if err != nil {
+		return out, err
 	}
+	n := len(ord)
 	if n == 0 {
 		return out, nil
 	}
+	toOrdinals := func(cuts []int) []int {
+		var o []int
+		for _, c := range cuts {
+			if i, ok := ord[c]; ok {
+				o = append(o, i)
+			}
+		}
+		sort.Ints(o)
+		return o
+	}
+	g, h := toOrdinals(finalCuts), toOrdinals(streamCuts)
+	if len(g) == 0 || len(h) == 0 {
+		return out, nil
+	}
 	// Window of half the mean final span, the usual Pk convention.
-	window := n / (2 * finalN)
+	window := n / (2 * len(g))
 	if window < 1 {
 		window = 1
 	}
-	out.Pk = segment.Pk(n, finalCuts, streamCuts, window)
-	out.WindowDiff = segment.WindowDiff(n, finalCuts, streamCuts, window)
+	out.Pk = segment.Pk(n, g, h, window)
+	out.WindowDiff = segment.WindowDiff(n, g, h, window)
 	return out, nil
+}
+
+// substantiveOrdinals maps a session's substantive messages.id values to
+// their position in the session, which is the index space the
+// segmentation scorers are defined over.
+func (s *Store) substantiveOrdinals(sessionID string) (map[int]int, error) {
+	rows, err := s.readDB.Query(`
+		SELECT id FROM messages
+		WHERE session_id = ? AND is_noise = 0 ORDER BY id`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("substantive ordinals: %w", err)
+	}
+	defer rows.Close()
+	ord := map[int]int{}
+	i := 0
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ord[id] = i
+		i++
+	}
+	return ord, rows.Err()
+}
+
+// LiveWatchableSessions returns the live sessions a segmentation watcher
+// may follow, excluding mnemo's own summariser sessions (🎯T132.2).
+//
+// Without this the watcher watches the agents it just spawned. A
+// summariser is a Claude Code process, so it writes its own transcript
+// into ~/.claude/projects and holds it open, which is exactly what
+// LiveSessions detects. Watching one spawns another, whose session is
+// also live. The concurrency cap bounds the damage but does not prevent
+// it: the cap fills with summarisers and real sessions are starved.
+//
+// Two independent exclusions, because each covers the other's blind spot:
+//
+//   - compactor_internal, stamped at ingest from the CompactorMarker
+//     prefix. Durable and survives a daemon restart — which matters,
+//     because claudia's tmux substrate keeps agents alive across one, so
+//     a restarted daemon can meet summariser sessions it did not spawn.
+//     But it is not immediate: a brand-new summariser has not been
+//     ingested yet, leaving a window in which it looks like a user
+//     session.
+//
+//   - the summariser working directory. Every agent this daemon spawns
+//     runs in workDir, so its session records that as cwd. This needs no
+//     ingest and closes the startup race — but it only knows about the
+//     current process's directory, hence the pair.
+func (s *Store) LiveWatchableSessions(summariserWorkDir string) map[string]int {
+	live := s.LiveSessions()
+	if len(live) == 0 {
+		return live
+	}
+
+	ids := make([]any, 0, len(live))
+	placeholders := make([]string, 0, len(live))
+	for id := range live {
+		ids = append(ids, id)
+		placeholders = append(placeholders, "?")
+	}
+
+	// One query for both exclusions. A session with no session_meta row
+	// yet is NOT excluded here — it is a genuine user session that ingest
+	// has not caught up with — which is precisely why the cwd check below
+	// cannot be dropped in favour of this.
+	q := `SELECT session_id FROM session_meta
+	      WHERE session_id IN (` + strings.Join(placeholders, ",") + `)
+	        AND (COALESCE(compactor_internal, 0) = 1` + summariserCWDClause(summariserWorkDir) + `)`
+	if summariserWorkDir != "" {
+		ids = append(ids, summariserWorkDir+"%")
+	}
+
+	rows, err := s.readDB.Query(q, ids...)
+	if err != nil {
+		// Failing closed would stop the watcher entirely on a transient
+		// error; failing open would watch summarisers. Neither is good,
+		// so refuse to watch anything this tick and try again next one.
+		slog.Warn("watchable-session filter failed; skipping this pass", "err", err)
+		return map[string]int{}
+	}
+	defer rows.Close()
+
+	excluded := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		excluded[id] = true
+	}
+
+	out := make(map[string]int, len(live))
+	for id, pid := range live {
+		if !excluded[id] {
+			out[id] = pid
+		}
+	}
+	return out
+}
+
+// summariserCWDClause adds the working-directory exclusion only when a
+// directory is known, so an empty one cannot degrade into `cwd LIKE '%'`
+// and exclude every session on the machine.
+func summariserCWDClause(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	return ` OR cwd LIKE ?`
 }
