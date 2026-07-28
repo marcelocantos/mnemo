@@ -84,6 +84,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events", getOnly(h.eventStream))
 	mux.HandleFunc("/health", getOnly(h.health))
 	h.registerThreadRoutes(mux)
+	h.registerSessionRoutes(mux)
 	h.registerPluginRoutes(mux)
 }
 

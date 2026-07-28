@@ -521,6 +521,12 @@ Requires iTerm2 and the daemon's Automation permission, as
 `mnemo_thread_go` does. Returns `{action: focused|spawned, path,
 session_id, repo, topic, command}`.
 
+There is a CLI twin, `mnemo resume [<ref>]`, taking the same references —
+for the case where someone wants a conversation back with no agent running
+to ask. Both routes go through the daemon's `POST /api/session/go`, so
+they behave identically; the daemon holds the single terminal Automation
+grant, which is why neither the CLI nor a shim drives iTerm2 directly.
+
 ### mnemo_self
 
 Discover the calling session's ID. Two-phase nonce protocol:

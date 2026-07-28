@@ -176,6 +176,35 @@ mnemo               # listen on :19419 (default)
 mnemo --addr :8080  # custom port
 ```
 
+## Reopening a past conversation
+
+You rarely have a session id to hand. Describe the conversation instead
+and mnemo opens a terminal tab in the directory that session ran in,
+resuming it there:
+
+```bash
+mnemo resume                    # pick up the most recent session
+mnemo resume mnemo              # newest session in a matching repo
+mnemo resume latest:yourworld
+mnemo resume 84369401           # an id or unique prefix; exact wins
+```
+
+It prints which session it chose, because you did not name one exactly.
+Reopening happens in the session's **own** working directory — a
+conversation is about a working tree, and resuming it somewhere else
+hands the agent context that contradicts its own transcript. A directory
+that has since been deleted is reported rather than silently substituted.
+
+Claude Code and Grok CLI sessions resume. Codex/ChatGPT sessions are
+indexed but refused by name — they have no verified terminal resume.
+
+Agents can do the same through the `mnemo_session_go` MCP tool, which is
+usually the better route: ask mnemo to find the conversation, then ask it
+to open the one you meant.
+
+Requires the daemon to be running (it owns the terminal automation
+grant), and iTerm2 on macOS.
+
 ## Upgrading
 
 **macOS / Linux (Homebrew)**:

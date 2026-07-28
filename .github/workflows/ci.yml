@@ -74,6 +74,37 @@ jobs:
         with:
           go-version-file: mnemo/go.mod
 
+      # 🎯T130. Defender exclusion for the paths the suite writes.
+      #
+      # HONEST RESULT: this was the leading hypothesis for the job's
+      # slowness and it was WRONG. Measured — all four exclusions applied
+      # cleanly (run 30355204617) and the job went 22m42s -> 21m25s, which
+      # is inside run-to-run noise. internal/store still took 1055s against
+      # 23s locally, the same 45x gap as before.
+      #
+      # The actual cause was fsync COUNT during schema creation, fixed in
+      # applyFreshSchema (internal/store/store.go): 221 CREATE statements
+      # were each running in their own implicit transaction, ~40,000
+      # fsyncs per CI run across 183 fresh test stores.
+      #
+      # Kept because it is free, scoped, and confined to a throwaway
+      # runner — and because leaving it documents the refutation, so the
+      # next person investigating this job does not spend the afternoon
+      # re-testing Defender.
+      - name: Exclude test scratch paths from Defender (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @($env:RUNNER_TEMP, $env:GITHUB_WORKSPACE, (go env GOMODCACHE), (go env GOCACHE)) |
+                   Where-Object { $_ } | Select-Object -Unique
+          foreach ($p in $paths) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop; Write-Host "excluded: $p" }
+            catch { Write-Host "could not exclude ${p}: $($_.Exception.Message)" }
+          }
+          # Never fail the job over this: it is a speed measure, and a
+          # runner image that locks Defender down should still run tests.
+          exit 0
+
       - name: Test
         working-directory: mnemo
         env:
