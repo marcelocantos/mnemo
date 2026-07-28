@@ -40,6 +40,10 @@ type TopicSegment struct {
 	FirstTS    string  `json:"first_ts,omitempty"`
 	LastTS     string  `json:"last_ts,omitempty"`
 	ComputedAt string  `json:"computed_at,omitempty"`
+	// SupersededBy names the span that later overturned this one, empty
+	// when it still stands (🎯T132.1). Distinct from ParentID, which is
+	// hierarchy: a parent encloses this span, a superseder replaces it.
+	SupersededBy string `json:"superseded_by,omitempty"`
 }
 
 // SegmentQuery filters for QuerySegments / mnemo_segments.
@@ -287,7 +291,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			SELECT s.id, s.session_id, s.from_msg_id, s.to_msg_id, s.level,
 			       COALESCE(s.parent_id, ''), s.method, s.confidence, s.sealed,
 			       COALESCE(s.label, ''), COALESCE(s.summary, ''), COALESCE(s.repo, ''),
-			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, '')
+			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, ''), COALESCE(s.superseded_by, '')
 			FROM topic_segments s
 			JOIN theme_members m1 ON m1.entity_id = s.id AND m1.doc_kind = 'segment' AND m1.theme_id = ?
 			JOIN theme_members m2 ON m2.entity_id = s.id AND m2.doc_kind = 'segment' AND m2.theme_id = ?
@@ -318,7 +322,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			SELECT id, session_id, from_msg_id, to_msg_id, level,
 			       COALESCE(parent_id, ''), method, confidence, sealed,
 			       COALESCE(label, ''), COALESCE(summary, ''), COALESCE(repo, ''),
-			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
+			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, ''), COALESCE(superseded_by, '')
 			FROM topic_segments
 			WHERE from_msg_id <= ? AND to_msg_id >= ?
 			  AND (? = '' OR session_id = ?)
@@ -338,7 +342,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			SELECT s.id, s.session_id, s.from_msg_id, s.to_msg_id, s.level,
 			       COALESCE(s.parent_id, ''), s.method, s.confidence, s.sealed,
 			       COALESCE(s.label, ''), COALESCE(s.summary, ''), COALESCE(s.repo, ''),
-			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, '')
+			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, ''), COALESCE(s.superseded_by, '')
 			FROM topic_segments s
 			JOIN theme_members m ON m.entity_id = s.id AND m.doc_kind = 'segment' AND m.theme_id = ?
 			WHERE (? = 0 OR s.sealed = 1)
@@ -357,7 +361,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			SELECT s.id, s.session_id, s.from_msg_id, s.to_msg_id, s.level,
 			       COALESCE(s.parent_id, ''), s.method, s.confidence, s.sealed,
 			       COALESCE(s.label, ''), COALESCE(s.summary, ''), COALESCE(s.repo, ''),
-			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, '')
+			       COALESCE(s.first_ts, ''), COALESCE(s.last_ts, ''), COALESCE(s.computed_at, ''), COALESCE(s.superseded_by, '')
 			FROM topic_segments s
 			JOIN topic_segments_fts f ON f.rowid = s.rowid
 			WHERE topic_segments_fts MATCH ?
@@ -376,7 +380,7 @@ func (s *Store) QuerySegments(q SegmentQuery) ([]TopicSegment, error) {
 			SELECT id, session_id, from_msg_id, to_msg_id, level,
 			       COALESCE(parent_id, ''), method, confidence, sealed,
 			       COALESCE(label, ''), COALESCE(summary, ''), COALESCE(repo, ''),
-			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
+			       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, ''), COALESCE(superseded_by, '')
 			FROM topic_segments
 			WHERE session_id = ?
 			  AND (? = 0 OR sealed = 1)
@@ -409,6 +413,7 @@ func scanSegments(rows *sql.Rows) ([]TopicSegment, error) {
 			&t.ID, &t.SessionID, &t.FromMsgID, &t.ToMsgID, &t.Level,
 			&t.ParentID, &t.Method, &t.Confidence, &sealed,
 			&t.Label, &t.Summary, &t.Repo, &t.FirstTS, &t.LastTS, &t.ComputedAt,
+			&t.SupersededBy,
 		); err != nil {
 			return nil, err
 		}
@@ -472,7 +477,7 @@ func (s *Store) segmentByID(id string) (*TopicSegment, error) {
 		SELECT id, session_id, from_msg_id, to_msg_id, level,
 		       COALESCE(parent_id, ''), method, confidence, sealed,
 		       COALESCE(label, ''), COALESCE(summary, ''), COALESCE(repo, ''),
-		       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, '')
+		       COALESCE(first_ts, ''), COALESCE(last_ts, ''), COALESCE(computed_at, ''), COALESCE(superseded_by, '')
 		FROM topic_segments WHERE id = ?
 	`, id)
 	var t TopicSegment
@@ -481,6 +486,7 @@ func (s *Store) segmentByID(id string) (*TopicSegment, error) {
 		&t.ID, &t.SessionID, &t.FromMsgID, &t.ToMsgID, &t.Level,
 		&t.ParentID, &t.Method, &t.Confidence, &sealed,
 		&t.Label, &t.Summary, &t.Repo, &t.FirstTS, &t.LastTS, &t.ComputedAt,
+		&t.SupersededBy,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

@@ -32,16 +32,30 @@ const (
 	// SegmentMethodLLM is a topic span the summariser drew inside a
 	// window it was already reading (Payload.Spans).
 	SegmentMethodLLM = "llm"
+	// SegmentMethodStream is a provisional span drawn live by the
+	// streaming watcher as the conversation happens (🎯T132). It ranks
+	// above structural — a span closed because the conversation closed
+	// the topic beats one inferred from idle gaps — and below the batch
+	// methods, which see the stretch whole and get the last word.
+	SegmentMethodStream = "stream"
 )
 
 // SegmentMethodRank orders methods by retrieval precedence, lowest
 // first. Inlined into ORDER BY clauses so the best available span for a
 // message wins without deleting the weaker ones — structural spans stay
 // as coverage for ranges no summariser has reached.
-const SegmentMethodRank = `CASE method
-		WHEN '` + SegmentMethodLLM + `' THEN 0
-		WHEN '` + SegmentMethodCompaction + `' THEN 1
-		ELSE 2 END`
+//
+// A superseded span sorts below every live one regardless of method
+// (🎯T132.1): being overturned is a stronger signal than how the span was
+// drawn. It is demoted rather than filtered, because the record that a
+// conclusion was once held — and by which method — is the point of
+// keeping the edge at all.
+const SegmentMethodRank = `CASE
+		WHEN superseded_by IS NOT NULL THEN 9
+		WHEN method = '` + SegmentMethodLLM + `' THEN 0
+		WHEN method = '` + SegmentMethodCompaction + `' THEN 1
+		WHEN method = '` + SegmentMethodStream + `' THEN 2
+		ELSE 3 END`
 
 // Levels for compaction-derived spans. The window span is the coarse
 // extent (expand="segment:coarse"); the summariser's topic spans nest
@@ -169,7 +183,48 @@ func (s *Store) PutCompactionSegments(seg CompactionSegments) error {
 		}
 	}
 
+	// Finalisation supersedes the live spans it redrew (🎯T132.3).
+	//
+	// Batch has hindsight: it sees the whole window at once, where the
+	// streaming watcher had to decide with only the past available. So
+	// the batch span wins at retrieval — but the stream span is kept and
+	// merely demoted, because the divergence between what the stream
+	// believed and what hindsight concluded IS the cost of freshness,
+	// and deleting the loser would delete the measurement.
+	if err := supersedeStreamSpansIn(tx, seg.SessionID, seg.FromMsgID, seg.ToMsgID, windowID); err != nil {
+		return err
+	}
+
 	return tx.Commit()
+}
+
+// supersedeStreamSpansIn points every stream span overlapping a
+// finalised window at the span that redrew it.
+//
+// Overlap, not containment: a stream span that straddles the window edge
+// was still drawn without the hindsight this window has, and leaving it
+// ranked alongside the finalised spans would let a half-informed
+// boundary win for the half of its range inside the window.
+//
+// Already-superseded rows are left alone. The first finaliser to reach a
+// span is the one whose hindsight actually replaced it; overwriting the
+// edge on a later pass would rewrite history to point at whichever
+// compaction ran most recently.
+func supersedeStreamSpansIn(tx *sql.Tx, sessionID string, from, to int64, bySpanID string) error {
+	_, err := tx.Exec(`
+		UPDATE topic_segments
+		SET superseded_by = ?
+		WHERE session_id = ?
+		  AND method = ?
+		  AND superseded_by IS NULL
+		  AND id != ?
+		  AND from_msg_id <= ?
+		  AND to_msg_id >= ?
+	`, bySpanID, sessionID, SegmentMethodStream, bySpanID, to, from)
+	if err != nil {
+		return fmt.Errorf("supersede stream spans: %w", err)
+	}
+	return nil
 }
 
 // compactionSegmentRow is the insert shape for a compaction-derived

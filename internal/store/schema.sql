@@ -629,7 +629,19 @@ CREATE TABLE topic_segments (
 			first_ts TEXT,
 			last_ts TEXT,
 			computed_at TEXT NOT NULL DEFAULT '',
-			compaction_id INTEGER
+			compaction_id INTEGER,
+			-- Lineage, NOT hierarchy (🎯T132.1). parent_id above says "this
+			-- fine span sits inside that coarse one"; superseded_by says
+			-- "that span later overturned this one". Conflating them would
+			-- make AttachSegmentExpand's parent walk climb a supersession
+			-- edge as though it were an enclosing span.
+			--
+			-- Nullable ADD COLUMN, which sqlift permits under AllowNone, so
+			-- this stays inside the append-only schema policy with no gate
+			-- relaxed. Superseded spans are retained and flagged rather than
+			-- deleted: the stream-vs-finalisation divergence is the freshness
+			-- metric, and deleting the loser would delete the measurement.
+			superseded_by TEXT
 		);
 
 CREATE INDEX topic_segments_by_session ON topic_segments (session_id, from_msg_id, to_msg_id);

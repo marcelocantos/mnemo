@@ -1113,7 +1113,7 @@ targets:
     discovered: 2026-07-28
   T132:
     name: A claudia-maintained streaming watcher summarises live sessions into provisional topic spans, replacing the structural layer in retrieval, with batch finalization superseding them
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1124,7 +1124,91 @@ targets:
     - Supersession edges exist in the schema and the watcher emits them when later work overturns an earlier span's conclusion; segment retrieval can rank or flag superseded spans
     - 'Effort/model sweep completed: grid over model tier × effort × drip size × seal-lookahead K, boundaries scored with the existing Pk/WindowDiff against high-effort hindsight gold, label/summary quality judged; chosen operating point documented with measured cost per active-session-day'
     context: 'Design from the 2026-07-28 segmentation-baseline discussion (CSP session fork). The batch pipeline''s windows are cut by token budget and never re-summarised, so a topic straddling a window boundary can never be one span, and no window ever sees another — cross-window semantics (supersession edges, callbacks to earlier topics) are structurally impossible in batch. A long-running low-effort summariser session (driven via ../claudia) watching the live transcript dissolves both: it closes spans when the conversation closes the topic, and its rolling state lets it emit "this overturns span X" at the moment the overturning happens. Streaming replaces the STRUCTURAL tier (the provisional live-tail layer, whose cadence heuristics were never a segmenter — see the T64.10 provenance discussion), NOT the batch tier: batch finalization at session close redraws spans with hindsight and gets the last word; backfill (🎯T131, in progress) covers history. Critical design commitment: the watcher is a bounded-state streaming automaton — rolling summary + open spans + unsealed tail; sealed spans evicted from context; restart from own emitted state on context budget. The naive accumulate-everything design is QUADRATIC in session length even with prompt caching (0.1× cache-read on a growing prefix per drip still sums quadratically); bounded state makes it linear. Premature sealing is mitigated by a seal-lookahead lag (K substantive messages of different topic before sealing — the structural layer''s lookahead rule finally attached to the right decider). The stream-vs-finalization diff doubles as a free quality metric: where hindsight routinely redraws streaming boundaries, that gap is the measured cost of freshness. Pk/WindowDiff scoring functions already exist in internal/segment/structural.go with nothing to evaluate; the effort/model sweep gives them a job. Expected cost: low single-digit dollars per heavy working day with substantive-message filtering; summarisation is extraction, not hard thinking, so low effort is the prior for the sweet spot.'
+    depends_on:
+    - T132.1
+    - T132.2
+    - T132.3
+    - T132.4
     origin: 2026-07-28 streaming-watcher design discussion (CSP code-smell session fork)
+    discovered: 2026-07-28
+  T132.1:
+    name: 'The span data model expresses streaming provenance and supersession: a stream method in the retrieval rank, and an edge saying one span overturns another'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - topic_segments carries method='stream' with a defined place in SegmentMethodRank, and the constant list in segments_compaction.go names it alongside structural/compaction/llm
+    - A nullable supersession edge exists on topic_segments (superseded_by, referencing topic_segments.id) added under sqlift AllowNone as a plain nullable ADD COLUMN — no gate relaxed, per the append-only schema policy
+    - parent_id keeps meaning hierarchy and ONLY hierarchy. The new edge is lineage. A test pins that the two are not conflated, because parent_id's existing walk in AttachSegmentExpand would silently follow a supersession edge as if it were an enclosing span
+    - Retrieval flags or ranks superseded spans rather than hiding them, consistent with method ranking leaving weaker structural coverage in place underneath
+    - 'Nothing writes stream spans yet: this ships the model alone, so the watcher lands against a schema that already exists'
+    context: 'Sub-target 1 of 🎯T132 (see docs/design/streaming-segmentation.md). Separated because the schema is the only part with a migration contract attached, and it is independently useful — the supersession edge is a genuine gap today even for batch spans. Survey finding: nothing in the schema expresses lineage. parent_id is a hierarchy pointer (fine span to enclosing coarse span), used as such by AttachSegmentExpand''s parent walk; a grep for supersed/lineage/generation finds only prose comments and an unrelated synthesis.go status enum. So this is design-from-scratch, not wiring-up.'
+    tags:
+    - segmentation
+    - schema
+    - supersession
+    - retrieval
+    origin: subdivide(🎯T132)
+    discovered: 2026-07-28
+  T132.2:
+    name: A bounded-state streaming watcher summarises live sessions into provisional spans at linear cost
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A claudia Session-mode agent consumes drip-fed substantive messages from a live session and emits idempotent span events (open, seal, reopen, supersede) written as method='stream', crash-recoverable from the last sealed state
+    - 'Bounded-state contract holds and is MEASURED, not asserted: context is rolling summary + open spans + unsealed tail; sealed spans are evicted; cost is linear in transcript length with no quadratic prefix re-read; the watcher restarts from its own emitted state when its context budget fills'
+    - 'Session discovery rides Store.LiveSessions() (🎯T9.5.1, lsof over transcript handles, already TTL-cached): poll, diff against the active watcher set, start and stop per session'
+    - Premature sealing is bounded by a seal-lookahead of K substantive messages on a different topic — the structural layer's lookahead rule attached to a decider that understands what messages mean rather than how far apart they arrived
+    - The live tail of an active session shows stream spans with real topic labels within minutes
+    context: 'Sub-target 2 of 🎯T132. The bounded-state property is the acceptance, not a nice-to-have: the naive accumulate-everything design is QUADRATIC in session length even with prompt caching, because a 0.1x cache-read on a growing prefix paid once per drip still sums quadratically. Survey finding that de-risks this: claudia v0.12.0 — already pinned in go.mod — ships Session mode (Start, Agent.Send, SubscribeEvents, WaitForResponse) backed by a tmux-held process that survives the consumer dying. mnemo has never used it; internal/compact/claudia.go drives one-shot Task mode exclusively and deliberately. So this is a new integration surface against a vendored API, not a dependency bump.'
+    depends_on:
+    - T132.1
+    tags:
+    - segmentation
+    - streaming
+    - claudia
+    - bounded-state
+    origin: subdivide(🎯T132)
+    discovered: 2026-07-28
+  T132.3:
+    name: Batch finalisation redraws sealed spans with hindsight and supersedes divergent stream spans, and the divergence is recorded as the cost of freshness
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - At session close (or budget crossing) the batch pass redraws spans over the sealed region and emits supersession edges against divergent stream spans rather than deleting them
+    - The stream-vs-final boundary diff is recorded per session as a freshness-cost metric — the measurement falls out of the design rather than being instrumented separately
+    - Retrieval prefers the finalised span where both exist, without losing the stream span's record that it was there first
+    context: 'Sub-target 3 of 🎯T132. Streaming replaces the STRUCTURAL tier, never the batch tier: batch has hindsight and gets the last word. Where hindsight routinely redraws a streaming boundary, that gap IS the measured cost of freshness — a free quality metric, which is why supersession is modelled as an edge rather than a delete.'
+    depends_on:
+    - T132.2
+    tags:
+    - segmentation
+    - finalisation
+    - supersession
+    - metrics
+    origin: subdivide(🎯T132)
+    discovered: 2026-07-28
+  T132.4:
+    name: The streaming operating point is chosen by measurement, and structural spans leave retrieval only once stream spans beat them
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - A grid over model tier x effort x drip size x seal-lookahead K is run, with boundaries scored by the existing Pk/WindowDiff against high-effort hindsight gold, and label/summary quality judged separately from boundary placement
+    - The chosen operating point is documented with measured cost per active-session-day — the prior is that low effort wins, since summarisation here is extraction rather than hard thinking, and the sweep exists to falsify that rather than confirm it
+    - Structural spans retire from retrieval (or reduce to unsummarised-gap markers) ONLY after stream spans clear a stated quality bar — the same bar that has kept DefaultSegmentExpand at none
+    - DefaultSegmentExpand's default is revisited in light of the result, since the reason it is off is precisely the quality the structural layer could not reach
+    context: Sub-target 4 of 🎯T132, deliberately last. Pk and WindowDiff already exist in internal/segment/structural.go, fully implemented and tested, with no production caller — a scoring harness with nothing to score. This gives them the job. Retiring the structural tier is last because removing the current provisional layer before stream spans have demonstrably beaten it trades a weak signal for no signal.
+    depends_on:
+    - T132.3
+    tags:
+    - segmentation
+    - evaluation
+    - sweep
+    - pk-windowdiff
+    origin: subdivide(🎯T132)
     discovered: 2026-07-28
   T14:
     name: File-history-snapshots surfaced as queryable tool

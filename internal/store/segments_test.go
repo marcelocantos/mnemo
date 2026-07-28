@@ -535,3 +535,115 @@ func TestGoldenPkWindowDiffHarness(t *testing.T) {
 	}
 	t.Logf("golden quality Pk=%.3f WindowDiff=%.3f hypCuts=%v", pk, wd, hypCuts)
 }
+
+// insertSpan writes one topic_segments row for the lineage tests.
+func insertSpan(t *testing.T, s *Store, id, sessionID string, from, to int,
+	method, label, parentID, supersededBy string) {
+	t.Helper()
+	var parent, superseder any
+	if parentID != "" {
+		parent = parentID
+	}
+	if supersededBy != "" {
+		superseder = supersededBy
+	}
+	now := "2026-07-28T00:00:00Z"
+	if _, err := s.writeDB.Exec(`
+		INSERT INTO topic_segments (
+			id, session_id, from_msg_id, to_msg_id, level, parent_id,
+			method, confidence, sealed, label, summary, repo,
+			first_ts, last_ts, computed_at, superseded_by
+		) VALUES (?, ?, ?, ?, 0, ?, ?, 0.9, 1, ?, ?, 'mnemo', ?, ?, ?, ?)
+	`, id, sessionID, from, to, parent, method, label, label, now, now, now, superseder); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSupersessionIsNotHierarchy is the 🎯T132.1 guard.
+//
+// topic_segments now carries two pointers between spans and they mean
+// opposite things: parent_id says "this fine span sits INSIDE that coarse
+// one", superseded_by says "that span later OVERTURNED this one".
+//
+// AttachSegmentExpand walks parent_id to widen a search hit to its
+// enclosing context. If a supersession edge were ever written into
+// parent_id — or the walk taught to follow both — expanding a hit would
+// silently swap in the span that replaced it and present the correction as
+// though it were the surrounding conversation. That is a wrong answer that
+// looks entirely reasonable, so it gets a test rather than a comment.
+func TestSupersessionIsNotHierarchy(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	// A coarse span genuinely enclosing the fine one.
+	insertSpan(t, s, "seg_coarse", "sess-x", 1, 100, SegmentMethodCompaction, "the whole window", "", "")
+	// The fine span: inside the coarse one, and later overturned.
+	insertSpan(t, s, "seg_old", "sess-x", 10, 20, SegmentMethodStream, "fd io not functional", "seg_coarse", "seg_new")
+	// The span that overturned it. Unrelated by hierarchy.
+	insertSpan(t, s, "seg_new", "sess-x", 60, 70, SegmentMethodLLM, "fd io fixed", "", "")
+
+	got, err := s.segmentByID("seg_old")
+	if err != nil || got == nil {
+		t.Fatalf("segmentByID: %v", err)
+	}
+	if got.ParentID != "seg_coarse" {
+		t.Errorf("parent = %q, want seg_coarse — hierarchy must survive", got.ParentID)
+	}
+	if got.SupersededBy != "seg_new" {
+		t.Errorf("superseded_by = %q, want seg_new", got.SupersededBy)
+	}
+	if got.ParentID == got.SupersededBy {
+		t.Fatal("hierarchy and lineage resolved to the same edge")
+	}
+
+	// The parent walk must climb to the enclosing span, never to the
+	// superseder — even though the superseder is the 'better' span.
+	parent, err := s.segmentByID(got.ParentID)
+	if err != nil || parent == nil {
+		t.Fatalf("parent lookup: %v", err)
+	}
+	if parent.ID != "seg_coarse" {
+		t.Errorf("parent walk reached %q, want seg_coarse", parent.ID)
+	}
+	if !(parent.FromMsgID <= got.FromMsgID && parent.ToMsgID >= got.ToMsgID) {
+		t.Errorf("parent [%d,%d] does not enclose child [%d,%d] — this is the shape a "+
+			"supersession edge would break", parent.FromMsgID, parent.ToMsgID, got.FromMsgID, got.ToMsgID)
+	}
+}
+
+// TestSupersededSpansRankBelowLiveOnes: a superseded span is demoted, not
+// hidden. Retrieval should prefer the live span for a message both cover,
+// while the overturned one stays queryable — the stream-vs-final
+// divergence is the freshness metric, and deleting the loser deletes the
+// measurement.
+func TestSupersededSpansRankBelowLiveOnes(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	// Both cover message 50. The superseded one is llm-method, which
+	// normally outranks everything — so if supersession did not dominate
+	// the ranking, this stale span would win.
+	insertSpan(t, s, "seg_stale", "sess-y", 40, 60, SegmentMethodLLM, "stale conclusion", "", "seg_fresh")
+	insertSpan(t, s, "seg_fresh", "sess-y", 45, 55, SegmentMethodStream, "current conclusion", "", "")
+
+	segs, err := s.QuerySegments(SegmentQuery{SessionID: "sess-y", ContainingMsgID: 50, Limit: 10})
+	if err != nil {
+		t.Fatalf("QuerySegments: %v", err)
+	}
+	if len(segs) < 2 {
+		t.Fatalf("want both spans returned, got %d", len(segs))
+	}
+	if segs[0].ID != "seg_fresh" {
+		t.Errorf("best span = %q, want seg_fresh — a superseded llm span must not outrank a live one", segs[0].ID)
+	}
+	var sawStale bool
+	for _, sg := range segs {
+		if sg.ID == "seg_stale" {
+			sawStale = true
+			if sg.SupersededBy != "seg_fresh" {
+				t.Errorf("stale span lost its lineage: superseded_by = %q", sg.SupersededBy)
+			}
+		}
+	}
+	if !sawStale {
+		t.Error("the superseded span was hidden, not demoted — the record it was once held is the point")
+	}
+}
