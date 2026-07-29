@@ -256,3 +256,95 @@ func TestSealAllOpenIsANoOpWithNothingOpen(t *testing.T) {
 		t.Errorf("expected no spans, got %d", len(got))
 	}
 }
+
+// TestForceSealStaleRescuesHeldSpans is the 🎯T132.4 under-sealing
+// backstop.
+//
+// The measured failure was not vagueness but SILENCE: the model held
+// spans open across whole sessions, and because only sealed spans persist,
+// a session hindsight cut into five topics produced one. A crude boundary
+// beats no span at all.
+func TestForceSealStaleRescuesHeldSpans(t *testing.T) {
+	a := New("sess", Config{SealLookahead: 99, MaxOpenSpanMessages: 20, MaxTail: 1000}, nil)
+	// Open first, then feed: a span only ages on messages that arrive
+	// after it opens.
+	a.Ingest(mkMsgs(1, 1))
+	a.Apply([]Event{{Kind: EventOpen, Ref: "t1", From: 1, Label: "held open forever"}})
+	a.Ingest(mkMsgs(2, 40))
+
+	got := a.ForceSealStale()
+	if len(got) != 1 {
+		t.Fatalf("force-sealed %d spans, want 1", len(got))
+	}
+	if got[0].To != 21 {
+		t.Errorf("sealed at %d, want 21 — the 20th message after the span opened", got[0].To)
+	}
+	if len(a.OpenSpans()) != 0 {
+		t.Error("stale span still open")
+	}
+}
+
+// TestStalenessCountsMessagesNotIdGaps is the bug that made the first
+// attempt at this WORSE than no backstop (🎯T132.4).
+//
+// messages.id is a global rowid, so one session's 70 substantive messages
+// can span 313 ids. Measuring a span's age as (head - from) therefore
+// measured id distance, firing the backstop roughly 4x too eagerly, and
+// sealing at (from + cap) landed on an id naming no message at all — a
+// boundary that maps to no ordinal position and scores as no span. The
+// sweep caught it: Pk went 0.445 -> 0.595 with one session returning the
+// no-hypothesis sentinel despite reporting four spans.
+func TestStalenessCountsMessagesNotIdGaps(t *testing.T) {
+	a := New("sess", Config{SealLookahead: 99, MaxOpenSpanMessages: 5, MaxTail: 1000}, nil)
+
+	// Ids with large gaps, exactly like a real session interleaved with
+	// noise and other sessions.
+	sparse := []segment.Message{}
+	for i, id := range []int{1000, 1050, 1120, 1200, 1310, 1400, 1500} {
+		sparse = append(sparse, segment.Message{
+			ID: id, Role: "user", Text: fmt.Sprintf("message %d", i),
+		})
+	}
+	a.Ingest(sparse[:1])
+	a.Apply([]Event{{Kind: EventOpen, Ref: "t1", From: 1000, Label: "topic"}})
+
+	// Four more messages: under the cap of 5, despite spanning 310 ids.
+	a.Ingest(sparse[1:5])
+	if got := a.ForceSealStale(); len(got) != 0 {
+		t.Fatalf("backstop fired after 4 messages spanning 310 ids; it is measuring "+
+			"id distance rather than messages (%+v)", got)
+	}
+
+	// Two more crosses the cap.
+	a.Ingest(sparse[5:])
+	got := a.ForceSealStale()
+	if len(got) != 1 {
+		t.Fatalf("backstop did not fire after 6 messages past the cap of 5")
+	}
+	// And it must seal at a REAL message id, or the boundary maps to no
+	// position and the span scores as if it never existed.
+	real := map[int]bool{}
+	for _, m := range sparse {
+		real[m.ID] = true
+	}
+	if !real[got[0].To] {
+		t.Errorf("sealed at id %d, which names no message; a boundary at a "+
+			"non-existent id maps to no ordinal and scores as no span", got[0].To)
+	}
+}
+
+// TestForceSealStaleLeavesYoungSpansAlone: the backstop must not trim
+// legitimately long topics, only spans the model has clearly abandoned.
+func TestForceSealStaleLeavesYoungSpansAlone(t *testing.T) {
+	a := New("sess", Config{MaxOpenSpanMessages: 60}, nil)
+	a.Ingest(mkMsgs(1, 30))
+	a.Apply([]Event{{Kind: EventOpen, Ref: "t1", From: 1, Label: "still running"}})
+
+	if got := a.ForceSealStale(); len(got) != 0 {
+		t.Errorf("force-sealed %d young spans; the backstop should only fire on "+
+			"spans held far past the observed topic length", len(got))
+	}
+	if len(a.OpenSpans()) != 1 {
+		t.Error("young span was closed")
+	}
+}

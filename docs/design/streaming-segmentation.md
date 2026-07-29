@@ -258,3 +258,66 @@ cases — the tier measured at the naive floor. The blocker is not that the
 good tiers are bad; it is that they have reached almost nothing. The
 trigger for revisiting is therefore **coverage**, not another sweep: when
 llm/stream coverage passes roughly half of sessions, re-decide.
+
+## Negative result: pushing the model to seal made it worse
+
+The 0.445 measurement above was diagnosed as **under-sealing** — the model
+opening spans and holding them, so a session hindsight cut into five topics
+produced one, with `sealed_through` still at zero after four context-budget
+restarts. That diagnosis was correct as a description. The intervention it
+suggested was wrong.
+
+Two changes were made and measured over the same six sessions:
+
+1. The prompt was rebalanced. v1 named only the cost of sealing *early*
+   ("if you are unsure, leave it open") and never mentioned that an
+   unsealed span is discarded entirely. v2 said so, showed each span's age,
+   and nudged when a span had been open a long time.
+2. A backstop force-sealed spans held past a message threshold.
+
+| configuration | meanPk | meanWD | spans |
+|---|---:|---:|---:|
+| force-seal at transcript end only | **0.445** | 0.445 | 3.3 |
+| + prompt pressure + backstop (buggy) | 0.595 | 0.637 | 6.7 |
+| + prompt pressure + backstop (fixed) | 0.507 | 0.534 | 4.7 |
+
+Both metrics agree, so this is not a Pk artefact — and Pk's known bias
+*favours* fewer boundaries, which would have flattered the change if
+anything.
+
+**The model does seal more now. It seals in worse places.** Sealing
+frequency was never the problem; boundary *placement* was, and pressure to
+seal produced cuts where the conversation had not actually turned. More
+spans at worse positions is worse than fewer spans at better ones.
+
+Reverted to the best measured configuration: v1 sealing instruction, span
+age shown but not editorialised, backstop present but off
+(`MaxOpenSpanMessages = 0`).
+
+### The middle result is the important one
+
+The buggy run scored 0.595 while producing *more* spans than either
+alternative. Rising span count reads as progress, and without the
+`Pk=1.000` sentinel appearing next to `spans=4` — a contradiction that
+could not be explained away — the conclusion would have been "the prompt
+change didn't take, push harder". The bug was `messages.id` treated as a
+position: ids are global rowids, and one session's 70 substantive messages
+span 313 of them, so the threshold fired ~4x too eagerly and sealed at ids
+naming no message at all.
+
+That is the third instance of the same mistake in this work — the other two
+being Pk fed raw ids (n = 1.9 million) and the same in
+`StreamFreshnessDiff`, which shipped. Anywhere `messages.id` is used as a
+sequence position is wrong; it is an identifier with gaps.
+
+### What this leaves
+
+The bar (meanPk <= 0.40 against a 0.555 naive baseline) is still not
+cleared, at 0.445. The cause is no longer "under-sealing" but the more
+awkward "boundary placement is mediocre and does not respond to
+instruction". Candidates not yet tried: giving the model the rolling
+summary of *sealed* spans rather than a single blob so it can see the shape
+it has already imposed; scoring label quality separately, since a correct
+boundary with a useless label and an incorrect boundary score the same
+today; and a larger gold corpus, since six sessions is thin for
+distinguishing 0.44 from 0.51.
