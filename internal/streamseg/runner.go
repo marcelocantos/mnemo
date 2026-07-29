@@ -135,6 +135,10 @@ func (r *Runner) Step(ctx context.Context) (int, error) {
 	}
 
 	sealed := r.auto.Apply(ParseEvents(reply))
+	// Backstop: whatever the model declined to seal and has now held far
+	// too long (🎯T132.4). Persisted alongside the model's own seals so a
+	// session that never seals still yields spans rather than silence.
+	sealed = append(sealed, r.auto.ForceSealStale()...)
 	if err := r.persist(sealed); err != nil {
 		return len(fresh), err
 	}
@@ -160,7 +164,11 @@ func (r *Runner) Step(ctx context.Context) (int, error) {
 // move boundaries. It is part of the derivation key, so a prompt revision
 // makes the spans it produced findable and redrawable (🎯T134) instead of
 // silently mixed in with the ones before it.
-const PromptVersion = 1
+// PromptVersion 2 rebalanced the sealing instructions: v1 named only the
+// cost of sealing early and never said that an unsealed span is discarded,
+// so the model held spans open and sessions produced one span where
+// hindsight drew five (🎯T132.4).
+const PromptVersion = 2
 
 // derivation is the configuration fingerprint stamped on every span this
 // runner writes: method/model/drip/lookahead/prompt-version.

@@ -60,7 +60,13 @@ func renderDrip(a *Automaton, fresh []segment.Message) string {
 	if open := a.OpenSpans(); len(open) > 0 {
 		b.WriteString("Spans you have open:\n")
 		for _, sp := range open {
-			fmt.Fprintf(&b, "  %s from #%d — %s\n", sp.Ref, sp.From, sp.Label)
+			// Age is shown but NOT editorialised. Pushing the model to
+			// seal stale spans was measured and made things worse (see
+			// the negative result in docs/design/streaming-segmentation.md):
+			// it sealed more often and in worse places. The bare count is
+			// context; the nudge was the part that hurt.
+			fmt.Fprintf(&b, "  %s from #%d (%d messages ago) — %s\n",
+				sp.Ref, sp.From, sp.MsgsSince, sp.Label)
 		}
 		b.WriteString("\n")
 	} else {

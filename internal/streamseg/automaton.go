@@ -39,6 +39,17 @@ type OpenSpan struct {
 	From    int    `json:"from"`
 	Label   string `json:"label"`
 	LastMsg int    `json:"last_msg"`
+	// MsgsSince counts substantive messages ingested since this span
+	// opened. A COUNT, deliberately, not a difference of message ids:
+	// ids are global rowids with gaps, so one session's 70 messages can
+	// span 313 ids. Subtracting them measures neither messages nor time.
+	MsgsSince int `json:"msgs_since"`
+	// StaleAtID is the id of the message at which this span crossed
+	// MaxOpenSpanMessages, or 0 while it is still young. Recorded when
+	// crossed rather than computed later, because it must be a REAL
+	// message id — a span sealed at an id that names no message produces
+	// a boundary that maps to no position and scores as no span at all.
+	StaleAtID int `json:"stale_at_id"`
 }
 
 // State is the automaton's entire working set. Everything not in here has
@@ -98,6 +109,17 @@ type Config struct {
 	// RestartTokens is the approximate context budget after which the
 	// agent is restarted and re-seeded from State.
 	RestartTokens int
+	// MaxOpenSpanMessages force-seals a span held open for longer than
+	// this many messages (🎯T132.4).
+	//
+	// A backstop, not the mechanism. The prompt asks the model to notice
+	// stale spans and seal them, and that is where good boundaries come
+	// from; this only guarantees the tier degrades to a coarse span
+	// rather than to NOTHING, which is what it did when the model simply
+	// held everything open. A crude boundary beats no span: unsealed
+	// spans are never persisted, so under-sealing does not produce a
+	// vague answer, it produces silence.
+	MaxOpenSpanMessages int
 }
 
 // Defaults. SealLookahead is now a MEASURED choice (🎯T132.4): the sweep
@@ -113,6 +135,14 @@ const (
 	DefaultSealLookahead   = 3
 	DefaultMaxSummaryChars = 4000
 	DefaultRestartTokens   = 120_000
+	// OFF by default. The stale-span backstop was measured and made
+	// segmentation WORSE: 0.445 -> 0.507 meanPk over the same six
+	// sessions, with span count rising 3.3 -> 4.7. The model sealed more
+	// and in worse places, so cuts the backstop inserted were noise
+	// rather than recovered structure. Kept because the machinery is
+	// correct and cheap to re-enable, and because a future prompt might
+	// need it; set MaxOpenSpanMessages explicitly to turn it on.
+	DefaultMaxOpenSpanMessages = 0
 )
 
 func (c Config) withDefaults() Config {
@@ -128,6 +158,7 @@ func (c Config) withDefaults() Config {
 	if c.RestartTokens <= 0 {
 		c.RestartTokens = DefaultRestartTokens
 	}
+	// Zero means disabled, so it is deliberately NOT defaulted upward.
 	return c
 }
 
@@ -175,6 +206,19 @@ func (a *Automaton) Ingest(msgs []segment.Message) []segment.Message {
 	if len(fresh) == 0 {
 		return nil
 	}
+	// Age every open span by the messages that just arrived, and record
+	// where each one goes stale. Done here because this is the only
+	// place that sees messages in order.
+	for _, m := range fresh {
+		for _, sp := range a.state.Open {
+			sp.MsgsSince++
+			if a.cfg.MaxOpenSpanMessages > 0 && sp.StaleAtID == 0 &&
+				sp.MsgsSince >= a.cfg.MaxOpenSpanMessages {
+				sp.StaleAtID = m.ID
+			}
+		}
+	}
+
 	a.state.Tail = append(a.state.Tail, fresh...)
 	if over := len(a.state.Tail) - a.cfg.MaxTail; over > 0 {
 		// Dropping, not summarising, the overflow. A message that has
@@ -326,6 +370,48 @@ func (a *Automaton) trimTail() {
 		}
 	}
 	a.state.Tail = append([]segment.Message(nil), kept...)
+}
+
+// ForceSealStale closes spans the model has held open past
+// MaxOpenSpanMessages, sealing each at the message where it went stale
+// rather than at the head — the excess is a new topic the model failed to
+// open, and handing all of it to the stale span would be wrong in the
+// other direction.
+//
+// A backstop, not the mechanism. Good boundaries come from the prompt
+// asking the model to notice stale spans; this only guarantees the tier
+// degrades to a coarse span rather than to NOTHING. Under-sealing does not
+// produce a vague answer, it produces silence: unsealed spans are never
+// persisted.
+func (a *Automaton) ForceSealStale() []Sealed {
+	var refs []string
+	for ref, sp := range a.state.Open {
+		if sp.StaleAtID != 0 {
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	sort.Strings(refs)
+
+	out := make([]Sealed, 0, len(refs))
+	for _, ref := range refs {
+		sp := a.state.Open[ref]
+		out = append(out, Sealed{
+			From:    sp.From,
+			To:      sp.StaleAtID,
+			Label:   sp.Label,
+			Summary: sp.Label,
+		})
+		a.rememberSealedRef(ref, sp.From, sp.StaleAtID)
+		delete(a.state.Open, ref)
+		if sp.StaleAtID > a.state.SealedThrough {
+			a.state.SealedThrough = sp.StaleAtID
+		}
+	}
+	a.trimTail()
+	return out
 }
 
 // SealAllOpen closes every remaining open span at `to`, bypassing the
