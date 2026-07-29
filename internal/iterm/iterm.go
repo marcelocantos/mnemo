@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Profile is the iTerm2 profile used for thread tabs (hardcoded per the
@@ -92,6 +93,15 @@ var runner = runOsascript
 func Go(ctx context.Context, args GoArgs) (Result, error) {
 	if strings.TrimSpace(args.Path) == "" {
 		return Result{}, fmt.Errorf("empty thread path")
+	}
+	// Bound the whole interaction when the caller gave no deadline. An
+	// HTTP handler's request context has none, so without this a wedged
+	// osascript holds the request open indefinitely and the client times
+	// out reporting the wrong cause entirely.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, automationTimeout)
+		defer cancel()
 	}
 	// loginCommand wraps the script in single quotes, so a single quote
 	// anywhere in the command would terminate it early and hand iTerm2 a
@@ -251,6 +261,17 @@ func osaEscape(s string) string {
 // with a cryptic "osascript: executable file not found". Tests exercise Go()
 // via an overridden runner, so they never reach this guard. (The menu-bar app
 // is excluded separately, in superviseThreadsShim.)
+// osascriptWaitDelay bounds how long Run waits on pipes still held by
+// processes osascript spawned, after the context is cancelled.
+const osascriptWaitDelay = 3 * time.Second
+
+// automationTimeout bounds a whole iTerm2 interaction when the caller
+// supplied no deadline of its own. Driving a terminal is not a long
+// operation; if it has not finished by now it is wedged — most commonly
+// because iTerm2 is not running and osascript is blocked trying to launch
+// it, which otherwise hangs the request forever.
+const automationTimeout = 20 * time.Second
+
 func runOsascript(ctx context.Context, lines []string) (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Errorf("iTerm2 control (the thread 'go' verb) is only available on macOS; this host is %s", runtime.GOOS)
@@ -260,6 +281,13 @@ func runOsascript(ctx context.Context, lines []string) (string, error) {
 		argv = append(argv, "-e", l)
 	}
 	cmd := exec.CommandContext(ctx, "osascript", argv...)
+	// CommandContext kills osascript itself on cancellation, but osascript
+	// launching iTerm2 forks a process that inherits the output pipes, and
+	// cmd.Run waits on those pipes rather than on the direct child. Without
+	// a WaitDelay a cancelled call still blocks indefinitely — the same
+	// trap the OCR worker hit (🎯T118). The delay bounds the gap between
+	// "kill the child" and "give up on its descendants".
+	cmd.WaitDelay = osascriptWaitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

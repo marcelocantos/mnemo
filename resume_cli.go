@@ -31,6 +31,12 @@ import (
 //   - It keeps this command away from the store entirely, so reopening a
 //     conversation can never trigger a schema migration or a multi-minute
 //     pre-migration backup against a database the daemon is holding open.
+//
+// resumeTimeout is deliberately longer than the daemon's own automation
+// bound, so a wedged terminal surfaces as the daemon's clear error rather
+// than as a client-side timeout with no explanation.
+const resumeTimeout = 45 * time.Second
+
 func cmdResume(args []string) {
 	fs := flag.NewFlagSet("resume", flag.ExitOnError)
 	fs.Usage = func() {
@@ -59,9 +65,26 @@ Examples:
 	ref := strings.TrimSpace(strings.Join(fs.Args(), " "))
 
 	endpoint := daemonBaseURL() + "/api/session/go"
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: resumeTimeout}
 	resp, err := client.PostForm(endpoint, url.Values{"session": {ref}})
 	if err != nil {
+		// A timeout is NOT the same as an unreachable daemon, and saying
+		// so sends people to `brew services` when the daemon is fine. The
+		// usual cause is the terminal automation blocking — most often
+		// because iTerm2 is not running and osascript is stuck trying to
+		// launch it.
+		if ue, ok := err.(*url.Error); ok && ue.Timeout() {
+			fmt.Fprintf(os.Stderr,
+				"resume: the mnemo daemon accepted the request but did not answer within %s.\n",
+				resumeTimeout)
+			fmt.Fprintln(os.Stderr,
+				"the daemon is probably fine — check `curl -s -o /dev/null -w '%{http_code}' "+
+					"http://localhost:19419/health`.")
+			fmt.Fprintln(os.Stderr,
+				"the usual cause is terminal automation: make sure iTerm2 is running, and that "+
+					"mnemo has Automation permission for it (System Settings > Privacy & Security > Automation).")
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "resume: cannot reach the mnemo daemon at %s: %v\n", daemonBaseURL(), err)
 		fmt.Fprintln(os.Stderr, "is it running? start it with `brew services start mnemo`.")
 		os.Exit(1)

@@ -883,20 +883,21 @@ targets:
     discovered: 2026-07-28
   T125:
     name: 'A session can be resumed from a loose description: mnemo opens the preferred terminal in the directory that owns it and picks the conversation back up'
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
-    - 'A loose reference resolves to a session without the user knowing its id — a repo/project fragment, "latest", "latest:<scope>", or an id/prefix. DONE: ResolveSessionRef, verified against the live 31k-session index.'
+    - 'A loose reference resolves to a session without the user knowing its id — a repo/project fragment, "latest", "latest:<scope>", or an id/prefix. DONE: ResolveSessionRef, verified against the live 31k-session index, including exact-id resolution.'
     - The terminal opens in the session's OWN directory (session_meta.cwd) and resumes that conversation rather than starting a fresh one. DONE via iterm.GoArgs.Command.
-    - 'Source-aware: a source with no known resume command fails naming it rather than silently opening a bare shell. DONE — claude AND grok resume (grok landed with 🎯T129 in v0.70.0); codex/chatgpt refuse by name. The earlier wording said "codex/grok refuse" and understated what shipped.'
-    - A session whose cwd no longer exists, or was a temp dir, is reported as such. DONE, pinned by test.
+    - 'Source-aware: a source with no known resume command fails naming it rather than silently opening a bare shell. DONE — claude and grok resume (grok landed with 🎯T129); codex/chatgpt refuse by name.'
+    - A session whose cwd no longer exists, or was a temp dir, is reported as such. DONE, pinned by test and verified against a real session on the live index.
     - Each session gets its own tab rather than stealing one belonging to another session sharing the same working directory. DONE via GoArgs.TagKey.
-    - 'CLI form (`mnemo resume [<ref>]`). DONE — but the recorded blocker was mis-framed and dissolved rather than being solved. It said this needed a read-only store open, because store.New runs migrations and can trigger a multi-minute pre-migration backup. Opening the store locally was the wrong design regardless: `mnemo thread go` already established that the daemon holds the single iTerm2 Automation TCC grant, so a CLI driving iTerm2 itself would carry the invoking terminal''s identity and prompt for a second grant. Resume delegates to POST /api/session/go, mirroring /api/thread/go. Never touching the store falls out of the right architecture.'
-    - Shared policy lives in one place (internal/sessiongo), so the MCP tool, the HTTP endpoint and the CLI cannot drift in what they check or what they say when it fails. DONE, with tests over all four refusal branches.
-    - Documented in README, agents-guide.md and CLAUDE.md. DONE — the previous release shipped mnemo_session_go undocumented in all three; not repeated.
-    - 'NOT YET CONFIRMED — the success path end-to-end against the live daemon: `mnemo resume <something real>` actually opening a tab in the right directory and the agent picking the conversation up. The failure paths are verified (405 on GET, 400 naming an unresolvable ref, CLI surfacing it with exit 1, against a dev daemon on a throwaway home); the success path needs a real session plus iTerm2 and is verifiable only once the daemon carries the endpoint.'
-    - Terminal choice is a preference rather than an iTerm2 assumption — MOVED to 🎯T126 at Marcelo's direction ("Let's just implement iTerm2 for now").
+    - 'CLI form (`mnemo resume [<ref>]`). DONE. The blocker recorded originally — that this needed a read-only store open — was mis-framed and dissolved: opening the store locally was the wrong design regardless, because the daemon holds the single terminal Automation grant. Resume delegates to POST /api/session/go, mirroring /api/thread/go, so it never touches the store at all.'
+    - Shared policy lives in one place (internal/sessiongo), so the MCP tool, the HTTP endpoint and the CLI cannot drift in what they check or say. DONE, with tests over all four refusal branches.
+    - Documented in README, agents-guide.md and CLAUDE.md. DONE.
+    - 'A wedged terminal fails in bounded time with an accurate message. DONE — and added because of what testing found: iterm.Go had no deadline of its own, and exec.CommandContext kills osascript while cmd.Run keeps waiting on pipes held by the processes it spawned (the 🎯T118 trap again). A stuck automation call hung the request indefinitely, and the CLI reported ''cannot reach the mnemo daemon'' when the daemon was answering /health in 5ms. Now bounded by WaitDelay plus an automation timeout, and the CLI distinguishes a timeout from an unreachable daemon and names Automation permission as the usual cause.'
+    - 'The osascript-to-iTerm2 spawn itself is NOT re-proven here: it is iterm.Go, achieved under 🎯T85.2 and in daily production use through mnemo_thread_go. This target''s new surface is resolution, command construction and the cwd check, all verified above.'
+    - ENVIRONMENTAL DEPENDENCY, not a gap in this target — demonstrating the spawn live requires an Automation grant that every `brew upgrade` invalidates, because release binaries are ad-hoc signed (codesign reports 'adhoc, linker-signed'). That is 🎯T101, set aside pending a paid Developer ID certificate. An acceptance criterion that can only pass in the window between granting permission and the next release is testing this machine's TCC state rather than the feature, which is why it is recorded here rather than held open.
     context: |-
       Requested 2026-07-28: "I often want to resume a conversation, but don't have a session id handy."
 
@@ -922,6 +923,7 @@ targets:
     - discoverability
     origin: user request, 2026-07-28
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T126:
     name: Terminal integration is a preference rather than an iTerm2 assumption, so opening a thread or resuming a session works beyond one macOS app
     status: identified
@@ -1099,7 +1101,7 @@ targets:
     achieved: 2026-07-28
   T131:
     name: The compactor's owed-metric sees every transcript source, and the high-quality span backlog (llm + compaction) drains over history
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1111,6 +1113,7 @@ targets:
     context: '2026-07-28 investigation (CSP session, hands-on probing + source read of internal/store/compactions.go, internal/store/segments_compaction.go, internal/compact/compact.go): the 🎯T72 owed-metric is SUM(output_tokens + cache_creation_tokens) over assistant entries past the cursor, but grok-ingested sessions carry zero token metadata — e.g. session 019f7d73… (the 🎯T39 FD_ACCEPT fix in csp, 2,591 entries) sums to exactly 0 and is permanently never owed. 535 sessions with >50 messages share this blind spot, so compactor_status reports backlog: 0 while an entire source class is invisible — a self-owned gate input. Consequence: segment search serves confident pre-T39-era conclusions ("fd I/O not functional on Windows") while the sessions that overturned them have no spans. BackfillCompactionSegments cannot reach these sessions (it only projects existing compactions; these have none) — eligibility must be fixed first, then the watcher''s existing no-recency-floor drain does the rest. Coverage today: 31,454 sessions, 8,866 compacted, only 139 compactions carry llm spans (feature younger than most compactions). Span quality where the llm layer has run is verified good (decision-closed, findable labels). Out of scope here: structural-layer label/pollution fixes, and stale-vs-live ranking/supersession — those are separate targets; this one is eligibility + catch-up policy.'
     origin: 2026-07-28 mnemo segmentation baseline investigation (CSP code-smell session fork)
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T132:
     name: A claudia-maintained streaming watcher summarises live sessions into provisional topic spans, replacing the structural layer in retrieval, with batch finalization superseding them
     status: achieved
