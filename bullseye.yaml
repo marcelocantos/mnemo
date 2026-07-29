@@ -1306,48 +1306,39 @@ targets:
     value: 0.0
     cost: 0.0
     acceptance:
-    - Discovery is via mnemo's EXISTING TRANSCRIPT INGESTION, and nothing else. Most spend passes through no tool that can be instrumented — work started straight from Claude Code, and the sub-agent storms it kicks off, touch neither mnemo nor claudia. Transcripts are the only universal observation point, which makes ingest the only honest basis for a total.
-    - A budget period is configurable and resets on schedule — a monthly cap resetting on the 1st is the case to support first. Spend-to-date against that cap is the headline number.
-    - Alerts fire on the PROJECTION, not only on thresholds already crossed. 'At this burn rate the month exceeds its cap on the 19th' permits action; '80% consumed' arrives after the decision that caused it.
-    - 'An alert names the CULPRITS, not just the total. At minimum: which sessions and which directories are responsible for the burn, ranked. A total with no attribution tells the user there is a problem and nothing about what to do next — and since most of the spend cannot be throttled automatically, acting on it is the user''s job and the report is their only instrument.'
-    - Where the offender is still running, resolve it to a PROCESS. mnemo_whatsup (🎯T9.5) and LiveSessions (🎯T9.5.1) already map a live session to a pid via open transcript handles, with cwd, repo and topic alongside.
-    - 'Offer affordances to act immediately: kill the offending process, or open the iTerm2 session running it. The second already exists — mnemo_session_go (🎯T125) opens a tab in a session''s own working directory — so this is mostly a matter of surfacing it from the alert.'
-    - The rate card distinguishes TOKEN CLASSES, not just models. Fresh input, cache read, cache write and output differ by up to an order of magnitude, and the observed mix is extreme — a real turn shows input_tokens=2 against cache_read_input_tokens=658,736. Pricing those alike is not a rounding error, it is the entire number, and this figure gets compared against an invoice.
-    - Usage is attributed per provider and never priced with another provider's rate card. Today mnemo_usage multiplies Codex token counts by Anthropic pricing into one total — 62.9 billion input tokens with no model and zero cache reads, most of a reported $123k over three days.
-    - A source with no rate card is reported as unpriced rather than assigned a number. Grok carries no token metadata at all (🎯T131); inventing a price is worse than admitting the gap.
-    - Figures reconcile against the provider's own billing. In a paid environment the invoice is the oracle and divergence is a defect. The Admin API reconciler (🎯T45/🎯T63) exists for exactly this.
-    - The underlying data is trustworthy first. One Codex session reports 495,390 assistant turns — not a plausible conversation — and it inflates every aggregate downstream. Whether Codex ingest counts sub-events as turns must be settled before any figure built on it is believable.
-    - 'EXPLICITLY OUT OF SCOPE: enforcement of any kind. This target reports and warns; 🎯T136 throttles the small subset mnemo can reach.'
+    - 'Token counts are DEDUPLICATED. This is mnemo''s own defect and the largest single error: naive summing over-counts by 1.95x to 2.83x depending on class, and the factor varies BY CLASS so no scalar correction works. More message ids appear twice in the corpus than once (192,442 vs 168,167 groups), with usage blocks repeated verbatim — one group carried the same input=5/output=1/cacheRead=18,529 six times. Dedup on (message id, request id), with the key CONFIGURABLE because its validity is environment-dependent: on a Bedrock+Portkey path duplicate message-id groups produced substantial divergence from the platform''s own billing, and a gateway is free to retry, coalesce or reissue identifiers in either direction.'
+    - 'Cache writes are priced by TTL TIER, not flattened. 73% of cache-write volume in the corpus is the long-TTL tier, which prices higher. Verified arithmetically: an opus day fits no single cache-write rate (base gives $6.527 against a reported $7.9230) and closes exactly at the long-TTL rate.'
+    - Long-context rates are applied above the per-model threshold, making cache writes a 2x2 matrix over (TTL, context size) and giving input/output/cache-read their own above-threshold rates. Not exceptional here — single requests routinely exceed 800k cache-read tokens.
+    - The rate card is FETCHED, not embedded, and is the only genuinely hard part — everything else is arithmetic over data mnemo already holds. A public community-maintained rate file (1.6 MB, 2,984 models) carries every required field including the TTL and long-context variants, in one HTTP request. Gated behind explicit opt-in like cost_reconciliation and image_embeddings, cached locally WITH ITS FETCH DATE.
+    - An unpriced model reports as UNPRICED, never as zero. The reference tool gets this wrong — 52,879 tokens of an unknown model reported at $0.00 — and the failure bites hardest exactly when it matters most, since a newly released model is the one missing from the card and the one whose spend you want to see. tokens > 0 AND cost == 0 is a condition to surface.
+    - 'No cross-provider pricing. Today mnemo multiplies Codex token counts by Anthropic rates: 99.99997% of one day''s 27.2 BILLION input tokens were Codex, which reports full prompt per turn with no cache accounting. A source with no rate card is unpriced, not estimated.'
+    - Pricing is CONTEMPORANEOUS and settled periods are frozen. Recompute only what can still change; a blanket recompute reprices history every run — a prochronism rather than staleness — and a genuine price revision then propagates backwards with nothing recording it.
+    - 'A budget period resets on schedule (monthly on the 1st first), and alerts fire on the PROJECTION rather than a threshold already crossed: ''at this burn rate the month exceeds its cap on the 19th'' permits action where ''80% consumed'' arrives after the decision that caused it.'
+    - Alerts name the CULPRITS and offer a way to act — which sessions and directories, resolved to a live pid via mnemo_whatsup (🎯T9.5) and LiveSessions (🎯T9.5.1), with the option to open the offending session's terminal (mnemo_session_go, 🎯T125). Most spend cannot be throttled automatically, so acting on it is the user's job and the report is their only instrument.
+    - 'Correctness is proven against an independent implementation as a REGRESSION TEST, not a one-off. ccusage is that oracle: it reads the same local transcripts (so divergence is arithmetic, not scope), keys sessions by the same UUID mnemo uses, and costs ~2s for the whole corpus. It is a development and CI dependency ONLY — never shipped, never invoked by the daemon, because every query is O(entire corpus) where mnemo''s ingest is O(new bytes).'
+    - The underlying data is trustworthy first. One Codex session reports 495,390 assistant turns, which is not a plausible conversation and inflates every aggregate built on it.
     context: |-
-      Marcelo, 2026-07-28, across four corrections that between them define this target and 🎯T136.
+      Marcelo, 2026-07-28/29, across several corrections that reshaped this target more than once.
 
-      The idea: "mnemo could also offer a general cost tracking tool with alerting, not just for the agents that run in the background."
+      The idea: "mnemo could also offer a general cost tracking tool with alerting". The environment: "at work, where we pay per token. There are no subsidized plans" — so money is the constraint and reconciliation against an invoice is mandatory. The scope: report and warn, no enforcement (that is 🎯T136). The architecture: enforcement cannot live in claudia because most spend passes through nothing controllable — "sub-agent storms Claude kicks off... It is what it is" — so observation is universal via transcript ingest, control is partial, and the user closes the gap.
 
-      The environment: "it's not actually here that I plan to use the budgeting tool. It's at work, where we pay per token. There are no subsidized plans." So money is the constraint, correct pricing stops being cosmetic, and reconciliation against the invoice becomes mandatory.
+      Then the decisive constraint: "I really don't want to add a dependency on a Node.js package."
 
-      The scope: "I just want a budgeting tool that reports where I'm at and then alerts me if I'm heading for trouble, e.g., a monthly cap that resets on the first of every month."
+      That turned out to dissolve rather than constrain. ccusage — the reference implementation used to validate all of this — ships as a compiled per-platform binary behind an npm launcher, which would have been a real erosion of mnemo's single-Go-binary property. But ITS VALUE WAS NEVER ITS CODE. Everything it does beyond pricing is a GROUP BY over data mnemo already ingests. The one thing mnemo lacked was a rate card, and that card is upstream of ccusage: a public community-maintained JSON file, 1.6 MB, 2,984 models, one HTTP GET, carrying every field this specification needs. So mnemo fetches the card, does its own arithmetic in Go, and keeps ccusage as a validation oracle run by a developer or CI — never shipped, never invoked by the daemon.
 
-      And the architecture, correcting me directly: "enforcement cannot live in Claudia because not everything goes through Claudia. Stuff coming straight out of Claude, sub-agent storms Claude kicks off — a lot of work can happen that none of my tools can control. It is what it is. What we can control is agents that mnemo itself invokes directly, and they will be through Claudia, but it's not an argument for controlling things through Claudia."
+      That also fixes a shape problem. ccusage is O(entire corpus) per invocation — measured at ~2.2s warm over 9.9 GB, with a 1.37s raw-read floor, no result cache, and `session --id` filtering the OUTPUT rather than the WORK. mnemo's ingest is O(new bytes). A daemon shelling out for live numbers would re-read the whole corpus every tick, competing with its own ingest for I/O.
 
-      I had argued the opposite: that claudia was the single chokepoint every agent crosses, so enforcement belonged there. That is simply false — Claude Code spawning its own sub-agents touches neither claudia nor mnemo. The correct picture is asymmetric:
+      Full specification, including the verified arithmetic and the failure modes each requirement exists to prevent, is in docs/design/token-cost-specification.md.
 
-        OBSERVATION is universal, because every session leaves a transcript and mnemo already ingests them all.
-        CONTROL is partial, covering only what mnemo invokes.
-        The gap between the two is closed by the USER, which is why the reporting has to be good enough to act on.
+      WITNESS — the parts exist.
 
-      That asymmetry is the design, and it drives the acceptance above: discovery through ingest rather than instrumentation, attribution down to session and directory, and affordances to reach the offending process directly.
+      1. mnemo already ingests every transcript from every provider, incrementally by byte offset, and records session, repo, cwd and model per entry. The dedup key fields are present in the raw JSON.
+      2. mnemo_usage already aggregates per session, model and window (🎯T43, 🎯T44). The gaps are dedup, TTL and long-context tiers, per-provider rate cards, and an unpriced state — arithmetic and a pricing table, not new plumbing.
+      3. The health pipeline (🎯T83) already runs scheduled checks with severity, opt-out notifications and a dashboard deep-link; 🎯T84's breaker shape stops a standing overage re-alerting every few minutes.
+      4. mnemo_whatsup (🎯T9.5) and mnemo_session_go (🎯T125) already supply the culprit-identification and take-me-there affordances.
+      5. ccusage validates it: same corpus, same session UUIDs, ~2s per full run.
 
-      WITNESS — the actionable half composes existing parts.
-
-      1. mnemo_usage already aggregates per session, model and window (🎯T43, 🎯T44). The gaps are per-provider rate cards, per-token-class pricing, and an unpriced state — a pricing-table change, not new plumbing.
-
-      2. mnemo_whatsup (🎯T9.5) already correlates live sessions with pid, CPU, RSS, cwd, repo and topic, built on LiveSessions (🎯T9.5.1) reading open transcript handles. That is the culprit-identification layer, already built.
-
-      3. mnemo_session_go (🎯T125) already opens an iTerm2 tab in a session's own working directory. The "take me to the offender" affordance exists; it needs surfacing from an alert.
-
-      4. The health pipeline (🎯T83) already runs scheduled checks with severity, opt-out local notifications and a dashboard deep-link — where a projection alert belongs. 🎯T84's breaker shape stops a standing overage re-alerting every few minutes.
-
-      Order of work: settle the Codex turn-count anomaly, fix token-class and per-provider pricing, then period/projection/attribution, then the kill and open-shell affordances.
+      Order of work: settle the Codex turn-count anomaly, fix deduplication, then TTL/long-context/per-provider pricing with an unpriced state, then the period/projection/alert layer, then the kill and open-shell affordances.
     tags:
     - usage
     - cost
