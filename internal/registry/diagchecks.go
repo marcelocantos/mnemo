@@ -77,6 +77,46 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			}
 		}},
 
+		// Budget projection (🎯T135). Full tier: it runs several usage
+		// aggregations, and a budget does not change on a three-minute
+		// timescale.
+		//
+		// Deliberately warn-not-fail even when the cap is already
+		// breached. A fail transition fires an OS notification, and mnemo
+		// cannot stop the spend that caused this — notifying about an
+		// unstoppable condition on every pass is how an alert becomes
+		// something to dismiss reflexively.
+		diag.Check{Name: "budget.projection", Tier: diag.Full, Run: func(context.Context) diag.CheckResult {
+			st, _ := state()
+			if st == nil {
+				return diag.Healthy("no default-user store yet")
+			}
+			bcfg := cfg.Budget
+			if bcfg.MonthlyCapUSD <= 0 {
+				return diag.Healthy("no budget cap configured; spend is reported but not watched")
+			}
+			b, err := st.BudgetStatusNow(bcfg, time.Now())
+			if err != nil {
+				return diag.Warning("budget status failed: "+err.Error(),
+					"check mnemo_budget for the underlying query error")
+			}
+			if !b.Priced {
+				// The one case that must not read as healthy spending:
+				// $0.00 here means nothing could be priced, not that
+				// nothing was spent.
+				return diag.Warning(b.Headline,
+					`set {"pricing": {"enabled": true}} in ~/.mnemo/config.json so mnemo can fetch the model rate card`)
+			}
+			switch b.Severity {
+			case "over", "warn":
+				return diag.Warning(b.Headline,
+					"run mnemo_budget for the sessions driving it, each with its repo, "+
+						"working directory and live pid where it is still running")
+			default:
+				return diag.Healthy(b.Headline)
+			}
+		}},
+
 		diag.Check{Name: "schema.upgrade", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			st := boot.Get()
 			if st.Upgrade == "" {

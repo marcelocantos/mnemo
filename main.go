@@ -822,6 +822,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
+	// Keep the model rate card current (🎯T135). Opt-in: with the pricing
+	// section absent from config.json this loop wakes, reads the config,
+	// makes no request, and goes back to sleep.
+	store.StartRateCardRefresher(ctx, func(msg string, args ...any) {
+		slog.Info("pricing: "+msg, args...)
+	})
+
 	// 🎯T102.2: plugin registry reconciles against config on startup and
 	// on every mnemo_config hot-reload. Home is the process effective
 	// home for ~/.mnemo/plugins/<name> path convention.

@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -219,8 +220,11 @@ func SetRateCard(c *RateCard) (restore func()) {
 // The only outbound call in cost accounting, and gated by the caller: a
 // user who has not asked for pricing must not have their machine reach the
 // network because they ran a usage report.
-func RefreshRateCard(ctx interface{ Done() <-chan struct{} }) (*RateCard, error) {
-	req, err := http.NewRequest(http.MethodGet, PricingSourceURL, nil)
+func RefreshRateCard(ctx context.Context, sourceURL string) (*RateCard, error) {
+	if sourceURL == "" {
+		sourceURL = PricingSourceURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +246,7 @@ func RefreshRateCard(ctx interface{ Done() <-chan struct{} }) (*RateCard, error)
 	}
 	delete(raw, "sample_spec")
 
-	card := &RateCard{FetchedAt: time.Now().UTC(), Source: PricingSourceURL, Rates: raw}
+	card := &RateCard{FetchedAt: time.Now().UTC(), Source: sourceURL, Rates: raw}
 	home, err := EffectiveHome()
 	if err == nil {
 		if out, err := json.Marshal(card); err == nil {
@@ -253,6 +257,61 @@ func RefreshRateCard(ctx interface{ Done() <-chan struct{} }) (*RateCard, error)
 	pricingCached = card
 	pricingMu.Unlock()
 	return card, nil
+}
+
+// StartRateCardRefresher keeps the cached rate card current, if and only
+// if the user has opted in (🎯T135).
+//
+// The flag is read on every attempt rather than captured at startup, so
+// enabling pricing takes effect without a daemon restart — and, more to
+// the point, so does disabling it. Same posture as the image embedder.
+//
+// The refresher is deliberately quiet about failure. A rate card that
+// cannot be fetched leaves the previous one in place, and the previous one
+// is what pricing should use anyway: a dated snapshot of what prices were
+// is more honest than no prices at all. Only the absence of any card is a
+// reportable condition, and that is the doctor's job, not this loop's.
+func StartRateCardRefresher(ctx context.Context, log func(msg string, args ...any)) {
+	go func() {
+		// Check often; fetch rarely. The interval between checks is not
+		// the interval between fetches — a check that finds a fresh card
+		// does nothing.
+		const checkEvery = time.Hour
+		for {
+			cfg, err := LoadConfig()
+			switch {
+			case err != nil:
+				// An unreadable config is not consent.
+			case !cfg.Pricing.IsEnabled():
+				// Opted out: no request, and any cached card stays usable.
+			default:
+				age := rateCardAge()
+				want := time.Duration(cfg.Pricing.EffectiveRefreshHours()) * time.Hour
+				if age < 0 || age > want {
+					if _, err := RefreshRateCard(ctx, cfg.Pricing.EffectiveSourceURL()); err != nil {
+						log("rate card refresh failed", "err", err)
+					} else {
+						log("rate card refreshed", "source", cfg.Pricing.EffectiveSourceURL())
+					}
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(checkEvery):
+			}
+		}
+	}()
+}
+
+// rateCardAge returns how old the cached card is, or -1 when there is
+// none.
+func rateCardAge() time.Duration {
+	c := LoadRateCard()
+	if c == nil || c.FetchedAt.IsZero() {
+		return -1
+	}
+	return time.Since(c.FetchedAt)
 }
 
 // priceBucket prices a group of records that share a model and a
