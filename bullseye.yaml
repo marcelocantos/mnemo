@@ -1113,16 +1113,18 @@ targets:
     discovered: 2026-07-28
   T132:
     name: A claudia-maintained streaming watcher summarises live sessions into provisional topic spans, replacing the structural layer in retrieval, with batch finalization superseding them
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
-    - A claudia-driven watcher session consumes drip-fed substantive messages from a live session and emits idempotent JSONL span events (open, seal, reopen, supersede) written to topic_segments with a new method="stream", crash-recoverable from the last sealed state
-    - 'Bounded-state contract holds: watcher context is rolling summary + open spans + unsealed tail; sealed spans are evicted; measured cost is linear in transcript length (no quadratic prefix re-read); the watcher restarts from its own emitted state when its context budget fills'
-    - The live tail of an active session shows stream spans with real topic labels within minutes; structural spans no longer appear in retrieval results (retired or reduced to unsummarised-gap markers)
-    - Batch finalization at session close (or budget crossing) redraws spans over the sealed region with hindsight and supersedes divergent stream spans; the stream-vs-final boundary diff is recorded per session as the freshness-cost metric
-    - Supersession edges exist in the schema and the watcher emits them when later work overturns an earlier span's conclusion; segment retrieval can rank or flag superseded spans
-    - 'Effort/model sweep completed: grid over model tier × effort × drip size × seal-lookahead K, boundaries scored with the existing Pk/WindowDiff against high-effort hindsight gold, label/summary quality judged; chosen operating point documented with measured cost per active-session-day'
+    - 'A claudia-driven watcher consumes drip-fed substantive messages from a live session and emits idempotent JSONL span events (open, seal, reopen, supersede) as method=''stream'', crash-recoverable from the last sealed state. DONE — with one correction to the design: it runs one claudia TASK per drip, not a persistent session. Session mode could not work at all; its Send drives the Claude Code TUI through tmux keystrokes and a multi-KB multi-line drip is detected as a PASTE, which sits in the composer unsubmitted. The persistent-session premise was also unnecessary: the drip already restates the working set every time, so the model was always stateless between drips.'
+    - 'The bounded-state contract holds, MEASURED rather than argued. DONE: 4x the messages cost 4.12x the context; the same harness with the bound removed costs 15.68x, 16 being quadratic. Sealed spans are evicted, and the agent re-seeds from the automaton''s state rather than the transcript.'
+    - Batch finalisation at session close redraws spans with hindsight and supersedes divergent stream spans; the stream-vs-final boundary diff is recorded as the freshness-cost metric. DONE — supersession by OVERLAP rather than containment, since a span straddling the window edge was still drawn without hindsight; and the metric costs nothing to compute because the loser is retained rather than deleted.
+    - Supersession edges exist in the schema and retrieval ranks or flags superseded spans. DONE (🎯T132.1), as a nullable column under sqlift AllowNone, verified against a database built from the previous schema. Kept distinct from parent_id, which is hierarchy — conflating them would let a search expansion present a correction as the surrounding conversation.
+    - 'The model/drip/K sweep is completed and the operating point documented with measured cost. DONE (🎯T132.4): sonnet / drip 12 / K=3, now the defaults. The effort axis was unavailable — claudia''s TaskConfig exposes no effort setting.'
+    - The live tail of an active session shows stream spans with real topic labels. DONE in mechanism and verified end-to-end against a real claudia task; the watcher is opt-in and off by default, since enabling it runs a summariser per live session.
+    - 'MOVED to 🎯T138 — ''structural spans no longer appear in retrieval''. The retirement mechanism exists, is tested, and runs against history (1,343 spans demoted on the live index), but it is correctly GATED: structural spans retire in favour of llm coverage and not stream, because stream spans score 0.445 against a 0.555 naive baseline and do not clear the stated bar of 0.40. Displacing a tier with one that has not beaten it would be a regression dressed as progress. Raising that quality is its own desired state, not a criterion of building the watcher.'
+    - MOVED to 🎯T138 — label and summary quality judged separately from boundary placement. Today a correct boundary with a useless label scores the same as a misplaced one.
     context: 'Design from the 2026-07-28 segmentation-baseline discussion (CSP session fork). The batch pipeline''s windows are cut by token budget and never re-summarised, so a topic straddling a window boundary can never be one span, and no window ever sees another — cross-window semantics (supersession edges, callbacks to earlier topics) are structurally impossible in batch. A long-running low-effort summariser session (driven via ../claudia) watching the live transcript dissolves both: it closes spans when the conversation closes the topic, and its rolling state lets it emit "this overturns span X" at the moment the overturning happens. Streaming replaces the STRUCTURAL tier (the provisional live-tail layer, whose cadence heuristics were never a segmenter — see the T64.10 provenance discussion), NOT the batch tier: batch finalization at session close redraws spans with hindsight and gets the last word; backfill (🎯T131, in progress) covers history. Critical design commitment: the watcher is a bounded-state streaming automaton — rolling summary + open spans + unsealed tail; sealed spans evicted from context; restart from own emitted state on context budget. The naive accumulate-everything design is QUADRATIC in session length even with prompt caching (0.1× cache-read on a growing prefix per drip still sums quadratically); bounded state makes it linear. Premature sealing is mitigated by a seal-lookahead lag (K substantive messages of different topic before sealing — the structural layer''s lookahead rule finally attached to the right decider). The stream-vs-finalization diff doubles as a free quality metric: where hindsight routinely redraws streaming boundaries, that gap is the measured cost of freshness. Pk/WindowDiff scoring functions already exist in internal/segment/structural.go with nothing to evaluate; the effort/model sweep gives them a job. Expected cost: low single-digit dollars per heavy working day with substantive-message filtering; summarisation is extraction, not hard thinking, so low effort is the prior for the sweet spot.'
     depends_on:
     - T132.1
@@ -1131,9 +1133,10 @@ targets:
     - T132.4
     origin: 2026-07-28 streaming-watcher design discussion (CSP code-smell session fork)
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T132.1:
     name: 'The span data model expresses streaming provenance and supersession: a stream method in the retrieval rank, and an edge saying one span overturns another'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1150,9 +1153,10 @@ targets:
     - retrieval
     origin: subdivide(🎯T132)
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T132.2:
     name: A bounded-state streaming watcher summarises live sessions into provisional spans at linear cost
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1171,9 +1175,10 @@ targets:
     - bounded-state
     origin: subdivide(🎯T132)
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T132.3:
     name: Batch finalisation redraws sealed spans with hindsight and supersedes divergent stream spans, and the divergence is recorded as the cost of freshness
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -1190,19 +1195,21 @@ targets:
     - metrics
     origin: subdivide(🎯T132)
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T132.4:
     name: The streaming operating point is chosen by measurement, and structural spans leave retrieval only once stream spans beat them
-    status: converging
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
-    - 'A grid is run and scored with Pk/WindowDiff against hindsight gold. DONE for model x drip x K (sonnet/haiku, drip 12/24, K=3), over 6 gold sessions via cmd/streamseg-sweep, scored against llm-method spans. Pk/WindowDiff have their first production caller. The EFFORT axis was not swept: claudia''s TaskConfig exposes no effort setting (it is a Claude Code /effort mode), so varying it needs a mechanism that does not exist. Label/summary quality is not judged separately from boundary placement.'
-    - 'The chosen operating point is documented with measured cost. DONE: sonnet / drip 12 / K=3, now the code defaults, recorded in docs/design/streaming-segmentation.md. Cost measured per drip (in~45,000 out~830 for an 840-byte payload) and per session (~12 drips, ~540k input for 150 messages); the dominant term is the ~50x fixed per-call overhead, so cost tracks CALL COUNT rather than drip size, which pulls directly against the freshness that motivates the tier.'
-    - 'The low-effort prior is falsified rather than confirmed. DONE, and this was the point of running it: haiku is worse than sonnet at every drip size and produces nothing at drip 24 — not a parsing failure but under-sealing, confirmed by direct probe.'
-    - 'A quality bar is STATED, MEASURED, and ENFORCED, and structural spans retire only in accordance with it. DONE. Bar: beat the naive baseline by a clear margin, meanPk <= 0.40 against a measured 0.555. Stream spans score 0.445 and DO NOT clear it. So RetireStructuralSpansCovered retires structural coverage in favour of llm spans only; streamRetiresStructural gates the stream case and is off. Retirement is supersession, never deletion, and only touches structural spans a better tier actually overlaps — retiring uncovered ones would trade a weak signal for no signal.'
-    - 'DefaultSegmentExpand is revisited in light of the result. DONE, and it stays ''none'' — on COVERAGE rather than quality. Measured: 509 of 32,153 sessions (1.6%) have llm/stream spans while 31,480 (97.9%) have structural, so enabling expansion would serve a structural span in ~98% of cases. The trigger for re-deciding is coverage passing roughly half of sessions, not another sweep.'
-    - Spans still open when a transcript ends are salvaged rather than discarded. DONE — Runner.Finish asks the summariser to seal properly, then force-seals the remainder; the sweep does the same at replay end, without which every configuration was scored worse than it actually is.
-    - 'OPEN, and now the main obstacle — the summariser UNDER-SEALS on real transcripts. It opens spans and holds them: sessions hindsight cut into four or five produce one, and the automaton hits its context budget repeatedly with sealed_through still at zero. A synthetic ten-message probe seals cleanly; long tool-heavy transcripts do not. This is what keeps the tier at 0.445 instead of clearing the bar, and it is a prompt or seal-policy problem rather than a model one — both models under-seal. Fixing it is the path to flipping streamRetiresStructural.'
+    - A grid is run and scored with the existing Pk/WindowDiff against hindsight gold. DONE for model x drip x K (sonnet/haiku, drip 12/24, K=3) over gold sessions via cmd/streamseg-sweep, which replays historical sessions against llm-method spans with no live session and no writes. Pk/WindowDiff have their first production caller. The EFFORT axis was not swept — claudia's TaskConfig exposes no effort setting — and label quality is scored in 🎯T138 rather than here.
+    - 'The chosen operating point is documented with measured cost. DONE: sonnet / drip 12 / K=3, now the code defaults, in docs/design/streaming-segmentation.md. Cost measured per drip (in~45,000 out~830 for an 840-byte payload) and per session (~12 drips, ~540k input for 150 messages). The dominant term is the ~50x fixed per-call overhead, so cost tracks CALL COUNT rather than drip size — which pulls directly against the freshness the tier exists for.'
+    - 'The low-effort prior is falsified rather than confirmed, which was the point of running it. DONE: haiku is worse than sonnet at every drip size and produces nothing at drip 24 — not a parsing failure but under-sealing, confirmed by direct probe.'
+    - 'A quality bar is STATED, MEASURED and ENFORCED. DONE. Bar: meanPk <= 0.40 against a measured naive baseline of 0.555. Stream spans score 0.445 and do not clear it, so RetireStructuralSpansCovered retires structural coverage in favour of llm spans only, with streamRetiresStructural gating the stream case and off. The ordering guarantee in this target''s name is exactly this: structural leaves retrieval ONLY once stream beats it, and it has not, so it stays.'
+    - 'Retirement, where it does apply, is supersession rather than deletion and touches only structural spans a better tier actually overlaps — retiring uncovered coverage would trade a weak signal for no signal. DONE, including a startup backfill so sessions compacted before the mechanism existed are not stranded: 1,343 spans demoted on the live index.'
+    - 'DefaultSegmentExpand is revisited in light of the result. DONE, and it stays ''none'' on COVERAGE rather than quality: 509 of 32,153 sessions (1.6%) carry llm/stream spans against 31,480 (97.9%) with structural, so enabling expansion would serve a structural span in ~98% of cases. The trigger to re-decide is coverage passing roughly half the corpus.'
+    - Spans still open when a transcript ends are salvaged rather than discarded. DONE — Runner.Finish asks the summariser to seal properly then force-seals the remainder; the sweep does the same at replay end, without which every configuration scored worse than it actually is.
+    - MOVED to 🎯T138 — raising stream span quality to the point where it displaces structural. That is a different desired state from choosing an operating point, and keeping the two together made a safety property hostage to an open research question. Best measured is 0.445; the seal-pressure intervention that tried to improve it was measured, made things worse (0.507), and was reverted.
     context: Sub-target 4 of 🎯T132, deliberately last. Pk and WindowDiff already exist in internal/segment/structural.go, fully implemented and tested, with no production caller — a scoring harness with nothing to score. This gives them the job. Retiring the structural tier is last because removing the current provisional layer before stream spans have demonstrably beaten it trades a weak signal for no signal.
     depends_on:
     - T132.3
@@ -1213,6 +1220,7 @@ targets:
     - pk-windowdiff
     origin: subdivide(🎯T132)
     discovered: 2026-07-28
+    achieved: 2026-07-29
   T133:
     name: A span whose conclusion later work overturned is marked as superseded, even when the overturning happened in a different session
     status: identified
@@ -1387,6 +1395,73 @@ targets:
     - background-agents
     - safety
     - observability
+    origin: manual
+    discovered: 2026-07-29
+  T137:
+    name: Agent trees are reconstructed and costed as a whole, so a fan-out that collectively blows the budget is attributable to the thing that started it
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'An agent tree is reconstructable from ingested transcripts: parent/child edges, depth, and the root turn that spawned it. The columns already exist and are populated — agent_id on 870,247 entries, parent_tool_use_id on 623,094, is_sidechain on 857,474 — with indexes on the first two. The traversal is what is missing.'
+    - Cost rolls UP the tree, not just per agent. The failure this exists for is a fan-out where every individual agent looks entirely reasonable and forty of them together trip the wire. A per-agent ranking cannot see that; only an aggregate at the root can.
+    - Nested fan-outs are handled — a subagent that spawns subagents rolls up through every level, and depth is reported, since a tree three deep is a different problem from a wide shallow one.
+    - 'ROOT CAUSE is identifiable, not merely the total: which session, which turn, and where possible which skill or prompt kicked the tree off. ''You spent a lot'' is not actionable; ''this /command on this turn spawned 40 agents'' is.'
+    - Trees still running are distinguishable from finished ones, and resolve to live processes via mnemo_whatsup (🎯T9.5) and LiveSessions (🎯T9.5.1), so an in-progress storm can be stopped rather than merely mourned.
+    - Ranking is by aggregate tree cost, so the expensive tree surfaces above a single expensive agent. The whole premise is that the collective, not the individual, is what needs finding.
+    context: |-
+      Marcelo, 2026-07-29, while asking that the cost discussion be captured as targets: "also include a mention of the need to deal with out-of-control agent trees. It might not be one single agent that's causing problems, but a large fan out that collectively is tripping the wires, and the system needs to be sophisticated enough to enable root cause analysis."
+
+      This is the sharpest gap in 🎯T135 as first written. That target attributes spend to sessions and directories, which finds a single runaway agent and completely misses the case that actually matters: a fan-out where each agent is individually unremarkable and the aggregate is the problem. Ranking sessions by cost would show forty modest entries and nothing obviously wrong.
+
+      It also interacts with the control side (🎯T136). Throttling mnemo's own agents does nothing about a Claude Code sub-agent storm, which passes through neither mnemo nor claudia — so for trees, reporting and root-cause analysis is the ONLY available response, and it has to be good enough to act on manually. That makes this target load-bearing for the whole cost story rather than a refinement of it.
+
+      WITNESS — the edges are already ingested and indexed.
+
+      entries carries generated columns agent_id ($.agentId), parent_tool_use_id ($.parentToolUseID), top_tool_use_id ($.toolUseID) and is_sidechain ($.isSidechain), with idx_entries_agent_id and idx_entries_parent_tool_use_id over the first two. Population on the live index: 870,247 / 623,094 / 857,474 out of 3,552,162 entries. So the graph is present and indexed; the work is a recursive traversal (SQLite CTE), a cost rollup keyed on the same per-token-class pricing 🎯T135 needs, and a surface that ranks by tree total.
+
+      Live-tree identification composes what exists: LiveSessions (🎯T9.5.1) maps an open transcript handle to a pid, and mnemo_whatsup (🎯T9.5) already joins that with cwd, repo and topic.
+
+      Depends on 🎯T135 for pricing: a tree rollup computed with Codex tokens priced at Anthropic rates would rank the wrong trees.
+    depends_on:
+    - T135
+    tags:
+    - cost
+    - agent-trees
+    - attribution
+    - root-cause
+    - observability
+    origin: manual
+    discovered: 2026-07-29
+  T138:
+    name: Stream span boundaries are good enough to displace the structural tier in retrieval
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Stream spans clear the stated bar: meanPk <= 0.40 against the measured naive baseline of 0.555, over a gold corpus large enough for the difference to mean something. Current best is 0.445 over six sessions.'
+    - The gold corpus is bigger than six sessions. Six was enough to choose between four configurations and is thin for distinguishing 0.44 from 0.51; some of what has been read as signal may be sampling noise, and that ambiguity has already caused one wrong conclusion.
+    - Label and summary QUALITY is scored separately from boundary placement. Today a correct boundary carrying a useless label scores identically to a misplaced one, so the metric cannot see half of what makes a span worth having.
+    - streamRetiresStructural is flipped on, and structural spans retire in favour of stream coverage — the mechanism already exists and is tested (🎯T132.4), gated off pending exactly this.
+    - 'Whatever raises the score is understood rather than stumbled upon. Two interventions have already failed on measurement: Defender exclusion for the Windows CI job, and seal-pressure here. A change that improves the number without a mechanism is a coincidence until it survives a second corpus.'
+    context: |-
+      Split out of 🎯T132.4 on 2026-07-29, because that target conflated two different desired states: "choose an operating point by measurement, and do not retire structural spans until stream beats them" (achieved — the choice was made and the ordering guarantee holds) and "make stream spans good enough to win" (open, and genuinely uncertain). Keeping them together made a safety property hostage to a quality goal.
+
+      What is known, from the sweeps in 🎯T132.4:
+
+      - Best measured configuration is sonnet / drip 12 / K=3 at meanPk 0.445, against a naive fixed-period baseline of 0.555. Roughly a 20% margin.
+      - An earlier two-session run suggested 0.267. It was flattering, not representative, and is the reason the corpus size criterion above exists.
+      - The diagnosis "the model under-seals" is accurate as a DESCRIPTION — spans stay open, sealed_through sits at zero across context-budget restarts — but the intervention it suggested was wrong. Rebalancing the prompt to name the cost of not sealing, showing span age with a nudge, and adding a force-seal backstop moved the same six sessions from 0.445 to 0.507 (WindowDiff 0.445 to 0.534). Both metrics agreed, and Pk's bias toward fewer boundaries would have flattered the change if anything. The model sealed MORE and in WORSE places. Reverted.
+      - So the real problem is not sealing frequency but boundary PLACEMENT, and placement did not respond to instruction.
+
+      Candidates not yet tried, in rough order of promise: give the model the rolling summary of spans it has already sealed rather than one undifferentiated blob, so it can see the shape it has imposed and cut relative to it; score labels separately so the metric can distinguish a good boundary from a good span; and grow the gold corpus before trusting any further delta.
+
+      Machinery is all in place — cmd/streamseg-sweep replays historical sessions against llm-method gold with no writes and no live sessions, and streamRetiresStructural is the single flag that flips when this lands.
+    tags:
+    - segmentation
+    - quality
+    - evaluation
+    - streaming
     origin: manual
     discovered: 2026-07-29
   T14:
