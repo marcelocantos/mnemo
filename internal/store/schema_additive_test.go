@@ -34,7 +34,7 @@ func TestSchemaUpgradeIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := sqlift.Parse(prev)
+	parsed, err := sqlift.Parse(normalizeEOL(prev))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestSchemaUpgradeIsAdditive(t *testing.T) {
 			len(self.Operations()))
 	}
 
-	desired, err := sqlift.Parse(schemaSQL)
+	desired, err := sqlift.Parse(normalizeEOL(schemaSQL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,3 +102,16 @@ func previousSchema(t *testing.T) string {
 	t.Logf("baseline schema: %s", strings.TrimSpace(string(tag)))
 	return string(out)
 }
+
+// normalizeEOL strips CR so the two schemas are compared on their SQL
+// rather than on their line endings.
+//
+// On Windows these arrive with DIFFERENT endings from the same repo:
+// `git show` emits the stored blob verbatim (LF), while the working-tree
+// checkout — and therefore the go:embed'd copy — has been through the
+// autocrlf smudge filter (CRLF). Every trigger body then compares unequal
+// and the planner proposes to drop and recreate all of them, which reads
+// exactly like a real schema change and fails this test on Windows only.
+// Nothing is wrong with the migration; the baseline was being read in a
+// different encoding from the target.
+func normalizeEOL(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
