@@ -4,6 +4,8 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -81,7 +83,13 @@ func asstTok(text, ts string, outTokens, cacheCreation, inputTokens int) map[str
 		"type":      "assistant",
 		"timestamp": ts,
 		"message": map[string]any{
-			"role":    "assistant",
+			"role": "assistant",
+			// Real assistant records always carry a message id — 100% of
+			// them across a whole corpus — and usage accounting now needs
+			// it: a record without one cannot be deduplicated, so it is
+			// quarantined rather than counted (🎯T135). A fixture with no
+			// id is not a simplification, it is a different case.
+			"id":      "msg_" + fixtureID(text, ts),
 			"content": text,
 			"usage": map[string]any{
 				"input_tokens":                inputTokens,
@@ -761,4 +769,12 @@ func TestAddendaTokensTokenlessSession(t *testing.T) {
 	if want := 6 * FallbackTokensPerMessage; got != want {
 		t.Errorf("AddendaTokens = %d, want %d (6 substantive messages via the fallback)", got, want)
 	}
+}
+
+// fixtureID derives a stable, unique message id from a fixture's own
+// content. Distinct records must get distinct ids or deduplication will
+// correctly collapse them and the fixture will under-count.
+func fixtureID(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:8])
 }

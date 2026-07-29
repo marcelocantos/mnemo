@@ -214,29 +214,12 @@ func modelContextWindow(model string) int64 {
 	return 200_000
 }
 
-// modelCostRates maps model slug prefixes to per-token costs in USD,
-// mirroring the rates in store.go's modelCosts table.
-var modelCostRates = []struct {
-	prefix                               string
-	input, output, cacheRead, cacheWrite float64
-}{
-	{"claude-opus-4", 15.0 / 1e6, 75.0 / 1e6, 1.5 / 1e6, 18.75 / 1e6},
-	{"claude-sonnet-4", 3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
-	{"claude-haiku-4", 0.80 / 1e6, 4.0 / 1e6, 0.08 / 1e6, 1.0 / 1e6},
-}
-
-// estimateCost returns the estimated USD cost for a set of token counts
-// at the given model's rates. Falls back to Sonnet pricing for unknown models.
-func estimateCost(model string, input, output, cacheRead, cacheWrite float64) float64 {
-	for _, m := range modelCostRates {
-		if strings.HasPrefix(model, m.prefix) {
-			return input*m.input + output*m.output + cacheRead*m.cacheRead + cacheWrite*m.cacheWrite
-		}
-	}
-	// Default to Sonnet pricing.
-	m := modelCostRates[1]
-	return input*m.input + output*m.output + cacheRead*m.cacheRead + cacheWrite*m.cacheWrite
-}
+// Pricing is store.EstimateCost (🎯T135). A hand-copied rate table stood
+// here, described as "mirroring the rates in store.go" — and had already
+// drifted, missing models the original carried. Both copies also matched by
+// prefix, giving every claude-opus-4-* the opus-4 rate when opus-4-5 prices
+// at a third of it, and both fell back to Sonnet for unknown models, which
+// priced a foreign provider's entire corpus at Anthropic's rates.
 
 // ContextRow is one session's peak context usage.
 type ContextRow struct {
@@ -552,7 +535,7 @@ func (h *Handler) dbstats(w http.ResponseWriter, r *http.Request) {
 
 	var allTimeCost float64
 	for _, row := range costRows {
-		allTimeCost += estimateCost(
+		allTimeCost += apiEstimateCost(
 			str(row["model"]),
 			num(row["input_tokens"]),
 			num(row["output_tokens"]),
@@ -692,4 +675,16 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, report)
+}
+
+// apiEstimateCost adapts the shared pricer to this layer's float counts.
+// Unpriced models contribute nothing to the total rather than borrowing
+// another model's rates; the count of such models is reported by
+// mnemo_usage rather than here.
+func apiEstimateCost(model string, input, output, cacheRead, cacheWrite float64) float64 {
+	usd, _ := store.EstimateCost(model, store.TokenCounts{
+		Input: int64(input), Output: int64(output),
+		CacheRead: int64(cacheRead), CacheWriteFlat: int64(cacheWrite),
+	})
+	return usd
 }

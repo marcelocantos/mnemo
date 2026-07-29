@@ -79,8 +79,38 @@ func noiseMsg(ts string) map[string]any {
 	return msg("user", "Tool loaded.", ts)
 }
 
+// testRateCard prices the models the fixtures use. Pricing is a real
+// dependency of usage accounting now (🎯T135): with no rate card nothing
+// is priceable, which is correct behaviour but makes cost assertions
+// vacuous. Rates match published values so the arithmetic is meaningful.
+func testRateCard() map[string]ModelRate {
+	sonnet := ModelRate{
+		Input: 3e-6, Output: 15e-6, CacheRead: 0.3e-6,
+		CacheWrite5m: 3.75e-6, CacheWrite1h: 6e-6, ContextThreshold: 200000,
+	}
+	opus := ModelRate{
+		Input: 5e-6, Output: 25e-6, CacheRead: 0.5e-6,
+		CacheWrite5m: 6.25e-6, CacheWrite1h: 10e-6, ContextThreshold: 200000,
+	}
+	m := map[string]ModelRate{}
+	for _, n := range []string{
+		"claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+		"claude-opus-5",
+	} {
+		m[n] = opus
+	}
+	for _, n := range []string{
+		"claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-5",
+		"claude-haiku-4-5", "claude-fable-5",
+	} {
+		m[n] = sonnet
+	}
+	return m
+}
+
 func newTestStore(t *testing.T, projectDir string) *Store {
 	t.Helper()
+	installTestRateCard(t, testRateCard())
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	s, err := New(dbPath, projectDir)
 	if err != nil {
@@ -2090,6 +2120,9 @@ func assistantWithUsage(ts string, model string, input, output, cacheRead, cache
 		"version":   "2.1.81",
 		"message": map[string]any{
 			"role": "assistant",
+			// See fixtureID: usage accounting quarantines records with no
+			// message id, because they cannot be deduplicated (🎯T135).
+			"id": "msg_" + fixtureID(ts, model),
 			"content": []any{
 				map[string]any{"type": "text", "text": "Working on it."},
 			},

@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,6 +30,14 @@ type fakeBackend struct {
 }
 
 func (f *fakeBackend) Stats() (*store.StatsResult, error) { return f.statsResult, nil }
+func (f *fakeBackend) AgentTrees(store.AgentTreeParams) ([]store.AgentTree, error) {
+	return nil, nil
+}
+
+func (f *fakeBackend) BudgetStatusNow(store.BudgetConfig, time.Time) (*store.BudgetStatus, error) {
+	return &store.BudgetStatus{}, nil
+}
+
 func (f *fakeBackend) Usage(p store.UsageParams) (*store.UsageResult, error) {
 	return f.usageResult, nil
 }
@@ -433,43 +442,61 @@ func TestResolveError(t *testing.T) {
 	}
 }
 
+// TestEstimateCost pins the contract this layer's pricing had to be
+// rewritten to satisfy (🎯T135).
+//
+// Its predecessor asserted the two defects rather than the behaviour: that
+// claude-opus-4-5 costs $15/M input (it is $5/M — the old table
+// prefix-matched it onto opus-4) and that an unrecognised model "defaults
+// to sonnet". The second is how 27 billion tokens from an entirely
+// different provider came to be priced at Anthropic's rates. A test that
+// encodes a bug makes fixing it look like a regression.
 func TestEstimateCost(t *testing.T) {
+	defer store.SetRateCard(&store.RateCard{Rates: map[string]store.ModelRate{
+		"claude-opus-4-5": {
+			Input: 5e-6, Output: 25e-6, CacheRead: 0.5e-6, CacheWrite5m: 6.25e-6,
+		},
+		"claude-sonnet-4-6": {
+			Input: 3e-6, Output: 15e-6, CacheRead: 0.3e-6, CacheWrite5m: 3.75e-6,
+		},
+	}})()
+
 	cases := []struct {
 		name                                 string
 		model                                string
 		input, output, cacheRead, cacheWrite float64
-		wantMin, wantMax                     float64
+		want                                 float64
 	}{
 		{
-			name:  "opus",
+			name:  "opus prices at its own rate, not its family prefix",
 			model: "claude-opus-4-5",
 			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
-			wantMin: 20.0, wantMax: 30.0, // ~$15 input + $7.5 output + $0.75 cache_read + $0.9375 cache_write
+			want: 5.0 + 2.5 + 0.25 + 0.3125,
 		},
 		{
 			name:  "sonnet",
 			model: "claude-sonnet-4-6",
 			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
-			wantMin: 4.0, wantMax: 5.0, // ~$3 input + $1.5 output + $0.15 cache_read + $0.1875 cache_write
+			want: 3.0 + 1.5 + 0.15 + 0.1875,
 		},
 		{
-			name:  "haiku",
-			model: "claude-haiku-4-5",
+			name:  "unpriced model contributes nothing, rather than borrowing a rate",
+			model: "some-other-providers-model",
 			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
-			wantMin: 1.0, wantMax: 2.0, // ~$0.80 input + $0.40 output + $0.04 cache_read + $0.05 cache_write
+			want: 0,
 		},
 		{
-			name:  "unknown defaults to sonnet",
-			model: "unknown-model",
+			name:  "no model recorded is also unpriced",
+			model: "",
 			input: 1_000_000, output: 100_000, cacheRead: 500_000, cacheWrite: 50_000,
-			wantMin: 4.0, wantMax: 5.0,
+			want: 0,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := estimateCost(c.model, c.input, c.output, c.cacheRead, c.cacheWrite)
-			if got < c.wantMin || got > c.wantMax {
-				t.Errorf("estimateCost(%q) = %.4f, want [%.1f, %.1f]", c.model, got, c.wantMin, c.wantMax)
+			got := apiEstimateCost(c.model, c.input, c.output, c.cacheRead, c.cacheWrite)
+			if math.Abs(got-c.want) > 1e-9 {
+				t.Errorf("apiEstimateCost(%q) = %.6f, want %.6f", c.model, got, c.want)
 			}
 		})
 	}

@@ -31,7 +31,8 @@ type Scheduler struct {
 	now      func() time.Time
 	// onReport, when set, receives every report the scheduler produces, so the
 	// live dashboard panel and status glyph can update via the SSE hub (🎯T86).
-	onReport func(Report)
+	onReport   func(Report)
+	beforeFull func()
 }
 
 // NewScheduler builds a scheduler. A zero interval uses the default;
@@ -75,9 +76,18 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+// BeforeFull runs immediately before each full pass. The daemon uses it
+// to re-evaluate the budget throttle (🎯T136) so the check that reports
+// throttle state reads a value computed in the same pass rather than one
+// from an hour ago.
+func (s *Scheduler) BeforeFull(fn func()) { s.beforeFull = fn }
+
 // runOnce runs the checks (full or fast tier), notifies, and logs a
 // one-line summary whenever anything is not ok.
 func (s *Scheduler) runOnce(ctx context.Context, full bool) {
+	if full && s.beforeFull != nil {
+		s.beforeFull()
+	}
 	rep := s.reg.Run(ctx, full, s.now())
 	if s.notifier != nil {
 		s.notifier.Observe(rep, s.now())

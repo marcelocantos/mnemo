@@ -33,6 +33,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/streamseg"
+	"github.com/marcelocantos/mnemo/internal/throttle"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
 	"github.com/marcelocantos/mnemo/internal/vault"
 )
@@ -97,6 +98,11 @@ type Registry struct {
 	plugins *plugin.Manager
 	// signals evaluates config signal_sources (🎯T102.8).
 	signals *plugin.SignalEvaluator
+	// governor throttles the agents mnemo invokes itself once a budget's
+	// soft limit is breached (🎯T136). Never nil — an unconfigured budget
+	// yields a governor that permits everything, so callers need no
+	// nil check on a hot path.
+	governor *throttle.Governor
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -138,7 +144,52 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 		cfg:               cfg,
 		summariserWorkDir: summariserWorkDir,
 		compactorModel:    "sonnet",
+		governor:          throttle.New(mnemoDir()),
 	}
+}
+
+// mnemoDir resolves ~/.mnemo for durable throttle state, falling back to
+// a temp dir so a governor is always constructible. A throttle that
+// cannot persist is worse than one that persists imperfectly: it silently
+// resets on every restart, and the auto-upgrade path restarts the daemon
+// on its own schedule.
+func mnemoDir() string {
+	home, err := store.EffectiveHome()
+	if err != nil {
+		return os.TempDir()
+	}
+	dir := filepath.Join(home, ".mnemo")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
+// Governor exposes the budget throttle for the health report and for
+// evaluation from the scheduler.
+func (r *Registry) Governor() *throttle.Governor { return r.governor }
+
+// EvaluateThrottle re-reads the budget and updates the throttle level
+// (🎯T136). Called on the diag scheduler's full pass: a budget does not
+// change on a three-minute timescale, and re-running several usage
+// aggregations more often than that would itself be a cost.
+func (r *Registry) EvaluateThrottle(defaultUser string) {
+	r.mu.Lock()
+	e, ok := r.stores[defaultUser]
+	cfg := r.cfg
+	r.mu.Unlock()
+	if !ok || e.store == nil {
+		return
+	}
+	b, err := e.store.BudgetStatusNow(cfg.Budget, time.Now())
+	if err != nil {
+		return
+	}
+	r.governor.Evaluate(throttle.BudgetView{
+		Priced:       b.Priced,
+		CapUSD:       b.CapUSD,
+		SpentPct:     b.SpentPct,
+		ProjectedPct: b.ProjectedPct,
+		WarnPct:      cfg.Budget.EffectiveWarnPct(),
+	})
 }
 
 // SetPluginManager wires the 🎯T102 plugin registry. Call once from
@@ -549,6 +600,10 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
 			compactor := compact.New(e.store, caller, compact.Config{})
 			watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{})
+			// Budget throttle (🎯T136).
+			watcher.Allow = func() (bool, time.Duration) {
+				return r.governor.Allow(throttle.Compaction)
+			}
 			e.compactWatcher = watcher
 			logger.Info("compact: watcher starting")
 			watcher.Run(r.baseCtx)
@@ -877,6 +932,8 @@ func (r *Registry) startStreamSegWatcher(e *userEntry) {
 		NewSummariser: func(string) streamseg.Summariser {
 			return streamseg.NewClaudiaSummariser(workDir, cfg.Model)
 		},
+		// Budget throttle (🎯T136): this tier pauses rather than slows.
+		Paused: func() bool { return r.governor.Paused(throttle.Segmenter) },
 	}
 	slog.Info("streaming segmentation enabled",
 		"model", cfg.Model, "drip_size", cfg.DripSize, "max_concurrent", cfg.MaxConcurrent)

@@ -188,6 +188,23 @@ type Config struct {
 	// calls.
 	CostReconciliation CostReconciliationConfig `json:"cost_reconciliation,omitempty"`
 
+	// Pricing gates fetching the model rate card (🎯T135). Disabled by
+	// default, same posture as CostReconciliation and ImageEmbeddings:
+	// the safe default for an unsolicited outbound call is not to make
+	// it. With it off, mnemo reports token counts and reports every
+	// model as unpriced — which is the honest state, and visibly
+	// different from reporting zero.
+	Pricing PricingConfig `json:"pricing,omitempty"`
+
+	// DedupKey selects which identifiers collapse duplicate billable
+	// records in usage accounting (🎯T135). Empty uses the default.
+	DedupKey string `json:"dedup_key,omitempty"`
+
+	// Budget defines the spending period and cap that spend is reported
+	// against (🎯T135). Absent → no cap, so nothing alerts; usage
+	// reporting is unaffected.
+	Budget BudgetConfig `json:"budget,omitempty"`
+
 	// ConnectionSweep controls the daemon_connections sweeper
 	// (🎯T60). Absent in config.json → defaults apply, sweeper
 	// enabled. Set {"connection_sweep": {"disabled": true}} to opt
@@ -402,6 +419,159 @@ type CostReconciliationConfig struct {
 // IsEnabled reports whether the reconciler should run. False by
 // default (zero-value config = no Admin API calls).
 func (c CostReconciliationConfig) IsEnabled() bool { return c.Enabled }
+
+// PricingConfig gates fetching the model rate card (🎯T135).
+//
+// A zero-value PricingConfig — the section omitted from config.json —
+// means no fetch, on the same reasoning as CostReconciliationConfig.
+// Everything else in cost accounting is arithmetic over transcripts mnemo
+// already holds locally; the rate card is the one piece that has to come
+// from somewhere, and one HTTP GET is still an HTTP GET.
+//
+// With this off, costs are not merely approximate — every model reports as
+// unpriced, with its token counts intact. That is deliberate: a cost
+// figure computed from no rate card would be zero, and zero is the one
+// answer indistinguishable from "you spent nothing".
+type PricingConfig struct {
+	// Enabled opts in to fetching the rate card. When false, no request
+	// is made and any previously cached card is still used — the cache is
+	// local data, and declining to refresh it is not a reason to discard
+	// what is already on disk.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// RefreshHours is how often to re-fetch. Zero uses the default.
+	RefreshHours int `json:"refresh_hours,omitempty"`
+
+	// SourceURL overrides where the card is fetched from, for an
+	// air-gapped mirror or a site-pinned copy. Empty uses the default.
+	SourceURL string `json:"source_url,omitempty"`
+}
+
+// IsEnabled reports whether the rate card may be fetched. False by
+// default (zero-value config = no outbound request).
+func (c PricingConfig) IsEnabled() bool { return c.Enabled }
+
+// DefaultRateCardRefreshHours is how often the card is re-fetched when
+// opted in. Daily: prices change on the order of model releases, so
+// anything more frequent is traffic without information.
+const DefaultRateCardRefreshHours = 24
+
+// EffectiveRefreshHours resolves the refresh interval.
+func (c PricingConfig) EffectiveRefreshHours() int {
+	if c.RefreshHours > 0 {
+		return c.RefreshHours
+	}
+	return DefaultRateCardRefreshHours
+}
+
+// EffectiveSourceURL resolves where to fetch the card from.
+func (c PricingConfig) EffectiveSourceURL() string {
+	if c.SourceURL != "" {
+		return c.SourceURL
+	}
+	return PricingSourceURL
+}
+
+// Deduplication keys (🎯T135).
+//
+// The key must identify the BILLABLE CALL, not the record's position in a
+// file. Which identifiers do that is environment-dependent, which is why
+// this is configurable rather than a constant.
+//
+// Against a provider's own API, message id plus request id is right.
+// Behind a gateway it may not be: reported from production on a
+// Bedrock-plus-Portkey path, duplicate message-id groups diverged
+// substantially from the platform's own billing. A proxy is free to retry,
+// coalesce or reissue identifiers, and either failure is available — ids
+// reissued per attempt make one call look like several and the local
+// figure over-counts; ids replayed across genuinely distinct calls make
+// several look like one and it under-counts.
+//
+// The direction of the divergence tells you which you have, so
+// reconciliation against the billing source is diagnostic rather than
+// merely reassuring. Validate the key per serving path, and re-validate
+// when the path changes.
+const (
+	// DedupKeyMessageRequest collapses records sharing both a message id
+	// and a request id. The default, and correct against a direct API.
+	DedupKeyMessageRequest = "message_request"
+
+	// DedupKeyMessage collapses on message id alone. Use where a gateway
+	// reissues request ids per retry of one billable call.
+	DedupKeyMessage = "message"
+
+	// DedupKeyNone counts every record. Use only after establishing that
+	// the transcript records billable calls one-to-one; it is the
+	// setting that produced a 2.54x over-count on input tokens here.
+	DedupKeyNone = "none"
+)
+
+// EffectiveDedupKey resolves the deduplication key, defaulting to
+// message+request and refusing to silently accept a name it does not
+// recognise — a typo that quietly disabled deduplication would inflate
+// every figure by roughly 2x with nothing to show for it.
+func (c Config) EffectiveDedupKey() string {
+	switch c.DedupKey {
+	case DedupKeyMessage, DedupKeyNone, DedupKeyMessageRequest:
+		return c.DedupKey
+	default:
+		return DedupKeyMessageRequest
+	}
+}
+
+// BudgetConfig defines the period spend is measured against (🎯T135).
+//
+// A cap alone would be nearly useless. "80% consumed" arrives after the
+// decision that caused it, so alerting is on the PROJECTION — at this burn
+// rate, the month exceeds its cap on the 19th — which is a statement you
+// can still act on.
+type BudgetConfig struct {
+	// MonthlyCapUSD is the spend ceiling for one period. Zero means no
+	// cap: spend is still reported, nothing alerts.
+	MonthlyCapUSD float64 `json:"monthly_cap_usd,omitempty"`
+
+	// Timezone is the IANA zone the period boundary and daily buckets are
+	// computed in. Empty uses UTC.
+	//
+	// Explicit rather than the host locale, because the same data must
+	// not produce different reports on different machines — and because
+	// a period boundary is exactly where the difference shows up.
+	Timezone string `json:"timezone,omitempty"`
+
+	// WarnAtPct is the projected-consumption fraction that raises a
+	// warning, as a percentage of the cap. Zero uses the default.
+	//
+	// It applies to the PROJECTED end-of-period total, not the amount
+	// spent so far, so it can exceed 100: a projection of 140% of cap is
+	// a meaningful thing to be told on the 8th.
+	WarnAtPct float64 `json:"warn_at_pct,omitempty"`
+}
+
+// DefaultBudgetWarnPct raises a warning once the period is projected to
+// finish at or above the cap. Set below 100 to be told earlier.
+const DefaultBudgetWarnPct = 100
+
+// EffectiveWarnPct resolves the projected-consumption warning threshold.
+func (c BudgetConfig) EffectiveWarnPct() float64 {
+	if c.WarnAtPct > 0 {
+		return c.WarnAtPct
+	}
+	return DefaultBudgetWarnPct
+}
+
+// Location resolves the budget timezone, falling back to UTC when unset
+// or unloadable. A bad zone name must not take the daemon down, and UTC
+// is the one choice that is wrong consistently rather than silently.
+func (c BudgetConfig) Location() *time.Location {
+	if c.Timezone == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(c.Timezone)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
 
 // ImageEmbeddingsConfig gates the CLIP image embedder (🎯T121). A
 // zero-value ImageEmbeddingsConfig — the section omitted from

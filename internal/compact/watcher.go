@@ -161,6 +161,12 @@ type Watcher struct {
 	compactor *Compactor
 	cfg       WatcherConfig
 
+	// Allow gates a scan against the budget throttle (🎯T136), returning
+	// false plus a retry hint when the rate is capped. A plain func
+	// rather than a dependency on the throttle package, so the watcher
+	// stays testable and unaware of budgets. Nil means never throttled.
+	Allow func() (bool, time.Duration)
+
 	mu                  sync.Mutex
 	lastN               int       // candidates returned by the last scan
 	lastBacklog         int       // owed sessions before the per-scan limit (gap to fixed point)
@@ -291,6 +297,18 @@ func (w *Watcher) LastScanCount() int {
 
 func (w *Watcher) scan(ctx context.Context) {
 	now := time.Now()
+
+	// Budget throttle (🎯T136). Soft and post hoc: a false here means
+	// "not yet", never "no" — the next tick tries again and the work is
+	// delayed rather than dropped. Compaction is throttled after
+	// backfill, because delaying recent summarisation has a real (if
+	// bounded) freshness cost where deep history has none.
+	if w.Allow != nil {
+		if ok, wait := w.Allow(); !ok {
+			slog.Debug("compaction scan throttled by budget", "retry_in", wait)
+			return
+		}
+	}
 
 	// Scan gate. The full candidate query re-sums the entries table for
 	// every session, so on a 21 GB index one scan costs seconds — every

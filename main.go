@@ -822,6 +822,13 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	reg := registry.NewRegistry(ctx, cfg, summariserDir)
 	defer reg.Close()
 
+	// Keep the model rate card current (🎯T135). Opt-in: with the pricing
+	// section absent from config.json this loop wakes, reads the config,
+	// makes no request, and goes back to sleep.
+	store.StartRateCardRefresher(ctx, func(msg string, args ...any) {
+		slog.Info("pricing: "+msg, args...)
+	})
+
 	// 🎯T102.2: plugin registry reconciles against config on startup and
 	// on every mnemo_config hot-reload. Home is the process effective
 	// home for ~/.mnemo/plugins/<name> path convention.
@@ -1119,6 +1126,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	})
 	notifier.SetShimPresent(eventHub.HasSubscribers)
 	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)
+	// Re-evaluate the budget throttle on the full pass (🎯T136), so the
+	// check that reports throttle state reads a value from this pass
+	// rather than one an hour old. Full tier because it runs several
+	// usage aggregations, and a budget does not move on a fast tick.
+	diagScheduler.BeforeFull(func() { reg.EvaluateThrottle(defaultUser) })
 	diagScheduler.OnReport(func(rep diag.Report) {
 		// Retained: a shim connecting between scheduler ticks gets the current
 		// health snapshot immediately rather than waiting for the next tick.

@@ -16,6 +16,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/throttle"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
 )
 
@@ -75,6 +76,66 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					boot.Summary(),
 					"daemon is still bringing up the default-user store; /health stays available")
 			}
+		}},
+
+		// Budget projection (🎯T135). Full tier: it runs several usage
+		// aggregations, and a budget does not change on a three-minute
+		// timescale.
+		//
+		// Deliberately warn-not-fail even when the cap is already
+		// breached. A fail transition fires an OS notification, and mnemo
+		// cannot stop the spend that caused this — notifying about an
+		// unstoppable condition on every pass is how an alert becomes
+		// something to dismiss reflexively.
+		diag.Check{Name: "budget.projection", Tier: diag.Full, Run: func(context.Context) diag.CheckResult {
+			st, _ := state()
+			if st == nil {
+				return diag.Healthy("no default-user store yet")
+			}
+			bcfg := cfg.Budget
+			if bcfg.MonthlyCapUSD <= 0 {
+				return diag.Healthy("no budget cap configured; spend is reported but not watched")
+			}
+			b, err := st.BudgetStatusNow(bcfg, time.Now())
+			if err != nil {
+				return diag.Warning("budget status failed: "+err.Error(),
+					"check mnemo_budget for the underlying query error")
+			}
+			if !b.Priced {
+				// The one case that must not read as healthy spending:
+				// $0.00 here means nothing could be priced, not that
+				// nothing was spent.
+				return diag.Warning(b.Headline,
+					`set {"pricing": {"enabled": true}} in ~/.mnemo/config.json so mnemo can fetch the model rate card`)
+			}
+			switch b.Severity {
+			case "over", "warn":
+				// State the governed fraction. mnemo can throttle only the
+				// agents it invokes itself (🎯T136); a rising total
+				// alongside an active throttle reads as a broken throttle
+				// unless the report separates governed from observed.
+				return diag.Warning(
+					fmt.Sprintf("%s Of that, $%.2f (%.0f%%) is mnemo's own background agents.",
+						b.Headline, b.GovernedUSD, b.GovernedPct),
+					"run mnemo_budget for the sessions driving it, each with its repo, "+
+						"working directory and live pid where it is still running. Only "+
+						"mnemo's own agents can be throttled automatically; Claude Code "+
+						"sessions and their sub-agents are observed but not gateable")
+			default:
+				return diag.Healthy(b.Headline)
+			}
+		}},
+
+		// Throttle state (🎯T136). Throttling is LOUD by requirement: a
+		// silent throttle is indistinguishable from a hang, and the first
+		// thing anyone does about an apparent hang is restart the daemon
+		// — which is precisely why the state is durable.
+		diag.Check{Name: "budget.throttle", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			detail, remediation := r.governor.Describe()
+			if r.governor.State().Level == throttle.Full {
+				return diag.Healthy(detail)
+			}
+			return diag.Warning(detail, remediation)
 		}},
 
 		diag.Check{Name: "schema.upgrade", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {

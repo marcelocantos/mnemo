@@ -383,7 +383,15 @@ When name is omitted, returns a list of all memories for the project with their 
 		mcp.NewTool("mnemo_usage",
 			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
 
-Returns per-period breakdown and totals. Cost estimates use published Anthropic pricing (Opus, Sonnet, Haiku families). Unknown models use Sonnet pricing as fallback.
+Returns per-period breakdown and totals. Costs come from a fetched model rate card, matched on the EXACT model identifier — there is no prefix matching and no fallback, because both produced large silent errors (opus-4-5 priced as opus-4 is a 3x overcharge; an unknown model priced as Sonnet is how another provider's corpus got billed at Anthropic's rates).
+
+Two fields report what a total leaves out, and both matter more than the total:
+
+"unpriced_models" names models whose tokens are counted but NOT costed, because the rate card has no entry. This is normal for a newly released model — which is exactly the spend you want to see. Their tokens are in the counts; their cost is in nobody's.
+
+"uncounted" reports volume EXCLUDED from every row and total, per source, with the reason. A record with no message id cannot be deduplicated, and deduplication is worth 1.95x-2.83x, so sources that supply no key (Codex, Grok today) are reported separately rather than summed into a figure that claims to be deduplicated. Codex volume is additionally inflated by an ingest artifact.
+
+Pricing requires opting in via {"pricing": {"enabled": true}} in ~/.mnemo/config.json, which lets mnemo fetch the rate card. Without it, token counts are exact and every model reports as unpriced.
 
 Each row includes a "source" field: "estimated" (computed from token counts), "reconciled" (authoritative cost from Anthropic Admin API), or "mixed" (aggregation spans both). Reconciliation requires ANTHROPIC_ADMIN_API_KEY env var; absent by default (all rows report "estimated").
 
@@ -394,6 +402,37 @@ A top-level "freshness" field reports the RFC3339 timestamp of the most recently
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), or path fragment.`)),
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
 			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", "repo", "session" (one row per Claude Code session ID), or "block" (one row per 5-hour Anthropic billing block, boundaries aligned to UTC and matching what /cost and ccusage report).`)),
+		),
+		mcp.NewTool("mnemo_budget",
+			mcp.WithDescription(`Spend against a resetting budget period, with projection and culprits.
+
+Answers "where am I, and am I heading for trouble" for the current calendar month (resets on the 1st, in the configured timezone).
+
+Alerting is on the PROJECTION, not on a threshold already crossed: "at $47/day, 2026-07 exceeds its $500 cap on the 19th" is something you can act on, where "80% consumed" arrives after the decision that caused it. The burn rate is measured over a trailing 7 days rather than the whole period, so a change in behaviour shows up within days instead of being averaged away.
+
+When severity is not "ok", the report names culprit sessions — largest spend first, each resolved to a repo, a working directory, and a live pid where the session is still running. A live session can be attached to (mnemo_session_go) or killed; a finished one cannot, and is labelled as such.
+
+Configure with {"budget": {"monthly_cap_usd": 500, "timezone": "Australia/Sydney", "warn_at_pct": 100}}. With no cap, spend is still reported and nothing alerts.
+
+Carries the same "unpriced_models" and "uncounted" disclosures as mnemo_usage — a budget figure that silently omits a provider is worse than no figure, because it gets believed.`),
+		),
+		mcp.NewTool("mnemo_agent_trees",
+			mcp.WithDescription(`Sub-agent fan-outs reconstructed and costed as a WHOLE, ranked by aggregate tree cost.
+
+For the failure a per-session ranking cannot see: a fan-out where every individual agent looks reasonable and forty together trip the wire. Ranking sessions by cost shows forty modest entries and nothing obviously wrong; only the aggregate at the root makes the shape visible.
+
+Each tree reports the root cause where the transcript records it — the skill that started it, the agent types spawned, the turn that spawned them and when. "You spent a lot" is not actionable; "the release skill spawned 40 agents at 14:03" is.
+
+tree_cost_usd is the fan-out's aggregate; direct_cost_usd is the session's own main-line spend, so a session that is expensive by itself is distinguishable from one that is expensive because of its children. max_depth is reported because a tree three deep is a different problem from a wide shallow one, and nested fan-outs roll up through every level.
+
+Trees still running carry live=true and a pid, and can be stopped (mnemo_session_go, or kill). Finished ones say so — their spend is already incurred.
+
+CLAUDE ONLY, deliberately. The parentage fields come from Claude Code's record shape; Codex records carry no message id and no parent linkage, and a tree built over them would be noise presented as structure. Trees whose spend cannot be priced report priced=false rather than a plausible $0.00.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7).")),
+			mcp.WithString("since", mcp.Description("RFC3339 lower bound. Overrides days.")),
+			mcp.WithString("until", mcp.Description("RFC3339 upper bound.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment.")),
+			mcp.WithNumber("limit", mcp.Description("Max trees to return (default 20).")),
 		),
 		mcp.NewTool("mnemo_skills",
 			mcp.WithDescription(`Search across Claude Code skill files (~/.claude/skills/). Skills define reusable workflows — release processes, audit procedures, documentation generation, etc. Use this to discover relevant skills or understand what workflows are available.`),
@@ -911,6 +950,10 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.skills(args)
 	case "mnemo_usage":
 		return ch.usage(args)
+	case "mnemo_budget":
+		return ch.budget()
+	case "mnemo_agent_trees":
+		return ch.agentTrees(args)
 	case "mnemo_configs":
 		return ch.configs(args)
 	case "mnemo_audit":
@@ -1523,11 +1566,58 @@ func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("usage query failed: %v", err), true, nil
 	}
-	if len(result.Rows) == 0 {
+	// Only "no data" when there is genuinely none. A query whose every
+	// record was quarantined for want of a dedup key has data — it has a
+	// LOT of data, which is the point — and reporting that as absence is
+	// the silent-exclusion failure this whole feature exists to prevent
+	// (🎯T135). Fall through so the caller sees what was withheld and why.
+	if len(result.Rows) == 0 && len(result.Uncounted) == 0 {
 		return "No usage data found.", false, nil
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) budget() (string, bool, error) {
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		return fmt.Sprintf("read config: %v", err), true, nil
+	}
+	st, err := h.mem.BudgetStatusNow(cfg.Budget, time.Now())
+	if err != nil {
+		return fmt.Sprintf("budget status failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) agentTrees(args map[string]any) (string, bool, error) {
+	p := store.AgentTreeParams{}
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		p.Days = int(d)
+	}
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		p.Limit = int(l)
+	}
+	p.Since, _ = args["since"].(string)
+	p.Until, _ = args["until"].(string)
+	p.RepoFilter, _ = args["repo"].(string)
+
+	trees, err := h.mem.AgentTrees(p)
+	if err != nil {
+		return fmt.Sprintf("agent tree query failed: %v", err), true, nil
+	}
+	if len(trees) == 0 {
+		return "No sub-agent fan-outs found in this window.", false, nil
+	}
+	out, err := json.MarshalIndent(trees, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
