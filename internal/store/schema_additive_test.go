@@ -34,6 +34,11 @@ func TestSchemaUpgradeIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Close before TempDir cleanup runs. On Windows an open handle blocks
+	// the unlink and t.TempDir's RemoveAll fails the test; POSIX allows
+	// unlinking an open file, which is why leaving this out passed
+	// everywhere except the Windows VM.
+	defer sdb.Close()
 	parsed, err := sqlift.Parse(normalizeEOL(prev))
 	if err != nil {
 		t.Fatal(err)
