@@ -1523,7 +1523,12 @@ func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("usage query failed: %v", err), true, nil
 	}
-	if len(result.Rows) == 0 {
+	// Only "no data" when there is genuinely none. A query whose every
+	// record was quarantined for want of a dedup key has data — it has a
+	// LOT of data, which is the point — and reporting that as absence is
+	// the silent-exclusion failure this whole feature exists to prevent
+	// (🎯T135). Fall through so the caller sees what was withheld and why.
+	if len(result.Rows) == 0 && len(result.Uncounted) == 0 {
 		return "No usage data found.", false, nil
 	}
 

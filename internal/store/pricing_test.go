@@ -162,21 +162,30 @@ func installTestRateCard(t *testing.T, rates map[string]ModelRate) {
 	t.Cleanup(SetRateCard(&RateCard{Rates: rates}))
 }
 
-// TestDedupCountsUnidentifiedRecordsOnce is the NULL-key trap.
+// TestUnidentifiedRecordsAreQuarantinedNotCounted covers the NULL-key trap
+// and the quarantine rule it turned into (🎯T135).
 //
-// A record carrying no message id cannot be shown to duplicate anything,
-// so it must be counted once. Grouping on a NULL key instead collapses
-// every such record into a single row — which silently discards an entire
-// provider's corpus and looks exactly like "you used it less".
-func TestDedupCountsUnidentifiedRecordsOnce(t *testing.T) {
+// A record with no message id cannot be shown to duplicate anything. Two
+// wrong things can be done with it, and this pins against both.
+//
+// Grouping on the NULL key collapses every such record into ONE row,
+// silently discarding an entire provider's corpus — that shows up here as
+// a quarantined total below 600.
+//
+// Counting it in the headline total is the other error: the volume is not
+// deduplicated, so it is not comparable with volume that is. Over one real
+// month the unkeyed sources carried 62.9 billion input tokens against 64.8
+// million from keyed ones. Admitting that to a total is not an
+// approximation.
+func TestUnidentifiedRecordsAreQuarantinedNotCounted(t *testing.T) {
 	dir := t.TempDir()
 	s := newTestStore(t, dir)
 	now := time.Now().UTC()
-	// Fixtures carry no message.id, which is the shape that broke.
+	// No message.id anywhere — the shape every non-Claude source has.
 	writeJSONL(t, dir, "p", "sess-dedup", []map[string]any{
-		asstTok("one", now.Add(-3*time.Minute).Format(time.RFC3339), 100, 0, 1000),
-		asstTok("two", now.Add(-2*time.Minute).Format(time.RFC3339), 200, 0, 2000),
-		asstTok("three", now.Add(-1*time.Minute).Format(time.RFC3339), 300, 0, 3000),
+		unkeyedAsst(now.Add(-3*time.Minute), 100, 1000),
+		unkeyedAsst(now.Add(-2*time.Minute), 200, 2000),
+		unkeyedAsst(now.Add(-1*time.Minute), 300, 3000),
 	})
 	if err := s.IngestAll(); err != nil {
 		t.Fatal(err)
@@ -185,8 +194,45 @@ func TestDedupCountsUnidentifiedRecordsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := res.Total.OutputTokens; got != 600 {
-		t.Errorf("output tokens = %d, want 600 (3 records counted once each); "+
-			"a collapsed NULL key would report 300 or less", got)
+
+	if res.Total.OutputTokens != 0 || res.Total.CostUSD != 0 {
+		t.Errorf("headline total = %d tokens / $%.4f, want zero: undeduplicable "+
+			"volume must not be admitted to a total that claims to be deduplicated",
+			res.Total.OutputTokens, res.Total.CostUSD)
+	}
+
+	if len(res.Uncounted) != 1 {
+		t.Fatalf("Uncounted = %+v, want exactly one source; excluded volume "+
+			"that is not reported is indistinguishable from absent volume", res.Uncounted)
+	}
+	u := res.Uncounted[0]
+	if u.OutputTokens != 600 {
+		t.Errorf("quarantined output = %d, want 600 (3 records counted once "+
+			"each); a collapsed NULL key reports 300 or less", u.OutputTokens)
+	}
+	if u.Records != 3 {
+		t.Errorf("quarantined records = %d, want 3", u.Records)
+	}
+	if u.Reason == "" {
+		t.Error("quarantine carries no reason; an unexplained exclusion is " +
+			"the failure mode this reports against")
+	}
+}
+
+// unkeyedAsst builds an assistant record with NO message id, as every
+// non-Claude source currently produces.
+func unkeyedAsst(ts time.Time, out, in int) map[string]any {
+	return map[string]any{
+		"type":      "assistant",
+		"timestamp": ts.Format(time.RFC3339),
+		"message": map[string]any{
+			"role":    "assistant",
+			"model":   "claude-sonnet-4-6",
+			"content": "x",
+			"usage": map[string]any{
+				"input_tokens":  in,
+				"output_tokens": out,
+			},
+		},
 	}
 }

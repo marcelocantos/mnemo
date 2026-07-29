@@ -265,7 +265,14 @@ func (g *Generator) Write(projectsDir string) error {
 				"userType":   "external",
 				"version":    "2.1.172",
 				"message": map[string]any{
-					"role":    "assistant",
+					"role": "assistant",
+					// Real assistant records always carry a message id, and
+					// usage accounting keys deduplication on it — a record
+					// without one is quarantined rather than counted
+					// (🎯T135). A generator that omits it produces a corpus
+					// no provider produces, and the tests built on it then
+					// verify a shape that cannot occur.
+					"id":      "msg_" + strings.ReplaceAll(assistantUUID, "-", "")[:24],
 					"model":   model,
 					"content": content,
 					"usage": map[string]any{

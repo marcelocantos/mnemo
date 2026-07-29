@@ -568,6 +568,59 @@ type UsageResult struct {
 	// newly released one, which is exactly the spend worth seeing. Costs in
 	// this result exclude them.
 	UnpricedModels []string `json:"unpriced_models,omitempty"`
+	// Uncounted reports volume that was deliberately EXCLUDED from Rows,
+	// Total and every cost above, because its records carry no
+	// deduplication key (🎯T135). Reported rather than dropped: an
+	// exclusion nobody can see is indistinguishable from an absence.
+	Uncounted []UncountedVolume `json:"uncounted,omitempty"`
+}
+
+// UncountedVolume is one source's quarantined volume.
+//
+// The quarantine rule is a property of the records, not a list of
+// providers: a record with no message id cannot be shown to duplicate
+// anything, and duplication is the largest error in this whole
+// calculation. A source that supplies no key therefore cannot be
+// deduplicated, and its totals cannot be trusted to within the 1.95x-2.83x
+// that deduplication is worth on a source that does.
+//
+// This is not hypothetical caution. Over one month of this corpus, Codex
+// contributed 733,879 assistant records with zero message ids, zero
+// request ids and no cache accounting — carrying 62.9 BILLION input tokens
+// against Claude's 64.8 million from records that are fully keyed. Nine
+// hundred times the volume from a third of the rows. Pricing that at any
+// provider's rates produces a number with no relationship to money.
+//
+// Stating it this way rather than naming providers means a source starts
+// counting the day its ingest supplies keys, with no code change here.
+type UncountedVolume struct {
+	Source              string `json:"source"`
+	Reason              string `json:"reason"`
+	Records             int    `json:"records"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	CacheReadTokens     int64  `json:"cache_read_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+}
+
+// uncountedReason explains, per source, why its volume is quarantined.
+//
+// The generic reason is the operative one and applies to every source: no
+// key, no deduplication. Codex earns an additional sentence because it has
+// a second, independent defect that would keep its numbers meaningless
+// even if ingest started recording ids tomorrow.
+func uncountedReason(source string) string {
+	const noKey = "records carry no message id, so duplicate billable calls cannot be " +
+		"collapsed; deduplication is worth 1.95x-2.83x on a source that supplies one"
+	switch source {
+	case "codex":
+		return noKey + ". Separately, ingest maps rollout sub-events one-to-one onto " +
+			"assistant records — one session shows 460,329 records across 13 days, " +
+			"peaking at 19,647 in a single second — so the record count is not a turn " +
+			"count and the token sums inherit that inflation"
+	default:
+		return noKey
+	}
 }
 
 // UsageParams gathers all filter and grouping parameters for Usage queries.
@@ -4611,11 +4664,9 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		args = append(args, p.Model+"%")
 	}
 
-	needJoin := p.RepoFilter != "" || groupBy == "repo"
-	joinClause := ""
-	if needJoin {
-		joinClause = "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
-	}
+	// session_meta is joined unconditionally: the source is needed to
+	// attribute quarantined volume (🎯T135), not just to filter by repo.
+	joinClause := "LEFT JOIN session_meta sm ON sm.session_id = e.session_id"
 
 	// For block grouping, fetch per-message rows and group in Go.
 	if groupBy == "block" {
@@ -4662,6 +4713,8 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 				e.timestamp AS timestamp,
 				e.model AS model,
 				e.session_id AS session_id,
+				COALESCE(sm.source, 'unknown') AS source,
+				CASE WHEN COALESCE(e.message_id, '') = '' THEN 0 ELSE 1 END AS keyed,
 				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
 				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
 				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
@@ -4684,6 +4737,8 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		SELECT
 			%s AS period,
 			COALESCE(e.model, '') AS model,
+			e.source AS source,
+			e.keyed AS keyed,
 			CASE WHEN (e.input_tokens + e.cache_read_tokens + e.cache_creation_tokens)
 			          > %d THEN 1 ELSE 0 END AS over_threshold,
 			COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
@@ -4697,7 +4752,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 			MAX(e.timestamp) AS max_ts
 		FROM billable e
 		%s
-		GROUP BY %s, e.model, over_threshold
+		GROUP BY %s, e.model, e.source, e.keyed, over_threshold
 		ORDER BY period DESC
 	`, joinClause, strings.Join(where, " AND "),
 		periodExpr, LongContextThreshold, reconcCostCol, reconcJoin, groupExpr)
@@ -4726,20 +4781,40 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 	unpricedModels := map[string]bool{}
 
 	var maxTS string // track overall freshness
+	uncounted := map[string]*UncountedVolume{}
+	var uncountedOrder []string
 	card := LoadRateCard()
 	for rows.Next() {
-		var period, rowModel string
-		var overThreshold int
+		var period, rowModel, rowSource string
+		var keyed, overThreshold int
 		var input, output, cacheRead, cacheCreate, cw5m, cw1h int64
 		var msgs int
 		var reconciledCost sql.NullFloat64
 		var rowMaxTS string
-		if err := rows.Scan(&period, &rowModel, &overThreshold, &input, &output,
-			&cacheRead, &cacheCreate, &cw5m, &cw1h, &msgs, &reconciledCost, &rowMaxTS); err != nil {
+		if err := rows.Scan(&period, &rowModel, &rowSource, &keyed, &overThreshold,
+			&input, &output, &cacheRead, &cacheCreate, &cw5m, &cw1h, &msgs,
+			&reconciledCost, &rowMaxTS); err != nil {
 			continue
 		}
 		if rowMaxTS > maxTS {
 			maxTS = rowMaxTS
+		}
+		if keyed == 0 {
+			// No deduplication key, so this volume is not a quantity.
+			// Quarantine it into its own report rather than adding it to
+			// a total that claims to be deduplicated (🎯T135).
+			u, ok := uncounted[rowSource]
+			if !ok {
+				u = &UncountedVolume{Source: rowSource, Reason: uncountedReason(rowSource)}
+				uncounted[rowSource] = u
+				uncountedOrder = append(uncountedOrder, rowSource)
+			}
+			u.Records += msgs
+			u.InputTokens += input
+			u.OutputTokens += output
+			u.CacheReadTokens += cacheRead
+			u.CacheCreationTokens += cacheCreate
+			continue
 		}
 		// Every record in this bucket shares a tier, so the bucket can be
 		// priced as one without losing per-request tiering (🎯T135).
@@ -4828,6 +4903,10 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 	// Release the DB connection before issuing any follow-on queries.
 	rows.Close()
 
+	for _, k := range uncountedOrder {
+		result.Uncounted = append(result.Uncounted, *uncounted[k])
+	}
+
 	if groupBy != "model" {
 		for _, k := range order {
 			r := merged[k]
@@ -4895,19 +4974,38 @@ func (s *Store) usageByBlock(
 	where []string, args []any,
 	joinClause, repoFilter, model string,
 ) (*UsageResult, error) {
-	// Fetch per-message rows ordered by timestamp.
+	// Blocks get the same deduplication, TTL split and quarantine as every
+	// other grouping (🎯T135). They previously got none of it: this path
+	// summed raw rows, so it over-counted by the same 1.95x-2.83x, priced
+	// unkeyed sources at Anthropic's rates, and flattened the cache-write
+	// tiers. Being a different GROUP BY is not a reason to be a different
+	// calculation.
 	q := fmt.Sprintf(`
-		SELECT
-			e.timestamp,
-			COALESCE(e.model, '') AS model,
-			COALESCE(e.input_tokens, 0) AS input_tokens,
-			COALESCE(e.output_tokens, 0) AS output_tokens,
-			COALESCE(e.cache_read_tokens, 0) AS cache_read_tokens,
-			COALESCE(e.cache_creation_tokens, 0) AS cache_creation_tokens
-		FROM entries e
-		%s
-		WHERE %s
-		ORDER BY e.timestamp ASC
+		WITH billable AS (
+			SELECT
+				e.timestamp AS timestamp,
+				COALESCE(e.model, '') AS model,
+				COALESCE(sm.source, 'unknown') AS source,
+				CASE WHEN COALESCE(e.message_id, '') = '' THEN 0 ELSE 1 END AS keyed,
+				MAX(COALESCE(e.input_tokens, 0))             AS input_tokens,
+				MAX(COALESCE(e.output_tokens, 0))            AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens, 0))        AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens, 0))    AS cache_creation_tokens,
+				MAX(COALESCE(e.cache_creation_5m_tokens, 0)) AS cw5m,
+				MAX(COALESCE(e.cache_creation_1h_tokens, 0)) AS cw1h
+			FROM entries e
+			%s
+			WHERE %s
+			GROUP BY
+				CASE WHEN COALESCE(e.message_id, '') = ''
+				     THEN 'row:' || e.id ELSE e.message_id END,
+				COALESCE(e.request_id, '')
+		)
+		SELECT timestamp, model, source, keyed,
+		       input_tokens, output_tokens, cache_read_tokens,
+		       cache_creation_tokens, cw5m, cw1h
+		FROM billable
+		ORDER BY timestamp ASC
 	`, joinClause, strings.Join(where, " AND "))
 
 	rows, err := s.readDB.Query(q, args...)
@@ -4923,14 +5021,20 @@ func (s *Store) usageByBlock(
 		output      int64
 		cacheRead   int64
 		cacheCreate int64
+		cw5m        int64
+		cw1h        int64
 	}
 
 	var msgs []msgRow
 	var maxTS time.Time
+	uncounted := map[string]*UncountedVolume{}
+	var uncountedOrder []string
 	for rows.Next() {
-		var tsStr, mdl string
-		var inp, out, cr, cc int64
-		if err := rows.Scan(&tsStr, &mdl, &inp, &out, &cr, &cc); err != nil {
+		var tsStr, mdl, src string
+		var keyed int
+		var inp, out, cr, cc, cw5m, cw1h int64
+		if err := rows.Scan(&tsStr, &mdl, &src, &keyed,
+			&inp, &out, &cr, &cc, &cw5m, &cw1h); err != nil {
 			continue
 		}
 		ts, err := parseTimestamp(tsStr)
@@ -4940,7 +5044,24 @@ func (s *Store) usageByBlock(
 		if ts.After(maxTS) {
 			maxTS = ts
 		}
-		msgs = append(msgs, msgRow{ts, mdl, inp, out, cr, cc})
+		if keyed == 0 {
+			u, ok := uncounted[src]
+			if !ok {
+				u = &UncountedVolume{Source: src, Reason: uncountedReason(src)}
+				uncounted[src] = u
+				uncountedOrder = append(uncountedOrder, src)
+			}
+			u.Records++
+			u.InputTokens += inp
+			u.OutputTokens += out
+			u.CacheReadTokens += cr
+			u.CacheCreationTokens += cc
+			continue
+		}
+		msgs = append(msgs, msgRow{ts, mdl, inp, out, cr, cc, cw5m, cw1h})
+	}
+	for _, k := range uncountedOrder {
+		result.Uncounted = append(result.Uncounted, *uncounted[k])
 	}
 
 	const blockDur = 5 * time.Hour
@@ -4964,8 +5085,9 @@ func (s *Store) usageByBlock(
 		// still count. Surfacing that per block is 🎯T135's reporting job,
 		// not this loop's.
 		cost, _ := EstimateCost(m.model, TokenCounts{
-			Input: m.input, Output: m.output,
-			CacheRead: m.cacheRead, CacheWriteFlat: m.cacheCreate,
+			Input: m.input, Output: m.output, CacheRead: m.cacheRead,
+			CacheWrite5m: m.cw5m, CacheWrite1h: m.cw1h,
+			CacheWriteFlat: m.cacheCreate - m.cw5m - m.cw1h,
 		})
 
 		if cur == nil {

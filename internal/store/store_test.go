@@ -2120,6 +2120,9 @@ func assistantWithUsage(ts string, model string, input, output, cacheRead, cache
 		"version":   "2.1.81",
 		"message": map[string]any{
 			"role": "assistant",
+			// See fixtureID: usage accounting quarantines records with no
+			// message id, because they cannot be deduplicated (🎯T135).
+			"id": "msg_" + fixtureID(ts, model),
 			"content": []any{
 				map[string]any{"type": "text", "text": "Working on it."},
 			},
