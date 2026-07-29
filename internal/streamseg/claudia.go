@@ -54,6 +54,19 @@ func NewClaudiaSummariser(workDir, model string) Summariser {
 	return &claudiaSummariser{workDir: workDir, model: model}
 }
 
+// taskConfig is the configuration every drip runs under. Extracted so a
+// test can assert on what is actually passed (🎯T139): the Session-mode
+// binding this replaced DID restrict tools, and the Task-mode rewrite
+// dropped that silently — because Task mode ignored the concept entirely
+// until claudia v0.20.0, so nothing failed and nothing warned.
+func (c *claudiaSummariser) taskConfig() claudia.TaskConfig {
+	return claudia.TaskConfig{
+		WorkDir:       c.workDir,
+		Model:         c.model,
+		DisallowTools: store.SummariserDisallowedTools,
+	}
+}
+
 func (c *claudiaSummariser) Ask(ctx context.Context, drip string) (string, error) {
 	// The marker keeps the summariser's own transcript out of the
 	// compaction candidate set at ingest (session_meta.compactor_internal),
@@ -62,7 +75,7 @@ func (c *claudiaSummariser) Ask(ctx context.Context, drip string) (string, error
 	combined := store.CompactorMarker + "\n\n" + SystemPrompt + "\n\n" + drip
 	combined = sanitizePrompt(combined)
 
-	task := claudia.NewTask(claudia.TaskConfig{WorkDir: c.workDir, Model: c.model})
+	task := claudia.NewTask(c.taskConfig())
 	ch, err := task.Run(ctx, combined)
 	if err != nil {
 		return "", fmt.Errorf("claudia: run task: %w", err)

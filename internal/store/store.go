@@ -51,6 +51,29 @@ const NoncePrefix = "mnemo:self:"
 // message literally carries the marker are skipped.
 const CompactorMarker = "[mnemo:compactor:v1]"
 
+// SummariserDisallowedTools are the tools removed from every agent mnemo
+// spawns to summarise ingested text.
+//
+// Such an agent is running UNTRUSTED INPUT through a live model. A
+// transcript is data, but the model cannot tell data from instructions,
+// so an imperative sentence inside it may be executed rather than
+// described. A real incident: a summariser handed a transcript containing
+// "research X and Y. go deep with fanout" obeyed it, opened with "I'll
+// research X and Y, fanning out across multiple angles", and spawned
+// ~33,000 subagents over two hours — ~4.3 billion tokens, many failing on
+// blocked tools and retrying rather than aborting.
+//
+// Framing the text as data helps and is not sufficient: in that incident
+// the summariser ignored its wrapper prompt entirely. Removing the tools
+// is what makes the misfire harmless, because a summariser reads text and
+// emits text and needs nothing else. claudia's own baseline already
+// removes Agent and friends (BaseDisallowedTools); this removes the
+// shell, filesystem and network on top.
+var SummariserDisallowedTools = []string{
+	"Bash", "Edit", "Write", "Read", "NotebookEdit",
+	"Glob", "Grep", "WebFetch", "WebSearch",
+}
+
 // LegacyCompactorSignature is the leading text of pre-🎯T72 compaction
 // prompts, which had no explicit marker (the summariser SystemPrompt
 // began with this sentence). Detecting it lets ingest flag the large
