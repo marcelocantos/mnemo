@@ -348,14 +348,109 @@ Parameters:
 ### mnemo_usage
 
 Token usage analytics across sessions. Aggregates input, output, cache
-read, and cache creation tokens with cost estimates. Returns per-period
-breakdown, totals, and hourly rate detection (tokens/hour, cost/hour).
+read, and cache creation tokens with costs. Returns per-period breakdown,
+totals, and hourly rate detection (tokens/hour, cost/hour).
+
+Costs come from a fetched rate card matched on the **exact** model
+identifier — no prefix matching and no fallback. Two disclosure fields
+matter as much as the totals:
+
+- `unpriced_models` — counted but **not costed**, because the rate card
+  has no entry. Normal for a newly released model, which is exactly the
+  spend worth watching. Never reported as `$0.00`.
+- `uncounted` — volume **excluded** from every row and total, per source,
+  with the reason. A record carrying no message id cannot be
+  deduplicated, and deduplication is worth 1.95x–2.83x, so sources that
+  supply no key (Codex and Grok today) are reported separately rather
+  than summed into a figure that claims to be deduplicated.
+
+Pricing requires opting in (see "Budgeting" below). Without it, token
+counts stay exact and every model reports as unpriced.
 
 Parameters:
 - `days` — recency window (default 30)
+- `since` / `until` — RFC3339 bounds; override `days`
 - `repo` — repo filter
 - `model` — model prefix filter (e.g. "claude-opus-4")
-- `group_by` — "day" (default), "model", or "repo"
+- `group_by` — "day" (default), "model", "repo", "session", or "block"
+
+### mnemo_budget
+
+Spend against a resetting budget period, with projection and culprits.
+
+Alerts on the **projection**, not on a threshold already crossed: *"at
+$47/day, 2026-07 exceeds its $500 cap on the 19th"* is actionable where
+*"80% consumed"* arrives after the decision that caused it. Burn rate is
+measured over a trailing 7 days, so a change in behaviour surfaces in
+days rather than being averaged away.
+
+When severity is not `ok`, names culprit sessions largest-first, each
+resolved to a repo, working directory, and a live pid where the session
+is still running — a live session can be attached to or killed, a
+finished one cannot, and the report says which.
+
+`governed_usd` reports the portion mnemo itself caused. mnemo can only
+throttle its own agents, so a rising total alongside an active throttle
+is expected rather than a malfunction.
+
+No parameters — reads the configured budget.
+
+### mnemo_agent_trees
+
+Sub-agent fan-outs reconstructed and costed **as a whole**, ranked by
+aggregate tree cost.
+
+For the failure a per-session ranking cannot see: forty individually
+unremarkable agents that collectively trip the wire. Reports the skill
+and turn that started each tree, `tree_cost_usd` vs `direct_cost_usd`
+(expensive by itself vs expensive because of its children), depth, and
+whether it is still running.
+
+Claude-only: the parentage fields come from Claude Code's record shape.
+
+Parameters:
+- `days` — recency window (default 7)
+- `since` / `until` — RFC3339 bounds
+- `repo` — repo filter
+- `limit` — max trees (default 20)
+
+### Budgeting and cost control
+
+Opt in to pricing, and optionally set a cap, in `~/.mnemo/config.json`:
+
+```json
+{
+  "pricing": { "enabled": true },
+  "budget": {
+    "monthly_cap_usd": 500,
+    "timezone": "Australia/Sydney",
+    "warn_at_pct": 100
+  },
+  "dedup_key": "message_request"
+}
+```
+
+`pricing.enabled` gates the single outbound HTTP GET that fetches the
+model rate card; it is read per attempt, so it takes effect in both
+directions without a restart. Cards are cached at
+`~/.mnemo/pricing.json` and archived by date under `~/.mnemo/pricing/`,
+which is what lets a record be priced with the card that was in force
+when it was written.
+
+`budget.timezone` is an IANA zone and must be explicit — the same data
+bucketed in a different zone yields a different report, and a period
+boundary is exactly where that shows up.
+
+`dedup_key` is configurable because its validity is
+environment-dependent: `message_request` is right against a provider's
+own API, but a gateway may retry, coalesce, or reissue identifiers.
+Validate it by reconciling against your billing source per serving path.
+An unrecognised value resolves to the default rather than being honoured.
+
+Once a soft limit is breached, mnemo throttles the agents it invokes
+itself — compactor, segmenter, reviewer, image description — and nothing
+else. Throttling is soft (a delay between runs, never a refusal) and
+loud (`mnemo_doctor` reports the level, reason, and what would lift it).
 
 ### mnemo_skills
 

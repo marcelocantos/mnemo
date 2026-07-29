@@ -402,7 +402,9 @@ primitive lives in the harness, not the daemon.
 
 | Tool | Description |
 |---|---|
-| `mnemo_usage` | Token usage analytics with cost estimates, grouped by day/model/repo |
+| `mnemo_usage` | Token usage analytics with costs, grouped by day/model/repo/session/block. Reports what it excludes: unpriced models and undeduplicable sources |
+| `mnemo_budget` | Spend against a resetting monthly budget, alerting on the **projection** rather than a threshold already crossed, and naming the sessions burning it |
+| `mnemo_agent_trees` | Sub-agent fan-outs costed as a whole — for the case where forty individually modest agents collectively blow the budget |
 | `mnemo_whatsup` | Live session resource monitor: CPU%, RSS, memory pressure |
 | `mnemo_permissions` | Analyse tool usage patterns to suggest `allowedTools` rules |
 | `mnemo_discover_patterns` | Find workaround patterns suggesting missing features |
