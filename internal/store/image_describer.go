@@ -80,6 +80,33 @@ func hasPendingImageWork(db *sql.DB, derivedTable string) bool {
 
 // describerSystemPrompt is appended to claude -p's system prompt. It
 // enforces the output contract: strict JSON array, no prose, no action.
+// describerDisallowedTools removes everything this describer does not
+// need (🎯T139).
+//
+// It keeps Read, and only Read, because reading the image files IS the
+// job — which is what makes it different from the compactor and the
+// streaming segmenter, where the whole toolset can go.
+//
+// It needs its own list rather than store.SummariserDisallowedTools for
+// two reasons: that list disallows Read, and this path invokes `claude`
+// directly rather than through claudia, so it does not inherit claudia's
+// BaseDisallowedTools either. Agent must therefore be named explicitly
+// here — without it, this was the least protected of mnemo's three
+// summariser paths despite having the best-written prompt.
+//
+// The exposure is real rather than theoretical: images are screenshots,
+// and a screenshot of a terminal or a document can contain imperative
+// text. The model is being asked to look at it.
+var describerDisallowedTools = []string{
+	// Sub-agent spawning: the mechanism behind the ~33,000-subagent
+	// incident this target exists for.
+	"Agent", "TeamCreate", "TeamDelete", "SendMessage", "EnterWorktree",
+	// Acting on the world.
+	"Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+	// Reaching beyond the images it was handed.
+	"Glob", "Grep",
+}
+
 const describerSystemPrompt = `You are building a text search index over images captured from past Claude Code sessions.
 
 For each image file the user lists, use the Read tool to open it, then emit ONE element in a JSON array:
@@ -282,6 +309,7 @@ func describeBatchAndStore(db *sql.DB, batch []pendingImage) {
 		"--output-format", "json",
 		"--disable-slash-commands",
 		"--dangerously-skip-permissions",
+		"--disallowedTools", strings.Join(describerDisallowedTools, ","),
 		"--add-dir", tmpDir,
 		"--append-system-prompt", describerSystemPrompt,
 	}

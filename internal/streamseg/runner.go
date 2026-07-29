@@ -5,6 +5,7 @@ package streamseg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -127,6 +128,14 @@ func (r *Runner) Step(ctx context.Context) (int, error) {
 	}
 
 	reply, err := r.Summ.Ask(ctx, renderDrip(r.auto, fresh))
+	if errors.Is(err, ErrSpendCeiling) {
+		// Terminal: stop watching this session rather than re-offering
+		// the drip. Retrying past a ceiling is how a bounded overrun
+		// becomes an unbounded one (🎯T139).
+		slog.Warn("stream segmentation stopped: session spend ceiling reached",
+			"session", r.SessionID, "err", err)
+		return 0, nil
+	}
 	if err != nil {
 		// A failed drip is not a lost drip: nothing was sealed, so the
 		// same messages are re-offered next Step. Returning the count
