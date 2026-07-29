@@ -189,6 +189,21 @@ CREATE TABLE entries (
 			output_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.output_tokens')),
 			cache_read_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_read_input_tokens')),
 			cache_creation_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation_input_tokens')),
+			-- Cache writes carry a TTL and the tiers price differently: the
+			-- longer TTL costs more (🎯T135). The aggregate column above
+			-- flattens them, and 73% of this corpus's cache-write volume is
+			-- the 1-hour tier, so pricing off the aggregate under-prices the
+			-- majority of it. Nullable, so records predating the split (or
+			-- providers that do not report it) stay distinguishable from a
+			-- genuine zero.
+			cache_creation_5m_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')),
+			cache_creation_1h_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')),
+			-- The billable-call identity, for deduplication. The same call is
+			-- recorded many times over — more message ids appear twice in a
+			-- real corpus than once — and summing without collapsing them
+			-- over-counts by 1.95x to 2.83x depending on token class.
+			message_id TEXT GENERATED ALWAYS AS (json_extract(raw, '$.message.id')),
+			request_id TEXT GENERATED ALWAYS AS (raw->>'$.requestId'),
 			agent_id TEXT GENERATED ALWAYS AS (raw->>'$.agentId'),
 			version TEXT GENERATED ALWAYS AS (raw->>'$.version'),
 			slug TEXT GENERATED ALWAYS AS (raw->>'$.slug'),
@@ -736,6 +751,7 @@ CREATE INDEX idx_docs_taxonomy ON docs(taxonomy) WHERE taxonomy != '';
 
 CREATE INDEX idx_entries_agent_id ON entries(agent_id) WHERE agent_id IS NOT NULL;
 
+CREATE INDEX idx_entries_billable ON entries(message_id, request_id) WHERE type = 'assistant' AND message_id IS NOT NULL;
 CREATE INDEX idx_entries_assistant_tokens ON entries(session_id, input_tokens, output_tokens) WHERE type = 'assistant';
 
 -- 🎯T93 usage-analytics covering index. Store.Usage (token/cost rollups by

@@ -562,6 +562,12 @@ type UsageResult struct {
 	// message (in RFC3339). Consumers polling for near-realtime data can
 	// use this to bound indexer lag.
 	Freshness string `json:"freshness,omitempty"`
+	// UnpricedModels names models whose tokens are counted but NOT costed,
+	// because the rate card has no entry for them (🎯T135). Surfaced rather
+	// than silently omitted: a model missing from the card is usually a
+	// newly released one, which is exactly the spend worth seeing. Costs in
+	// this result exclude them.
+	UnpricedModels []string `json:"unpriced_models,omitempty"`
 }
 
 // UsageParams gathers all filter and grouping parameters for Usage queries.
@@ -574,29 +580,11 @@ type UsageParams struct {
 	GroupBy    string // "day" | "model" | "repo" | "session" | "block"
 }
 
-// modelCosts maps model slug prefixes to per-token costs in USD.
-// Prices are per-million tokens; we store per-token for calculation.
-var modelCosts = map[string]struct{ input, output, cacheRead, cacheWrite float64 }{
-	"claude-opus-4":   {15.0 / 1e6, 75.0 / 1e6, 1.5 / 1e6, 18.75 / 1e6},
-	"claude-sonnet-4": {3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
-	"claude-haiku-4":  {0.80 / 1e6, 4.0 / 1e6, 0.08 / 1e6, 1.0 / 1e6},
-	"claude-3-5":      {3.0 / 1e6, 15.0 / 1e6, 0.3 / 1e6, 3.75 / 1e6},
-}
-
-func estimateCost(model string, input, output, cacheRead, cacheCreate int64) float64 {
-	for prefix, cost := range modelCosts {
-		if strings.HasPrefix(model, prefix) {
-			return float64(input)*cost.input +
-				float64(output)*cost.output +
-				float64(cacheRead)*cost.cacheRead +
-				float64(cacheCreate)*cost.cacheWrite
-		}
-	}
-	// Fallback: use sonnet pricing as a reasonable middle ground.
-	c := modelCosts["claude-sonnet-4"]
-	return float64(input)*c.input + float64(output)*c.output +
-		float64(cacheRead)*c.cacheRead + float64(cacheCreate)*c.cacheWrite
-}
+// Pricing lives in pricing.go (🎯T135). What stood here was a hardcoded
+// four-entry table matched by PREFIX, which gave every claude-opus-4-* the
+// opus-4 rate — a 3x overcharge on opus-4-5, which prices at $5/M input
+// rather than $15/M — and fell back to Sonnet's rates for anything it did
+// not recognise, pricing an entire foreign provider's corpus at Anthropic's.
 
 // fts5Operators matches explicit FTS5 syntax that should not be rewritten.
 var fts5Operators = regexp.MustCompile(`(?i)\b(OR|NOT|AND|NEAR)\b|"`)
@@ -4651,24 +4639,68 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		reconcCostCol = "MIN(rc.cost_usd)" // MIN collapses the per-model GROUP
 	}
 
+	// Two corrections live in this query (🎯T135).
+	//
+	// DEDUPLICATION. The same billable call is recorded many times over —
+	// more message ids appear twice in a real corpus than once, with the
+	// usage block repeated verbatim. Summing the rows over-counts by 1.95x
+	// to 2.83x depending on token class, and because the factor varies BY
+	// CLASS no scalar correction exists. The inner query collapses to one
+	// row per billable call first. Records with no message id (providers
+	// that do not report one) fall back to their own uuid, so they are
+	// counted once rather than dropped.
+	//
+	// PER-REQUEST TIERING. Long-context rates apply to a single request
+	// that crosses the threshold, not to a day whose total does. Bucketing
+	// on the per-record context size preserves that while still letting
+	// SQL do the aggregation: a day of ordinary requests stays in the
+	// under-threshold bucket where it belongs. Pricing the day's totals
+	// instead inflates by nearly 2x.
 	q := fmt.Sprintf(`
+		WITH billable AS (
+			SELECT
+				e.timestamp AS timestamp,
+				e.model AS model,
+				e.session_id AS session_id,
+				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
+				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
+				MAX(COALESCE(e.cache_creation_5m_tokens, 0)) AS cw5m,
+				MAX(COALESCE(e.cache_creation_1h_tokens, 0)) AS cw1h
+			FROM entries e
+			%s
+			WHERE %s
+			GROUP BY
+				-- Fall back to the row's own identity, never to NULL. A
+				-- record with no message id cannot be shown to duplicate
+				-- anything, so it must be counted ONCE — whereas grouping
+				-- a NULL key collapses every such record into a single
+				-- row, silently discarding an entire provider's corpus.
+				CASE WHEN COALESCE(e.message_id, '') = ''
+				     THEN 'row:' || e.id ELSE e.message_id END,
+				COALESCE(e.request_id, '')
+		)
 		SELECT
 			%s AS period,
 			COALESCE(e.model, '') AS model,
+			CASE WHEN (e.input_tokens + e.cache_read_tokens + e.cache_creation_tokens)
+			          > %d THEN 1 ELSE 0 END AS over_threshold,
 			COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
 			COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
 			COALESCE(SUM(e.cache_read_tokens), 0) AS cache_read_tokens,
 			COALESCE(SUM(e.cache_creation_tokens), 0) AS cache_creation_tokens,
+			COALESCE(SUM(e.cw5m), 0) AS cw5m,
+			COALESCE(SUM(e.cw1h), 0) AS cw1h,
 			COUNT(*) AS messages,
 			%s AS reconciled_cost_usd,
 			MAX(e.timestamp) AS max_ts
-		FROM entries e
+		FROM billable e
 		%s
-		%s
-		WHERE %s
-		GROUP BY %s, e.model
+		GROUP BY %s, e.model, over_threshold
 		ORDER BY period DESC
-	`, periodExpr, reconcCostCol, joinClause, reconcJoin, strings.Join(where, " AND "), groupExpr)
+	`, joinClause, strings.Join(where, " AND "),
+		periodExpr, LongContextThreshold, reconcCostCol, reconcJoin, groupExpr)
 
 	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
@@ -4691,22 +4723,38 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 
 	totalEstimated := false
 	totalReconciled := false
+	unpricedModels := map[string]bool{}
 
 	var maxTS string // track overall freshness
+	card := LoadRateCard()
 	for rows.Next() {
 		var period, rowModel string
-		var input, output, cacheRead, cacheCreate int64
+		var overThreshold int
+		var input, output, cacheRead, cacheCreate, cw5m, cw1h int64
 		var msgs int
 		var reconciledCost sql.NullFloat64
 		var rowMaxTS string
-		if err := rows.Scan(&period, &rowModel, &input, &output,
-			&cacheRead, &cacheCreate, &msgs, &reconciledCost, &rowMaxTS); err != nil {
+		if err := rows.Scan(&period, &rowModel, &overThreshold, &input, &output,
+			&cacheRead, &cacheCreate, &cw5m, &cw1h, &msgs, &reconciledCost, &rowMaxTS); err != nil {
 			continue
 		}
 		if rowMaxTS > maxTS {
 			maxTS = rowMaxTS
 		}
-		estimatedCost := estimateCost(rowModel, input, output, cacheRead, cacheCreate)
+		// Every record in this bucket shares a tier, so the bucket can be
+		// priced as one without losing per-request tiering (🎯T135).
+		estimatedCost, priced := priceBucket(card, rowModel, overThreshold == 1, TokenCounts{
+			Input: input, Output: output, CacheRead: cacheRead,
+			CacheWrite5m: cw5m, CacheWrite1h: cw1h,
+			CacheWriteFlat: cacheCreate - cw5m - cw1h,
+		})
+		if !priced {
+			// No rate for this model. Report the tokens and leave the cost
+			// alone: an unpriced model must never read as free, and must
+			// never borrow another model's rates — that is how 27 billion
+			// Codex tokens came to be billed at Anthropic's.
+			unpricedModels[rowModel] = true
+		}
 
 		// Use the reconciled cost (from Anthropic Admin API) when available;
 		// fall back to the locally-computed estimate otherwise.
@@ -4807,6 +4855,12 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 	// collected from MAX(e.timestamp) during the main iteration.
 	if maxTS != "" {
 		result.Freshness = maxTS
+		for m := range unpricedModels {
+			if m != "" {
+				result.UnpricedModels = append(result.UnpricedModels, m)
+			}
+		}
+		sort.Strings(result.UnpricedModels)
 	}
 
 	// Compute hourly rate from the actual time span of assistant messages.
@@ -4906,7 +4960,13 @@ func (s *Store) usageByBlock(
 	var cur *blockState
 
 	for _, m := range msgs {
-		cost := estimateCost(m.model, m.input, m.output, m.cacheRead, m.cacheCreate)
+		// Unpriced models contribute zero to a block's cost; their tokens
+		// still count. Surfacing that per block is 🎯T135's reporting job,
+		// not this loop's.
+		cost, _ := EstimateCost(m.model, TokenCounts{
+			Input: m.input, Output: m.output,
+			CacheRead: m.cacheRead, CacheWriteFlat: m.cacheCreate,
+		})
 
 		if cur == nil {
 			// Floor to UTC hour.
