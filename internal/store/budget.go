@@ -124,6 +124,18 @@ type BudgetStatus struct {
 	UnpricedModels []string          `json:"unpriced_models,omitempty"`
 	Uncounted      []UncountedVolume `json:"uncounted,omitempty"`
 
+	// GovernedUSD is the portion of SpentUSD that mnemo ITSELF caused —
+	// its compactor, segmenter, reviewer and image describer — as opposed
+	// to spend it merely observed (🎯T136).
+	//
+	// Reported because the throttle can only act on this portion. Work
+	// started from Claude Code, and the sub-agent fan-outs it spawns,
+	// passes through nothing mnemo can gate. A throttle that governs a
+	// minority of spend while the headline keeps climbing looks broken
+	// unless the report says which is which.
+	GovernedUSD float64 `json:"governed_usd"`
+	GovernedPct float64 `json:"governed_pct"`
+
 	// RateCardFetchedAt dates the prices behind every figure above, and
 	// is empty when no card is available — in which case SpentUSD is zero
 	// because nothing could be priced, NOT because nothing was spent.
@@ -240,6 +252,15 @@ func (s *Store) BudgetStatusNow(cfg BudgetConfig, now time.Time) (*BudgetStatus,
 		}
 	}
 
+	// Governed spend: mnemo's own agents, identified by the marker their
+	// prompts carry and stamped onto their sessions at ingest.
+	if gov, err := s.governedSpend(period.Start, now); err == nil {
+		st.GovernedUSD = gov
+		if st.SpentUSD > 0 {
+			st.GovernedPct = 100 * gov / st.SpentUSD
+		}
+	}
+
 	st.Headline = budgetHeadline(st)
 
 	// Culprits are only worth gathering when there is something to act
@@ -345,4 +366,47 @@ func (s *Store) sessionLocation(sessionID string) (repo, cwd string) {
 		sessionID)
 	_ = row.Scan(&repo, &cwd)
 	return repo, cwd
+}
+
+// governedSpend sums the period's cost attributable to agents mnemo
+// invoked itself (🎯T136).
+//
+// Identified by session_meta.compactor_internal, stamped at ingest from
+// the marker every mnemo-spawned prompt carries. That marker exists
+// already as a recursion guard — a summariser must not become a session to
+// be summarised — and it happens to be exactly the attribution a throttle
+// needs.
+func (s *Store) governedSpend(from, to time.Time) (float64, error) {
+	res, err := s.Usage(UsageParams{
+		Since:   from.UTC().Format(time.RFC3339),
+		Until:   to.UTC().Format(time.RFC3339),
+		GroupBy: "session",
+	})
+	if err != nil {
+		return 0, err
+	}
+	internal := map[string]bool{}
+	rows, err := s.readDB.Query(
+		`SELECT session_id FROM session_meta WHERE compactor_internal = 1`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			internal[id] = true
+		}
+	}
+	var total float64
+	for _, r := range res.Rows {
+		id := r.SessionID
+		if id == "" {
+			id = r.Period
+		}
+		if internal[id] {
+			total += r.CostUSD
+		}
+	}
+	return total, nil
 }

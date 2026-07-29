@@ -48,6 +48,11 @@ type Watcher struct {
 	// Claude processes; the busiest sessions are the ones worth
 	// following, and the batch tier covers the rest at close.
 	MaxConcurrent int
+	// Paused reports whether the budget throttle has stopped this tier
+	// (🎯T136). A plain func rather than a dependency on the throttle
+	// package, so the watcher stays testable and unaware of budgets. Nil
+	// means never paused.
+	Paused func() bool
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
@@ -91,6 +96,17 @@ func (w *Watcher) Run(ctx context.Context) {
 // session would keep paying a summariser to re-examine a transcript that
 // can no longer change.
 func (w *Watcher) reconcile(ctx context.Context) {
+	// Budget throttle (🎯T136). The segmenter is PAUSED rather than
+	// slowed: a drip costs ~45,000 input tokens regardless of payload
+	// because the model's own system prompt dominates it, so running at
+	// half rate pays nearly the same money for spans that arrive too late
+	// to be fresh. Batch finalisation covers these conversations at
+	// session close, so pausing costs freshness, not coverage.
+	if w.Paused != nil && w.Paused() {
+		w.stopAll()
+		return
+	}
+
 	live := w.Live.LiveWatchableSessions(w.WorkDir)
 
 	w.mu.Lock()

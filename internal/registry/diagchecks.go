@@ -16,6 +16,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/throttle"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
 )
 
@@ -109,12 +110,32 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			}
 			switch b.Severity {
 			case "over", "warn":
-				return diag.Warning(b.Headline,
+				// State the governed fraction. mnemo can throttle only the
+				// agents it invokes itself (🎯T136); a rising total
+				// alongside an active throttle reads as a broken throttle
+				// unless the report separates governed from observed.
+				return diag.Warning(
+					fmt.Sprintf("%s Of that, $%.2f (%.0f%%) is mnemo's own background agents.",
+						b.Headline, b.GovernedUSD, b.GovernedPct),
 					"run mnemo_budget for the sessions driving it, each with its repo, "+
-						"working directory and live pid where it is still running")
+						"working directory and live pid where it is still running. Only "+
+						"mnemo's own agents can be throttled automatically; Claude Code "+
+						"sessions and their sub-agents are observed but not gateable")
 			default:
 				return diag.Healthy(b.Headline)
 			}
+		}},
+
+		// Throttle state (🎯T136). Throttling is LOUD by requirement: a
+		// silent throttle is indistinguishable from a hang, and the first
+		// thing anyone does about an apparent hang is restart the daemon
+		// — which is precisely why the state is durable.
+		diag.Check{Name: "budget.throttle", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			detail, remediation := r.governor.Describe()
+			if r.governor.State().Level == throttle.Full {
+				return diag.Healthy(detail)
+			}
+			return diag.Warning(detail, remediation)
 		}},
 
 		diag.Check{Name: "schema.upgrade", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {

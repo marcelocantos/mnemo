@@ -1126,6 +1126,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	})
 	notifier.SetShimPresent(eventHub.HasSubscribers)
 	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)
+	// Re-evaluate the budget throttle on the full pass (🎯T136), so the
+	// check that reports throttle state reads a value from this pass
+	// rather than one an hour old. Full tier because it runs several
+	// usage aggregations, and a budget does not move on a fast tick.
+	diagScheduler.BeforeFull(func() { reg.EvaluateThrottle(defaultUser) })
 	diagScheduler.OnReport(func(rep diag.Report) {
 		// Retained: a shim connecting between scheduler ticks gets the current
 		// health snapshot immediately rather than waiting for the next tick.
