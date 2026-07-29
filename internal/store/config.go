@@ -196,6 +196,10 @@ type Config struct {
 	// different from reporting zero.
 	Pricing PricingConfig `json:"pricing,omitempty"`
 
+	// DedupKey selects which identifiers collapse duplicate billable
+	// records in usage accounting (🎯T135). Empty uses the default.
+	DedupKey string `json:"dedup_key,omitempty"`
+
 	// Budget defines the spending period and cap that spend is reported
 	// against (🎯T135). Absent → no cap, so nothing alerts; usage
 	// reporting is unaffected.
@@ -466,6 +470,53 @@ func (c PricingConfig) EffectiveSourceURL() string {
 		return c.SourceURL
 	}
 	return PricingSourceURL
+}
+
+// Deduplication keys (🎯T135).
+//
+// The key must identify the BILLABLE CALL, not the record's position in a
+// file. Which identifiers do that is environment-dependent, which is why
+// this is configurable rather than a constant.
+//
+// Against a provider's own API, message id plus request id is right.
+// Behind a gateway it may not be: reported from production on a
+// Bedrock-plus-Portkey path, duplicate message-id groups diverged
+// substantially from the platform's own billing. A proxy is free to retry,
+// coalesce or reissue identifiers, and either failure is available — ids
+// reissued per attempt make one call look like several and the local
+// figure over-counts; ids replayed across genuinely distinct calls make
+// several look like one and it under-counts.
+//
+// The direction of the divergence tells you which you have, so
+// reconciliation against the billing source is diagnostic rather than
+// merely reassuring. Validate the key per serving path, and re-validate
+// when the path changes.
+const (
+	// DedupKeyMessageRequest collapses records sharing both a message id
+	// and a request id. The default, and correct against a direct API.
+	DedupKeyMessageRequest = "message_request"
+
+	// DedupKeyMessage collapses on message id alone. Use where a gateway
+	// reissues request ids per retry of one billable call.
+	DedupKeyMessage = "message"
+
+	// DedupKeyNone counts every record. Use only after establishing that
+	// the transcript records billable calls one-to-one; it is the
+	// setting that produced a 2.54x over-count on input tokens here.
+	DedupKeyNone = "none"
+)
+
+// EffectiveDedupKey resolves the deduplication key, defaulting to
+// message+request and refusing to silently accept a name it does not
+// recognise — a typo that quietly disabled deduplication would inflate
+// every figure by roughly 2x with nothing to show for it.
+func (c Config) EffectiveDedupKey() string {
+	switch c.DedupKey {
+	case DedupKeyMessage, DedupKeyNone, DedupKeyMessageRequest:
+		return c.DedupKey
+	default:
+		return DedupKeyMessageRequest
+	}
 }
 
 // BudgetConfig defines the period spend is measured against (🎯T135).

@@ -568,6 +568,10 @@ type UsageResult struct {
 	// newly released one, which is exactly the spend worth seeing. Costs in
 	// this result exclude them.
 	UnpricedModels []string `json:"unpriced_models,omitempty"`
+	// RateCardFetchedAt dates the prices used. Per-bucket pricing selects
+	// the card in force at the time of the records (🎯T135); this reports
+	// the current card, which is the one applied to anything recent.
+	RateCardFetchedAt string `json:"rate_card_fetched_at,omitempty"`
 	// Uncounted reports volume that was deliberately EXCLUDED from Rows,
 	// Total and every cost above, because its records carry no
 	// deduplication key (🎯T135). Reported rather than dropped: an
@@ -601,6 +605,38 @@ type UncountedVolume struct {
 	OutputTokens        int64  `json:"output_tokens"`
 	CacheReadTokens     int64  `json:"cache_read_tokens"`
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+}
+
+// effectiveDedupKey reads the configured deduplication key, falling back
+// to the default when config is unreadable. An unreadable config must not
+// silently disable deduplication — that direction inflates every figure.
+func effectiveDedupKey() string {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return DedupKeyMessageRequest
+	}
+	return cfg.EffectiveDedupKey()
+}
+
+// dedupGroupSQL renders the GROUP BY that collapses duplicate billable
+// records, for the configured key (🎯T135).
+//
+// Every variant falls back to the row's own identity when the chosen
+// identifier is absent, never to NULL. A record that carries no id cannot
+// be shown to duplicate anything, so it must be counted ONCE — whereas
+// grouping on a NULL key collapses every such record into a single row,
+// silently discarding an entire provider's corpus and looking exactly like
+// "you used it less".
+func dedupGroupSQL(key string) string {
+	const own = "CASE WHEN COALESCE(e.message_id, '') = '' THEN 'row:' || e.id ELSE e.message_id END"
+	switch key {
+	case DedupKeyNone:
+		return "e.id"
+	case DedupKeyMessage:
+		return own
+	default:
+		return own + ", COALESCE(e.request_id, '')"
+	}
 }
 
 // uncountedReason explains, per source, why its volume is quarantined.
@@ -4690,6 +4726,8 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		reconcCostCol = "MIN(rc.cost_usd)" // MIN collapses the per-model GROUP
 	}
 
+	dedupKey := effectiveDedupKey()
+
 	// Two corrections live in this query (🎯T135).
 	//
 	// DEDUPLICATION. The same billable call is recorded many times over —
@@ -4724,15 +4762,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 			FROM entries e
 			%s
 			WHERE %s
-			GROUP BY
-				-- Fall back to the row's own identity, never to NULL. A
-				-- record with no message id cannot be shown to duplicate
-				-- anything, so it must be counted ONCE — whereas grouping
-				-- a NULL key collapses every such record into a single
-				-- row, silently discarding an entire provider's corpus.
-				CASE WHEN COALESCE(e.message_id, '') = ''
-				     THEN 'row:' || e.id ELSE e.message_id END,
-				COALESCE(e.request_id, '')
+			GROUP BY %s
 		)
 		SELECT
 			%s AS period,
@@ -4754,7 +4784,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		%s
 		GROUP BY %s, e.model, e.source, e.keyed, over_threshold
 		ORDER BY period DESC
-	`, joinClause, strings.Join(where, " AND "),
+	`, joinClause, strings.Join(where, " AND "), dedupGroupSQL(dedupKey),
 		periodExpr, LongContextThreshold, reconcCostCol, reconcJoin, groupExpr)
 
 	rows, err := s.readDB.Query(q, args...)
@@ -4783,7 +4813,26 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 	var maxTS string // track overall freshness
 	uncounted := map[string]*UncountedVolume{}
 	var uncountedOrder []string
-	card := LoadRateCard()
+	// Cards are selected per bucket by the bucket's own timestamp
+	// (contemporaneous pricing, 🎯T135), memoised here because a day-
+	// grouped month asks the same question thirty times.
+	cards := map[string]*RateCard{}
+	cardFor := func(ts string) *RateCard {
+		day := ts
+		if len(day) > 10 {
+			day = day[:10]
+		}
+		if c, ok := cards[day]; ok {
+			return c
+		}
+		at, err := parseTimestamp(ts)
+		if err != nil {
+			at = time.Now()
+		}
+		c := RateCardAsOf(at)
+		cards[day] = c
+		return c
+	}
 	for rows.Next() {
 		var period, rowModel, rowSource string
 		var keyed, overThreshold int
@@ -4818,7 +4867,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		}
 		// Every record in this bucket shares a tier, so the bucket can be
 		// priced as one without losing per-request tiering (🎯T135).
-		estimatedCost, priced := priceBucket(card, rowModel, overThreshold == 1, TokenCounts{
+		estimatedCost, priced := priceBucket(cardFor(rowMaxTS), rowModel, overThreshold == 1, TokenCounts{
 			Input: input, Output: output, CacheRead: cacheRead,
 			CacheWrite5m: cw5m, CacheWrite1h: cw1h,
 			CacheWriteFlat: cacheCreate - cw5m - cw1h,
@@ -4930,6 +4979,13 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		result.Total.Source = "estimated"
 	}
 
+	// The prices behind every figure above. Reported because a cost that
+	// cannot be traced to a rate card and a date cannot be checked, and
+	// checking is the point (🎯T135).
+	if c := LoadRateCard(); c != nil && !c.FetchedAt.IsZero() {
+		result.RateCardFetchedAt = c.FetchedAt.UTC().Format(time.RFC3339)
+	}
+
 	// Freshness: timestamp of most-recently ingested assistant message,
 	// collected from MAX(e.timestamp) during the main iteration.
 	if maxTS != "" {
@@ -4996,17 +5052,14 @@ func (s *Store) usageByBlock(
 			FROM entries e
 			%s
 			WHERE %s
-			GROUP BY
-				CASE WHEN COALESCE(e.message_id, '') = ''
-				     THEN 'row:' || e.id ELSE e.message_id END,
-				COALESCE(e.request_id, '')
+			GROUP BY %s
 		)
 		SELECT timestamp, model, source, keyed,
 		       input_tokens, output_tokens, cache_read_tokens,
 		       cache_creation_tokens, cw5m, cw1h
 		FROM billable
 		ORDER BY timestamp ASC
-	`, joinClause, strings.Join(where, " AND "))
+	`, joinClause, strings.Join(where, " AND "), dedupGroupSQL(effectiveDedupKey()))
 
 	rows, err := s.readDB.Query(q, args...)
 	if err != nil {

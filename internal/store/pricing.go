@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -158,13 +160,58 @@ const LongContextThreshold = 200000
 // thousands of models, carrying the TTL and long-context variants.
 const PricingSourceURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
-// pricingCacheFile is where the fetched card is kept, under the mnemo home.
+// pricingCacheFile is where the current fetched card is kept, under the
+// mnemo home.
 const pricingCacheFile = "pricing.json"
+
+// pricingArchiveDir holds dated snapshots of every card ever fetched, one
+// file per day, named pricing-YYYY-MM-DD.json.
+//
+// This is what makes CONTEMPORANEOUS pricing possible (🎯T135). Applying
+// today's card to last January's tokens is an error in the opposite
+// direction from staleness — a later artifact projected backwards, a
+// prochronism — and it is invisible: per-model prices are stable after
+// release, so a blanket recompute is usually approximately right, which is
+// exactly why nobody ever notices the times it is not.
+//
+// Archiving the cards rather than caching the computed costs also makes
+// "freeze settled periods" fall out rather than needing its own machinery:
+// recomputing an old period selects the same old card and therefore
+// produces the same answer. There is nothing to invalidate and nothing to
+// drift.
+//
+// Plain files rather than a table: they are inspectable, they need no
+// schema change, and a snapshot is immutable once written.
+const pricingArchiveDir = "pricing"
 
 var (
 	pricingMu     sync.Mutex
 	pricingCached *RateCard
+	// pricingExplicit records that the current card was INSTALLED rather
+	// than fetched or read from the cache file. An installed card is an
+	// override — a site-pinned copy, or a fixed card in a test — and an
+	// override that silently loses to a dated archive for historical rows
+	// is a trap for both.
+	pricingExplicit bool
+
+	// archiveMu guards the as-of index and the parsed-card cache. Cards
+	// are ~1.6 MB parsed, so they are loaded on demand and kept, not read
+	// per query.
+	archiveMu    sync.Mutex
+	archiveIndex []archivedCard
+	archiveRead  time.Time
+	archiveCards map[string]*RateCard
 )
+
+// archivedCard is one dated snapshot on disk, before it is parsed.
+type archivedCard struct {
+	date time.Time
+	path string
+}
+
+// archiveRescanEvery bounds how often the archive directory is listed.
+// New snapshots appear at most daily.
+const archiveRescanEvery = time.Hour
 
 // LoadRateCard returns the cached rate card, reading it from disk on first
 // use. It never fetches: fetching is an outbound call and happens only
@@ -205,12 +252,12 @@ func LoadRateCard() *RateCard {
 // something else already had.
 func SetRateCard(c *RateCard) (restore func()) {
 	pricingMu.Lock()
-	prev := pricingCached
-	pricingCached = c
+	prev, prevExplicit := pricingCached, pricingExplicit
+	pricingCached, pricingExplicit = c, c != nil
 	pricingMu.Unlock()
 	return func() {
 		pricingMu.Lock()
-		pricingCached = prev
+		pricingCached, pricingExplicit = prev, prevExplicit
 		pricingMu.Unlock()
 	}
 }
@@ -251,12 +298,117 @@ func RefreshRateCard(ctx context.Context, sourceURL string) (*RateCard, error) {
 	if err == nil {
 		if out, err := json.Marshal(card); err == nil {
 			_ = os.WriteFile(filepath.Join(home, pricingCacheFile), out, 0o644)
+
+			// Archive a dated snapshot alongside it. One file per day:
+			// re-fetching within a day overwrites, which is right, since
+			// the archive answers "what were prices on this date" and a
+			// date has one answer.
+			dir := filepath.Join(home, pricingArchiveDir)
+			if os.MkdirAll(dir, 0o755) == nil {
+				name := "pricing-" + card.FetchedAt.Format("2006-01-02") + ".json"
+				_ = os.WriteFile(filepath.Join(dir, name), out, 0o644)
+			}
+			archiveMu.Lock()
+			archiveRead = time.Time{} // force a rescan
+			archiveMu.Unlock()
 		}
 	}
 	pricingMu.Lock()
-	pricingCached = card
+	pricingCached, pricingExplicit = card, false
 	pricingMu.Unlock()
 	return card, nil
+}
+
+// RateCardAsOf returns the rate card that was in force at t.
+//
+// Selection is the newest snapshot dated at or before t. A record older
+// than every snapshot gets the OLDEST one rather than the newest: it is
+// the closest thing to a contemporaneous price that exists, and reaching
+// forward for a newer card would be the exact prochronism the archive is
+// here to prevent.
+//
+// Falls back to the current card when no archive exists, which is the
+// state on a fresh install and after the first fetch. That is a knowingly
+// approximate answer, and it is the reason every result reports the fetch
+// date of the card that priced it.
+func RateCardAsOf(t time.Time) *RateCard {
+	pricingMu.Lock()
+	explicit := pricingExplicit
+	pricingMu.Unlock()
+	if explicit {
+		return LoadRateCard()
+	}
+	idx := loadArchiveIndex()
+	if len(idx) == 0 {
+		return LoadRateCard()
+	}
+	pick := idx[0] // oldest, for records predating the archive
+	for _, a := range idx {
+		if a.date.After(t) {
+			break
+		}
+		pick = a
+	}
+	return loadArchivedCard(pick.path)
+}
+
+// loadArchiveIndex lists the dated snapshots, oldest first.
+func loadArchiveIndex() []archivedCard {
+	archiveMu.Lock()
+	defer archiveMu.Unlock()
+	if time.Since(archiveRead) < archiveRescanEvery && archiveIndex != nil {
+		return archiveIndex
+	}
+	home, err := EffectiveHome()
+	if err != nil {
+		return nil
+	}
+	ents, err := os.ReadDir(filepath.Join(home, pricingArchiveDir))
+	if err != nil {
+		archiveIndex, archiveRead = nil, time.Now()
+		return nil
+	}
+	var out []archivedCard
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasPrefix(name, "pricing-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		d, err := time.Parse("2006-01-02", strings.TrimSuffix(strings.TrimPrefix(name, "pricing-"), ".json"))
+		if err != nil {
+			continue
+		}
+		out = append(out, archivedCard{date: d, path: filepath.Join(home, pricingArchiveDir, name)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].date.Before(out[j].date) })
+	archiveIndex, archiveRead = out, time.Now()
+	return out
+}
+
+// loadArchivedCard parses and memoises one snapshot.
+func loadArchivedCard(path string) *RateCard {
+	archiveMu.Lock()
+	if c, ok := archiveCards[path]; ok {
+		archiveMu.Unlock()
+		return c
+	}
+	archiveMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return LoadRateCard()
+	}
+	var c RateCard
+	if json.Unmarshal(data, &c) != nil || len(c.Rates) == 0 {
+		return LoadRateCard()
+	}
+	archiveMu.Lock()
+	if archiveCards == nil {
+		archiveCards = map[string]*RateCard{}
+	}
+	archiveCards[path] = &c
+	archiveMu.Unlock()
+	return &c
 }
 
 // StartRateCardRefresher keeps the cached rate card current, if and only

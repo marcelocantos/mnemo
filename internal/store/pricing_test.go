@@ -4,7 +4,10 @@
 package store
 
 import (
+	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -235,4 +238,119 @@ func unkeyedAsst(ts time.Time, out, in int) map[string]any {
 			},
 		},
 	}
+}
+
+// TestPricesAreContemporaneous pins the archive's selection rule.
+//
+// Applying today's card to last January's tokens is a prochronism — a
+// later artifact projected backwards — and it is invisible, because
+// per-model prices are stable after release and a blanket recompute is
+// therefore usually approximately right. "Usually approximately right,
+// silently" is the description of a bug nobody finds.
+//
+// Two snapshots with deliberately different rates make the selection
+// observable: a record from March must price at March's rate even though
+// a June card exists and is newer.
+func TestPricesAreContemporaneous(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(MnemoHomeEnv, home)
+	// The archive only applies to a card that was fetched, not installed;
+	// an installed card is an override for all dates by design.
+	t.Cleanup(SetRateCard(nil))
+
+	dir := filepath.Join(home, pricingArchiveDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(day string, rate float64) {
+		card := RateCard{
+			FetchedAt: mustDay(t, day),
+			Rates:     map[string]ModelRate{"m": {Output: rate}},
+		}
+		b, err := json.Marshal(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "pricing-"+day+".json"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("2026-03-01", 10e-6)
+	write("2026-06-01", 99e-6) // a later, much dearer card
+
+	resetArchiveCache()
+
+	got, _ := RateCardAsOf(mustDay(t, "2026-04-15")).Rate("m")
+	if got.Output != 10e-6 {
+		t.Errorf("April priced at %g, want March's 1e-05: the June card is "+
+			"newer but did not exist in April", got.Output)
+	}
+
+	got, _ = RateCardAsOf(mustDay(t, "2026-07-15")).Rate("m")
+	if got.Output != 99e-6 {
+		t.Errorf("July priced at %g, want June's 9.9e-05", got.Output)
+	}
+
+	// A record older than every snapshot takes the OLDEST card. Reaching
+	// forward for a newer one is the error this whole mechanism prevents.
+	got, _ = RateCardAsOf(mustDay(t, "2026-01-01")).Rate("m")
+	if got.Output != 10e-6 {
+		t.Errorf("January priced at %g, want the oldest card's 1e-05", got.Output)
+	}
+}
+
+// TestFrozenPeriodsDoNotRepriceOnRefetch is the freeze obligation.
+//
+// It needs no separate machinery: a settled period selects the same
+// archived card every time, so recomputing it is idempotent. Fetching a
+// new, dearer card must not move a figure for a month that has closed.
+func TestFrozenPeriodsDoNotRepriceOnRefetch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(MnemoHomeEnv, home)
+	t.Cleanup(SetRateCard(nil))
+
+	dir := filepath.Join(home, pricingArchiveDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	card := RateCard{
+		FetchedAt: mustDay(t, "2026-03-01"),
+		Rates:     map[string]ModelRate{"m": {Output: 10e-6}},
+	}
+	b, _ := json.Marshal(card)
+	os.WriteFile(filepath.Join(dir, "pricing-2026-03-01.json"), b, 0o644)
+	resetArchiveCache()
+
+	before, _ := RateCardAsOf(mustDay(t, "2026-03-15")).Rate("m")
+
+	// A price revision lands today.
+	card.FetchedAt = mustDay(t, "2026-07-01")
+	card.Rates = map[string]ModelRate{"m": {Output: 500e-6}}
+	b, _ = json.Marshal(card)
+	os.WriteFile(filepath.Join(dir, "pricing-2026-07-01.json"), b, 0o644)
+	resetArchiveCache()
+
+	after, _ := RateCardAsOf(mustDay(t, "2026-03-15")).Rate("m")
+	if before.Output != after.Output {
+		t.Errorf("March repriced from %g to %g when a July card arrived; a "+
+			"settled period must not move under a later revision",
+			before.Output, after.Output)
+	}
+}
+
+func mustDay(t *testing.T, s string) time.Time {
+	t.Helper()
+	d, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// resetArchiveCache drops the memoised index and parsed cards so a test
+// that writes new snapshots sees them.
+func resetArchiveCache() {
+	archiveMu.Lock()
+	archiveIndex, archiveRead, archiveCards = nil, time.Time{}, nil
+	archiveMu.Unlock()
 }
