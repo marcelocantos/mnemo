@@ -64,7 +64,9 @@ user. Good moments to reach for mnemo:
 - `mnemo_memories` — Search across auto-memory files from all projects. Filters by type (user/feedback/project/reference), project. Cross-project memory search.
 - `mnemo_skills` — Search across skill files from ~/.claude/skills/. Discover available workflows and reusable procedures.
 - `mnemo_configs` — Search across CLAUDE.md project instruction files from all repos. Find build instructions, conventions, and delivery definitions.
-- `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with cost estimates. Filters by repo, model, date range. Groups by day, model, or repo.
+- `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with costs. Filters by repo, model, date range. Groups by day, model, repo, session, or 5-hour billing block. Costs come from a fetched rate card matched on the **exact** model identifier — no prefix matching, no fallback (🎯T135). Two disclosure fields matter as much as the totals: `unpriced_models` (counted but not costed, because the card has no entry — normal for a newly released model, which is exactly the spend you want to see) and `uncounted` (volume EXCLUDED from every total, per source, with the reason: a record with no message id cannot be deduplicated, and deduplication is worth 1.95x-2.83x).
+- `mnemo_budget` — Spend against a resetting budget period, with projection and culprits (🎯T135). Alerts on the **projection**, not a threshold already crossed: "at $47/day, 2026-07 exceeds its $500 cap on the 19th" is actionable where "80% consumed" arrives after the decision that caused it. Burn rate is measured over a trailing week. When not `ok`, names culprit sessions largest-first, each resolved to a repo, working directory and live pid where one exists.
+- `mnemo_agent_trees` — Sub-agent fan-outs reconstructed and costed **as a whole**, ranked by aggregate tree cost (🎯T137). For the failure a per-session ranking cannot see: forty individually-unremarkable agents that collectively trip the wire. Reports the skill and turn that started each tree, `tree_cost_usd` vs `direct_cost_usd`, depth, and whether it is still running. Claude-only.
 - `mnemo_audit` — Search across audit logs (docs/audit-log.md) from all repos. Filters by repo, skill (release/audit/docs). Use to check when a project was last released or find maintenance patterns.
 - `mnemo_targets` — Search across convergence targets (`docs/targets.md`) from all repos. Filters by repo, status. Cross-project target search. **Note**: today the indexer only reads `docs/targets.md`. mnemo's own targets live in `bullseye.yaml` at the repo root (matching the global bullseye convention) and are therefore not visible to this tool. Teaching the indexer to also read `bullseye.yaml` is a known follow-up.
 - `mnemo_plans` — Search across implementation plans (.planning/ directories) from all repos. Use this to find past design decisions or understand how features were planned.
@@ -244,6 +246,39 @@ The same session-driven bound applies to the local `commits` stream.
 File discovery for docs, todos, plans and targets is separate and
 still walks git repos, synthesis roots, and session cwds.
 
+**Model rate card (pricing, 🎯T135).** Disabled by default. Costing
+model calls needs per-model prices, and those are the one input that
+cannot be derived from transcripts mnemo already holds. They are fetched
+as a single HTTP GET of a public, community-maintained rate file
+(~1.6 MB, ~2,983 models), cached at `~/.mnemo/pricing.json` with a dated
+snapshot archived under `~/.mnemo/pricing/`.
+
+Nothing is fetched until you opt in:
+
+```json
+{ "pricing": { "enabled": true } }
+```
+
+The flag is read per attempt, so it takes effect — in both directions —
+without a daemon restart. `source_url` overrides the upstream for an
+air-gapped mirror or a site-pinned copy; `refresh_hours` sets the
+interval (default 24).
+
+With it off, token counts remain exact and **every model reports as
+unpriced**. That is deliberate rather than a degradation: a cost computed
+from no rate card would be `$0.00`, and zero is the one answer
+indistinguishable from "you spent nothing". `mnemo_budget` and the
+`budget.projection` health check both say "unpriced" rather than showing
+a figure.
+
+The dated archive is what makes pricing **contemporaneous**: a record is
+priced with the card that was in force when it was written, so a price
+revision cannot propagate backwards into a settled period. Applying
+today's card to last January's tokens is an error in the *opposite*
+direction from staleness — a prochronism — and an invisible one, since
+prices are stable after release and a blanket recompute is usually
+approximately right.
+
 **Federation (🎯T15 / linked instances).** Outbound calls to peer
 mnemo daemons are gated on `linked_instances` being non-empty in
 config. Absent → zero federation calls.
@@ -285,6 +320,65 @@ outcomes are in the `image_embedding_attempts` table.
 The append-only schema policy and the opt-in egress posture compose:
 restoring an older backup never silently triggers a backfill of
 data from external APIs that the user did not authorise.
+
+## Budgeting and cost control
+
+Three pieces, in dependency order.
+
+**🎯T135 measures.** Deduplicated per-record token counts, priced from a
+fetched rate card by exact model match, with cache writes split by TTL
+tier (73% of volume is the long tier, which prices higher) and
+long-context rates applied **per request** rather than per aggregate
+(applying the 200k threshold to a daily total roughly doubles the bill).
+Sources with no dedup key — Codex and Grok today — are quarantined and
+reported separately rather than summed into a figure that claims to be
+deduplicated. Validated against ccusage as a build-tagged regression
+oracle: `go test -tags "sqlite_fts5 ccusage" ./internal/store/`.
+
+**🎯T136 controls, partially.** Once a budget's soft limit is breached,
+mnemo throttles the agents it invokes itself — compactor, segmenter,
+reviewer, image description — and nothing else. Work started from Claude
+Code, and the sub-agent fan-outs it spawns, passes through nothing mnemo
+can gate. That asymmetry is the premise, not a limitation: observation is
+universal, control is partial, and the user closes the gap. `mnemo_budget`
+reports `governed_usd` beside the total so a rising headline alongside an
+active throttle does not read as a broken throttle.
+
+Throttling is post hoc and soft (a delay between runs, never a refusal),
+ordered by time-insensitivity rather than cost (backfill first), with the
+streaming segmenter **paused** rather than slowed — a drip costs ~45k
+input tokens regardless of payload, so half-rate pays nearly the same
+money for spans too late to be fresh. State is durable across restarts,
+recovery needs a 10-point margin, and the governor **refuses to act** when
+the number is untrustworthy.
+
+**🎯T137 attributes.** Agent trees, costed as a whole, because a fan-out
+of forty modest agents is invisible to a per-session ranking.
+
+Config:
+
+```json
+{
+  "pricing": { "enabled": true },
+  "budget": {
+    "monthly_cap_usd": 500,
+    "timezone": "Australia/Sydney",
+    "warn_at_pct": 100
+  },
+  "dedup_key": "message_request"
+}
+```
+
+`dedup_key` is configurable because its validity is environment-dependent:
+against a provider's own API `message_request` is right, but behind a
+gateway (Bedrock+Portkey has been reported to diverge) a proxy may retry,
+coalesce or reissue identifiers. Validate it by reconciling against the
+billing source for each serving path. An unrecognised value resolves to
+the default rather than being honoured — a typo that quietly disabled
+deduplication would inflate every figure ~2x with nothing on screen to
+suggest it.
+
+Full specification: `docs/design/token-cost-specification.md`.
 
 ## Convergence
 
