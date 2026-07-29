@@ -50,6 +50,22 @@ func NewClaudiaCaller(workDir, model string) *ClaudiaCaller {
 	return &ClaudiaCaller{workDir: workDir, model: model}
 }
 
+// taskConfig is the configuration every summarisation task runs under.
+// Extracted so a test can assert on what is actually handed to claudia
+// rather than on what this file appears to intend — intent is exactly
+// what failed in 🎯T139, where a rewrite kept the appearance of passing
+// restrictions while passing none.
+func (c *ClaudiaCaller) taskConfig() claudia.TaskConfig {
+	return claudia.TaskConfig{
+		WorkDir: c.workDir,
+		Model:   c.model,
+		// The transcript is untrusted input and the model cannot tell it
+		// from instructions, so the summariser gets no way to act on
+		// anything it reads.
+		DisallowTools: store.SummariserDisallowedTools,
+	}
+}
+
 // Call runs a single summarisation turn and returns the result.
 // The LLM sees systemPrompt prepended to userPrompt as a combined message
 // (claude -p does not have a native system-prompt flag, so we bake it in).
@@ -63,10 +79,7 @@ func (c *ClaudiaCaller) Call(ctx context.Context, systemPrompt, userPrompt strin
 	combined := store.CompactorMarker + "\n\n" + systemPrompt + "\n\n" + userPrompt
 	combined = sanitizePrompt(combined)
 
-	task := claudia.NewTask(claudia.TaskConfig{
-		WorkDir: c.workDir,
-		Model:   c.model,
-	})
+	task := claudia.NewTask(c.taskConfig())
 
 	ch, err := task.Run(ctx, combined)
 	if err != nil {
