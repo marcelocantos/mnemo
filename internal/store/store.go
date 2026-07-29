@@ -607,6 +607,29 @@ type UncountedVolume struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 }
 
+// The billable-call identity and the cache-write TTL split, extracted
+// inline from the raw JSON (🎯T135).
+//
+// These were originally added as GENERATED columns on `entries`, which is
+// the obvious place for them and does not work. sqlift plans a full table
+// REBUILD to add a column to an existing table, and the append-only schema
+// policy forbids rebuilds — so the migration could never be applied to any
+// existing installation. The whole test suite stayed green regardless,
+// because every test store is created fresh and is therefore already on
+// the current schema. It surfaced only when the migration was planned
+// against a copy of a real database.
+//
+// Extracting inline costs nothing over the column form. SQLite's generated
+// columns here are VIRTUAL, meaning computed on read rather than stored —
+// so `json_extract(raw, ...)` in the query and a virtual column reading
+// the same path do identical work. The column was only ever notation.
+const (
+	sqlMessageID    = `json_extract(e.raw, '$.message.id')`
+	sqlRequestID    = `e.raw->>'$.requestId'`
+	sqlCacheWrite5m = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')`
+	sqlCacheWrite1h = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')`
+)
+
 // effectiveDedupKey reads the configured deduplication key, falling back
 // to the default when config is unreadable. An unreadable config must not
 // silently disable deduplication — that direction inflates every figure.
@@ -628,14 +651,14 @@ func effectiveDedupKey() string {
 // silently discarding an entire provider's corpus and looking exactly like
 // "you used it less".
 func dedupGroupSQL(key string) string {
-	const own = "CASE WHEN COALESCE(e.message_id, '') = '' THEN 'row:' || e.id ELSE e.message_id END"
+	own := "CASE WHEN COALESCE(" + sqlMessageID + ", '') = '' THEN 'row:' || e.id ELSE " + sqlMessageID + " END"
 	switch key {
 	case DedupKeyNone:
 		return "e.id"
 	case DedupKeyMessage:
 		return own
 	default:
-		return own + ", COALESCE(e.request_id, '')"
+		return own + ", COALESCE(" + sqlRequestID + ", '')"
 	}
 }
 
@@ -4752,13 +4775,13 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 				e.model AS model,
 				e.session_id AS session_id,
 				COALESCE(sm.source, 'unknown') AS source,
-				CASE WHEN COALESCE(e.message_id, '') = '' THEN 0 ELSE 1 END AS keyed,
+				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
 				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
 				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
 				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
 				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
-				MAX(COALESCE(e.cache_creation_5m_tokens, 0)) AS cw5m,
-				MAX(COALESCE(e.cache_creation_1h_tokens, 0)) AS cw1h
+				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
+				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
 			FROM entries e
 			%s
 			WHERE %s
@@ -5042,13 +5065,13 @@ func (s *Store) usageByBlock(
 				e.timestamp AS timestamp,
 				COALESCE(e.model, '') AS model,
 				COALESCE(sm.source, 'unknown') AS source,
-				CASE WHEN COALESCE(e.message_id, '') = '' THEN 0 ELSE 1 END AS keyed,
+				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
 				MAX(COALESCE(e.input_tokens, 0))             AS input_tokens,
 				MAX(COALESCE(e.output_tokens, 0))            AS output_tokens,
 				MAX(COALESCE(e.cache_read_tokens, 0))        AS cache_read_tokens,
 				MAX(COALESCE(e.cache_creation_tokens, 0))    AS cache_creation_tokens,
-				MAX(COALESCE(e.cache_creation_5m_tokens, 0)) AS cw5m,
-				MAX(COALESCE(e.cache_creation_1h_tokens, 0)) AS cw1h
+				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
+				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
 			FROM entries e
 			%s
 			WHERE %s

@@ -184,6 +184,12 @@ func TestUnpricedBudgetDoesNotReadAsZeroSpend(t *testing.T) {
 
 	// After the fixture: newTestStore installs a card for every other
 	// test's benefit, and this is the one test that must run without one.
+	//
+	// Clearing the installed card is not enough — LoadRateCard falls back
+	// to the cache file under the mnemo home, so on a developer machine
+	// that has ever fetched one this test would silently price everything
+	// and assert nothing. Point the home at an empty directory.
+	t.Setenv(MnemoHomeEnv, t.TempDir())
 	t.Cleanup(SetRateCard(nil))
 
 	st, err := s.BudgetStatusNow(BudgetConfig{MonthlyCapUSD: 300}, now)

@@ -258,7 +258,11 @@ func TestPricesAreContemporaneous(t *testing.T) {
 	// an installed card is an override for all dates by design.
 	t.Cleanup(SetRateCard(nil))
 
-	dir := filepath.Join(home, pricingArchiveDir)
+	ph, err := pricingHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ph, pricingArchiveDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +313,11 @@ func TestFrozenPeriodsDoNotRepriceOnRefetch(t *testing.T) {
 	t.Setenv(MnemoHomeEnv, home)
 	t.Cleanup(SetRateCard(nil))
 
-	dir := filepath.Join(home, pricingArchiveDir)
+	ph, err := pricingHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ph, pricingArchiveDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -318,16 +326,24 @@ func TestFrozenPeriodsDoNotRepriceOnRefetch(t *testing.T) {
 		Rates:     map[string]ModelRate{"m": {Output: 10e-6}},
 	}
 	b, _ := json.Marshal(card)
-	os.WriteFile(filepath.Join(dir, "pricing-2026-03-01.json"), b, 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "pricing-2026-03-01.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	resetArchiveCache()
 
-	before, _ := RateCardAsOf(mustDay(t, "2026-03-15")).Rate("m")
+	before, ok := RateCardAsOf(mustDay(t, "2026-03-15")).Rate("m")
+	if !ok || before.Output == 0 {
+		t.Fatalf("March has no rate (%+v, ok=%v); a test comparing 0 to 0 "+
+			"would pass without exercising anything", before, ok)
+	}
 
 	// A price revision lands today.
 	card.FetchedAt = mustDay(t, "2026-07-01")
 	card.Rates = map[string]ModelRate{"m": {Output: 500e-6}}
 	b, _ = json.Marshal(card)
-	os.WriteFile(filepath.Join(dir, "pricing-2026-07-01.json"), b, 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "pricing-2026-07-01.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	resetArchiveCache()
 
 	after, _ := RateCardAsOf(mustDay(t, "2026-03-15")).Rate("m")

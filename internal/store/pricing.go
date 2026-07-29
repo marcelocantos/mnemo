@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,7 +80,37 @@ type ModelRate struct {
 
 	// ContextThreshold is where the above-rates take over. Zero disables
 	// the long-context tier for this model.
-	ContextThreshold int64 `json:"max_input_tokens"`
+	ContextThreshold flexInt64 `json:"max_input_tokens"`
+}
+
+// flexInt64 accepts a JSON number OR a JSON string.
+//
+// The upstream rate file is community-maintained across thousands of
+// models and is not uniformly typed: some entries quote max_input_tokens.
+// A strict int64 makes one such entry fail the whole document, which is
+// how a rate card of 2,984 models became zero models and every cost
+// became unpriced — with the only symptom being a log line.
+type flexInt64 int64
+
+func (f *flexInt64) UnmarshalJSON(b []byte) error {
+	if len(b) > 1 && b[0] == '"' {
+		b = b[1 : len(b)-1]
+	}
+	if len(b) == 0 || string(b) == "null" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.ParseFloat(string(b), 64)
+	if err != nil {
+		// An unparseable threshold disables the long-context tier for
+		// this model rather than discarding the model. Pricing without
+		// the tier is wrong by a bounded amount; having no rate at all
+		// is wrong by the whole cost.
+		*f = 0
+		return nil
+	}
+	*f = flexInt64(n)
+	return nil
 }
 
 // pick returns the rate for a class, preferring the above-threshold
@@ -105,7 +136,7 @@ func pick(base, above float64, over bool) float64 {
 // The bool reports whether every quantity present was actually priceable;
 // false means part of this call has no rate and the figure is incomplete.
 func (r ModelRate) Cost(t TokenCounts) (float64, bool) {
-	over := r.ContextThreshold > 0 && t.contextSize() > r.ContextThreshold
+	over := r.ContextThreshold > 0 && t.contextSize() > int64(r.ContextThreshold)
 
 	w5, w1 := t.CacheWrite5m, t.CacheWrite1h
 	if w5 == 0 && w1 == 0 && t.CacheWriteFlat > 0 {
@@ -160,9 +191,23 @@ const LongContextThreshold = 200000
 // thousands of models, carrying the TTL and long-context variants.
 const PricingSourceURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
-// pricingCacheFile is where the current fetched card is kept, under the
-// mnemo home.
+// pricingCacheFile is where the current fetched card is kept, under
+// ~/.mnemo.
 const pricingCacheFile = "pricing.json"
+
+// pricingHome returns the ~/.mnemo directory the card and its archive
+// live in.
+//
+// EffectiveHome is the USER's home, not mnemo's directory — writing
+// straight to it put pricing.json and a pricing/ directory in the user's
+// home folder, which is not mnemo's to litter.
+func pricingHome() (string, error) {
+	home, err := EffectiveHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".mnemo"), nil
+}
 
 // pricingArchiveDir holds dated snapshots of every card ever fetched, one
 // file per day, named pricing-YYYY-MM-DD.json.
@@ -225,7 +270,7 @@ func LoadRateCard() *RateCard {
 	if pricingCached != nil {
 		return pricingCached
 	}
-	home, err := EffectiveHome()
+	home, err := pricingHome()
 	if err != nil {
 		return nil
 	}
@@ -287,15 +332,32 @@ func RefreshRateCard(ctx context.Context, sourceURL string) (*RateCard, error) {
 	if err != nil {
 		return nil, err
 	}
-	var raw map[string]ModelRate
-	if err := json.Unmarshal(body, &raw); err != nil {
+	// Decode per model rather than into one map, so a single malformed
+	// entry costs one model instead of the entire card. In a
+	// community-maintained file spanning thousands of models across
+	// dozens of providers, some entry being odd is the expected case.
+	var docs map[string]json.RawMessage
+	if err := json.Unmarshal(body, &docs); err != nil {
 		return nil, fmt.Errorf("parse rate card: %w", err)
 	}
-	delete(raw, "sample_spec")
+	delete(docs, "sample_spec")
+	raw := make(map[string]ModelRate, len(docs))
+	var skipped int
+	for name, doc := range docs {
+		var r ModelRate
+		if err := json.Unmarshal(doc, &r); err != nil {
+			skipped++
+			continue
+		}
+		raw[name] = r
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("parse rate card: no usable entries in %d models", len(docs))
+	}
 
 	card := &RateCard{FetchedAt: time.Now().UTC(), Source: sourceURL, Rates: raw}
-	home, err := EffectiveHome()
-	if err == nil {
+	home, err := pricingHome()
+	if err == nil && os.MkdirAll(home, 0o755) == nil {
 		if out, err := json.Marshal(card); err == nil {
 			_ = os.WriteFile(filepath.Join(home, pricingCacheFile), out, 0o644)
 
@@ -359,7 +421,7 @@ func loadArchiveIndex() []archivedCard {
 	if time.Since(archiveRead) < archiveRescanEvery && archiveIndex != nil {
 		return archiveIndex
 	}
-	home, err := EffectiveHome()
+	home, err := pricingHome()
 	if err != nil {
 		return nil
 	}
