@@ -4,6 +4,8 @@
 package streamseg
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -63,5 +65,35 @@ func TestSummariserToolListIsShared(t *testing.T) {
 	if !slices.Equal(cfg.DisallowTools, store.SummariserDisallowedTools) {
 		t.Errorf("streamseg uses its own list %v rather than the shared one %v",
 			cfg.DisallowTools, store.SummariserDisallowedTools)
+	}
+}
+
+// TestSpendCeilingStopsRatherThanRetries is 🎯T139's third mitigation.
+//
+// Framing can be ignored and tool restrictions only remove the ability to
+// ACT, not to keep generating. The ceiling bounds what happens when the
+// first two are bypassed — and it must be TERMINAL, because retrying is
+// exactly what turned the reported misfire into ~33,000 subagents.
+func TestSpendCeilingStopsRatherThanRetries(t *testing.T) {
+	c := &claudiaSummariser{workDir: "/tmp/x", ceiling: 1000}
+	c.inTokens, c.outTok = 900, 200 // already past the ceiling
+
+	_, err := c.Ask(context.Background(), "another drip")
+	if !errors.Is(err, ErrSpendCeiling) {
+		t.Fatalf("expected ErrSpendCeiling, got %v", err)
+	}
+	if c.calls != 0 {
+		t.Error("the summariser spawned a task despite being over its ceiling")
+	}
+}
+
+// TestSpendCeilingIsOnByDefault: a ceiling nobody enables protects nobody.
+func TestSpendCeilingIsOnByDefault(t *testing.T) {
+	c, ok := NewClaudiaSummariser("/tmp/x", "sonnet").(*claudiaSummariser)
+	if !ok {
+		t.Fatal("unexpected summariser type")
+	}
+	if c.ceiling <= 0 {
+		t.Error("the default summariser has no spend ceiling")
 	}
 }
