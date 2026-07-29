@@ -416,6 +416,24 @@ Configure with {"budget": {"monthly_cap_usd": 500, "timezone": "Australia/Sydney
 
 Carries the same "unpriced_models" and "uncounted" disclosures as mnemo_usage — a budget figure that silently omits a provider is worse than no figure, because it gets believed.`),
 		),
+		mcp.NewTool("mnemo_agent_trees",
+			mcp.WithDescription(`Sub-agent fan-outs reconstructed and costed as a WHOLE, ranked by aggregate tree cost.
+
+For the failure a per-session ranking cannot see: a fan-out where every individual agent looks reasonable and forty together trip the wire. Ranking sessions by cost shows forty modest entries and nothing obviously wrong; only the aggregate at the root makes the shape visible.
+
+Each tree reports the root cause where the transcript records it — the skill that started it, the agent types spawned, the turn that spawned them and when. "You spent a lot" is not actionable; "the release skill spawned 40 agents at 14:03" is.
+
+tree_cost_usd is the fan-out's aggregate; direct_cost_usd is the session's own main-line spend, so a session that is expensive by itself is distinguishable from one that is expensive because of its children. max_depth is reported because a tree three deep is a different problem from a wide shallow one, and nested fan-outs roll up through every level.
+
+Trees still running carry live=true and a pid, and can be stopped (mnemo_session_go, or kill). Finished ones say so — their spend is already incurred.
+
+CLAUDE ONLY, deliberately. The parentage fields come from Claude Code's record shape; Codex records carry no message id and no parent linkage, and a tree built over them would be noise presented as structure. Trees whose spend cannot be priced report priced=false rather than a plausible $0.00.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7).")),
+			mcp.WithString("since", mcp.Description("RFC3339 lower bound. Overrides days.")),
+			mcp.WithString("until", mcp.Description("RFC3339 upper bound.")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment.")),
+			mcp.WithNumber("limit", mcp.Description("Max trees to return (default 20).")),
+		),
 		mcp.NewTool("mnemo_skills",
 			mcp.WithDescription(`Search across Claude Code skill files (~/.claude/skills/). Skills define reusable workflows — release processes, audit procedures, documentation generation, etc. Use this to discover relevant skills or understand what workflows are available.`),
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
@@ -934,6 +952,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.usage(args)
 	case "mnemo_budget":
 		return ch.budget()
+	case "mnemo_agent_trees":
+		return ch.agentTrees(args)
 	case "mnemo_configs":
 		return ch.configs(args)
 	case "mnemo_audit":
@@ -1572,6 +1592,32 @@ func (h *callHandler) budget() (string, bool, error) {
 		return fmt.Sprintf("budget status failed: %v", err), true, nil
 	}
 	out, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) agentTrees(args map[string]any) (string, bool, error) {
+	p := store.AgentTreeParams{}
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		p.Days = int(d)
+	}
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		p.Limit = int(l)
+	}
+	p.Since, _ = args["since"].(string)
+	p.Until, _ = args["until"].(string)
+	p.RepoFilter, _ = args["repo"].(string)
+
+	trees, err := h.mem.AgentTrees(p)
+	if err != nil {
+		return fmt.Sprintf("agent tree query failed: %v", err), true, nil
+	}
+	if len(trees) == 0 {
+		return "No sub-agent fan-outs found in this window.", false, nil
+	}
+	out, err := json.MarshalIndent(trees, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

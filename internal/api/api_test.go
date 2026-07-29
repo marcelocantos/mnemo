@@ -30,6 +30,10 @@ type fakeBackend struct {
 }
 
 func (f *fakeBackend) Stats() (*store.StatsResult, error) { return f.statsResult, nil }
+func (f *fakeBackend) AgentTrees(store.AgentTreeParams) ([]store.AgentTree, error) {
+	return nil, nil
+}
+
 func (f *fakeBackend) BudgetStatusNow(store.BudgetConfig, time.Time) (*store.BudgetStatus, error) {
 	return &store.BudgetStatus{}, nil
 }
