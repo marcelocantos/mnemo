@@ -1578,37 +1578,82 @@ MOCs without invading.
 
 ### Slice 7 — patterns (persisted + rendered)
 
-Promote `mnemo_discover_patterns` from live-queried to persisted. New
-`patterns` table (additive, append-only per schema policy):
+**Shipped.** Promote `mnemo_discover_patterns` from live-queried to
+persisted. New `patterns` table (additive, append-only per schema
+policy):
 
 ```sql
 CREATE TABLE patterns (
-  id              TEXT PRIMARY KEY,         -- pattern_<sha1(type+canonical_signature)[:8]>
-  pattern_type    TEXT NOT NULL,            -- "direct_jsonl_read" | "repeated_query_shape" | ...
+  id              TEXT PRIMARY KEY,         -- pattern_<sha1(type+"\0"+signature)[:8]>
+  pattern_type    TEXT NOT NULL,            -- "direct_jsonl_read" | "transcript_grep" | "repeated_query" | "repeated_search"
   signature       TEXT NOT NULL,            -- canonicalised input snippet that defines the pattern
-  occurrence_count INTEGER NOT NULL,
-  session_count   INTEGER NOT NULL,         -- distinct sessions where pattern observed
-  repos           TEXT NOT NULL,            -- JSON array of repo names
-  first_seen      TEXT NOT NULL,
-  last_seen       TEXT NOT NULL,
-  representative_excerpts TEXT NOT NULL,    -- JSON array of excerpt strings
-  computed_at     TEXT NOT NULL
+  occurrence_count INTEGER NOT NULL DEFAULT 0,
+  session_count   INTEGER NOT NULL DEFAULT 0,  -- distinct sessions where pattern observed
+  repos           TEXT NOT NULL DEFAULT '[]',  -- JSON array of repo names
+  sessions        TEXT NOT NULL DEFAULT '[]',  -- JSON array of session ids (capped sample; see below)
+  first_seen      TEXT NOT NULL DEFAULT '',
+  last_seen       TEXT NOT NULL DEFAULT '',
+  representative_excerpts TEXT NOT NULL DEFAULT '[]',  -- JSON array of excerpt strings
+  computed_at     TEXT NOT NULL DEFAULT ''
 );
+
+CREATE INDEX idx_patterns_type ON patterns(pattern_type);
 
 CREATE VIRTUAL TABLE patterns_fts USING fts5(
   pattern_type, signature, representative_excerpts,
-  content='patterns', content_rowid='rowid'
+  content=patterns, content_rowid=rowid
 );
 ```
 
-Renderer emits `_mnemo/patterns/` pages for patterns meeting the
-`occurrence ≥ 3` and `session_count ≥ 2` threshold (carried over
-from the live `mnemo_discover_patterns` filter).
+Renderer emits `_mnemo/patterns/` pages plus a `_index.md` collection
+hub for patterns meeting the `occurrence ≥ 3` **and** `session_count ≥
+2` threshold. The gate is applied in the query, not in a loop filter,
+so the index and the pages cannot disagree about which patterns exist.
+Pages are wing-only: v1 never had a `patterns/` directory, so there is
+no dual-write shape to choose and no `patternPathsForLayout`.
+
+**Deltas from the shape above, as built.**
+
+- `sessions` column added. The design records `session_count` only, but
+  the page's "Occurrences" provenance section and
+  `mnemo_discover_patterns`' existing output both name the sessions, and
+  re-deriving them would mean re-running the miner on every read. The
+  list is capped at 20 ids while `session_count` stays exact, and every
+  renderer says "showing N of M" so a sample never reads as the set.
+- `description` and `suggestion` are **not** stored. They are pure
+  functions of `(pattern_type, signature, session_count)`; a stored copy
+  could only drift from the row that produced it.
+- `occurrence_count` is genuinely the occurrence count. The pre-Slice-7
+  miner reported `len(sessions)` under that name, so a session that read
+  six transcripts looked like six sessions. Both the emission gate and
+  the clustering weight depend on telling those apart.
+- `first_seen` accumulates across passes (mining is windowed at 90 days;
+  the upsert only ever moves `first_seen` earlier and `last_seen`
+  later), so a pattern remembers when it was first observed even after
+  the window has moved past it.
+- The `transcript_grep` detector was narrowed. Its SQL can only ask
+  "does this command mention a transcript directory", which a `cat` or
+  `wc -l` satisfies as well as a `grep` — so every direct JSONL read
+  also fired it, under a description that says "Grep/rg commands". Bash
+  rows now have to name a search tool (`grep`/`rg`/`ag`/`ack`/…) in one
+  of their pipeline segments; the `Grep` tool is a search by definition.
+  `direct_jsonl_read` already covers the reads.
+
+Refresh runs as a `StreamReconciler` under the 🎯T68 convergence data
+plane at hourly cadence. Since the registry dispatcher ticks every
+minute for every stream, the cadence is enforced by an age check on
+`MAX(computed_at)`, not by `Interval()`. `mnemo_discover_patterns` is
+otherwise a pure read; the one exception is a table that has never been
+computed (fresh install, or first run after the upgrade), where the
+first caller pays for one mining pass rather than being told "no
+patterns" — a claim indistinguishable from "no patterns exist".
 
 *Value:* first new abstraction. Patterns are the cheapest abstraction to
 extract (purely heuristic) and the highest signal per unit effort.
 Slice 8's clustering corpus (`vault-clustering.md` Inputs §3) reads
-this table directly.
+this table via `Store.PatternCorpusDocs`, which emits `ClusterCorpusDoc`
+rows at weight 1.2 behind the same emission gate as the pages — one
+repo-scoped doc per repo the pattern spans.
 
 ### Slice 8 — themes + cross-repo (clustering engine)
 

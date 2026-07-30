@@ -38,6 +38,8 @@ New vaults use the `_mnemo/` namespace (v2 layout — default since v0.49.0):
     ├── sessions/<repo>/       — one note per session (full conversation)
     ├── decisions/<repo>/      — detected proposal + outcome pairs
     ├── memories/              — project memory files (globally unique names)
+    ├── patterns/              — recurring workarounds + _index.md hub
+    │                            (≥ 3 occurrences across ≥ 2 sessions)
     ├── skills/                — skill procedures from ~/.claude/skills/
     ├── configs/               — CLAUDE.md project instruction notes
     ├── plans/<repo>/          — implementation plans

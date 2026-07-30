@@ -164,6 +164,9 @@ func (f *fakeBackend) SearchCommits(query string, repo string, author string, da
 func (f *fakeBackend) DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]store.PatternCandidate, error) {
 	panic("unexpected DiscoverPatterns call")
 }
+func (f *fakeBackend) ListPatterns(q store.PatternQuery) ([]store.PatternCandidate, error) {
+	panic("unexpected ListPatterns call")
+}
 func (f *fakeBackend) SearchImages(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
 	panic("unexpected SearchImages call")
 }

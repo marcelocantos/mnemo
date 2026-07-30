@@ -407,7 +407,7 @@ primitive lives in the harness, not the daemon.
 | `mnemo_agent_trees` | Sub-agent fan-outs costed as a whole — for the case where forty individually modest agents collectively blow the budget |
 | `mnemo_whatsup` | Live session resource monitor: CPU%, RSS, memory pressure |
 | `mnemo_permissions` | Analyse tool usage patterns to suggest `allowedTools` rules |
-| `mnemo_discover_patterns` | Find workaround patterns suggesting missing features |
+| `mnemo_discover_patterns` | Workaround patterns suggesting missing features, persisted and refreshed hourly. Reports occurrences and distinct sessions separately, and needs ≥ 3 of the former across ≥ 2 of the latter — one session's habit is not a pattern |
 
 ### Database and templates
 
