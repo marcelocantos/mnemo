@@ -308,6 +308,11 @@ Tables:
     — GitHub Actions runs polled from repos seen in session history
     — status: completed, in_progress, queued; conclusion: success, failure, cancelled, skipped
   ci_runs_fts — FTS5 on repo, workflow, branch, log_summary, conclusion
+  patterns (id, pattern_type, signature, occurrence_count, session_count, repos, sessions, first_seen, last_seen, representative_excerpts, computed_at)
+    — workaround patterns mined hourly; see mnemo_discover_patterns
+    — pattern_type: direct_jsonl_read, transcript_grep, repeated_query, repeated_search
+    — repos / sessions / representative_excerpts are JSON arrays; use json_each()
+  patterns_fts — FTS5 on pattern_type, signature, representative_excerpts
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -667,18 +672,20 @@ Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonc
 			mcp.WithDescription(`List all saved query templates with their names, descriptions, and parameter definitions.`),
 		),
 		mcp.NewTool("mnemo_discover_patterns",
-			mcp.WithDescription(`Analyze transcript history to discover workaround patterns that suggest missing mnemo features.
+			mcp.WithDescription(`Workaround patterns mined from transcript history — places where an agent reached around mnemo instead of through it, and therefore candidate missing features.
 
 Detects:
 - direct_jsonl_read: Bash commands that read JSONL transcript files directly (bypassing mnemo)
 - transcript_grep: grep/rg over transcript directories instead of using mnemo_search
-- repeated_query: mnemo_query shapes repeated across 3+ sessions (candidates for templates)
-- repeated_search: mnemo_search patterns repeated across 3+ sessions (may warrant dedicated tools)
+- repeated_query: the same mnemo_query shape run repeatedly (candidate for a template)
+- repeated_search: the same mnemo_search terms run repeatedly (may warrant a dedicated tool)
 
-Returns candidate features with evidence counts, example sessions, and suggested actions.`),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 90)")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithNumber("min_occurrences", mcp.Description("Minimum pattern occurrences to report (default 3)")),
+Served from the persisted patterns table, refreshed hourly by a reconciler, so patterns accumulate a real first_seen instead of being re-derived per call. The reported mine timestamp says how fresh the answer is.
+
+occurrence_count and session_count are different numbers and both are reported: one session that read six transcript files directly is 6 occurrences across 1 session. The emission gate is occurrence >= 3 across >= 2 sessions — a pattern with no corroborating second session is not reported, because a single session's habit is not yet a pattern.`),
+			mcp.WithNumber("days", mcp.Description("Recency window in days, applied to last_seen (default 90)")),
+			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment; matches any repo the pattern spans")),
+			mcp.WithNumber("min_occurrences", mcp.Description("Minimum occurrence count to report (default 3). The >= 2 distinct sessions requirement is not adjustable.")),
 		),
 		mcp.NewTool("mnemo_session_structure",
 			mcp.WithDescription(`Return a structural summary of a session's entry types and content-block shapes.
@@ -2591,7 +2598,7 @@ func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error
 		days = int(d)
 	}
 	repoFilter, _ := args["repo"].(string)
-	minOccurrences := 3
+	minOccurrences := store.PatternEmitMinOccurrences
 	if m, ok := args["min_occurrences"].(float64); ok && m > 0 {
 		minOccurrences = int(m)
 	}
@@ -2601,15 +2608,30 @@ func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error
 		return fmt.Sprintf("discover patterns failed: %v", err), true, nil
 	}
 	if len(candidates) == 0 {
-		return fmt.Sprintf("No workaround patterns found in the last %d days (min_occurrences=%d). The transcript index may not have enough data yet, or agents are already using mnemo tools effectively.", days, minOccurrences), false, nil
+		return fmt.Sprintf("No workaround patterns found in the last %d days (min_occurrences=%d, min_sessions=%d). The transcript index may not have enough data yet, or agents are already using mnemo tools effectively.",
+			days, minOccurrences, store.PatternEmitMinSessions), false, nil
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Discovered Workaround Patterns (%d days, min_occurrences=%d)\n\n", days, minOccurrences)
+	fmt.Fprintf(&b, "# Discovered Workaround Patterns (%d days, min_occurrences=%d, min_sessions=%d)\n\n",
+		days, minOccurrences, store.PatternEmitMinSessions)
+	// Freshness is disclosed rather than assumed: these rows come from
+	// the patterns table, refreshed hourly by a reconciler, so a caller
+	// comparing against something they did five minutes ago needs to
+	// know how old the mine is.
+	if len(candidates) > 0 && candidates[0].ComputedAt != "" {
+		fmt.Fprintf(&b, "*Mined %s (persisted; refreshed hourly).*\n\n", candidates[0].ComputedAt)
+	}
 	for _, c := range candidates {
-		fmt.Fprintf(&b, "## %s (%d sessions)\n", c.PatternType, c.Occurrences)
+		fmt.Fprintf(&b, "## %s (%d occurrences across %d sessions)\n", c.PatternType, c.Occurrences, c.SessionCount)
 		fmt.Fprintf(&b, "**Description:** %s\n\n", c.Description)
 		fmt.Fprintf(&b, "**Suggestion:** %s\n\n", c.Suggestion)
+		if c.FirstSeen != "" || c.LastSeen != "" {
+			fmt.Fprintf(&b, "**Seen:** %s → %s\n\n", c.FirstSeen, c.LastSeen)
+		}
+		if len(c.Repos) > 0 {
+			fmt.Fprintf(&b, "**Repos:** %s\n\n", strings.Join(c.Repos, ", "))
+		}
 		if c.Evidence != "" {
 			fmt.Fprintf(&b, "**Example evidence:**\n```\n%s\n```\n\n", c.Evidence)
 		}
@@ -2618,7 +2640,11 @@ func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error
 			if len(shown) > 5 {
 				shown = shown[:5]
 			}
-			fmt.Fprintf(&b, "**Sessions (showing %d of %d):** %s\n\n", len(shown), len(c.Sessions), strings.Join(shown, ", "))
+			// Denominator is SessionCount, not len(c.Sessions): the
+			// stored list is itself capped, so counting it would report
+			// the sample size as the population.
+			fmt.Fprintf(&b, "**Sessions (showing %d of %d):** %s\n\n",
+				len(shown), c.SessionCount, strings.Join(shown, ", "))
 		}
 		b.WriteString("---\n\n")
 	}

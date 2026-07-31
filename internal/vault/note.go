@@ -538,6 +538,129 @@ func renderRootIndex(repos []store.RepoInfo, stats *store.StatsResult) string {
 	return b.String()
 }
 
+// renderPattern produces a Markdown note for a persisted workaround
+// pattern (🎯T64.7). The provenance section is headed "Occurrences" per
+// the entity-type table in docs/design/vault-library-wing.md.
+func renderPattern(p store.PatternCandidate) string {
+	var b strings.Builder
+
+	b.WriteString("---\n")
+	writeYAML(&b, "type", "pattern")
+	writeYAML(&b, "pattern_id", p.ID)
+	writeYAML(&b, "pattern_type", p.PatternType)
+	writeYAML(&b, "signature", summarize(p.Signature, 200))
+	fmt.Fprintf(&b, "occurrence_count: %d\n", p.Occurrences)
+	fmt.Fprintf(&b, "session_count: %d\n", p.SessionCount)
+	writeYAML(&b, "first-seen", dateOf(p.FirstSeen))
+	writeYAML(&b, "last-touched", dateOf(p.LastSeen))
+	writeYAML(&b, "computed_at", p.ComputedAt)
+	b.WriteString("tags:\n")
+	b.WriteString("  - mnemo\n")
+	b.WriteString("  - mnemo/pattern\n")
+	b.WriteString("  - pattern\n")
+	fmt.Fprintf(&b, "  - pattern-%s\n", slugify(p.PatternType))
+	for _, repo := range p.Repos {
+		if r := shortProjectName(repo); r != "" && r != "untitled" {
+			fmt.Fprintf(&b, "  - %s\n", r)
+		}
+	}
+	b.WriteString("---\n\n")
+
+	fmt.Fprintf(&b, "# %s\n\n", patternTitle(p))
+	b.WriteString(p.Description)
+	b.WriteString("\n\n")
+
+	fmt.Fprintf(&b, "*%s across %s",
+		pluralize(p.Occurrences, "occurrence"), pluralize(p.SessionCount, "session"))
+	if p.FirstSeen != "" {
+		fmt.Fprintf(&b, " · first seen %s", dateOf(p.FirstSeen))
+	}
+	if p.LastSeen != "" {
+		fmt.Fprintf(&b, " · last seen %s", dateOf(p.LastSeen))
+	}
+	b.WriteString("*\n\n")
+
+	if p.Suggestion != "" {
+		b.WriteString("## Suggestion\n\n")
+		b.WriteString(p.Suggestion)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## Occurrences\n\n")
+	fmt.Fprintf(&b, "Signature: `%s`\n\n", summarize(p.Signature, 200))
+	for _, ex := range p.Excerpts {
+		fmt.Fprintf(&b, "```\n%s\n```\n\n", ex)
+	}
+	if len(p.Repos) > 0 {
+		fmt.Fprintf(&b, "Repos: %s\n\n", strings.Join(p.Repos, ", "))
+	}
+	if len(p.Sessions) > 0 {
+		// Session ids only: under pure v2 there are no sessions/ pages to
+		// link to, and mnemo_read_session takes an id directly. The
+		// stored list is capped, so say how much of the set is shown
+		// rather than letting the sample read as all of it.
+		if len(p.Sessions) < p.SessionCount {
+			fmt.Fprintf(&b, "Sessions (%d of %d): `%s`\n\n",
+				len(p.Sessions), p.SessionCount, strings.Join(p.Sessions, "`, `"))
+		} else {
+			fmt.Fprintf(&b, "Sessions: `%s`\n\n", strings.Join(p.Sessions, "`, `"))
+		}
+	}
+
+	return b.String()
+}
+
+// renderPatternsIndex produces _mnemo/patterns/_index.md — the
+// collection hub that keeps the wing hub-and-spoke rather than a
+// hairball in the user's graph view.
+func renderPatternsIndex(patterns []store.PatternCandidate) string {
+	var b strings.Builder
+
+	b.WriteString("---\n")
+	writeYAML(&b, "type", "pattern-index")
+	fmt.Fprintf(&b, "patterns: %d\n", len(patterns))
+	b.WriteString("tags:\n")
+	b.WriteString("  - mnemo\n")
+	b.WriteString("  - mnemo/pattern\n")
+	b.WriteString("  - index\n")
+	b.WriteString("---\n\n")
+
+	b.WriteString("# Patterns\n\n")
+	b.WriteString("Recurring workarounds mined from session history — each one is\n")
+	b.WriteString("a place where an agent reached around mnemo instead of through\n")
+	b.WriteString("it, and therefore a candidate missing feature. A pattern earns a\n")
+	fmt.Fprintf(&b, "page at %d or more occurrences across %d or more sessions.\n\n",
+		store.PatternEmitMinOccurrences, store.PatternEmitMinSessions)
+
+	if len(patterns) == 0 {
+		b.WriteString("*No pattern currently clears that bar.*\n\n")
+		return b.String()
+	}
+
+	for _, p := range patterns {
+		link := strings.TrimSuffix(filepath.ToSlash(patternPath(p)), ".md")
+		fmt.Fprintf(&b, "- [[%s|%s]] — %s across %s\n",
+			link, patternTitle(p),
+			pluralize(p.Occurrences, "occurrence"),
+			pluralize(p.SessionCount, "session"))
+	}
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// patternTitle is the human-facing heading for a pattern page. The
+// grouped families need the signature to tell two rows of the same type
+// apart; the single-shape families read better without it.
+func patternTitle(p store.PatternCandidate) string {
+	name := strings.ReplaceAll(p.PatternType, "_", " ")
+	switch p.PatternType {
+	case store.PatternRepeatedQuery, store.PatternRepeatedSearch:
+		return fmt.Sprintf("%s · %s", name, summarize(p.Signature, 60))
+	}
+	return name
+}
+
 // writeYAML appends "key: value\n" to b, quoting value when it contains
 // characters that would break YAML parsing. Empty values are omitted.
 func writeYAML(b *strings.Builder, key, value string) {

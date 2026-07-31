@@ -55,6 +55,9 @@ type Backend interface {
 	SearchGitHubActivity(query string, repo string, state string, author string, activityType string, days int, limit int) ([]GitHubActivityResult, error)
 	SearchCommits(query string, repo string, author string, days int, limit int) ([]GitCommit, error)
 	DiscoverPatterns(days int, repoFilter string, minOccurrences int) ([]PatternCandidate, error)
+	// ListPatterns reads persisted workaround patterns (🎯T64.7). The
+	// vault exporter uses it directly so rendering never triggers a mine.
+	ListPatterns(q PatternQuery) ([]PatternCandidate, error)
 	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
 	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)

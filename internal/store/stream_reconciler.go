@@ -38,6 +38,7 @@ func (s *Store) StreamReconcilers() []StreamReconciler {
 	return []StreamReconciler{
 		mirrorReconcilerStream{s},
 		sourceStateReconcilerStream{s},
+		patternsReconcilerStream{s},
 	}
 }
 

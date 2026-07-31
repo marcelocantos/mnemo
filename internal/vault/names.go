@@ -189,6 +189,36 @@ func memoryPathsForLayout(layout string, m store.MemoryInfo) []string {
 	}
 }
 
+// patternPath returns the library-wing path for a pattern note (🎯T64.7).
+// Format: _mnemo/patterns/<pattern-type-slug>-<id-suffix>.md
+//
+// Wing-only by construction: patterns are a second-order abstraction
+// that v1 never had a directory for, so there is no dual-write shape to
+// choose between and no patternPathsForLayout.
+//
+// The id suffix is not decoration. A pattern's identity is (type,
+// signature), and the grouped families (repeated_query,
+// repeated_search) have one row per distinct signature — several rows
+// share a type. Slugging the signature into the filename would be
+// unreadable at 200 characters and would rename the file whenever the
+// canonicaliser changed; the id is stable and short.
+func patternPath(p store.PatternCandidate) string {
+	kind := slugify(p.PatternType)
+	if kind == "" || kind == "untitled" {
+		kind = "pattern"
+	}
+	suffix := strings.TrimPrefix(p.ID, "pattern_")
+	if suffix == "" {
+		suffix = "unknown"
+	}
+	return filepath.Join(mnemoWingDir, "patterns", kind+"-"+slugify(suffix)+".md")
+}
+
+// patternsIndexPath returns the library-wing patterns collection index.
+func patternsIndexPath() string {
+	return filepath.Join(mnemoWingDir, "patterns", "_index.md")
+}
+
 // writesRawSignalReports whether layout still materialises v1 raw-signal
 // pages (sessions, CI, PRs, repo indices). False for pure v2 / empty
 // (empty defaults to v2). (🎯T64.4)

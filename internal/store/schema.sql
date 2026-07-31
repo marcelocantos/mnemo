@@ -429,6 +429,35 @@ CREATE TABLE messages (
 			tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId'))
 		);
 
+-- 🎯T64.7: workaround patterns, promoted from a live query to a
+-- persisted table so they survive across sessions, accumulate a real
+-- first_seen, and give the clustering engine (🎯T64.8) a deterministic
+-- input stream at weight 1.2.
+--
+-- occurrence_count and session_count are genuinely different numbers:
+-- one session that read six transcript files directly is 6 occurrences
+-- across 1 session. The emission gate (vault pages, clustering corpus)
+-- is occurrence >= 3 AND session_count >= 2, so both are load-bearing.
+--
+-- `sessions` is an addition to the shape in docs/design/vault-library-
+-- wing.md § Slice 7: the design records session_count only, but the
+-- provenance section of a rendered pattern page and mnemo_discover_
+-- patterns' existing output both name the sessions, and re-deriving
+-- them would mean re-running the miner on every read.
+CREATE TABLE patterns (
+			id TEXT PRIMARY KEY,
+			pattern_type TEXT NOT NULL,
+			signature TEXT NOT NULL,
+			occurrence_count INTEGER NOT NULL DEFAULT 0,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			repos TEXT NOT NULL DEFAULT '[]',
+			sessions TEXT NOT NULL DEFAULT '[]',
+			first_seen TEXT NOT NULL DEFAULT '',
+			last_seen TEXT NOT NULL DEFAULT '',
+			representative_excerpts TEXT NOT NULL DEFAULT '[]',
+			computed_at TEXT NOT NULL DEFAULT ''
+		);
+
 CREATE TABLE plans (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo TEXT NOT NULL,
@@ -860,6 +889,8 @@ CREATE INDEX idx_messages_tool_url ON messages(tool_url) WHERE tool_url IS NOT N
 
 CREATE INDEX idx_messages_tool_use_id ON messages(tool_use_id);
 
+CREATE INDEX idx_patterns_type ON patterns(pattern_type);
+
 CREATE INDEX idx_plans_phase ON plans(phase);
 
 CREATE INDEX idx_plans_repo ON plans(repo);
@@ -1016,6 +1047,12 @@ CREATE VIRTUAL TABLE topic_segments_fts USING fts5(
 CREATE VIRTUAL TABLE themes_fts USING fts5(
 			label, summary,
 			content=themes,
+			content_rowid=rowid
+		);
+
+CREATE VIRTUAL TABLE patterns_fts USING fts5(
+			pattern_type, signature, representative_excerpts,
+			content=patterns,
 			content_rowid=rowid
 		);
 
@@ -1417,6 +1454,26 @@ CREATE TRIGGER themes_au AFTER UPDATE ON themes
 			VALUES ('delete', old.rowid, old.label, old.summary);
 			INSERT INTO themes_fts(rowid, label, summary)
 			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER patterns_ad AFTER DELETE ON patterns
+		BEGIN
+			INSERT INTO patterns_fts(patterns_fts, rowid, pattern_type, signature, representative_excerpts)
+			VALUES ('delete', old.rowid, old.pattern_type, old.signature, old.representative_excerpts);
+		END;
+
+CREATE TRIGGER patterns_ai AFTER INSERT ON patterns
+		BEGIN
+			INSERT INTO patterns_fts(rowid, pattern_type, signature, representative_excerpts)
+			VALUES (new.rowid, new.pattern_type, new.signature, new.representative_excerpts);
+		END;
+
+CREATE TRIGGER patterns_au AFTER UPDATE ON patterns
+		BEGIN
+			INSERT INTO patterns_fts(patterns_fts, rowid, pattern_type, signature, representative_excerpts)
+			VALUES ('delete', old.rowid, old.pattern_type, old.signature, old.representative_excerpts);
+			INSERT INTO patterns_fts(rowid, pattern_type, signature, representative_excerpts)
+			VALUES (new.rowid, new.pattern_type, new.signature, new.representative_excerpts);
 		END;
 
 -- Views

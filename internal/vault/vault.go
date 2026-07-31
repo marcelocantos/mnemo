@@ -24,7 +24,7 @@
 //	  sessions/, repos/, ci/, prs/, decisions/, memories/
 //	v2 / both wing (🎯T64.2–T64.3):
 //	  _mnemo/{index,README,MIGRATION}.md
-//	  _mnemo/decisions/, _mnemo/memories/  (+ later: patterns, themes, …)
+//	  _mnemo/decisions/, _mnemo/memories/, _mnemo/patterns/  (+ later: themes, …)
 //	Always (all layouts):
 //	  index.md, plans/, targets/, skills/, configs/
 package vault
@@ -203,6 +203,8 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	// Decisions + memories: layout-selected paths (v1 and/or _mnemo/). (🎯T64.3)
 	setErr(e.syncDecisions(ctx, sessionPaths, layout))
 	setErr(e.syncMemories(ctx, layout))
+	// Patterns: wing-only second-order abstraction. (🎯T64.7)
+	setErr(e.syncPatterns(ctx, layout))
 
 	setErr(e.syncPlans(ctx))
 	setErr(e.syncTargets(ctx))
@@ -349,6 +351,68 @@ func (e *Exporter) syncMemories(ctx context.Context, layout string) error {
 	}
 
 	slog.Info("vault: memories synced", "written", written, "skipped", skipped, "layout", layout)
+	return nil
+}
+
+// syncPatterns writes a page per persisted workaround pattern into the
+// library wing, plus the collection index (🎯T64.7).
+//
+// Only patterns past the emission gate — occurrence >= 3 across >= 2
+// sessions — get a page. The gate lives in the query, not in a loop
+// filter, so the index and the pages can never disagree about which
+// patterns exist.
+//
+// Wing-only: a pure-v1 vault gets nothing, because v1 had no patterns/
+// directory to be compatible with. Unlike decisions and memories there
+// is no dual-write to reconcile.
+func (e *Exporter) syncPatterns(ctx context.Context, layout string) error {
+	if layout == store.VaultLayoutV1 {
+		return nil
+	}
+
+	patterns, err := e.backend.ListPatterns(store.PatternQuery{
+		MinOccurrences: store.PatternEmitMinOccurrences,
+		MinSessions:    store.PatternEmitMinSessions,
+	})
+	if err != nil {
+		return fmt.Errorf("vault: list patterns: %w", err)
+	}
+
+	written, skipped := 0, 0
+	for _, p := range patterns {
+		if ctx.Err() != nil {
+			break
+		}
+		relPath := patternPath(p)
+		absPath := filepath.Join(e.path, relPath)
+		// Keyed on computed_at, not last_seen: a re-mine that leaves
+		// last_seen alone can still move the counts, and a page showing
+		// stale counts is worse than a redundant write.
+		if !needsUpdate(absPath, p.ComputedAt) {
+			skipped++
+			continue
+		}
+		content := renderPattern(p)
+		if err := writeNote(absPath, content, p.ComputedAt); err != nil {
+			slog.Warn("vault: write pattern note failed", "path", absPath, "err", err)
+			continue
+		}
+		e.recordOutput(relPath, "pattern", p.ID, content)
+		written++
+	}
+
+	// The index is rewritten unconditionally — it summarises the whole
+	// collection, so any member's change invalidates it, and there is no
+	// single entity timestamp that expresses that.
+	idxPath := patternsIndexPath()
+	idxContent := renderPatternsIndex(patterns)
+	if err := writeNote(filepath.Join(e.path, idxPath), idxContent, ""); err != nil {
+		slog.Warn("vault: write patterns index failed", "path", idxPath, "err", err)
+	} else {
+		e.recordOutput(idxPath, "pattern_index", "patterns", idxContent)
+	}
+
+	slog.Info("vault: patterns synced", "written", written, "skipped", skipped, "layout", layout)
 	return nil
 }
 

@@ -118,13 +118,23 @@ material.
 
 ### 3. Patterns
 
-Source: `patterns` table (introduced in Slice 7).
+Source: `patterns` table (introduced in Slice 7). **Available now** —
+`Store.PatternCorpusDocs` returns this stream as `ClusterCorpusDoc`
+rows; it is the only one of the four built ahead of the engine.
 
 Filtering: patterns with occurrence ≥ 3 across ≥ 2 sessions. Single-
-occurrence patterns do not yet warrant cross-cluster placement.
+occurrence patterns do not yet warrant cross-cluster placement. This is
+the same gate the vault renderer applies (`store.PatternEmitMinOccurrences`
+/ `PatternEmitMinSessions`), deliberately: a document the clusterer sees
+but no page exists for would be a disagreement nobody could inspect.
 
-Weight: 1.2. Patterns are explicit recurrences, the highest-signal
-input.
+Weight: 1.2 (`store.PatternStreamWeight`). Patterns are explicit
+recurrences, the highest-signal input.
+
+A pattern spanning several repos yields one doc **per repo** — the
+corpus row is repo-scoped and a cross-repo pattern is evidence in each.
+A pattern with no repo attribution yields a single doc with an empty
+repo rather than being dropped.
 
 ### 4. User-authored vault content
 
