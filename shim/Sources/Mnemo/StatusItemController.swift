@@ -7,16 +7,18 @@ import ApplicationServices
 // hotkeyDefaultsKey persists whether the user enabled the ⌥⌥ global hotkey.
 private let hotkeyDefaultsKey = "hotkeyEnabled"
 
-// StatusItemController owns the menu-bar status item, the popover, and the
-// optional global hotkey (§6). The status item uses a FIXED square length so a
-// variable-width glyph can't shift the popover anchor.
+// StatusItemController owns the optional menu-bar status item, the popover,
+// and the optional global hotkey (§6). Health notifications live on the
+// shared HealthController owned by AppDelegate — this type is chrome only.
+// The status item uses a FIXED square length so a variable-width glyph can't
+// shift the popover anchor.
 final class StatusItemController: NSObject, NSPopoverDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
     private let content = PopoverContentController()
-    // health drives the dashboard panel, native notifications, and the glyph's
-    // colour from the daemon's diagnostics stream (🎯T86).
-    private let health = HealthController()
+    // Shared with AppDelegate: glyph tint + Status tab only. Notifications
+    // and the SSE stream are owned by HealthController at the app level.
+    private let health: HealthController
     private var hotkey: HotkeyMonitor?
     // Dismissal monitors give the popover a menu-like lifecycle: any click
     // outside the app, or the app resigning active, closes it. We activate the
@@ -26,7 +28,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var resignObserver: Any?
     private var trustPoll: Timer?
 
-    override init() {
+    init(health: HealthController) {
+        self.health = health
         super.init()
         content.onRequestClose = { [weak self] in self?.closePopover() }
 
@@ -55,16 +58,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // Prewarm the list/previews on launch so the first open is instant.
         content.prewarm()
 
-        // Subscribe to the daemon's diagnostics stream: tint the glyph by worst
-        // severity, feed the Status tab, and raise native notifications (🎯T86).
+        // Glyph + plugin preview: notifications stay on AppDelegate's handlers.
         health.onSeverity = { [weak self] sev in self?.applySeverity(sev) }
-        // A notification's "Open Dashboard" action opens the Status tab.
-        health.onOpenRequested = { [weak self] in self?.showSettings(select: .status) }
-        // plugin.reload → re-request the live plugin WKWebView (🎯T102.9).
         health.onPluginReload = { [weak self] name in
             self?.content.handlePluginReload(name: name)
         }
-        health.start()
+        // Reflect current severity immediately (stream may already be live).
+        applySeverity(health.currentReport().worst)
 
         // Restore the opt-in hotkey across launches (the daemon relaunches the
         // shim, so persistence is what keeps it "on"). No permission prompt on
@@ -72,6 +72,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         if UserDefaults.standard.bool(forKey: hotkeyDefaultsKey) {
             startHotkey(requestPermission: false)
         }
+    }
+
+    deinit {
+        health.onSeverity = nil
+        health.onPluginReload = nil
+        removeDismissMonitors()
+        hotkey?.stop()
+        NSStatusBar.system.removeStatusItem(statusItem)
     }
 
     // applySeverity sets the status-item glyph by the worst current health

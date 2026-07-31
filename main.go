@@ -1098,10 +1098,11 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		notifyCfg.Enabled = false
 	}
 	// The SSE hub (🎯T86) was created earlier so plugins can publish
-	// plugin.reload during startup reconcile (🎯T102.9). The notifier
-	// routes alerts to the shim when one is connected and falls back to
-	// osascript/notify-send when headless; the scheduler streams every
-	// report so the shim's dashboard panel and status glyph stay live.
+	// plugin.reload during startup reconcile (🎯T102.9). Health alerts
+	// always go through the hub → multi-purpose native shim (notifications,
+	// optional menu-bar chrome). There is no parallel osascript path and
+	// no "is the menubar up?" gate. The scheduler also streams every
+	// report so the shim's dashboard and glyph stay live.
 	notifier := diag.NewNotifier(notifyCfg)
 	notifier.OnAlert(func(a diag.Alert) {
 		eventHub.Publish(api.Event{Type: "alert", Data: a})
@@ -1124,7 +1125,6 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			}()
 		}
 	})
-	notifier.SetShimPresent(eventHub.HasSubscribers)
 	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)
 	// Re-evaluate the budget throttle on the full pass (🎯T136), so the
 	// check that reports throttle state reads a value from this pass
@@ -1136,6 +1136,14 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		// health snapshot immediately rather than waiting for the next tick.
 		eventHub.PublishRetained(api.Event{Type: "health", Data: rep})
 	})
+	// Retained UI chrome flags for the shim (menu bar on/off is chrome,
+	// not process lifecycle).
+	publishUIConfig := func(menuBar bool) {
+		eventHub.PublishRetained(api.Event{Type: "ui", Data: map[string]any{
+			"menu_bar_app": menuBar,
+		}})
+	}
+	publishUIConfig(cfg.MenuBarApp)
 	go diagScheduler.Run(ctx)
 
 	// Resolver threaded into tools.Handler. If the inbound request
@@ -1231,13 +1239,14 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// disk via store.WriteConfig (which re-runs the same validation as
 	// LoadConfig) and asks the Registry to adopt it across every
 	// already-initialised per-user Store.
-	// The menu-bar shim supervisor (🎯T85.5) honours the menu_bar_app flag and
-	// is hot-reloadable: configController.Put pokes it on every config change,
-	// so toggling menu_bar_app via mnemo_config takes effect immediately, with
-	// no daemon restart.
+	// Multi-purpose native shim supervisor (🎯T85.5): always keep Mnemo.app
+	// running when installed (notifications + SSE consumer). menu_bar_app is
+	// chrome-only and is published as a retained "ui" event for the shim.
 	shimSup := newShimSupervisor()
-	shimSup.SetEnabled(cfg.MenuBarApp)
-	handler.SetConfigController(configController{reg: reg, shim: shimSup, autoOrch: autoOrch})
+	handler.SetConfigController(configController{
+		reg: reg, autoOrch: autoOrch,
+		onMenuBar: publishUIConfig,
+	})
 
 	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
 	// same registry that backs the /health endpoint and the scheduler.
@@ -1381,12 +1390,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	go func() { errCh <- httpServer.ListenAndServe() }()
 	boot.Set(boot.PhaseListening, "HTTP listener up on "+addr+"; opening default-user store")
 
-	// Start the menu-bar shim supervisor (🎯T85.5). It honours menu_bar_app
-	// (initial value set above) and reacts to live toggles via Put, so the
-	// menu-bar app is opt-in and the toggle needs no restart. The Threads
-	// daemon API (mnemo_thread_* tools, the `mnemo thread` CLI, the HTTP
-	// thread routes) stays available unconditionally; only the menu-bar app
-	// is gated. Best-effort, macOS-only; a no-op when no Mnemo.app is found.
+	// Always supervise the multi-purpose shim when Mnemo.app is present.
+	// Menu-bar visibility is chrome toggled via the retained "ui" event,
+	// not process lifecycle. Best-effort, macOS-only; no-op without the app.
 	go shimSup.run(ctx)
 
 	// Optionally start the federated mTLS server in parallel
@@ -1704,9 +1710,9 @@ func (a compactorAdapter) Health() tools.CompactorHealth {
 // importing the tools package (a cycle we already avoid for
 // dependency hygiene).
 type configController struct {
-	reg      *registry.Registry
-	shim     *shimSupervisor
-	autoOrch *upgrade.Orchestrator
+	reg       *registry.Registry
+	autoOrch  *upgrade.Orchestrator
+	onMenuBar func(bool) // live-publish menu_bar_app chrome flag to the shim
 }
 
 func (c configController) Get() store.Config {
@@ -1719,10 +1725,14 @@ func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
 		return tools.ConfigReport{}, err
 	}
 	rep := c.reg.Reload(newCfg)
-	// Adopt menu_bar_app live: start/stop supervising the menu-bar app
-	// without a daemon restart (🎯T85.5).
-	if c.shim != nil {
-		c.shim.SetEnabled(newCfg.MenuBarApp)
+	// menu_bar_app is chrome-only: tell the always-running shim whether to
+	// show the status item. Process lifecycle is independent (🎯T85.5).
+	if old.MenuBarApp != newCfg.MenuBarApp {
+		rep.Changed = append(rep.Changed, "menu_bar_app")
+		if c.onMenuBar != nil {
+			c.onMenuBar(newCfg.MenuBarApp)
+		}
+		rep.Adopted = append(rep.Adopted, "menu_bar_app")
 	}
 	// Adopt auto_upgrade live (enabled + quiescence). Apply still only
 	// runs on Homebrew non-Windows installs (orchestrator NotifyOnly).

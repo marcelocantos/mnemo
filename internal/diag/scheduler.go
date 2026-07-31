@@ -83,7 +83,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) BeforeFull(fn func()) { s.beforeFull = fn }
 
 // runOnce runs the checks (full or fast tier), notifies, and logs a
-// one-line summary whenever anything is not ok.
+// one-line summary whenever anything is not ok — including the check
+// names, so a fail=1 line is not anonymous.
 func (s *Scheduler) runOnce(ctx context.Context, full bool) {
 	if full && s.beforeFull != nil {
 		s.beforeFull()
@@ -96,7 +97,17 @@ func (s *Scheduler) runOnce(ctx context.Context, full bool) {
 		s.onReport(rep)
 	}
 	if rep.Fail > 0 || rep.Warn > 0 {
+		var failed, warned []string
+		for _, r := range rep.Results {
+			switch r.Severity {
+			case "fail":
+				failed = append(failed, r.Name)
+			case "warn":
+				warned = append(warned, r.Name)
+			}
+		}
 		slog.Warn("diag: health degraded",
-			"fail", rep.Fail, "warn", rep.Warn, "ok", rep.OK, "tier_full", full)
+			"fail", rep.Fail, "warn", rep.Warn, "ok", rep.OK, "tier_full", full,
+			"failed", failed, "warned", warned)
 	}
 }

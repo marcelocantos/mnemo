@@ -65,3 +65,13 @@ struct HealthAlert: Decodable {
 
     var isRecovery: Bool { kind == "recovery" }
 }
+
+// UIConfig is chrome for the multi-purpose shim: the process always runs;
+// menu_bar_app only controls whether the status item is shown.
+struct UIConfig: Decodable {
+    let menuBarApp: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case menuBarApp = "menu_bar_app"
+    }
+}

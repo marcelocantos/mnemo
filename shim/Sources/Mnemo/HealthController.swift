@@ -33,9 +33,17 @@ final class HealthController {
     // onPluginReload fires on the plugin.reload SSE event (🎯T102.9) so the
     // popover can re-request the plugin's live WKWebView document.
     var onPluginReload: ((String?) -> Void)?
+    // onUIConfig fires when the daemon publishes a retained "ui" event
+    // (menu_bar_app chrome). The process always runs; only the status item
+    // is optional.
+    var onUIConfig: ((UIConfig) -> Void)?
 
     func start() {
         notifications.setOpenDashboard { [weak self] in self?.onOpenRequested?() }
+        // Request notification auth at launch: the shim is the sole
+        // presenter, so waiting for the dashboard open is too late for
+        // headless (no menu bar) installs.
+        notifications.ensureAuthorized()
         primeFromHealth()
         guard let url = DaemonClient.shared.eventsURL() else {
             Log.debug("HealthController: no events URL")
@@ -70,6 +78,8 @@ final class HealthController {
             if let r = try? JSONDecoder().decode(HealthReport.self, from: data) { apply(r) }
         case "alert":
             if let a = try? JSONDecoder().decode(HealthAlert.self, from: data) { notifications.post(a) }
+        case "ui":
+            if let u = try? JSONDecoder().decode(UIConfig.self, from: data) { onUIConfig?(u) }
         case "plugin.reload":
             // Empty body or missing name → reload whatever is showing.
             let pname = (try? JSONDecoder().decode(PluginReload.self, from: data))?.name

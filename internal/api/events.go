@@ -26,9 +26,8 @@ type Event struct {
 // daemon publishes typed Events; each connected client receives them on its own
 // buffered channel. Publish never blocks on a slow client — a full buffer drops
 // the event for that client, which re-primes from the next snapshot (the
-// dashboard panel also pulls /health on open). HasSubscribers lets the
-// notification path choose between an SSE alert (shim connected) and the
-// osascript/notify-send fallback (headless).
+// dashboard panel also pulls /health on open). Health alerts always
+// publish here; the multi-purpose shim is the sole presenter.
 type EventHub struct {
 	mu   sync.Mutex
 	subs map[int]chan Event

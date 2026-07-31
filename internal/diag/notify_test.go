@@ -4,6 +4,8 @@
 package diag
 
 import (
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,34 +52,31 @@ func TestNotifierTransitionsAndCooldown(t *testing.T) {
 	}
 }
 
-// When a native shim is connected (shimPresent true) alerts route to OnAlert
-// for a rich native notification; when it is absent they fall back to the OS
-// sender. (🎯T86)
-func TestNotifierRoutesToShim(t *testing.T) {
+// When OnAlert is wired, every decided alert goes there — never the OS
+// fallback. There is no subscriber/presence gate. (🎯T86)
+func TestNotifierRoutesToOnAlert(t *testing.T) {
 	n := NewNotifier(DefaultNotifierConfig("http://x/#health"))
 	var sends int
 	var alerts []Alert
 	n.SetSender(func(string, string) { sends++ })
 	n.OnAlert(func(a Alert) { alerts = append(alerts, a) })
-	present := true
-	n.SetShimPresent(func() bool { return present })
 
 	base := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	fail := Result{Name: "claude.path", Severity: "fail", Detail: "missing", Remediation: "install"}
 
-	n.Observe(rep(fail), base) // shim present → alert, no OS send
+	n.Observe(rep(fail), base)
 	if len(alerts) != 1 || sends != 0 {
-		t.Fatalf("present: alerts=%d sends=%d, want 1/0", len(alerts), sends)
+		t.Fatalf("OnAlert path: alerts=%d sends=%d, want 1/0", len(alerts), sends)
 	}
 	if a := alerts[0]; a.Name != "claude.path" || a.Severity != "fail" || a.Kind != "fail" ||
 		a.Detail != "missing" || a.Remediation != "install" || a.DashboardURL != "http://x/#health" {
 		t.Fatalf("alert payload mismatch: %+v", a)
 	}
 
-	present = false
-	n.Observe(rep(Result{Name: "db.readable", Severity: "fail"}), base) // absent → OS send
-	if sends != 1 || len(alerts) != 1 {
-		t.Fatalf("absent: sends=%d alerts=%d, want 1/1", sends, len(alerts))
+	// Second check: still OnAlert only, even with no "presence" concept.
+	n.Observe(rep(Result{Name: "db.readable", Severity: "fail"}), base)
+	if sends != 0 || len(alerts) != 2 {
+		t.Fatalf("still OnAlert only: sends=%d alerts=%d, want 0/2", sends, len(alerts))
 	}
 }
 
@@ -96,5 +95,40 @@ func TestNotifierDisabledAndThreshold(t *testing.T) {
 	on.Observe(rep(Result{Name: "y", Severity: "warn"}), time.Now())
 	if b != 0 {
 		t.Error("warn notified at fail threshold")
+	}
+}
+
+// logHealthAlert is pure: fail → WARN, recovery → INFO, attrs carry the
+// check identity. Captured via a temporary default logger so a missing
+// log line is a regression of the forensics path that left db.readable
+// notifications untraceable in the daemon log.
+func TestLogHealthAlertLevels(t *testing.T) {
+	var buf strings.Builder
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	logHealthAlert(Alert{
+		Name: "db.readable", Kind: "fail", Severity: "fail",
+		Detail: "the database is not responding", Remediation: "restart",
+		DashboardURL: "http://localhost:19419/#health",
+	}, "os")
+	logHealthAlert(Alert{
+		Name: "db.readable", Kind: "recovery", Severity: "ok",
+	}, "shim")
+
+	out := buf.String()
+	if !strings.Contains(out, `level=WARN`) || !strings.Contains(out, `check=db.readable`) {
+		t.Fatalf("fail alert not logged at WARN with check name:\n%s", out)
+	}
+	if !strings.Contains(out, `kind=fail`) || !strings.Contains(out, `detail=`) {
+		t.Fatalf("fail alert missing kind/detail:\n%s", out)
+	}
+	if !strings.Contains(out, `level=INFO`) || !strings.Contains(out, `kind=recovery`) {
+		t.Fatalf("recovery alert not logged at INFO:\n%s", out)
+	}
+	if !strings.Contains(out, `via=os`) || !strings.Contains(out, `via=shim`) {
+		t.Fatalf("via attribute missing:\n%s", out)
 	}
 }

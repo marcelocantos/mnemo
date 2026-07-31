@@ -55,15 +55,12 @@ type Config struct {
 	// content searchable via mnemo's existing FTS index.
 	ThreadsRoot string `json:"threads_root,omitempty"`
 
-	// MenuBarApp opts in to the macOS menu-bar Threads navigator app
-	// (🎯T85). When false (the default), the daemon does NOT auto-launch
-	// Mnemo.app. The Threads feature itself stays fully available
-	// regardless — via the mnemo_thread_* MCP tools, the `mnemo thread`
-	// CLI, and the HTTP thread routes; only the menu-bar button is gated.
-	// Set true to have the daemon launch and supervise the app. Applied
-	// live: toggling this via mnemo_config starts/stops supervising the app
-	// immediately, with no daemon restart. (Disabling won't force-quit a
-	// running app — it just won't be relaunched.)
+	// MenuBarApp toggles whether the multi-purpose native shim shows a
+	// menu-bar status item (🎯T85). The daemon always supervises
+	// Mnemo.app when it is installed — notifications and the health
+	// stream use the shim regardless. This flag is chrome-only: false
+	// (default) hides the status item; true shows it. Applied live via a
+	// retained "ui" SSE event, no daemon restart.
 	MenuBarApp bool `json:"menu_bar_app,omitempty"`
 
 	// DisableOCR turns image OCR off entirely (🎯T118). OCR runs in a
@@ -99,11 +96,10 @@ type Config struct {
 	// E.g. ["TASKS.md", "docs/roadmap.md"]. Empty → defaults only.
 	TodoGlobs []string `json:"todo_globs,omitempty"`
 
-	// DisableHealthNotifications turns off the self-diagnostics OS
-	// notifications (🎯T83). They are opt-out — enabled by default,
-	// fail-severity only, local-only (osascript / notify-send). Set true
-	// to silence them; the dashboard health page and mnemo_doctor are
-	// unaffected.
+	// DisableHealthNotifications turns off self-diagnostics notifications
+	// (🎯T83). They are opt-out — enabled by default, fail-severity only,
+	// delivered through the multi-purpose native shim. Set true to silence
+	// them; the dashboard health page and mnemo_doctor are unaffected.
 	DisableHealthNotifications bool `json:"disable_health_notifications,omitempty"`
 
 	// VaultPath is the directory where mnemo writes its Markdown knowledge
