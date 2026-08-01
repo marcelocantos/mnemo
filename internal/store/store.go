@@ -4722,15 +4722,18 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		untilExpr = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	// Build GROUP BY expression.
+	// Build GROUP BY expression. Outer SELECT is FROM billable e — only
+	// columns projected by the CTE are in scope. session_meta (sm) is joined
+	// inside the CTE only; repo/cwd must be lifted as billable.repo_key
+	// (dashboard Cost by Repo 500: "no such column: sm.repo").
 	var groupExpr, periodExpr string
 	switch groupBy {
 	case "model":
 		groupExpr = "e.model"
 		periodExpr = "e.model"
 	case "repo":
-		groupExpr = "CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END"
-		periodExpr = groupExpr
+		groupExpr = "e.repo_key"
+		periodExpr = "e.repo_key"
 	case "session":
 		groupExpr = "e.session_id"
 		periodExpr = "e.session_id"
@@ -4812,6 +4815,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 				e.model AS model,
 				e.session_id AS session_id,
 				COALESCE(sm.source, 'unknown') AS source,
+				MAX(CASE WHEN COALESCE(sm.repo, '') != '' THEN sm.repo ELSE COALESCE(sm.cwd, '') END) AS repo_key,
 				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
 				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
 				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,

@@ -2308,6 +2308,52 @@ func TestUsageGroupBySession(t *testing.T) {
 	}
 }
 
+// TestUsageGroupByRepo is the dashboard Cost-by-Repo path: group_by=repo must
+// not 500 with "no such column: sm.repo" (outer billable CTE loses sm).
+func TestUsageGroupByRepo(t *testing.T) {
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "proj-a", "sess-ra", []map[string]any{
+		{
+			"type": "system", "timestamp": nowAt(0, 10, 0, 0),
+			"cwd": "/Users/dev/work/github.com/acme/alpha", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage(nowAt(0, 10, 0, 5), "claude-sonnet-4-5", 1000, 100, 0, 0),
+	})
+	writeJSONL(t, projectDir, "proj-b", "sess-rb", []map[string]any{
+		{
+			"type": "system", "timestamp": nowAt(0, 11, 0, 0),
+			"cwd": "/Users/dev/work/github.com/acme/beta", "version": "2.1.81",
+			"message": map[string]any{"content": "init"},
+		},
+		assistantWithUsage(nowAt(0, 11, 0, 5), "claude-sonnet-4-5", 2000, 200, 0, 0),
+	})
+
+	s := newTestStore(t, projectDir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.Usage(UsageParams{Days: 30, GroupBy: "repo"})
+	if err != nil {
+		t.Fatalf("Usage group_by=repo: %v", err)
+	}
+	if len(result.Rows) == 0 {
+		t.Fatal("expected at least one repo row")
+	}
+	for i, r := range result.Rows {
+		if r.Period == "" {
+			t.Errorf("row %d: empty period (repo key)", i)
+		}
+		if r.Messages == 0 {
+			t.Errorf("row %d: zero messages", i)
+		}
+	}
+	if result.Total.Messages != 2 {
+		t.Errorf("total messages=%d want 2", result.Total.Messages)
+	}
+}
+
 // TestUsageGroupByBlock verifies 🎯T43: group_by="block" groups messages into
 // 5-hour billing blocks with the ccusage-compatible boundary algorithm.
 func TestUsageGroupByBlock(t *testing.T) {
