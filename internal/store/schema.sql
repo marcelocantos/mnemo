@@ -621,6 +621,30 @@ CREATE TABLE cluster_embeddings (
 			PRIMARY KEY (doc_kind, entity_id, content_hash, provider, model, model_version)
 		);
 
+-- 🎯T64.8: per-pass clustering telemetry (docs/design/vault-clustering.md
+-- § Cost telemetry). One row per RecomputeThemes pass, recording engine,
+-- corpus size, themes emitted, trigger, and (for the opt-in embeddings
+-- engine, later) provider/model/cost. All columns NOT NULL DEFAULT so the
+-- table is additive per 🎯T49 and the heuristic engine fills the
+-- embeddings-only columns with zero/empty.
+CREATE TABLE cluster_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			started_at TEXT NOT NULL DEFAULT '',
+			ended_at TEXT NOT NULL DEFAULT '',
+			engine TEXT NOT NULL DEFAULT 'heuristic',
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			model_version TEXT NOT NULL DEFAULT '',
+			input_docs INTEGER NOT NULL DEFAULT 0,
+			output_themes INTEGER NOT NULL DEFAULT 0,
+			embedding_calls INTEGER NOT NULL DEFAULT 0,
+			estimated_cost REAL NOT NULL DEFAULT 0,
+			failure_mode TEXT NOT NULL DEFAULT '',
+			trigger TEXT NOT NULL DEFAULT 'manual'
+		);
+
+CREATE INDEX cluster_runs_by_started ON cluster_runs (started_at DESC);
+
 -- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash
 -- drives incremental skip, and (size, mtime) is the write-back
 -- fingerprint that lets a mutation detect an external edit since the
