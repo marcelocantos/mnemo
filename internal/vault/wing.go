@@ -102,13 +102,15 @@ func (e *Exporter) syncMnemoWing(ctx context.Context, now time.Time) {
 				st.MigrationDocWrittenAt = now.UTC()
 			}
 		}
-
-		// Bridges (🎯T64.6): reconcile configured bridges against anchor
-		// files + the written-bridge record. Runs even when no bridges
-		// are configured so a removed bridge's block is stripped. Mutates
-		// st (WrittenBridges + BridgeErrors); persisted by st.Write below.
-		e.syncBridges(st)
 	}
+
+	// Bridges (🎯T64.6): reconcile configured bridges against anchor
+	// files + the written-bridge record. Runs even under v1 (write
+	// disallowed, strip-only) so a block a prior v2 sync left behind is
+	// reclaimed rather than orphaned, and even when no bridges are
+	// configured so a removed bridge's block is stripped. Mutates st
+	// (WrittenBridges + BridgeErrors); persisted by st.Write below.
+	e.syncBridges(st, layout != store.VaultLayoutV1)
 
 	soak := e.effectiveSoakWarn()
 	if e.maybeSoakWarn(st, layout, now, soak) {

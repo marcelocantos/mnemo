@@ -1217,6 +1217,29 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 			report.Adopted = append(report.Adopted, "vault_path")
 		}
 	}
+	// Vault exporter options other than the path (profile / bridges /
+	// bridge cap). These are captured at vault.New and read nowhere else,
+	// so adopt them by rebuilding the exporter in place — swapVault reads
+	// the already-swapped r.cfg and re-derives all of them. Skip when the
+	// path itself changed: the vault_path branch above already rebuilt
+	// with the new options. (🎯T64.5/T64.6)
+	if old.VaultPath == newCfg.VaultPath && vaultOptionsChanged(old, newCfg) {
+		report.Changed = append(report.Changed, "vault_profile/vault_bridges/vault_bridges_max_links")
+		anyFailure := false
+		for username, e := range entries {
+			if e.vault == nil {
+				continue // no vault active for this user; nothing to rebuild
+			}
+			if err := r.swapVault(username, e, newCfg.ResolvedVaultPath(e.homeDir)); err != nil {
+				report.Warnings = append(report.Warnings,
+					fmt.Sprintf("vault options: user %q: %v", username, err))
+				anyFailure = true
+			}
+		}
+		if !anyFailure {
+			report.Adopted = append(report.Adopted, "vault_profile/vault_bridges/vault_bridges_max_links")
+		}
+	}
 	if !linkedInstancesEqual(old.LinkedInstances, newCfg.LinkedInstances) {
 		report.Changed = append(report.Changed, "linked_instances")
 		report.RequiresRestart = append(report.RequiresRestart, "linked_instances")
@@ -1282,6 +1305,24 @@ func signalSourcesEqual(a, b []store.SignalSource) bool {
 		}
 	}
 	return true
+}
+
+// vaultOptionsChanged reports whether any non-path vault exporter option
+// (profile / bridges / bridge cap) differs between two configs, for
+// Reload change detection. (🎯T64.5/T64.6)
+func vaultOptionsChanged(a, b store.Config) bool {
+	if a.VaultProfile != b.VaultProfile || a.VaultBridgesMaxLinks != b.VaultBridgesMaxLinks {
+		return true
+	}
+	if len(a.VaultBridges) != len(b.VaultBridges) {
+		return true
+	}
+	for k, v := range a.VaultBridges {
+		if b.VaultBridges[k] != v {
+			return true
+		}
+	}
+	return false
 }
 
 // pluginsEqual reports whether two plugin lists are equal for Reload

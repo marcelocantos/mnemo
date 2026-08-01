@@ -152,7 +152,7 @@ type Config struct {
 	// VaultBridgesMaxLinks caps how many links a single bridge block
 	// emits (per source project for the memories bridge) so a bridge
 	// never becomes its own hairball (🎯T64.6). Zero resolves to the
-	// default (defaultVaultBridgesMaxLinks).
+	// default (DefaultVaultBridgesMaxLinks).
 	VaultBridgesMaxLinks int `json:"vault_bridges_max_links,omitempty"`
 
 	// VaultLayoutSoakWarnAfter is the duration (Go time.ParseDuration
@@ -1272,9 +1272,9 @@ var vaultBridgeCollections = []string{
 	"themes", "patterns", "cross-repo", "lessons", "decisions", "memories",
 }
 
-// defaultVaultBridgesMaxLinks caps a bridge block's link count when the
+// DefaultVaultBridgesMaxLinks caps a bridge block's link count when the
 // user has not set vault_bridges_max_links. (🎯T64.6)
-const defaultVaultBridgesMaxLinks = 50
+const DefaultVaultBridgesMaxLinks = 50
 
 // IsVaultBridgeCollection reports whether name is a recognised bridge
 // target collection. (🎯T64.6)
@@ -1288,13 +1288,13 @@ func IsVaultBridgeCollection(name string) bool {
 }
 
 // ResolvedVaultBridgesMaxLinks returns the effective per-bridge link cap:
-// the configured value when positive, else defaultVaultBridgesMaxLinks.
+// the configured value when positive, else DefaultVaultBridgesMaxLinks.
 // (🎯T64.6)
 func (c Config) ResolvedVaultBridgesMaxLinks() int {
 	if c.VaultBridgesMaxLinks > 0 {
 		return c.VaultBridgesMaxLinks
 	}
-	return defaultVaultBridgesMaxLinks
+	return DefaultVaultBridgesMaxLinks
 }
 
 // defaultVaultLayoutSoakWarnAfter is the soak window before the

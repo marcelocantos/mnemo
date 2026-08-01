@@ -5,10 +5,12 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 	"github.com/marcelocantos/mnemo/internal/storetest"
@@ -36,7 +38,7 @@ func TestLocateBridgeBlock(t *testing.T) {
 	})
 	t.Run("duplicate start", func(t *testing.T) {
 		content := sd + "\n" + ed + "\n" + sd + "\n" + ed + "\n"
-		if _, _, _, err := locateBridgeBlock(content, "themes"); err != errDuplicateFence {
+		if _, _, _, err := locateBridgeBlock(content, "themes"); !errors.Is(err, errDuplicateFence) {
 			t.Fatalf("err=%v, want errDuplicateFence", err)
 		}
 	})
@@ -136,7 +138,7 @@ func TestUpsertBridgeBlockDuplicateFenceLeavesFileAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := upsertBridgeBlock(anchor, "themes", []string{"- x"})
-	if err != errDuplicateFence {
+	if !errors.Is(err, errDuplicateFence) {
 		t.Fatalf("err=%v, want errDuplicateFence", err)
 	}
 	// File is byte-for-byte unchanged.
@@ -281,6 +283,157 @@ func TestSyncBridgesRemovedBridgeStripsBlock(t *testing.T) {
 	st, _ := store.LoadState(statePath)
 	if _, ok := st.WrittenBridges["decisions"]; ok {
 		t.Error("removed bridge still tracked in WrittenBridges")
+	}
+}
+
+// #1: a relocation whose old-anchor strip fails must not orphan the old
+// block. The old-anchor record survives for a later retry, the new
+// anchor is not written, and the failure is surfaced.
+func TestSyncBridgesRelocationStripFailureDoesNotOrphan(t *testing.T) {
+	exp, vaultDir, statePath := newBridgeExporter(t, map[string]string{
+		"decisions": "A.md",
+	})
+	if err := exp.Sync(context.Background()); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+	aPath := filepath.Join(vaultDir, "A.md")
+	// Duplicate the fence so the strip fails with errDuplicateFence.
+	dup := string(mustRead(t, aPath)) + "\n" +
+		bridgeStartDelim("decisions") + "\n" + bridgeEndDelim("decisions") + "\n"
+	if err := os.WriteFile(aPath, []byte(dup), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Relocate the bridge to B.md over the same vault + state.
+	s := storetest.NewStore(t, t.TempDir())
+	s.IngestAll()
+	exp2, err := New(s, vaultDir, Options{
+		Layout:    store.VaultLayoutV2,
+		StatePath: statePath,
+		Bridges:   map[string]string{"decisions": "B.md"},
+	})
+	if err != nil {
+		t.Fatalf("New2: %v", err)
+	}
+	if err := exp2.Sync(context.Background()); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(vaultDir, "B.md")); err == nil {
+		t.Error("new anchor B.md written while old block still stands (orphan)")
+	}
+	if string(mustRead(t, aPath)) != dup {
+		t.Error("A.md modified despite duplicate fence")
+	}
+	st, _ := store.LoadState(statePath)
+	if st.WrittenBridges["decisions"] != "A.md" {
+		t.Errorf("WrittenBridges = %v, want decisions→A.md (retained for retry)", st.WrittenBridges)
+	}
+	if len(st.BridgeErrors) == 0 {
+		t.Error("expected a bridge error for the failed relocation strip")
+	}
+}
+
+// #3: a no-op upsert must not rewrite the user-owned anchor (no mtime
+// bump, no rename that would break hardlinks / sync heuristics).
+func TestUpsertBridgeBlockIdempotentNoRewrite(t *testing.T) {
+	anchor := filepath.Join(t.TempDir(), "M.md")
+	body := []string{"- a", "- b"}
+	if err := upsertBridgeBlock(anchor, "decisions", body); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	// Backdate mtime; a no-op second upsert must leave it untouched.
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(anchor, past, past); err != nil {
+		t.Fatal(err)
+	}
+	before := string(mustRead(t, anchor))
+	if err := upsertBridgeBlock(anchor, "decisions", body); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	fi, err := os.Stat(anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(past) {
+		t.Errorf("no-op upsert rewrote the file (mtime bumped to %v)", fi.ModTime())
+	}
+	if string(mustRead(t, anchor)) != before {
+		t.Error("content changed on a no-op upsert")
+	}
+}
+
+// #2: containedAnchor rejects any anchor that escapes the vault root.
+func TestContainedAnchorRejectsEscape(t *testing.T) {
+	root := filepath.FromSlash("/vault/root")
+	cases := map[string]bool{
+		"x.md":           true,
+		"sub/x.md":       true,
+		"sub/../ok.md":   true,
+		"../escape.md":   false,
+		"../../etc/x.md": false,
+	}
+	for anchor, want := range cases {
+		if _, ok := containedAnchor(root, filepath.FromSlash(anchor)); ok != want {
+			t.Errorf("containedAnchor(%q) = %v, want %v", anchor, ok, want)
+		}
+	}
+}
+
+// #2 (integration): an escaping anchor writes nothing outside the vault
+// and is surfaced as an error rather than silently honoured.
+func TestSyncBridgesRejectsEscapingAnchor(t *testing.T) {
+	exp, vaultDir, statePath := newBridgeExporter(t, map[string]string{
+		"decisions": filepath.FromSlash("../escape.md"),
+	})
+	if err := exp.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(vaultDir), "escape.md")); err == nil {
+		t.Error("bridge wrote outside the vault root")
+	}
+	st, _ := store.LoadState(statePath)
+	if len(st.BridgeErrors) == 0 || st.BridgeErrors[0].Reason != "anchor outside vault" {
+		t.Errorf("expected 'anchor outside vault' error, got %+v", st.BridgeErrors)
+	}
+	if _, ok := st.WrittenBridges["decisions"]; ok {
+		t.Error("escaping anchor should not be recorded as written")
+	}
+}
+
+// #5: dropping back to a v1 layout strips a block a prior v2 sync wrote,
+// rather than orphaning it — write is disabled but strip still runs.
+func TestSyncBridgesV1StripsPriorBlock(t *testing.T) {
+	exp, vaultDir, statePath := newBridgeExporter(t, map[string]string{
+		"decisions": "A.md",
+	})
+	if err := exp.Sync(context.Background()); err != nil {
+		t.Fatalf("v2 Sync: %v", err)
+	}
+	anchor := filepath.Join(vaultDir, "A.md")
+	if !strings.Contains(string(mustRead(t, anchor)), bridgeStartDelim("decisions")) {
+		t.Fatal("v2 sync did not write the block")
+	}
+
+	s := storetest.NewStore(t, t.TempDir())
+	s.IngestAll()
+	exp2, err := New(s, vaultDir, Options{
+		Layout:    store.VaultLayoutV1,
+		StatePath: statePath,
+		Bridges:   map[string]string{"decisions": "A.md"},
+	})
+	if err != nil {
+		t.Fatalf("New2: %v", err)
+	}
+	if err := exp2.Sync(context.Background()); err != nil {
+		t.Fatalf("v1 Sync: %v", err)
+	}
+	if strings.Contains(string(mustRead(t, anchor)), "mnemo:bridge:decisions") {
+		t.Error("v1 sync did not strip the prior bridge block")
+	}
+	st, _ := store.LoadState(statePath)
+	if _, ok := st.WrittenBridges["decisions"]; ok {
+		t.Error("v1 sync left the bridge tracked in WrittenBridges")
 	}
 }
 
