@@ -65,6 +65,73 @@ func TestThemesForRenderWeightFloor(t *testing.T) {
 	}
 }
 
+func TestInspectThemeByIDAndSlug(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	insertTheme(t, s, "theme_heavy", "Schema Migration", 5.0, `["mnemo"]`)
+	insertThemeMember(t, s, "theme_heavy", "decision", "2", 0.95)
+	insertThemeMember(t, s, "theme_heavy", "pattern", "pattern_x", 0.60)
+
+	byID, err := s.InspectTheme("theme_heavy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byID == nil || byID.ID != "theme_heavy" {
+		t.Fatalf("inspect by id failed: %+v", byID)
+	}
+	if byID.LabelSource != "bigram" || byID.Pinned {
+		t.Errorf("unexpected label-source/pin: %+v", byID)
+	}
+	if len(byID.Members) != 2 {
+		t.Errorf("want 2 members, got %d", len(byID.Members))
+	}
+
+	bySlug, err := s.InspectTheme("schema-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bySlug == nil || bySlug.ID != "theme_heavy" {
+		t.Errorf("inspect by slug failed: %+v", bySlug)
+	}
+
+	miss, err := s.InspectTheme("nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss != nil {
+		t.Errorf("want nil for unknown ref, got %+v", miss)
+	}
+}
+
+func TestSetThemePinRoundTrip(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	insertTheme(t, s, "theme_heavy", "Schema Migration", 5.0, `["mnemo"]`)
+	insertThemeMember(t, s, "theme_heavy", "decision", "2", 0.95)
+
+	if err := s.SetThemePin("theme_heavy", "keep for the retro", false); err != nil {
+		t.Fatal(err)
+	}
+	insp, _ := s.InspectTheme("theme_heavy")
+	if insp == nil || !insp.Pinned || insp.PinReason != "keep for the retro" {
+		t.Fatalf("pin not reflected: %+v", insp)
+	}
+
+	// Idempotent re-pin updates the reason, no error.
+	if err := s.SetThemePin("theme_heavy", "still keeping", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := countScalar(t, s, "SELECT COUNT(*) FROM theme_pins"); got != 1 {
+		t.Errorf("re-pin should not duplicate rows, got %d", got)
+	}
+
+	if err := s.SetThemePin("theme_heavy", "", true); err != nil {
+		t.Fatal(err)
+	}
+	insp2, _ := s.InspectTheme("theme_heavy")
+	if insp2 == nil || insp2.Pinned {
+		t.Errorf("unpin not reflected: %+v", insp2)
+	}
+}
+
 func TestMaybeRecomputeThemesGating(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	seedClusterCorpus(t, s)

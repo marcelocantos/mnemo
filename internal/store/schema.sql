@@ -645,6 +645,15 @@ CREATE TABLE cluster_runs (
 
 CREATE INDEX cluster_runs_by_started ON cluster_runs (started_at DESC);
 
+-- 🎯T64.8: pinned themes are exempt from retire_after auto-archival.
+-- One row per pinned theme; rows live until the user unpins. Additive
+-- per 🎯T49.
+CREATE TABLE theme_pins (
+			theme_id TEXT PRIMARY KEY,
+			pinned_at TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT ''
+		);
+
 -- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash
 -- drives incremental skip, and (size, mtime) is the write-back
 -- fingerprint that lets a mutation detect an external edit since the

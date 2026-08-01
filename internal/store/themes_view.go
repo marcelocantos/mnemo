@@ -112,6 +112,64 @@ func (s *Store) ThemesForRender(minWeight float64) ([]ThemeView, error) {
 	return out, nil
 }
 
+// ThemeInspect is the full detail for one theme (mnemo_vault_themes_inspect):
+// the view plus how it was labelled and whether it is pinned.
+type ThemeInspect struct {
+	ThemeView
+	LabelSource string `json:"label_source"` // "bigram" | "llm" | "vault_user"
+	Pinned      bool   `json:"pinned"`
+	PinReason   string `json:"pin_reason,omitempty"`
+}
+
+// InspectTheme resolves a theme by exact id or by slug (derived from the
+// label) and returns its full detail, ignoring the render weight floor
+// so any theme is inspectable. Returns nil when nothing matches.
+func (s *Store) InspectTheme(ref string) (*ThemeInspect, error) {
+	// Load all non-segment themes (small set) and match by id or slug.
+	// Matching slug in Go avoids duplicating slugify in SQL.
+	views, err := s.ThemesForRender(0)
+	if err != nil {
+		return nil, err
+	}
+	var match *ThemeView
+	for i := range views {
+		if views[i].ID == ref || views[i].Slug == ref {
+			match = &views[i]
+			break
+		}
+	}
+	if match == nil {
+		return nil, nil
+	}
+
+	insp := &ThemeInspect{ThemeView: *match, LabelSource: "bigram"}
+	var pinnedAt, reason string
+	err = s.readDB.QueryRow(
+		`SELECT COALESCE(pinned_at,''), COALESCE(reason,'') FROM theme_pins WHERE theme_id = ?`,
+		match.ID).Scan(&pinnedAt, &reason)
+	if err == nil && pinnedAt != "" {
+		insp.Pinned = true
+		insp.PinReason = reason
+	}
+	return insp, nil
+}
+
+// SetThemePin pins or unpins a theme (mnemo_vault_themes_pin). A pinned
+// theme is exempt from retire_after auto-archival. Idempotent in both
+// directions.
+func (s *Store) SetThemePin(themeID, reason string, unpin bool) error {
+	if unpin {
+		_, err := s.writeDB.Exec(`DELETE FROM theme_pins WHERE theme_id = ?`, themeID)
+		return err
+	}
+	_, err := s.writeDB.Exec(`
+		INSERT INTO theme_pins (theme_id, pinned_at, reason)
+		VALUES (?, ?, ?)
+		ON CONFLICT(theme_id) DO UPDATE SET reason = excluded.reason
+	`, themeID, time.Now().UTC().Format(time.RFC3339), reason)
+	return err
+}
+
 // MaybeRecomputeThemes runs a clustering pass only if the last one is
 // older than interval (or none exists). Called from the vault sync loop
 // so the recompute cadence rides the existing timer without a dedicated

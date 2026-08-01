@@ -105,6 +105,10 @@ user. Good moments to reach for mnemo:
 - `mnemo_vault_migration_doc` — Return or (with `write=true`) regenerate `_mnemo/MIGRATION.md`, the once-written v1→v2 explainer. Preview-only by default. Requires `vault_path`.
 - `mnemo_vault_bridge_list` — List the vault bridges mnemo maintains (🎯T64.6): each configured collection (themes/patterns/cross-repo/lessons/decisions/memories) → anchor file, whether its fenced block is written yet, plus any per-bridge errors from the last sync. Configured via `vault_bridges` + `vault_bridges_max_links`.
 - `mnemo_vault_gc` — Inspect (and with `confirm=true`, clean up) vault GC orphans: `manifest_path_missing` rows (removable) and `disk_not_in_manifest` files (informational only — user content). Dry-run by default.
+- `mnemo_vault_recluster` — Force an immediate theme clustering pass (🎯T64.8) instead of waiting for the scheduled recompute that rides the vault sync loop. Runs the local heuristic engine (TF-IDF + single-link) over the four-stream corpus (decisions, compaction summaries, patterns, and — under a full/includes indexing scope — user vault notes), rewrites `themes`/`theme_members`, and records a `cluster_runs` row (returned). Theme pages refresh on the next sync. An `engine: "embeddings"` override is **rejected** — the embeddings engine is opt-in and not wired in this release.
+- `mnemo_vault_themes_inspect` — Inspect one theme by id or slug (🎯T64.8): label, weight, repo set, labelling source (bigram/llm/vault_user), pinned state, and the full member list ordered by centroid similarity. The "why does this theme look like this" surface.
+- `mnemo_vault_themes_pin` — Pin/unpin a theme (🎯T64.8) so it is exempt from `retire_after` auto-archival. Idempotent both ways; persists to `theme_pins`.
+- `mnemo_vault_themes_split` / `mnemo_vault_themes_merge` — Placeholders (🎯T64.8): manual cluster-quality overrides are a follow-up and reject cleanly for now. Use `mnemo_vault_themes_inspect` to examine a theme today.
 
 ## Code Structure
 

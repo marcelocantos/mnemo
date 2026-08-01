@@ -785,6 +785,36 @@ Returns, for the configured vault:
 
 Configured via the vault_bridges map (and vault_bridges_max_links) in ~/.mnemo/config.json. Requires vault to be enabled.`),
 		),
+		mcp.NewTool("mnemo_vault_recluster",
+			mcp.WithDescription(`Trigger an immediate theme clustering pass (🎯T64.8), instead of waiting for the scheduled recompute that rides the vault sync loop.
+
+Runs the heuristic engine over the four-stream corpus (decisions, compaction summaries, patterns, and — under a full/includes indexing scope — your own vault notes), rewrites the themes table, and records a cluster_runs row. Returns the run summary (engine, input docs, output themes). Theme pages refresh on the next vault sync.
+
+engine: optional override. "embeddings" is rejected unless vault_clustering.engine is set to "embeddings" in config (the embeddings engine is opt-in per the T63 egress posture; it is not wired in this release). force_reembed is accepted for forward-compatibility and has no effect on the heuristic engine.`),
+			mcp.WithString("engine", mcp.Description(`Optional engine override: "heuristic" (default) or "embeddings". An "embeddings" override without vault_clustering.engine=="embeddings" configured is rejected.`)),
+			mcp.WithBoolean("force_reembed", mcp.Description("Force a clean re-embed of the corpus (embeddings engine only; no effect on heuristic). Default false.")),
+		),
+		mcp.NewTool("mnemo_vault_themes_inspect",
+			mcp.WithDescription(`Inspect one theme (🎯T64.8): given a theme id or slug, return its label, weight, repo set, the labelling source (bigram / llm / vault_user), whether it is pinned, and its full member list (decision / compaction / pattern / vault_user) ordered by similarity to the cluster centroid.
+
+Use this to understand why a theme looks the way it does and what evidence backs it.`),
+			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id (theme_...) or slug (kebab-case, from the label).")),
+		),
+		mcp.NewTool("mnemo_vault_themes_pin",
+			mcp.WithDescription(`Pin or unpin a theme (🎯T64.8) so it is exempt from retire_after auto-archival. Pinning is idempotent; unpin removes the exemption.`),
+			mcp.WithString("theme_id", mcp.Required(), mcp.Description("Theme id to pin/unpin.")),
+			mcp.WithBoolean("unpin", mcp.Description("If true, remove the pin. Default false (pin).")),
+			mcp.WithString("reason", mcp.Description("Optional note recorded with the pin.")),
+		),
+		mcp.NewTool("mnemo_vault_themes_split",
+			mcp.WithDescription(`Placeholder (🎯T64.8): manual theme split is not available in this release. Cluster-quality overrides (split/merge) are a follow-up after real-world data is in hand; use mnemo_vault_themes_inspect to examine a theme today.`),
+			mcp.WithString("theme_id", mcp.Description("Theme id (accepted but not acted on in this release).")),
+		),
+		mcp.NewTool("mnemo_vault_themes_merge",
+			mcp.WithDescription(`Placeholder (🎯T64.8): manual theme merge is not available in this release. Cluster-quality overrides (split/merge) are a follow-up after real-world data is in hand; use mnemo_vault_themes_inspect to examine a theme today.`),
+			mcp.WithString("theme_id_a", mcp.Description("First theme id (accepted but not acted on in this release).")),
+			mcp.WithString("theme_id_b", mcp.Description("Second theme id (accepted but not acted on in this release).")),
+		),
 		mcp.NewTool("mnemo_doctor",
 			mcp.WithDescription(`Run mnemo's self-diagnostics and report health (🎯T83). Returns a per-check report — name, severity (ok/warn/fail), tier (fast/full), detail, and a remediation hint — covering the summariser working directory, claude on PATH, configured roots, the compaction circuit-breaker (a tripped breaker means every compaction is failing systemically), whether the indexer has backfilled since startup, and database responsiveness. The single "is mnemo healthy, and what do I do about it" call; the same data backs the dashboard health page (http://localhost:19419/#health) and opt-out OS notifications.`),
 		),
@@ -1048,6 +1078,14 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultMigrationDoc(args)
 	case "mnemo_vault_bridge_list":
 		return ch.vaultBridgeList(h.cfgCtl)
+	case "mnemo_vault_recluster":
+		return ch.vaultRecluster(args)
+	case "mnemo_vault_themes_inspect":
+		return ch.vaultThemesInspect(args)
+	case "mnemo_vault_themes_pin":
+		return ch.vaultThemesPin(args)
+	case "mnemo_vault_themes_split", "mnemo_vault_themes_merge":
+		return ch.vaultThemesOverrideStub(name)
 	case "mnemo_compactor_status":
 		return ch.compactorStatus(h.resolveCompactor)
 	case "mnemo_doctor":
@@ -3124,6 +3162,75 @@ func (h *callHandler) vaultBridgeList(ctl ConfigController) (string, bool, error
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(buf), false, nil
+}
+
+// vaultRecluster implements mnemo_vault_recluster (🎯T64.8): force an
+// immediate heuristic clustering pass. The embeddings engine is opt-in
+// and not wired in this release, so an "embeddings" override is
+// rejected rather than silently downgraded.
+func (h *callHandler) vaultRecluster(args map[string]any) (string, bool, error) {
+	if engine, _ := args["engine"].(string); engine == "embeddings" {
+		return "engine \"embeddings\" is not available: the embeddings engine is opt-in (vault_clustering.engine) and not wired in this release. Re-run without an engine override to use the heuristic engine.", true, nil
+	}
+
+	vaultRoot := ""
+	if h.vault != nil {
+		vaultRoot = h.vault.Path()
+	}
+	run, err := h.mem.RecomputeThemes(vaultRoot, "manual")
+	if err != nil {
+		return fmt.Sprintf("recluster failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(run, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+// vaultThemesInspect implements mnemo_vault_themes_inspect (🎯T64.8).
+func (h *callHandler) vaultThemesInspect(args map[string]any) (string, bool, error) {
+	ref, _ := args["theme"].(string)
+	if strings.TrimSpace(ref) == "" {
+		return "theme is required (a theme id or slug).", true, nil
+	}
+	insp, err := h.mem.InspectTheme(ref)
+	if err != nil {
+		return fmt.Sprintf("inspect failed: %v", err), true, nil
+	}
+	if insp == nil {
+		return fmt.Sprintf("no theme matches %q (try mnemo_query on themes, or an id like theme_...).", ref), false, nil
+	}
+	out, err := json.MarshalIndent(insp, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+// vaultThemesPin implements mnemo_vault_themes_pin (🎯T64.8).
+func (h *callHandler) vaultThemesPin(args map[string]any) (string, bool, error) {
+	themeID, _ := args["theme_id"].(string)
+	if strings.TrimSpace(themeID) == "" {
+		return "theme_id is required.", true, nil
+	}
+	unpin, _ := args["unpin"].(bool)
+	reason, _ := args["reason"].(string)
+	if err := h.mem.SetThemePin(themeID, reason, unpin); err != nil {
+		return fmt.Sprintf("pin failed: %v", err), true, nil
+	}
+	if unpin {
+		return fmt.Sprintf("theme %s unpinned.", themeID), false, nil
+	}
+	return fmt.Sprintf("theme %s pinned (exempt from auto-archival).", themeID), false, nil
+}
+
+// vaultThemesOverrideStub implements the mnemo_vault_themes_split and
+// mnemo_vault_themes_merge placeholders (🎯T64.8): manual cluster-quality
+// overrides are a follow-up, so these reject cleanly rather than pretend.
+func (h *callHandler) vaultThemesOverrideStub(name string) (string, bool, error) {
+	op := strings.TrimPrefix(name, "mnemo_vault_themes_")
+	return fmt.Sprintf("theme %s is not available in this release: manual cluster-quality overrides (split/merge) are a follow-up after real-world data is in hand. Use mnemo_vault_themes_inspect to examine a theme today.", op), true, nil
 }
 
 // doctor implements mnemo_doctor (🎯T83): it runs the full self-

@@ -173,6 +173,15 @@ func (f *fakeBackend) ThemesForRender(minWeight float64) ([]store.ThemeView, err
 func (f *fakeBackend) MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*store.ClusterRun, error) {
 	panic("unexpected MaybeRecomputeThemes call")
 }
+func (f *fakeBackend) RecomputeThemes(vaultRoot, trigger string) (*store.ClusterRun, error) {
+	panic("unexpected RecomputeThemes call")
+}
+func (f *fakeBackend) InspectTheme(ref string) (*store.ThemeInspect, error) {
+	panic("unexpected InspectTheme call")
+}
+func (f *fakeBackend) SetThemePin(themeID, reason string, unpin bool) error {
+	panic("unexpected SetThemePin call")
+}
 func (f *fakeBackend) SearchImages(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
 	panic("unexpected SearchImages call")
 }

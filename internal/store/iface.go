@@ -64,6 +64,14 @@ type Backend interface {
 	// MaybeRecomputeThemes runs a clustering pass if the last is older
 	// than interval, so the cadence rides the vault sync loop (🎯T64.8).
 	MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*ClusterRun, error)
+	// RecomputeThemes forces an immediate clustering pass, for the
+	// mnemo_vault_recluster tool (🎯T64.8).
+	RecomputeThemes(vaultRoot, trigger string) (*ClusterRun, error)
+	// InspectTheme resolves a theme by id or slug for
+	// mnemo_vault_themes_inspect; nil when nothing matches (🎯T64.8).
+	InspectTheme(ref string) (*ThemeInspect, error)
+	// SetThemePin pins/unpins a theme for mnemo_vault_themes_pin (🎯T64.8).
+	SetThemePin(themeID, reason string, unpin bool) error
 	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
 	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
