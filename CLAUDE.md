@@ -326,6 +326,21 @@ Whether the embedder ran or was skipped, and why, is reported by the
 `images.embedder` check in `mnemo_doctor` / `GET /health`; per-image
 outcomes are in the `image_embedding_attempts` table.
 
+**Vault clustering (🎯T64.8).** Two independent egress surfaces, each
+off by default — a two-key matrix:
+
+1. **Embeddings** — Voyage AI (`POST /v1/embeddings`). Requires
+   `vault_clustering.engine: "embeddings"` **and** `VOYAGE_API_KEY`
+   (or `VOYAGEAI_API_KEY`). Key alone is not enough; engine alone with
+   no key falls back to the local heuristic engine.
+2. **LLM labels** — Anthropic Messages API (Haiku). Requires
+   `vault_clustering.label.engine: "llm"` **and** `ANTHROPIC_API_KEY`.
+   Key alone leaves bigram labels.
+
+Default (`engine: "heuristic"`, `label.engine: "bigram"`) is fully
+offline. Vectors cache in `cluster_embeddings` keyed by
+`(doc_kind, entity_id, content_hash, provider, model, model_version)`.
+
 The append-only schema policy and the opt-in egress posture compose:
 restoring an older backup never silently triggers a backfill of
 data from external APIs that the user did not authorise.

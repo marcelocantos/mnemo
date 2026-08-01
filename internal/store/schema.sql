@@ -598,7 +598,9 @@ CREATE TABLE themes (
 			source_engine TEXT NOT NULL DEFAULT '',
 			member_count INTEGER NOT NULL DEFAULT 0,
 			centroid_text TEXT NOT NULL DEFAULT '',
-			archived INTEGER NOT NULL DEFAULT 0
+			archived INTEGER NOT NULL DEFAULT 0,
+			label_path TEXT NOT NULL DEFAULT '',
+			label_gate TEXT NOT NULL DEFAULT ''
 		);
 
 CREATE INDEX idx_themes_parent ON themes(parent_theme_id);

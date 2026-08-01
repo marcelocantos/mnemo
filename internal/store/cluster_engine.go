@@ -12,10 +12,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/marcelocantos/mnemo/internal/cluster"
 )
 
 // ClusterRunArgs configures one clustering pass (🎯T64.8).
@@ -34,8 +35,19 @@ type ClusterRunArgs struct {
 	// are recomputed even when content is unchanged.
 	ForceReembed bool
 
+	// Provider overrides the default Voyage constructor. Tests inject a
+	// fake; production leaves it nil so RunCluster builds Voyage only
+	// when engine=embeddings and a key is present.
+	Provider cluster.EmbeddingProvider
+
+	// Labeler overrides the default Anthropic labeler. Tests inject a
+	// fake; production leaves it nil so RunCluster builds one only when
+	// label.engine=llm and a key is present.
+	Labeler cluster.Labeler
+
 	// HTTPAllowed is set by tests to observe egress. Production leaves it
-	// nil. When non-nil, any outbound attempt records true.
+	// nil. When non-nil, any outbound attempt records true. Providers
+	// constructed by RunCluster wire their OnRequest to flip this.
 	HTTPAllowed *bool
 
 	// Now overrides wall clock (tests).
@@ -142,19 +154,55 @@ func (s *Store) RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRu
 	}
 
 	var warnings []string
-	// Two-key egress: never open outbound HTTP unless the matching
-	// engine opt-in is set. Even with keys present.
+	// Resolve providers only when the matching opt-in is set. API keys
+	// alone never open egress (two-key matrix).
+	var provider cluster.EmbeddingProvider
 	if engine == "embeddings" {
-		if os.Getenv("VOYAGE_API_KEY") == "" && os.Getenv("VOYAGEAI_API_KEY") == "" {
-			warnings = append(warnings, "embeddings engine requested but no Voyage API key; falling back to heuristic")
-			if !cfg.EffectiveFallbackToHeuristicOnOutage() {
-				return s.recordFailedRun(nowStr, engine, trigger, "no_api_key", warnings)
+		provider = args.Provider
+		if provider == nil {
+			vargs := &cluster.VoyageArgs{
+				Model:        cfg.EffectiveEmbeddingModel(),
+				ModelVersion: cfg.EmbeddingModelVersion,
 			}
-			engine = "heuristic"
+			if args.HTTPAllowed != nil {
+				flag := args.HTTPAllowed
+				vargs.OnRequest = func() { *flag = true }
+			}
+			v, err := cluster.NewVoyage(vargs)
+			if err != nil {
+				warnings = append(warnings, "embeddings engine requested but provider unavailable: "+err.Error()+"; falling back to heuristic")
+				if !cfg.EffectiveFallbackToHeuristicOnOutage() {
+					return s.recordFailedRun(nowStr, engine, trigger, "no_api_key", warnings)
+				}
+				engine = "heuristic"
+				provider = nil
+			} else {
+				provider = v
+			}
+		} else if args.HTTPAllowed != nil {
+			// Injected providers still honour the egress observer when
+			// they call through; tests flip the flag themselves.
 		}
 	}
-	// Label engine "llm" is recorded but not called in this pass unless
-	// a provider is wired later; default bigram path is always local.
+
+	var labeler cluster.Labeler
+	if cfg.EffectiveLabelEngine() == "llm" {
+		labeler = args.Labeler
+		if labeler == nil {
+			largs := &cluster.AnthropicLabelArgs{}
+			if args.HTTPAllowed != nil {
+				flag := args.HTTPAllowed
+				largs.OnRequest = func() { *flag = true }
+			}
+			lab, err := cluster.NewAnthropicLabeler(largs)
+			if err != nil {
+				warnings = append(warnings, "label.engine=llm but no Anthropic key; using bigram labels")
+				labeler = nil
+			} else {
+				labeler = lab
+			}
+		}
+	}
 
 	started := nowStr
 	runID, err := s.insertClusterRunStart(started, engine, trigger, cfg)
@@ -193,32 +241,36 @@ func (s *Store) RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRu
 
 	var embCalls int
 	var estCost float64
+	var embBytes, embRows int
 	failureMode := ""
 
-	switch engine {
-	case "embeddings":
-		// Opt-in path: currently reuses TF-IDF vectors when no live
-		// provider is injected. Real Voyage wiring lives behind the
-		// same gate and still requires engine=embeddings. Recording
-		// embCalls=0 keeps the two-key test honest: without a provider
-		// implementation that dials HTTP, we do not dial HTTP.
-		if args.HTTPAllowed != nil {
-			// Test hook only: we deliberately do NOT set it — proving
-			// zero egress when keys exist but we never call out.
+	switch {
+	case engine == "embeddings" && provider != nil:
+		nCalls, cost, err := s.vectoriseWithEmbeddings(ctx, docs, provider, args.ForceReembed, nowStr)
+		if err != nil {
+			warnings = append(warnings, "embeddings failed: "+err.Error())
+			if !cfg.EffectiveFallbackToHeuristicOnOutage() {
+				_ = s.finishClusterRun(runID, time.Now().UTC().Format(time.RFC3339), len(docs), 0, nCalls, 0, "embedding_outage", 0, 0)
+				return &ClusterRunResult{
+					RunID: runID, Engine: engine, InputDocs: len(docs),
+					EmbeddingCalls: nCalls, FailureMode: "embedding_outage",
+					Trigger: trigger, StartedAt: started,
+					EndedAt: time.Now().UTC().Format(time.RFC3339), Warnings: warnings,
+				}, nil
+			}
+			// Fall back to heuristic vectors; keep last themes intact
+			// only if we never got past vectorisation — we continue.
+			engine = "heuristic"
+			failureMode = "embedding_fallback"
+			idf := computeIDF(docs)
+			for i := range docs {
+				docs[i].vec = tfidfVector(docs[i].Text, idf)
+			}
+		} else {
+			embCalls = nCalls
+			estCost = cost
+			embRows, embBytes = s.embeddingCacheStats(provider)
 		}
-		// Build TF-IDF still (embeddings provider optional). When a
-		// future EmbeddingProvider is set on the store, swap here.
-		idf := computeIDF(docs)
-		for i := range docs {
-			docs[i].vec = tfidfVector(docs[i].Text, idf)
-		}
-		// Note: without a live embedder this path is algorithmically
-		// identical to heuristic but records source_engine=embeddings
-		// only when a provider actually produced vectors. Force heuristic
-		// labelling of engine field when no provider ran:
-		engine = "heuristic"
-		failureMode = "embeddings_provider_unavailable"
-		warnings = append(warnings, "embeddings provider not wired; ran heuristic vectors")
 	default:
 		idf := computeIDF(docs)
 		for i := range docs {
@@ -231,9 +283,9 @@ func (s *Store) RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRu
 		threshold = cfg.EffectiveEmbeddingThreshold()
 	}
 
-	themes, err := singleLinkThemes(docs, threshold, cfg)
+	themes, err := singleLinkThemes(ctx, docs, threshold, cfg, labeler)
 	if err != nil {
-		_ = s.finishClusterRun(runID, time.Now().UTC().Format(time.RFC3339), len(docs), 0, embCalls, estCost, "cluster_error", 0, 0)
+		_ = s.finishClusterRun(runID, time.Now().UTC().Format(time.RFC3339), len(docs), 0, embCalls, estCost, "cluster_error", embBytes, embRows)
 		return nil, err
 	}
 
@@ -277,7 +329,7 @@ func (s *Store) RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRu
 		log.Warn("trim cluster_runs", "err", err)
 	}
 
-	if err := s.finishClusterRun(runID, ended, len(docs), len(themes), embCalls, estCost, failureMode, 0, 0); err != nil {
+	if err := s.finishClusterRun(runID, ended, len(docs), len(themes), embCalls, estCost, failureMode, embBytes, embRows); err != nil {
 		return nil, err
 	}
 
@@ -296,6 +348,102 @@ func (s *Store) RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRu
 	}, nil
 }
 
+// vectoriseWithEmbeddings fills docs[i].vec from the cluster_embeddings
+// cache or a live provider call. Returns (embedding_calls, estimated_cost).
+func (s *Store) vectoriseWithEmbeddings(ctx context.Context, docs []clusterDoc, provider cluster.EmbeddingProvider, force bool, nowStr string) (int, float64, error) {
+	providerName := provider.Name()
+	model := provider.Model()
+	version := provider.ModelVersion()
+	dims := provider.Dimensions()
+
+	type need struct {
+		i    int
+		text string
+	}
+	var miss []need
+	for i := range docs {
+		if !force {
+			if vec, ok := s.lookupEmbedding(docs[i].Kind, docs[i].EntityID, docs[i].contentHash, providerName, model, version, dims); ok {
+				docs[i].vec = cluster.DenseToSparse(vec)
+				continue
+			}
+		}
+		miss = append(miss, need{i: i, text: docs[i].Text})
+	}
+	if len(miss) == 0 {
+		return 0, 0, nil
+	}
+	texts := make([]string, len(miss))
+	for i, m := range miss {
+		texts[i] = m.text
+	}
+	vecs, err := provider.Embed(ctx, texts)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(vecs) != len(miss) {
+		return 0, 0, fmt.Errorf("provider returned %d vectors for %d texts", len(vecs), len(miss))
+	}
+	for j, m := range miss {
+		v := vecs[j]
+		docs[m.i].vec = cluster.DenseToSparse(v)
+		if err := s.putEmbedding(docs[m.i].Kind, docs[m.i].EntityID, docs[m.i].contentHash,
+			providerName, model, version, dims, v, nowStr); err != nil {
+			return len(miss), 0, err
+		}
+	}
+	// Rough cost estimate: voyage-3-lite ~$0.02 / 1M tokens; assume ~100
+	// tokens per doc average for the estimate column only.
+	est := float64(len(miss)) * 100 * 0.02 / 1_000_000
+	return len(miss), est, nil
+}
+
+func (s *Store) lookupEmbedding(kind, entityID, hash, provider, model, version string, dims int) ([]float32, bool) {
+	var blob []byte
+	var gotDims int
+	err := s.readDB.QueryRow(`
+		SELECT dims, vector FROM cluster_embeddings
+		WHERE doc_kind = ? AND entity_id = ? AND content_hash = ?
+		  AND provider = ? AND model = ? AND model_version = ?
+	`, kind, entityID, hash, provider, model, version).Scan(&gotDims, &blob)
+	if err != nil {
+		return nil, false
+	}
+	if gotDims <= 0 {
+		gotDims = dims
+	}
+	v, err := cluster.UnpackFloat32LE(blob, gotDims)
+	if err != nil {
+		return nil, false
+	}
+	return v, true
+}
+
+func (s *Store) putEmbedding(kind, entityID, hash, provider, model, version string, dims int, v []float32, nowStr string) error {
+	if dims <= 0 {
+		dims = len(v)
+	}
+	blob := cluster.PackFloat32LE(v)
+	_, err := s.writeDB.Exec(`
+		INSERT INTO cluster_embeddings (
+			doc_kind, entity_id, content_hash, provider, model, model_version,
+			dims, vector, computed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(doc_kind, entity_id, content_hash, provider, model, model_version)
+		DO UPDATE SET dims = excluded.dims, vector = excluded.vector, computed_at = excluded.computed_at
+	`, kind, entityID, hash, provider, model, version, dims, blob, nowStr)
+	return err
+}
+
+func (s *Store) embeddingCacheStats(provider cluster.EmbeddingProvider) (rows, bytes int) {
+	_ = s.readDB.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(length(vector)), 0)
+		FROM cluster_embeddings
+		WHERE provider = ? AND model = ? AND model_version = ?
+	`, provider.Name(), provider.Model(), provider.ModelVersion()).Scan(&rows, &bytes)
+	return rows, bytes
+}
+
 type docTheme struct {
 	id         string
 	label      string
@@ -312,7 +460,7 @@ type docTheme struct {
 	centroidTx string
 }
 
-func singleLinkThemes(docs []clusterDoc, threshold float64, cfg VaultClusteringConfig) ([]docTheme, error) {
+func singleLinkThemes(ctx context.Context, docs []clusterDoc, threshold float64, cfg VaultClusteringConfig, labeler cluster.Labeler) ([]docTheme, error) {
 	n := len(docs)
 	if n == 0 {
 		return nil, nil
@@ -371,7 +519,7 @@ func singleLinkThemes(docs []clusterDoc, threshold float64, cfg VaultClusteringC
 	for _, ci := range active {
 		c := all[ci]
 		cent := centroidOf(docs, c.members)
-		lab := labelCluster(corpusAsDocs(docs), c.members, cent, cfg)
+		lab := labelCluster(ctx, corpusAsDocs(docs), c.members, cent, cfg, labeler)
 		ids := make([]string, len(c.members))
 		repos := map[string]struct{}{}
 		var weight float64
@@ -671,8 +819,9 @@ func (s *Store) persistDocThemes(docs []clusterDoc, themes []docTheme, engine, n
 			INSERT INTO themes (
 				id, label, summary, weight, repos, parent_theme_id, depth,
 				first_seen, last_touched, computed_at,
-				slug, source_engine, member_count, centroid_text, archived
-			) VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?, ?, 0)
+				slug, source_engine, member_count, centroid_text, archived,
+				label_path, label_gate
+			) VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				label = excluded.label,
 				summary = excluded.summary,
@@ -684,10 +833,13 @@ func (s *Store) persistDocThemes(docs []clusterDoc, themes []docTheme, engine, n
 				source_engine = excluded.source_engine,
 				member_count = excluded.member_count,
 				centroid_text = excluded.centroid_text,
-				archived = 0
+				archived = 0,
+				label_path = excluded.label_path,
+				label_gate = excluded.label_gate
 		`, tw.id, tw.label, tw.summary, tw.weight, string(reposJSON),
 			first, last, nowStr,
-			tw.slug, engine, len(tw.members), tw.centroidTx); err != nil {
+			tw.slug, engine, len(tw.members), tw.centroidTx,
+			string(tw.labelPath), string(tw.labelGate)); err != nil {
 			return fmt.Errorf("insert theme %s: %w", tw.id, err)
 		}
 		for _, mi := range tw.members {
@@ -829,14 +981,15 @@ func (s *Store) InspectTheme(ref string) (*ThemeInspect, error) {
 		weight                                                          float64
 		members, archived                                               int
 	)
+	var labelPath, labelGate string
 	err := s.readDB.QueryRow(`
 		SELECT id, label, COALESCE(slug,''), COALESCE(source_engine,''), weight,
 		       COALESCE(member_count,0), COALESCE(repos,'[]'), COALESCE(centroid_text,''),
 		       COALESCE(archived,0), COALESCE(first_seen,''), COALESCE(last_touched,''),
-		       COALESCE(computed_at,'')
+		       COALESCE(computed_at,''), COALESCE(label_path,''), COALESCE(label_gate,'')
 		FROM themes WHERE id = ? OR slug = ? LIMIT 1
 	`, ref, ref).Scan(&id, &label, &slug, &engine, &weight, &members, &repos, &centroid,
-		&archived, &first, &last, &computed)
+		&archived, &first, &last, &computed, &labelPath, &labelGate)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("theme %q not found", ref)
 	}
@@ -883,6 +1036,8 @@ func (s *Store) InspectTheme(ref string) (*ThemeInspect, error) {
 		MemberCount:  members,
 		Repos:        repoList,
 		CentroidText: centroid,
+		LabelPath:    labelPath,
+		LabelGate:    labelGate,
 		Archived:     archived != 0,
 		Pinned:       pinned,
 		FirstSeen:    first,

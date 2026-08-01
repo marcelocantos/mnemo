@@ -4,11 +4,14 @@
 package store
 
 import (
+	"context"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/marcelocantos/mnemo/internal/cluster"
 )
 
 // LabelPath names which step of the labelling chain produced a label.
@@ -55,10 +58,10 @@ var dailyPathParts = map[string]bool{
 	"inbox": true, "scratch": true,
 }
 
-// labelCluster applies the user-anchor → (optional LLM, skipped here) →
-// bigram chain. LLM opt-in is handled by the caller: when label engine is
-// not "llm", we never call out. This function is pure offline.
-func labelCluster(docs []ClusterCorpusDoc, members []int, cent map[string]float64, cfg VaultClusteringConfig) ThemeLabel {
+// labelCluster applies the user-anchor → optional LLM → bigram chain.
+// labeler is non-nil only when label.engine=llm and a provider was
+// constructed; otherwise the LLM step is skipped with zero egress.
+func labelCluster(ctx context.Context, docs []ClusterCorpusDoc, members []int, cent map[string]float64, cfg VaultClusteringConfig, labeler cluster.Labeler) ThemeLabel {
 	// Centroid text ≈ top terms for inspect/gate overlap.
 	centroidTx := topTerms(cent, 12)
 	minTok := cfg.EffectiveUserMinTokens()
@@ -113,8 +116,21 @@ func labelCluster(docs []ClusterCorpusDoc, members []int, cent map[string]float6
 		}
 	}
 
-	// LLM path is opt-in and performed by the caller when engine=llm.
-	// This pure helper always falls through to bigram.
+	// --- LLM path (opt-in) ------------------------------------------------
+	if labeler != nil && cfg.EffectiveLabelEngine() == "llm" {
+		excerpts := topExcerpts(docs, members, 5)
+		if lab, err := labeler.Label(ctx, excerpts); err == nil && strings.TrimSpace(lab) != "" {
+			label := cleanLabel(lab)
+			return ThemeLabel{
+				Label:      titleCase(label),
+				Slug:       slugify(label),
+				Path:       LabelPathLLM,
+				GateFired:  gate,
+				CentroidTx: centroidTx,
+			}
+		}
+		// Provider error → fall through to bigram (design: degrade).
+	}
 
 	// --- Bigram fallback --------------------------------------------------
 	label, path := bigramLabel(docs, members)
@@ -125,6 +141,37 @@ func labelCluster(docs []ClusterCorpusDoc, members []int, cent map[string]float6
 		GateFired:  gate,
 		CentroidTx: centroidTx,
 	}
+}
+
+// topExcerpts picks up to n member texts for the LLM prompt, preferring
+// higher-weight docs.
+func topExcerpts(docs []ClusterCorpusDoc, members []int, n int) []string {
+	type scored struct {
+		w float64
+		t string
+	}
+	var all []scored
+	for _, mi := range members {
+		w := docs[mi].Weight
+		if w <= 0 {
+			w = 1
+		}
+		all = append(all, scored{w, docs[mi].Text})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].w != all[j].w {
+			return all[i].w > all[j].w
+		}
+		return all[i].t < all[j].t
+	})
+	if n > len(all) {
+		n = len(all)
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = all[i].t
+	}
+	return out
 }
 
 func splitTitleBody(text string) (title, body string) {

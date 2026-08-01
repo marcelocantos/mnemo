@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -41,6 +42,18 @@ func (e *Exporter) syncThemes(ctx context.Context, layout string) error {
 		}
 		relPath := themePath(slug, th.Archived)
 		absPath := filepath.Join(e.path, relPath)
+		// Opposite path: when a theme archives (or returns), remove the
+		// stale location so there is never a live + archive pair for one id.
+		other := themePath(slug, !th.Archived)
+		otherAbs := filepath.Join(e.path, other)
+		if _, err := os.Stat(otherAbs); err == nil {
+			if rmErr := os.Remove(otherAbs); rmErr != nil {
+				slog.Warn("vault: remove stale theme path failed", "path", otherAbs, "err", rmErr)
+			} else {
+				// Drop manifest row for the moved path if present.
+				_ = e.backend.RemoveVaultManifestRow(other)
+			}
+		}
 		if !needsUpdate(absPath, th.ComputedAt) {
 			skipped++
 			continue

@@ -5,7 +5,6 @@ package store
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -145,21 +144,142 @@ func TestTwoKeyEgressMatrix(t *testing.T) {
 	if httpHit {
 		t.Fatal("expected zero outbound HTTP with keys present but no opt-in")
 	}
-	// Explicit embeddings override without wiring should still not dial.
-	httpHit = false
-	_, err = s.RunCluster(context.Background(), ClusterRunArgs{
-		Config:         cfg,
-		Trigger:        "manual",
-		EngineOverride: "embeddings",
-		HTTPAllowed:    &httpHit,
+}
+
+// fakeEmbed is a test EmbeddingProvider with fixed 2-d vectors.
+type fakeEmbed struct {
+	hits *int
+	dims int
+}
+
+func (f *fakeEmbed) Name() string         { return "fake" }
+func (f *fakeEmbed) Model() string        { return "fake-1" }
+func (f *fakeEmbed) ModelVersion() string { return "v0" }
+func (f *fakeEmbed) Dimensions() int {
+	if f.dims > 0 {
+		return f.dims
+	}
+	return 2
+}
+func (f *fakeEmbed) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	if f.hits != nil {
+		*f.hits++
+	}
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		// Distinct non-zero vectors so cosine is defined.
+		out[i] = []float32{float32(i + 1), 1}
+	}
+	return out, nil
+}
+
+// TestEmbeddingsEngineUsesCache: force_reembed false reuses cache rows.
+func TestEmbeddingsEngineUsesCache(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	ts := time.Now().UTC().Format(time.RFC3339)
+	seedDecision(t, s, "s1", "r",
+		"Propose feature flags for rollout control in production deployments enough text.",
+		"Yes implement feature flags for gradual production rollout control enough.", ts)
+	hits := 0
+	prov := &fakeEmbed{hits: &hits}
+	cfg := VaultClusteringConfig{
+		Engine:             "embeddings",
+		HeuristicThreshold: 0.01,
+		MinClusterWeight:   0.5,
+	}
+	r1, err := s.RunCluster(context.Background(), ClusterRunArgs{
+		Config: cfg, Provider: prov, Trigger: "manual",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if httpHit {
-		t.Fatal("embeddings override without provider must not dial HTTP")
+	if r1.Engine != "embeddings" {
+		t.Fatalf("engine=%s", r1.Engine)
 	}
-	_ = os.Getenv // keep import if needed
+	if r1.EmbeddingCalls == 0 {
+		t.Fatal("expected embedding calls on first pass")
+	}
+	firstHits := hits
+	r2, err := s.RunCluster(context.Background(), ClusterRunArgs{
+		Config: cfg, Provider: prov, Trigger: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.EmbeddingCalls != 0 {
+		t.Fatalf("second pass should hit cache, got embedding_calls=%d", r2.EmbeddingCalls)
+	}
+	if hits != firstHits {
+		t.Fatalf("provider called again on cache hit: hits %d → %d", firstHits, hits)
+	}
+	// force_reembed bypasses cache.
+	r3, err := s.RunCluster(context.Background(), ClusterRunArgs{
+		Config: cfg, Provider: prov, ForceReembed: true, Trigger: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r3.EmbeddingCalls == 0 {
+		t.Fatal("force_reembed must call provider")
+	}
+}
+
+// fakeLabeler returns a fixed label.
+type fakeLabeler struct{ hits *int }
+
+func (f *fakeLabeler) Label(_ context.Context, _ []string) (string, error) {
+	if f.hits != nil {
+		*f.hits++
+	}
+	return "feature flag rollout", nil
+}
+
+// TestLLMLabelOptIn: label.engine=llm uses the labeler; default does not.
+func TestLLMLabelOptIn(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	ts := time.Now().UTC().Format(time.RFC3339)
+	seedDecision(t, s, "s1", "r",
+		"Propose feature flags for rollout control in production deployments enough text here.",
+		"Yes implement feature flags for gradual production rollout control enough text.", ts)
+
+	hits := 0
+	// Default label engine = bigram → labeler must not be consulted even if passed…
+	// Actually we only construct/pass when llm is set. Pass nil with llm off.
+	cfgOff := VaultClusteringConfig{MinClusterWeight: 0.5, HeuristicThreshold: 0.01}
+	if _, err := s.RunCluster(context.Background(), ClusterRunArgs{
+		Config: cfgOff, Labeler: &fakeLabeler{hits: &hits},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Labeler is only used when EffectiveLabelEngine is llm — but we still
+	// pass it; labelCluster checks cfg. Ensure zero hits.
+	if hits != 0 {
+		t.Fatalf("labeler called with bigram engine: hits=%d", hits)
+	}
+
+	cfgOn := VaultClusteringConfig{
+		MinClusterWeight:   0.5,
+		HeuristicThreshold: 0.01,
+		Label:              VaultClusteringLabelConfig{Engine: "llm"},
+	}
+	if _, err := s.RunCluster(context.Background(), ClusterRunArgs{
+		Config: cfgOn, Labeler: &fakeLabeler{hits: &hits},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if hits == 0 {
+		t.Fatal("expected labeler call when label.engine=llm")
+	}
+	// Theme label should reflect LLM output (title-cased).
+	var label, path string
+	// We don't persist path yet — check label text.
+	if err := s.readDB.QueryRow(`SELECT label FROM themes LIMIT 1`).Scan(&label); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(label), "feature") {
+		t.Fatalf("expected llm-ish label, got %q", label)
+	}
+	_ = path
 }
 
 // TestLabelGates reject daily notes and short stubs.
@@ -175,7 +295,7 @@ func TestLabelGates(t *testing.T) {
 	}
 	cfg := VaultClusteringConfig{}
 	// Force vault_user to be closest by making its text match centroid strongly.
-	lab := labelCluster(docs, []int{0, 1}, cent, cfg)
+	lab := labelCluster(context.Background(), docs, []int{0, 1}, cent, cfg, nil)
 	if lab.Path == LabelPathUserAnchor {
 		t.Fatalf("daily note must not win user_anchor; gate=%s path=%s label=%s", lab.GateFired, lab.Path, lab.Label)
 	}
@@ -188,7 +308,7 @@ func TestLabelGates(t *testing.T) {
 
 	// Short stub.
 	docs[0].Text = "Auth notes\n\nshort"
-	lab = labelCluster(docs, []int{0, 1}, cent, cfg)
+	lab = labelCluster(context.Background(), docs, []int{0, 1}, cent, cfg, nil)
 	if lab.Path == LabelPathUserAnchor {
 		t.Fatal("short stub must not be user_anchor")
 	}
