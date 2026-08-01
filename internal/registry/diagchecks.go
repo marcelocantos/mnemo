@@ -212,6 +212,24 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			return diag.Healthy("all configured roots resolve")
 		}},
 
+		// 🎯T142: FD-bounded tree watching — backend, open FDs, cap hit.
+		diag.Check{Name: "watch.fds", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return storeNotReadyResult("watch.fds")
+			}
+			tel := s.WatchTelemetrySnapshot()
+			sev, detail, rem := store.EvaluateWatchHealth(tel)
+			switch sev {
+			case "fail":
+				return diag.Failure(detail, rem)
+			case "warn":
+				return diag.Warning(detail, rem)
+			default:
+				return diag.Healthy(detail)
+			}
+		}},
+
 		diag.Check{Name: "compactor.breaker", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			_, w := state()
 			if w == nil {

@@ -27,9 +27,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/mnemo/internal/boot"
+	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 	"github.com/marcelocantos/sqldeep/go/sqldeep"
 	"github.com/marcelocantos/sqlift/go/sqlift"
 	_ "github.com/mattn/go-sqlite3"
@@ -98,6 +98,10 @@ type Store struct {
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
+
+	// watchTel is live 🎯T142 tree-watch telemetry (backend, FDs, poll).
+	// Own mutex; not guarded by mu.
+	watchTel watchTelemetryState
 
 	// vaultPath is the configured vault root, mirrored from
 	// registry/config (🎯T68.6) so the vault divergence gatherer and
@@ -467,6 +471,8 @@ type StatsResult struct {
 	TotalMessages int              `json:"total_messages"`
 	ByType        []TypeStats      `json:"by_type"`
 	Streams       []BackfillStatus `json:"streams,omitempty"`
+	// Watch is live tree-watch telemetry (🎯T142).
+	Watch *WatchTelemetry `json:"watch,omitempty"`
 }
 
 // UsageRow holds aggregated token usage for a single group (date, model, repo, session, or block).
@@ -3715,20 +3721,17 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 	return pf, nil
 }
 
-// Watch watches for new/modified JSONL files and ingests them in realtime.
-// It runs until ctx is cancelled (graceful drain, 🎯T97.1) or the fsnotify
-// backend closes its channels. Returning promptly on cancellation is what
-// lets Registry.Close finish stopping workers and reach the WAL checkpoint;
-// before ctx observance the kqueue/inotify read blocked shutdown until the
-// drain deadline forced a hard exit.
+// Watch watches transcript and context trees for new/modified files and
+// ingests them in realtime (🎯T142). It uses platform tree watching
+// (FSEvents on Darwin; fsnotify dir watches on Linux/Windows) plus a
+// bounded safety poll — never recursive kqueue open-every-file.
+//
+// It runs until ctx is cancelled (graceful drain, 🎯T97.1). Returning
+// promptly on cancellation lets Registry.Close finish stopping workers
+// and reach the WAL checkpoint.
 func (s *Store) Watch(ctx context.Context) error {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	defer watcher.Close()
-
 	projectDirs := s.projectDirs()
+	var roots []string
 	for _, dir := range projectDirs {
 		if _, err := os.Stat(dir); err != nil {
 			if os.IsNotExist(err) {
@@ -3738,246 +3741,277 @@ func (s *Store) Watch(ctx context.Context) error {
 			}
 			continue
 		}
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info.IsDir() {
-				if wErr := watcher.Add(path); wErr != nil {
-					slog.Warn("failed to watch directory", "path", path, "err", wErr)
-				}
-			}
-			return nil
-		})
+		roots = append(roots, dir)
 	}
-
-	// Watch Codex rollout roots (🎯T99). Date-nested subdirs created
-	// later are picked up by the fsnotify Create→watcher.Add path below.
-	for _, dir := range s.codexDirs() {
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info.IsDir() {
-				if wErr := watcher.Add(path); wErr != nil {
-					slog.Warn("failed to watch codex directory", "path", path, "err", wErr)
-				}
-			}
-			return nil
-		})
-	}
-
-	// Watch Grok session roots (🎯T110). New session dirs are picked up
-	// by the fsnotify Create→watcher.Add path below.
-	for _, dir := range s.grokDirs() {
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info.IsDir() {
-				if wErr := watcher.Add(path); wErr != nil {
-					slog.Warn("failed to watch grok directory", "path", path, "err", wErr)
-				}
-			}
-			return nil
-		})
-	}
-
-	// Also watch the skills directory for .md changes.
+	roots = append(roots, s.codexDirs()...)
+	roots = append(roots, s.grokDirs()...)
 	if sdir, err := skillsDir(); err == nil {
-		if wErr := watcher.Add(sdir); wErr != nil {
-			slog.Warn("failed to watch skills directory", "path", sdir, "err", wErr)
-		}
+		roots = append(roots, sdir)
 	}
 
-	// Watch repo-level context source files (CLAUDE.md, docs/, .planning/).
+	// Repo map is for event dispatch (which repo a CLAUDE.md belongs to).
+	// Do NOT add every known repo as its own watch root: on Darwin FSEvents
+	// that multiplies open DIR FDs (~1 per path). Subscribe to workspace
+	// roots instead; nested checkouts are covered by the tree stream (🎯T142).
 	repoRoots := s.knownRepoRoots()
-	repoForRoot := map[string]string{} // root path → repo name
-	watchedDirs := map[string]bool{}
+	repoForRoot := map[string]string{}
 	for _, rr := range repoRoots {
 		repoForRoot[rr.root] = rr.repo
-		// Watch the repo root itself (for CLAUDE.md changes).
-		if !watchedDirs[rr.root] {
-			watchedDirs[rr.root] = true
-			if wErr := watcher.Add(rr.root); wErr != nil {
-				slog.Warn("failed to watch repo root", "path", rr.root, "err", wErr)
-			}
-		}
-		// Watch docs/ for audit-log.md and targets.md.
-		docsDir := filepath.Join(rr.root, "docs")
-		if info, err := os.Stat(docsDir); err == nil && info.IsDir() && !watchedDirs[docsDir] {
-			watchedDirs[docsDir] = true
-			if wErr := watcher.Add(docsDir); wErr != nil {
-				slog.Warn("failed to watch docs dir", "path", docsDir, "err", wErr)
-			}
-		}
-		// Watch .planning/ recursively for plan files.
-		planDir := filepath.Join(rr.root, ".planning")
-		if info, err := os.Stat(planDir); err == nil && info.IsDir() {
-			filepath.Walk(planDir, func(path string, fi os.FileInfo, err error) error {
-				if err == nil && fi.IsDir() && !watchedDirs[path] {
-					watchedDirs[path] = true
-					if wErr := watcher.Add(path); wErr != nil {
-						slog.Warn("failed to watch planning dir", "path", path, "err", wErr)
-					}
-				}
-				return nil
-			})
+	}
+	s.rootsMu.RLock()
+	for _, wr := range s.workspaceRoots {
+		if wr != "" {
+			roots = append(roots, wr)
 		}
 	}
-	slog.Info("watching for changes", "transcripts", projectDirs, "repos", len(repoRoots))
+	s.rootsMu.RUnlock()
 
-	// debounce coalesces burst events (editor saves, formatter rewrites, git
-	// operations) for the same path into a single re-index after 300ms of quiet.
-	// Heavy ingest work runs in the timer goroutine, not on the event goroutine.
+	watcher, err := fswatch.New(fswatch.Config{
+		Roots: roots,
+		Mode:  fswatch.ModeTranscript,
+	})
+	if err != nil {
+		return err
+	}
+	defer watcher.Close()
+	defer s.noteWatchStopped()
+
+	s.noteWatchStarted(watcher.Backend(), len(watcher.Roots()), watcher.DirWatchCount(), watcher.CapHit())
+
+	slog.Info("watching for changes",
+		"backend", watcher.Backend(),
+		"roots", len(watcher.Roots()),
+		"dir_watches", watcher.DirWatchCount(),
+		"cap_hit", watcher.CapHit(),
+		"open_fds", s.WatchTelemetrySnapshot().ProcessOpenFDs,
+		"transcripts", projectDirs,
+		"repos", len(repoRoots),
+	)
+	if watcher.CapHit() {
+		slog.Warn("fswatch directory watch cap hit; safety poll covers remaining paths",
+			"cap", fswatch.MaxDirWatches)
+	}
+
+	// debounce coalesces burst events into a single re-index after 300ms.
 	db := newDebouncerWithConcurrency(300*time.Millisecond, 4)
-	// On drain, cancel pending debounced ingests so none races the store's
-	// Close/checkpoint (🎯T97.1).
 	defer db.stop()
+
+	poller := fswatch.NewPollTracker(2*time.Minute, fswatch.DefaultPollMaxPerTick)
+	pollTick := time.NewTicker(watchPollInterval)
+	defer pollTick.Stop()
+
+	// canonPath resolves macOS /var vs /private/var so offsets match IngestAll.
+	canonPath := func(name string) string {
+		if resolved, err := filepath.EvalSymlinks(name); err == nil {
+			return resolved
+		}
+		return name
+	}
+
+	handlePath := func(name string, writeOrCreate bool, removeOrRename bool) {
+		name = canonPath(name)
+		if writeOrCreate && strings.HasSuffix(name, ".jsonl") {
+			poller.NoteEvent(name, time.Now())
+			db.enqueue(name, func() {
+				if isCodexRollout(name) {
+					if err := s.ingestCodexFile(name); err != nil {
+						slog.Error("ingest codex failed", "file", name, "err", err)
+					}
+					return
+				}
+				if isGrokUpdates(name) {
+					if err := s.ingestGrokFile(name); err != nil {
+						slog.Error("ingest grok failed", "file", name, "err", err)
+					}
+					return
+				}
+				if err := s.ingestFile(name); err != nil {
+					slog.Error("ingest failed", "file", name, "err", err)
+				}
+			})
+		}
+		if strings.HasSuffix(name, ".md") && strings.Contains(name, "/memory/") {
+			if writeOrCreate {
+				poller.NoteEvent(name, time.Now())
+				db.enqueue(name, func() {
+					if err := s.ingestMemoryFile(name); err != nil {
+						slog.Error("ingest memory failed", "file", name, "err", err)
+					}
+				})
+			}
+			if removeOrRename {
+				s.deleteMemoryFile(name)
+			}
+		}
+		if writeOrCreate {
+			base := filepath.Base(name)
+			dir := filepath.Dir(name)
+			if base == "CLAUDE.md" {
+				if repo, ok := repoForRoot[dir]; ok {
+					db.enqueue(name, func() {
+						if err := s.ingestClaudeConfigFile(name, repo); err != nil {
+							slog.Error("ingest claude config failed", "file", name, "err", err)
+						}
+					})
+				}
+			}
+			if base == "audit-log.md" && filepath.Base(dir) == "docs" {
+				repoRoot := filepath.Dir(dir)
+				if repo, ok := repoForRoot[repoRoot]; ok {
+					db.enqueue(name, func() {
+						if err := s.ingestAuditLogFile(name, repo); err != nil {
+							slog.Error("ingest audit log failed", "file", name, "err", err)
+						}
+					})
+				}
+			}
+			if base == "targets.md" && filepath.Base(dir) == "docs" {
+				repoRoot := filepath.Dir(dir)
+				if repo, ok := repoForRoot[repoRoot]; ok {
+					db.enqueue(name, func() {
+						if err := s.ingestTargetFile(name, repo); err != nil {
+							slog.Error("ingest targets failed", "file", name, "err", err)
+						}
+					})
+				}
+			}
+			if isTodoFileName(base) {
+				repoRoot := dir
+				if filepath.Base(dir) == "docs" {
+					repoRoot = filepath.Dir(dir)
+				}
+				if repo, ok := repoForRoot[repoRoot]; ok {
+					db.enqueue(name, func() {
+						s.ingestTodoFile(name, repo)
+					})
+				}
+			}
+			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.planning/") {
+				for root, repo := range repoForRoot {
+					planDir := filepath.Join(root, ".planning")
+					if strings.HasPrefix(name, planDir+string(filepath.Separator)) || strings.HasPrefix(name, planDir+"/") {
+						capturedRepo := repo
+						capturedPlanDir := planDir
+						db.enqueue(name, func() {
+							if err := s.ingestPlanFile(name, capturedRepo, capturedPlanDir); err != nil {
+								slog.Error("ingest plan failed", "file", name, "err", err)
+							}
+						})
+						break
+					}
+				}
+			}
+			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.claude/skills/") {
+				db.enqueue(name, func() {
+					if err := s.ingestSkillFile(name); err != nil {
+						slog.Error("ingest skill failed", "file", name, "err", err)
+					}
+				})
+			}
+		}
+		if removeOrRename && strings.HasSuffix(name, ".md") && strings.Contains(name, "/.claude/skills/") {
+			s.deleteSkillFile(name)
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case event, ok := <-watcher.Events:
+		case ev, ok := <-watcher.Events():
 			if !ok {
 				return nil
 			}
-			name := event.Name
-			if strings.HasSuffix(name, ".jsonl") &&
-				(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
-				db.enqueue(name, func() {
-					if isCodexRollout(name) {
-						if err := s.ingestCodexFile(name); err != nil {
-							slog.Error("ingest codex failed", "file", name, "err", err)
-						}
-						return
-					}
-					if isGrokUpdates(name) {
-						if err := s.ingestGrokFile(name); err != nil {
-							slog.Error("ingest grok failed", "file", name, "err", err)
-						}
-						return
-					}
-					// Ignore other Grok sidecars that share the tree
-					// (events/chat_history/…) if a parent dir is watched.
-					if filepath.Base(name) == "chat_history.jsonl" ||
-						filepath.Base(name) == "events.jsonl" ||
-						filepath.Base(name) == "rewind_points.jsonl" ||
-						filepath.Base(name) == "prompt_history.jsonl" ||
-						filepath.Base(name) == "hunk_records.jsonl" ||
-						filepath.Base(name) == "feedback.jsonl" {
-						return
-					}
-					if err := s.ingestFile(name); err != nil {
-						slog.Error("ingest failed", "file", name, "err", err)
-					}
-				})
-			}
-			// Watch memory file changes.
-			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/memory/") {
-				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-					db.enqueue(name, func() {
-						if err := s.ingestMemoryFile(name); err != nil {
-							slog.Error("ingest memory failed", "file", name, "err", err)
-						}
-					})
-				}
-				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					// Deletions are not debounced: the file is already gone.
-					s.deleteMemoryFile(name)
-				}
-			}
-			// Watch repo-level context source changes.
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				base := filepath.Base(name)
-				dir := filepath.Dir(name)
-
-				// CLAUDE.md at repo root.
-				if base == "CLAUDE.md" {
-					if repo, ok := repoForRoot[dir]; ok {
-						db.enqueue(name, func() {
-							if err := s.ingestClaudeConfigFile(name, repo); err != nil {
-								slog.Error("ingest claude config failed", "file", name, "err", err)
-							}
-						})
-					}
-				}
-
-				// docs/audit-log.md
-				if base == "audit-log.md" && filepath.Base(dir) == "docs" {
-					repoRoot := filepath.Dir(dir)
-					if repo, ok := repoForRoot[repoRoot]; ok {
-						db.enqueue(name, func() {
-							if err := s.ingestAuditLogFile(name, repo); err != nil {
-								slog.Error("ingest audit log failed", "file", name, "err", err)
-							}
-						})
-					}
-				}
-
-				// docs/targets.md
-				if base == "targets.md" && filepath.Base(dir) == "docs" {
-					repoRoot := filepath.Dir(dir)
-					if repo, ok := repoForRoot[repoRoot]; ok {
-						db.enqueue(name, func() {
-							if err := s.ingestTargetFile(name, repo); err != nil {
-								slog.Error("ingest targets failed", "file", name, "err", err)
-							}
-						})
-					}
-				}
-
-				// TODO.md / todos.md at the repo root or under docs/.
-				// Deeper or glob-matched TODO files refresh on the next
-				// startup backfill; the common locations are live-watched.
-				if isTodoFileName(base) {
-					repoRoot := dir
-					if filepath.Base(dir) == "docs" {
-						repoRoot = filepath.Dir(dir)
-					}
-					if repo, ok := repoForRoot[repoRoot]; ok {
-						db.enqueue(name, func() {
-							s.ingestTodoFile(name, repo)
-						})
-					}
-				}
-
-				// .planning/**/*.md
-				if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.planning/") {
-					for root, repo := range repoForRoot {
-						planDir := filepath.Join(root, ".planning")
-						if strings.HasPrefix(name, planDir+"/") {
-							// Capture loop variables for the closure.
-							capturedRepo := repo
-							capturedPlanDir := planDir
-							db.enqueue(name, func() {
-								if err := s.ingestPlanFile(name, capturedRepo, capturedPlanDir); err != nil {
-									slog.Error("ingest plan failed", "file", name, "err", err)
-								}
-							})
-							break
-						}
-					}
-				}
-			}
-			// Watch skill file changes.
-			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.claude/skills/") {
-				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-					db.enqueue(name, func() {
-						if err := s.ingestSkillFile(name); err != nil {
-							slog.Error("ingest skill failed", "file", name, "err", err)
-						}
-					})
-				}
-				if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-					s.deleteSkillFile(name)
-				}
-			}
-			if event.Has(fsnotify.Create) {
-				if info, err := os.Stat(name); err == nil && info.IsDir() {
-					if wErr := watcher.Add(name); wErr != nil {
-						slog.Warn("failed to watch new directory", "path", name, "err", wErr)
-					}
-				}
-			}
-		case err, ok := <-watcher.Errors:
+			s.noteWatchEvent()
+			writeOrCreate := ev.Op.Has(fswatch.OpWrite) || ev.Op.Has(fswatch.OpCreate)
+			removeOrRename := ev.Op.Has(fswatch.OpRemove) || ev.Op.Has(fswatch.OpRename)
+			handlePath(ev.Path, writeOrCreate, removeOrRename)
+		case err, ok := <-watcher.Errors():
 			if !ok {
 				return nil
 			}
 			slog.Error("watcher error", "err", err)
+		case <-pollTick.C:
+			var candN int
+			s.safetyPoll(poller, func(path string) {
+				candN++
+				db.enqueue(path, func() {
+					s.ingestJSONLPath(path)
+				})
+			})
+			s.noteWatchPoll(candN, poller)
 		}
+	}
+}
+
+// watchPollInterval is the safety-poll period used by Store.Watch (tests may shorten it).
+var watchPollInterval = 5 * time.Second
+
+// safetyPoll runs one bounded poll cycle using the shipped PollTracker and
+// invokes onNeed for each jsonl path that has grown past its offset.
+// This is the production recovery path for open/write/close writers when tree
+// events are missed (🎯T142.5).
+func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)) {
+	if poller == nil || onNeed == nil {
+		return
+	}
+	s.mu.Lock()
+	offsets := make(map[string]int64, len(s.offsets))
+	for p, off := range s.offsets {
+		offsets[p] = off
+	}
+	s.mu.Unlock()
+
+	// Use only a warm LiveSessions cache — never force a synchronous
+	// lsof +D of ~/.claude/projects on the poll path (that walk can take
+	// seconds and starve the Watch select loop). Rotation still covers
+	// silent appends without live signals.
+	var live []string
+	if liveMap := s.cachedLiveSessions(); len(liveMap) > 0 {
+		for p := range offsets {
+			base := strings.TrimSuffix(filepath.Base(p), ".jsonl")
+			if _, ok := liveMap[base]; ok {
+				live = append(live, p)
+			}
+		}
+	}
+
+	cands := poller.Candidates(fswatch.CandidatesArgs{
+		Offsets: offsets,
+		Live:    live,
+		Now:     time.Now(),
+		Stat: func(path string) (int64, error) {
+			fi, err := os.Stat(path)
+			if err != nil {
+				return 0, err
+			}
+			return fi.Size(), nil
+		},
+	})
+	for _, name := range cands {
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		onNeed(name)
+	}
+}
+
+// ingestJSONLPath dispatches a transcript path to the correct ingest implementation.
+func (s *Store) ingestJSONLPath(path string) {
+	if isCodexRollout(path) {
+		if err := s.ingestCodexFile(path); err != nil {
+			slog.Error("ingest codex failed", "file", path, "err", err)
+		}
+		return
+	}
+	if isGrokUpdates(path) {
+		if err := s.ingestGrokFile(path); err != nil {
+			slog.Error("ingest grok failed", "file", path, "err", err)
+		}
+		return
+	}
+	if err := s.ingestFile(path); err != nil {
+		slog.Error("ingest failed", "file", path, "err", err)
 	}
 }
 
@@ -4434,6 +4468,9 @@ func (s *Store) Stats() (*StatsResult, error) {
 		strRows.Close()
 	}
 
+	wt := s.WatchTelemetrySnapshot()
+	result.Watch = &wt
+
 	return &result, nil
 }
 
@@ -4685,15 +4722,18 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		untilExpr = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	// Build GROUP BY expression.
+	// Build GROUP BY expression. Outer SELECT is FROM billable e — only
+	// columns projected by the CTE are in scope. session_meta (sm) is joined
+	// inside the CTE only; repo/cwd must be lifted as billable.repo_key
+	// (dashboard Cost by Repo 500: "no such column: sm.repo").
 	var groupExpr, periodExpr string
 	switch groupBy {
 	case "model":
 		groupExpr = "e.model"
 		periodExpr = "e.model"
 	case "repo":
-		groupExpr = "CASE WHEN sm.repo != '' THEN sm.repo ELSE sm.cwd END"
-		periodExpr = groupExpr
+		groupExpr = "e.repo_key"
+		periodExpr = "e.repo_key"
 	case "session":
 		groupExpr = "e.session_id"
 		periodExpr = "e.session_id"
@@ -4775,6 +4815,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 				e.model AS model,
 				e.session_id AS session_id,
 				COALESCE(sm.source, 'unknown') AS source,
+				MAX(CASE WHEN COALESCE(sm.repo, '') != '' THEN sm.repo ELSE COALESCE(sm.cwd, '') END) AS repo_key,
 				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
 				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
 				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
@@ -5853,6 +5894,17 @@ func (s *Store) LiveSessions() map[string]int {
 	s.liveCache = result
 	s.liveCacheTime = time.Now()
 	return result
+}
+
+// cachedLiveSessions returns the last LiveSessions result if still within
+// liveSessionsTTL, otherwise nil. Does not run lsof — safe for the Watch poll path.
+func (s *Store) cachedLiveSessions() map[string]int {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if s.liveCache == nil || time.Since(s.liveCacheTime) >= liveSessionsTTL {
+		return nil
+	}
+	return s.liveCache
 }
 
 // SessionCWD returns the working directory recorded for the session in

@@ -42,6 +42,10 @@ type IngestDiagnostics struct {
 	// Repo is present only when a repo filter was supplied: it explains
 	// that repo's ingest state specifically.
 	Repo *RepoDiagnostic `json:"repo_diagnostic,omitempty"`
+	// Watch is live tree-watch telemetry (🎯T142): backend, open FDs,
+	// dir watches / streams, poll counters. Always present so agents can
+	// answer "is mnemo about to exhaust vnodes?" from mnemo_status alone.
+	Watch *WatchTelemetry `json:"watch,omitempty"`
 }
 
 // FreshnessInfo bounds indexer lag: how far behind "now" the freshest
@@ -124,6 +128,10 @@ func (s *Store) IngestDiagnostics(repoFilter string) *IngestDiagnostics {
 	if strings.TrimSpace(repoFilter) != "" {
 		d.Repo = s.repoDiagnostic(repoFilter)
 	}
+	// Always attach watch telemetry (even when not yet Running) so
+	// mnemo_status is the first-line check for FD-bounded watching (🎯T142).
+	wt := s.WatchTelemetrySnapshot()
+	d.Watch = &wt
 	return d
 }
 
