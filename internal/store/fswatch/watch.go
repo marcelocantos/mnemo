@@ -87,13 +87,13 @@ func newNopWatcher() *nopWatcher {
 	return &nopWatcher{events: ev, errors: er}
 }
 
-func (w *nopWatcher) Events() <-chan Event   { return w.events }
-func (w *nopWatcher) Errors() <-chan error   { return w.errors }
-func (w *nopWatcher) Close() error           { return nil }
-func (w *nopWatcher) Backend() string        { return "none" }
-func (w *nopWatcher) DirWatchCount() int     { return 0 }
-func (w *nopWatcher) CapHit() bool           { return false }
-func (w *nopWatcher) Roots() []string        { return nil }
+func (w *nopWatcher) Events() <-chan Event { return w.events }
+func (w *nopWatcher) Errors() <-chan error { return w.errors }
+func (w *nopWatcher) Close() error         { return nil }
+func (w *nopWatcher) Backend() string      { return "none" }
+func (w *nopWatcher) DirWatchCount() int   { return 0 }
+func (w *nopWatcher) CapHit() bool         { return false }
+func (w *nopWatcher) Roots() []string      { return nil }
 
 // OpenFDCount returns the number of open FDs in this process. Used by the
 // T142 FD oracle. Tries /dev/fd first, then lsof -p <pid>. Returns -1 if
