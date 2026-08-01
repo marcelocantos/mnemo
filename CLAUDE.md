@@ -105,6 +105,10 @@ user. Good moments to reach for mnemo:
 - `mnemo_vault_migration_doc` — Return or (with `write=true`) regenerate `_mnemo/MIGRATION.md`, the once-written v1→v2 explainer. Preview-only by default. Requires `vault_path`.
 - `mnemo_vault_bridge_list` — List the vault bridges mnemo maintains (🎯T64.6): each configured collection (themes/patterns/cross-repo/lessons/decisions/memories) → anchor file, whether its fenced block is written yet, plus any per-bridge errors from the last sync. Configured via `vault_bridges` + `vault_bridges_max_links`.
 - `mnemo_vault_gc` — Inspect (and with `confirm=true`, clean up) vault GC orphans: `manifest_path_missing` rows (removable) and `disk_not_in_manifest` files (informational only — user content). Dry-run by default.
+- `mnemo_vault_recluster` — Trigger an immediate document-level themes clustering pass (🎯T64.8). Default engine is local TF-IDF + single-link; embeddings is opt-in via `vault_clustering.engine` or the `engine` param. Returns the new `cluster_runs` row.
+- `mnemo_vault_themes_inspect` — Full membership, centroid, pin/archive state, and labelling path/gate for a theme id or slug.
+- `mnemo_vault_themes_pin` — Pin/unpin a theme so it is exempt from `retire_after` auto-archive.
+- `mnemo_vault_themes_split` / `mnemo_vault_themes_merge` — Stubs that record `theme_overrides` only; live apply ships in a follow-up.
 
 ## Code Structure
 

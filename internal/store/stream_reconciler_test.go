@@ -28,7 +28,7 @@ func TestStreamReconcilersRegistered(t *testing.T) {
 			t.Errorf("stream %q reconcile on empty store: %v", sr.Name(), err)
 		}
 	}
-	for _, want := range []string{"mirror", "source_state"} {
+	for _, want := range []string{"mirror", "source_state", "patterns", "themes_cluster"} {
 		if !got[want] {
 			t.Errorf("stream %q not registered; have %v", want, got)
 		}

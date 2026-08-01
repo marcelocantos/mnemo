@@ -39,7 +39,44 @@ func (s *Store) StreamReconcilers() []StreamReconciler {
 		mirrorReconcilerStream{s},
 		sourceStateReconcilerStream{s},
 		patternsReconcilerStream{s},
+		clusterReconcilerStream{s},
 	}
+}
+
+// clusterReconcilerStream runs document-level themes clustering on a
+// long cadence (default 24h; 🎯T64.8). The worker ticks more often;
+// Reconcile skips when the last successful run is still fresh.
+type clusterReconcilerStream struct{ s *Store }
+
+func (c clusterReconcilerStream) Name() string { return "themes_cluster" }
+
+func (c clusterReconcilerStream) Interval() time.Duration {
+	return 24 * time.Hour
+}
+
+func (c clusterReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	last, err := c.s.LatestClusterRun()
+	if err != nil {
+		return 0, err
+	}
+	if last != nil && last.EndedAt != "" && last.FailureMode == "" {
+		if t, perr := time.Parse(time.RFC3339, last.EndedAt); perr == nil {
+			if now.Sub(t) < c.Interval() {
+				return 0, nil
+			}
+		}
+	}
+	res, err := c.s.RunCluster(ctx, ClusterRunArgs{
+		Trigger: "interval",
+		Now:     now,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.OutputThemes, nil
 }
 
 type mirrorReconcilerStream struct{ s *Store }

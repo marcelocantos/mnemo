@@ -192,6 +192,12 @@ type Config struct {
 	// consulted — nested .mnemoignore files are not honoured.
 	VaultIndexingIgnoreFile string `json:"vault_indexing_ignore_file,omitempty"`
 
+	// VaultClustering configures the document-level themes engine
+	// (🎯T64.8). Zero value → heuristic engine, bigram labels, no
+	// outbound calls. Embeddings and LLM labelling each require their
+	// own explicit opt-in (two-key egress matrix).
+	VaultClustering VaultClusteringConfig `json:"vault_clustering,omitempty"`
+
 	// LinkedInstances declares peer mnemo endpoints to federate with
 	// (🎯T15). Each peer is identified by a https URL and a trusted
 	// peer certificate (either a name resolved under ~/.mnemo/peers/
@@ -617,6 +623,210 @@ type ImageEmbeddingsConfig struct {
 // IsEnabled reports whether the image embedder should run. False by
 // default (zero-value config = no PyPI / HuggingFace fetches).
 func (c ImageEmbeddingsConfig) IsEnabled() bool { return c.Enabled }
+
+// VaultClusteringConfig drives the document-level themes engine (🎯T64.8).
+// Defaults keep the whole pipeline offline: heuristic clustering and
+// bigram labels. Hosted embeddings and LLM labelling each need their own
+// explicit engine string — API keys alone never open egress.
+type VaultClusteringConfig struct {
+	// Engine is "heuristic" (default) or "embeddings" (opt-in).
+	Engine string `json:"engine,omitempty"`
+
+	// EmbeddingProvider selects the concrete provider when Engine is
+	// "embeddings". Default "voyage".
+	EmbeddingProvider string `json:"embedding_provider,omitempty"`
+
+	// EmbeddingModel pins the model name in the cluster_embeddings cache
+	// key. Default "voyage-3-lite".
+	EmbeddingModel string `json:"embedding_model,omitempty"`
+
+	// EmbeddingModelVersion overrides the provider-reported version tag
+	// used in the cache key. Empty → provider-reported (or "").
+	EmbeddingModelVersion string `json:"embedding_model_version,omitempty"`
+
+	// HeuristicThreshold is the single-link cosine cut for Engine B.
+	// Zero → 0.35.
+	HeuristicThreshold float64 `json:"heuristic_threshold,omitempty"`
+
+	// EmbeddingThreshold is the single-link cosine cut for Engine A.
+	// Zero → 0.55.
+	EmbeddingThreshold float64 `json:"embedding_threshold,omitempty"`
+
+	// MinClusterWeight drops themes whose summed member weights fall
+	// below this. Zero → 3.
+	MinClusterWeight float64 `json:"min_cluster_weight,omitempty"`
+
+	// MaxThemes caps emitted themes per pass. Zero → 200.
+	MaxThemes int `json:"max_themes,omitempty"`
+
+	// MaxDocs caps corpus size before clustering (cost backstop after
+	// 🎯T64.11's super-quadratic lesson). Zero → 5000.
+	MaxDocs int `json:"max_docs,omitempty"`
+
+	// RetireAfter is how long a theme may sit without a new member
+	// before auto-archive. Go duration string; empty → "4320h" (180d).
+	RetireAfter string `json:"retire_after,omitempty"`
+
+	// MaxRunHistory trims cluster_runs older than the newest N rows.
+	// Zero → 1000.
+	MaxRunHistory int `json:"max_run_history,omitempty"`
+
+	// RecomputeInterval is the worker cadence. Empty → "24h".
+	RecomputeInterval string `json:"recompute_interval,omitempty"`
+
+	// Label configures the labelling chain (user-anchor → optional LLM
+	// → bigram). Nested so label.engine is independent of the clustering
+	// engine opt-in.
+	Label VaultClusteringLabelConfig `json:"label,omitempty"`
+
+	// BalanceFactor caps dominant-repo contribution in the heuristic
+	// engine (per-repo quota = factor × second-largest). Zero disables;
+	// default when unset is applied via EffectiveBalanceFactor (2.0).
+	// Use a negative value is not supported; omit or set 0 to disable.
+	BalanceFactor *float64 `json:"balance_factor,omitempty"`
+
+	// FallbackToHeuristicOnOutage controls Engine A outage behaviour.
+	// Nil → true.
+	FallbackToHeuristicOnOutage *bool `json:"fallback_to_heuristic_on_outage,omitempty"`
+}
+
+// VaultClusteringLabelConfig is the labelling half of the two-key matrix.
+type VaultClusteringLabelConfig struct {
+	// Engine is "bigram" (default) or "llm" (opt-in).
+	Engine string `json:"engine,omitempty"`
+
+	// UserMinTokens is the body-length gate for user-anchor labels.
+	// Zero → 200.
+	UserMinTokens int `json:"user_min_tokens,omitempty"`
+
+	// UserFilenameExclude extends the default daily-note exclusion
+	// regex set.
+	UserFilenameExclude []string `json:"user_filename_exclude,omitempty"`
+}
+
+// EffectiveEngine returns "heuristic" unless the user opted into embeddings.
+func (c VaultClusteringConfig) EffectiveEngine() string {
+	switch strings.ToLower(strings.TrimSpace(c.Engine)) {
+	case "embeddings", "embedding":
+		return "embeddings"
+	default:
+		return "heuristic"
+	}
+}
+
+// EffectiveLabelEngine returns "bigram" unless the user opted into LLM labels.
+func (c VaultClusteringConfig) EffectiveLabelEngine() string {
+	switch strings.ToLower(strings.TrimSpace(c.Label.Engine)) {
+	case "llm":
+		return "llm"
+	default:
+		return "bigram"
+	}
+}
+
+func (c VaultClusteringConfig) EffectiveHeuristicThreshold() float64 {
+	if c.HeuristicThreshold > 0 {
+		return c.HeuristicThreshold
+	}
+	return 0.35
+}
+
+func (c VaultClusteringConfig) EffectiveEmbeddingThreshold() float64 {
+	if c.EmbeddingThreshold > 0 {
+		return c.EmbeddingThreshold
+	}
+	return 0.55
+}
+
+func (c VaultClusteringConfig) EffectiveMinClusterWeight() float64 {
+	if c.MinClusterWeight > 0 {
+		return c.MinClusterWeight
+	}
+	return 3
+}
+
+func (c VaultClusteringConfig) EffectiveMaxThemes() int {
+	if c.MaxThemes > 0 {
+		return c.MaxThemes
+	}
+	return 200
+}
+
+func (c VaultClusteringConfig) EffectiveMaxDocs() int {
+	if c.MaxDocs > 0 {
+		return c.MaxDocs
+	}
+	return 5000
+}
+
+func (c VaultClusteringConfig) EffectiveMaxRunHistory() int {
+	if c.MaxRunHistory > 0 {
+		return c.MaxRunHistory
+	}
+	return 1000
+}
+
+func (c VaultClusteringConfig) EffectiveUserMinTokens() int {
+	if c.Label.UserMinTokens > 0 {
+		return c.Label.UserMinTokens
+	}
+	return 200
+}
+
+func (c VaultClusteringConfig) EffectiveEmbeddingProvider() string {
+	if strings.TrimSpace(c.EmbeddingProvider) != "" {
+		return c.EmbeddingProvider
+	}
+	return "voyage"
+}
+
+func (c VaultClusteringConfig) EffectiveEmbeddingModel() string {
+	if strings.TrimSpace(c.EmbeddingModel) != "" {
+		return c.EmbeddingModel
+	}
+	return "voyage-3-lite"
+}
+
+func (c VaultClusteringConfig) EffectiveRetireAfter() time.Duration {
+	if c.RetireAfter == "" {
+		return 180 * 24 * time.Hour
+	}
+	d, err := time.ParseDuration(c.RetireAfter)
+	if err != nil || d <= 0 {
+		return 180 * 24 * time.Hour
+	}
+	return d
+}
+
+func (c VaultClusteringConfig) EffectiveRecomputeInterval() time.Duration {
+	if c.RecomputeInterval == "" {
+		return 24 * time.Hour
+	}
+	d, err := time.ParseDuration(c.RecomputeInterval)
+	if err != nil || d <= 0 {
+		return 24 * time.Hour
+	}
+	return d
+}
+
+// EffectiveBalanceFactor returns the per-repo down-sample factor.
+// Default 2.0. Explicit 0 (via pointer) disables.
+func (c VaultClusteringConfig) EffectiveBalanceFactor() float64 {
+	if c.BalanceFactor == nil {
+		return 2.0
+	}
+	if *c.BalanceFactor < 0 {
+		return 2.0
+	}
+	return *c.BalanceFactor
+}
+
+func (c VaultClusteringConfig) EffectiveFallbackToHeuristicOnOutage() bool {
+	if c.FallbackToHeuristicOnOutage == nil {
+		return true
+	}
+	return *c.FallbackToHeuristicOnOutage
+}
 
 // BackupConfig controls the periodic backup worker. Field defaults are
 // resolved via the Effective* methods so a zero-value BackupConfig (the
