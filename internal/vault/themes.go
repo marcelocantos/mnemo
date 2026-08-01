@@ -83,7 +83,11 @@ func renderTheme(v store.ThemeView) string {
 	writeYAML(&b, "first-seen", dateOf(v.FirstSeen))
 	writeYAML(&b, "last-touched", dateOf(v.LastTouched))
 	writeYAML(&b, "computed_at", v.ComputedAt)
-	writeYAML(&b, "label-source", "bigram")
+	labelSource := v.LabelSource
+	if labelSource == "" {
+		labelSource = "bigram"
+	}
+	writeYAML(&b, "label-source", labelSource)
 	b.WriteString("tags:\n")
 	b.WriteString("  - mnemo\n")
 	b.WriteString("  - mnemo/theme\n")

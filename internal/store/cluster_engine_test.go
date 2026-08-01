@@ -26,7 +26,7 @@ func TestClusterDocsSeparatesGroups(t *testing.T) {
 		corpusDoc("3", "compaction", "mnemo", "react frontend component rendering hooks state props", 0.8),
 		corpusDoc("4", "compaction", "mnemo", "frontend react rendering component props hooks memo", 0.8),
 	}
-	clusters := clusterDocs(docs, HeuristicThreshold)
+	clusters := clusterDocs(docs, DefaultClusterParams())
 	if len(clusters) != 2 {
 		t.Fatalf("want 2 clusters, got %d: %+v", len(clusters), clusters)
 	}
@@ -45,7 +45,7 @@ func TestClusterDocsSingleton(t *testing.T) {
 		corpusDoc("2", "decision", "r", "database schema migration sqlite", 1.0),
 		corpusDoc("3", "pattern", "r", "kubernetes ingress load balancer networking", 1.2),
 	}
-	clusters := clusterDocs(docs, HeuristicThreshold)
+	clusters := clusterDocs(docs, DefaultClusterParams())
 	if len(clusters) != 2 {
 		t.Fatalf("want 2 clusters (a pair + a singleton), got %d", len(clusters))
 	}
@@ -64,7 +64,7 @@ func TestClusterClusterFields(t *testing.T) {
 		corpusDoc("1", "decision", "mnemo", "schema migration schema migration sqlite", 1.0),
 		corpusDoc("2", "decision", "bullseye", "schema migration schema migration column", 1.0),
 	}
-	clusters := clusterDocs(docs, HeuristicThreshold)
+	clusters := clusterDocs(docs, DefaultClusterParams())
 	if len(clusters) != 1 {
 		t.Fatalf("want 1 cluster, got %d", len(clusters))
 	}

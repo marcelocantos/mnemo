@@ -592,7 +592,13 @@ CREATE TABLE themes (
 			depth INTEGER,
 			first_seen TEXT NOT NULL DEFAULT '',
 			last_touched TEXT NOT NULL DEFAULT '',
-			computed_at TEXT NOT NULL DEFAULT ''
+			computed_at TEXT NOT NULL DEFAULT '',
+			-- 🎯T64.8 labelling provenance: which of the label chain paths
+			-- (vault_user | llm | bigram) named this theme, and — when a
+			-- user-anchor candidate was rejected — which quality gate fired,
+			-- surfaced by mnemo_vault_themes_inspect. Additive per 🎯T49.
+			label_source TEXT NOT NULL DEFAULT '',
+			label_note TEXT NOT NULL DEFAULT ''
 		);
 
 CREATE INDEX idx_themes_parent ON themes(parent_theme_id);

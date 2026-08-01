@@ -6,6 +6,7 @@ package store
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -31,14 +32,16 @@ var clusterDocKinds = []string{"decision", "compaction", "pattern", "vault_user"
 // themeCluster is one emitted theme: its member doc indices plus the
 // fields derived from them.
 type themeCluster struct {
-	members []int
-	label   string
-	slug    string
-	weight  float64
-	repos   []string
-	summary string // representative (centroid-closest) member text
-	firstTS string // earliest member timestamp — theme first_seen
-	lastTS  string // latest member timestamp — theme last_touched (drives retirement)
+	members     []int
+	label       string
+	slug        string
+	weight      float64
+	repos       []string
+	summary     string // representative (centroid-closest) member text
+	firstTS     string // earliest member timestamp — theme first_seen
+	lastTS      string // latest member timestamp — theme last_touched (drives retirement)
+	labelSource string // "vault_user" | "bigram" | "llm"
+	labelNote   string // gate that rejected a user-anchor candidate, if any
 	// simTo is centroid cosine per member index, for theme_members.similarity.
 	simTo map[int]float64
 }
@@ -78,7 +81,7 @@ func (s *Store) RecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*Cl
 	if err != nil {
 		return nil, err
 	}
-	clusters := clusterDocs(docs, p.Threshold)
+	clusters := clusterDocs(docs, p)
 
 	run, err := s.writeThemes(docs, clusters, started, trigger)
 	if err != nil {
@@ -96,17 +99,21 @@ func (s *Store) RecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*Cl
 // that got the segment clusterer (🎯T64.11) retired. That cost profile
 // is the thing T64.8's acceptance requires the document engine not to
 // reproduce.
-func clusterDocs(docs []ClusterCorpusDoc, threshold float64) []themeCluster {
+func clusterDocs(docs []ClusterCorpusDoc, p ClusterParams) []themeCluster {
 	n := len(docs)
 	if n == 0 {
 		return nil
 	}
+	if p.Threshold <= 0 {
+		p = DefaultClusterParams()
+	}
 	vecs := tfidfVectors(docs)
+	extraExclude, _ := compileUserFilenameExclude(p.LabelFilenameExtra)
 
 	uf := newUnionFind(n)
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			if cosine(vecs[i], vecs[j]) >= threshold {
+			if cosine(vecs[i], vecs[j]) >= p.Threshold {
 				uf.union(i, j)
 			}
 		}
@@ -127,14 +134,16 @@ func clusterDocs(docs []ClusterCorpusDoc, threshold float64) []themeCluster {
 	out := make([]themeCluster, 0, len(roots))
 	for _, r := range roots {
 		members := groups[r]
-		out = append(out, buildThemeCluster(docs, vecs, members))
+		out = append(out, buildThemeCluster(docs, vecs, members, p, extraExclude))
 	}
 	return out
 }
 
 // buildThemeCluster derives a theme's label, weight, repos, and
-// representative text from its member documents.
-func buildThemeCluster(docs []ClusterCorpusDoc, vecs []map[string]float64, members []int) themeCluster {
+// representative text from its member documents. p carries the label
+// config; extraExclude are the pre-compiled user filename patterns.
+func buildThemeCluster(docs []ClusterCorpusDoc, vecs []map[string]float64, members []int,
+	p ClusterParams, extraExclude []*regexp.Regexp) themeCluster {
 	tc := themeCluster{members: members, simTo: map[int]float64{}}
 
 	cent := map[string]float64{}
@@ -175,7 +184,21 @@ func buildThemeCluster(docs []ClusterCorpusDoc, vecs []map[string]float64, membe
 	}
 	tc.summary = strings.TrimSpace(docs[rep].Text)
 
-	tc.label = bigramLabel(docs, members)
+	// Label chain (§ Cluster labelling): user-anchored → bigram. The LLM
+	// path sits between them and is opt-in; it is wired in a later phase.
+	minTok := p.LabelUserMinTokens
+	if minTok <= 0 {
+		minTok = defaultLabelUserMinTokens
+	}
+	anchor := userAnchorLabel(docs, members, tc.simTo, tc.summary, minTok, extraExclude)
+	if anchor.Label != "" {
+		tc.label = anchor.Label
+		tc.labelSource = labelSourceVaultUser
+	} else {
+		tc.label = bigramLabel(docs, members)
+		tc.labelSource = labelSourceBigram
+		tc.labelNote = anchor.RejectNote // empty unless a candidate was rejected
+	}
 	tc.slug = slugify(tc.label)
 	return tc
 }
@@ -351,13 +374,15 @@ func (s *Store) writeThemes(docs []ClusterCorpusDoc, clusters []themeCluster, st
 			lastTouched = now
 		}
 		if _, err := tx.Exec(`
-			INSERT INTO themes (id, label, summary, weight, repos, depth, first_seen, last_touched, computed_at)
-			VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+			INSERT INTO themes (id, label, summary, weight, repos, depth, first_seen, last_touched, computed_at, label_source, label_note)
+			VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				label = excluded.label, summary = excluded.summary, weight = excluded.weight,
 				repos = excluded.repos, first_seen = excluded.first_seen,
-				last_touched = excluded.last_touched, computed_at = excluded.computed_at
-		`, themeID, tc.label, tc.summary, tc.weight, reposJSON(tc.repos), firstSeen, lastTouched, now); err != nil {
+				last_touched = excluded.last_touched, computed_at = excluded.computed_at,
+				label_source = excluded.label_source, label_note = excluded.label_note
+		`, themeID, tc.label, tc.summary, tc.weight, reposJSON(tc.repos), firstSeen, lastTouched, now,
+			tc.labelSource, tc.labelNote); err != nil {
 			return nil, fmt.Errorf("insert theme %s: %w", themeID, err)
 		}
 		for _, mi := range tc.members {

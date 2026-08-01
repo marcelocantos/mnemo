@@ -44,6 +44,8 @@ type ThemeView struct {
 	FirstSeen   string            `json:"first_seen"`
 	LastTouched string            `json:"last_touched"`
 	ComputedAt  string            `json:"computed_at"`
+	LabelSource string            `json:"label_source"`         // "vault_user" | "llm" | "bigram"
+	LabelNote   string            `json:"label_note,omitempty"` // gate that rejected a user-anchor
 	Pinned      bool              `json:"pinned"`
 	Members     []ThemeMemberView `json:"members"`
 }
@@ -57,6 +59,7 @@ func (s *Store) ThemesForRender(minWeight float64, limit int) ([]ThemeView, erro
 	q := `
 		SELECT t.id, t.label, t.summary, t.weight, t.repos,
 		       t.first_seen, t.last_touched, t.computed_at,
+		       t.label_source, t.label_note,
 		       CASE WHEN p.theme_id IS NULL THEN 0 ELSE 1 END AS pinned
 		FROM themes t
 		LEFT JOIN theme_pins p ON p.theme_id = t.id
@@ -84,7 +87,7 @@ func (s *Store) ThemesForRender(minWeight float64, limit int) ([]ThemeView, erro
 		var reposJSON string
 		var pinned int
 		if err := rows.Scan(&v.ID, &v.Label, &v.Summary, &v.Weight, &reposJSON,
-			&v.FirstSeen, &v.LastTouched, &v.ComputedAt, &pinned); err != nil {
+			&v.FirstSeen, &v.LastTouched, &v.ComputedAt, &v.LabelSource, &v.LabelNote, &pinned); err != nil {
 			return nil, err
 		}
 		v.Pinned = pinned == 1
@@ -124,12 +127,11 @@ func (s *Store) ThemesForRender(minWeight float64, limit int) ([]ThemeView, erro
 }
 
 // ThemeInspect is the full detail for one theme (mnemo_vault_themes_inspect):
-// the view plus how it was labelled and whether it is pinned.
+// the view (which already carries the label source/note) plus the pin
+// reason. LabelSource / LabelNote live on the embedded ThemeView.
 type ThemeInspect struct {
 	ThemeView
-	LabelSource string `json:"label_source"` // "bigram" | "llm" | "vault_user"
-	Pinned      bool   `json:"pinned"`
-	PinReason   string `json:"pin_reason,omitempty"`
+	PinReason string `json:"pin_reason,omitempty"`
 }
 
 // InspectTheme resolves a theme by exact id or by slug (derived from the
@@ -153,7 +155,10 @@ func (s *Store) InspectTheme(ref string) (*ThemeInspect, error) {
 		return nil, nil
 	}
 
-	insp := &ThemeInspect{ThemeView: *match, LabelSource: "bigram"}
+	insp := &ThemeInspect{ThemeView: *match}
+	if insp.LabelSource == "" {
+		insp.LabelSource = labelSourceBigram
+	}
 	var pinnedAt, reason string
 	err = s.readDB.QueryRow(
 		`SELECT COALESCE(pinned_at,''), COALESCE(reason,'') FROM theme_pins WHERE theme_id = ?`,
