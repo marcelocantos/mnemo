@@ -45,20 +45,22 @@ func newPlatformWatcher(cfg Config) (Watcher, error) {
 		return nil, err
 	}
 	w.stream = es
+	// Capture channel before Close can clear stream (loop must not deref nil).
+	rawEvents := es.Events
 
-	go w.loop()
+	go w.loop(rawEvents)
 	slog.Info("fswatch: FSEvents backend started", "roots", len(cfg.Roots), "backend", "fsevents")
 	return w, nil
 }
 
-func (w *darwinWatcher) loop() {
+func (w *darwinWatcher) loop(rawEvents <-chan []fsevents.Event) {
 	defer close(w.events)
 	defer close(w.errors)
 	for {
 		select {
 		case <-w.stop:
 			return
-		case batch, ok := <-w.stream.Events:
+		case batch, ok := <-rawEvents:
 			if !ok {
 				return
 			}

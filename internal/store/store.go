@@ -3785,8 +3785,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	defer db.stop()
 
 	poller := fswatch.NewPollTracker(2*time.Minute, fswatch.DefaultPollMaxPerTick)
-	pollEvery := 5 * time.Second
-	pollTick := time.NewTicker(pollEvery)
+	pollTick := time.NewTicker(watchPollInterval)
 	defer pollTick.Stop()
 
 	// canonPath resolves macOS /var vs /private/var so offsets match IngestAll.
@@ -3903,58 +3902,6 @@ func (s *Store) Watch(ctx context.Context) error {
 		}
 	}
 
-	runPoll := func() {
-		s.mu.Lock()
-		offsets := make(map[string]int64, len(s.offsets))
-		for p, off := range s.offsets {
-			offsets[p] = off
-		}
-		s.mu.Unlock()
-
-		// Live Claude sessions (JSONL held open) → full paths from open files.
-		var live []string
-		if liveMap := s.LiveSessions(); len(liveMap) > 0 {
-			// LiveSessions maps sessionID→pid; recover paths from offsets keys.
-			for p := range offsets {
-				base := strings.TrimSuffix(filepath.Base(p), ".jsonl")
-				if _, ok := liveMap[base]; ok {
-					live = append(live, p)
-				}
-			}
-		}
-
-		cands := poller.Candidates(fswatch.CandidatesArgs{
-			Offsets: offsets,
-			Live:    live,
-			Now:     time.Now(),
-			Stat: func(path string) (int64, error) {
-				fi, err := os.Stat(path)
-				if err != nil {
-					return 0, err
-				}
-				return fi.Size(), nil
-			},
-		})
-		for _, name := range cands {
-			// Only jsonl append recovery via poll (md paths come from events).
-			if !strings.HasSuffix(name, ".jsonl") {
-				continue
-			}
-			path := name
-			db.enqueue(path, func() {
-				if isCodexRollout(path) {
-					_ = s.ingestCodexFile(path)
-					return
-				}
-				if isGrokUpdates(path) {
-					_ = s.ingestGrokFile(path)
-					return
-				}
-				_ = s.ingestFile(path)
-			})
-		}
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -3972,8 +3919,83 @@ func (s *Store) Watch(ctx context.Context) error {
 			}
 			slog.Error("watcher error", "err", err)
 		case <-pollTick.C:
-			runPoll()
+			s.safetyPoll(poller, func(path string) {
+				db.enqueue(path, func() {
+					s.ingestJSONLPath(path)
+				})
+			})
 		}
+	}
+}
+
+// watchPollInterval is the safety-poll period used by Store.Watch (tests may shorten it).
+var watchPollInterval = 5 * time.Second
+
+// safetyPoll runs one bounded poll cycle using the shipped PollTracker and
+// invokes onNeed for each jsonl path that has grown past its offset.
+// This is the production recovery path for open/write/close writers when tree
+// events are missed (🎯T142.5).
+func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)) {
+	if poller == nil || onNeed == nil {
+		return
+	}
+	s.mu.Lock()
+	offsets := make(map[string]int64, len(s.offsets))
+	for p, off := range s.offsets {
+		offsets[p] = off
+	}
+	s.mu.Unlock()
+
+	// Use only a warm LiveSessions cache — never force a synchronous
+	// lsof +D of ~/.claude/projects on the poll path (that walk can take
+	// seconds and starve the Watch select loop). Rotation still covers
+	// silent appends without live signals.
+	var live []string
+	if liveMap := s.cachedLiveSessions(); len(liveMap) > 0 {
+		for p := range offsets {
+			base := strings.TrimSuffix(filepath.Base(p), ".jsonl")
+			if _, ok := liveMap[base]; ok {
+				live = append(live, p)
+			}
+		}
+	}
+
+	cands := poller.Candidates(fswatch.CandidatesArgs{
+		Offsets: offsets,
+		Live:    live,
+		Now:     time.Now(),
+		Stat: func(path string) (int64, error) {
+			fi, err := os.Stat(path)
+			if err != nil {
+				return 0, err
+			}
+			return fi.Size(), nil
+		},
+	})
+	for _, name := range cands {
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		onNeed(name)
+	}
+}
+
+// ingestJSONLPath dispatches a transcript path to the correct ingest implementation.
+func (s *Store) ingestJSONLPath(path string) {
+	if isCodexRollout(path) {
+		if err := s.ingestCodexFile(path); err != nil {
+			slog.Error("ingest codex failed", "file", path, "err", err)
+		}
+		return
+	}
+	if isGrokUpdates(path) {
+		if err := s.ingestGrokFile(path); err != nil {
+			slog.Error("ingest grok failed", "file", path, "err", err)
+		}
+		return
+	}
+	if err := s.ingestFile(path); err != nil {
+		slog.Error("ingest failed", "file", path, "err", err)
 	}
 }
 
@@ -5849,6 +5871,17 @@ func (s *Store) LiveSessions() map[string]int {
 	s.liveCache = result
 	s.liveCacheTime = time.Now()
 	return result
+}
+
+// cachedLiveSessions returns the last LiveSessions result if still within
+// liveSessionsTTL, otherwise nil. Does not run lsof — safe for the Watch poll path.
+func (s *Store) cachedLiveSessions() map[string]int {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if s.liveCache == nil || time.Since(s.liveCacheTime) >= liveSessionsTTL {
+		return nil
+	}
+	return s.liveCache
 }
 
 // SessionCWD returns the working directory recorded for the session in

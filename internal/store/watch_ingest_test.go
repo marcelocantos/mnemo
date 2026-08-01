@@ -5,8 +5,12 @@ package store
 
 import (
 	"context"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 )
 
 // TestWatchIngestsAppend drives the shipped Store.Watch path: start Watch,
@@ -28,7 +32,6 @@ func TestWatchIngestsAppend(t *testing.T) {
 	go func() { errCh <- s.Watch(ctx) }()
 	time.Sleep(400 * time.Millisecond)
 
-	// Use FTS-friendly tokens (hyphenated strings are split by the tokenizer).
 	appendJSONL(t, projectDir, "proj", "watch-session-1", []map[string]any{
 		msg("user", "hello watch append uniquet142marker enough", "2026-08-01T10:00:01Z"),
 	})
@@ -60,39 +63,67 @@ func TestWatchIngestsAppend(t *testing.T) {
 	}
 }
 
-// TestWatchPollOrEventRecoversAppend proves append recovery on the shipped
-// Watch loop (tree event and/or 5s safety poll).
-func TestWatchPollOrEventRecoversAppend(t *testing.T) {
+// TestSafetyPollRecoversSilentAppend proves the shipped safetyPoll path
+// recovers open/write/close growth with NO tree events and NO NoteEvent
+// (Grok-style updates.jsonl). Drives Store.safetyPoll + PollTracker only —
+// does not start FSEvents (verification plan: poll path separate from events).
+func TestSafetyPollRecoversSilentAppend(t *testing.T) {
 	projectDir := t.TempDir()
-	writeJSONL(t, projectDir, "proj", "poll-session", []map[string]any{
-		msg("user", "poll seed content text enough", "2026-08-01T11:00:00Z"),
+	writeJSONL(t, projectDir, "proj", "decoy-a", []map[string]any{
+		msg("user", "decoy a seed text enough", "2026-08-01T11:00:00Z"),
 	})
+	writeJSONL(t, projectDir, "proj", "decoy-b", []map[string]any{
+		msg("user", "decoy b seed text enough", "2026-08-01T11:00:00Z"),
+	})
+	path := writeJSONL(t, projectDir, "proj", "silent-session", []map[string]any{
+		msg("user", "silent seed content text enough", "2026-08-01T11:00:00Z"),
+	})
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+
 	s := newTestStore(t, projectDir)
 	if err := s.IngestAll(); err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Watch(ctx) }()
-	time.Sleep(300 * time.Millisecond)
-
-	appendJSONL(t, projectDir, "proj", "poll-session", []map[string]any{
-		msg("user", "pollrecoveryt142marker enough text", "2026-08-01T11:00:02Z"),
+	// Silent append: no Watch, no NoteEvent.
+	appendJSONL(t, projectDir, "proj", "silent-session", []map[string]any{
+		msg("user", "silentpollt142marker enough text", "2026-08-01T11:00:02Z"),
 	})
 
-	deadline := time.Now().Add(12 * time.Second)
-	for time.Now().Before(deadline) {
-		hits, err := s.Search("pollrecoveryt142marker", 5, "all", "", 0, 0, false)
+	// maxPerTick=1 forces rotation across decoys before silent-session.
+	poller := fswatch.NewPollTracker(time.Minute, 1)
+
+	var mu sync.Mutex
+	var onNeedCount int
+	for tick := 0; tick < 20; tick++ {
+		s.safetyPoll(poller, func(p string) {
+			mu.Lock()
+			onNeedCount++
+			mu.Unlock()
+			s.ingestJSONLPath(p)
+		})
+		hits, err := s.Search("silentpollt142marker", 5, "all", "", 0, 0, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(hits) > 0 {
-			cancel()
+			mu.Lock()
+			n := onNeedCount
+			mu.Unlock()
+			if n == 0 {
+				t.Fatal("search hit without safetyPoll onNeed (poll path not exercised)")
+			}
+			if !poller.Stated(path) {
+				// Offsets may use a non-EvalSymlinks spelling; require some path stated.
+				if poller.StatCallCount() == 0 {
+					t.Fatal("poller never stated any path")
+				}
+			}
 			return
 		}
-		time.Sleep(250 * time.Millisecond)
 	}
-	cancel()
-	t.Fatal("append not recovered by event or safety poll within 12s")
+	t.Fatalf("silent append not recovered by safetyPoll in 20 ticks; onNeed=%d stated=%v",
+		onNeedCount, poller.Stated(path))
 }

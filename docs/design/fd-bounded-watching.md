@@ -31,6 +31,29 @@ fsnotify has no FSEvents backend ([fsnotify#11](https://github.com/fsnotify/fsno
 Shared package: `internal/store/fswatch`. Production call sites:
 `Store.Watch`, vault watcher in `internal/registry`.
 
+### Linux: `fs.inotify.max_user_watches`
+
+Each watched directory consumes one inotify watch. The kernel limits total
+watches per user via `fs.inotify.max_user_watches` (often 8192–65536; check
+`sysctl fs.inotify.max_user_watches` or
+`/proc/sys/fs/inotify/max_user_watches`).
+
+mnemo also enforces `fswatch.MaxDirWatches` (4096) in-process: when the cap is
+hit, further `Add`s stop (**fail soft**), a warning is logged, and the safety
+poll continues to cover known transcript paths. If the **kernel** limit is
+lower than the tree size, `watcher.Add` fails per directory (also logged);
+raise the sysctl only if you intentionally need more simultaneous dir watches:
+
+```bash
+# temporary
+sudo sysctl -w fs.inotify.max_user_watches=524288
+# persistent (distro-dependent)
+echo fs.inotify.max_user_watches=524288 | sudo tee /etc/sysctl.d/99-mnemo-inotify.conf
+```
+
+Prefer fewer roots / filters over unbounded watch counts; the product bound is
+still “well under 5k” open FDs / watches for mnemo’s own process.
+
 ## Steady-state bound
 
 Watch-related open FDs must stay **well under 5k** for a full corpus (target
@@ -42,10 +65,18 @@ subscription or the safety poll — never as individual permanent watches.
 
 ## Safety poll
 
-All platforms re-stat only a **hot set**: live sessions, recently evented
-paths, and previously incomplete (`size > offset`) paths — not the full cold
-archive every tick. Recovers open/write/close writers (e.g. Grok
-`updates.jsonl`).
+Each tick states at most `DefaultPollMaxPerTick` (500) paths, in order:
+
+1. **Live** sessions (existing liveness / open-jsonl signals)
+2. **Recent** tree-event paths (`NoteEvent`)
+3. **Incomplete** (`size > offset` observed earlier)
+4. **Round-robin sample** of remaining keys in `ingest_state` / offsets
+   (jsonl preferred)
+
+So a silent open/write/close append with **no** FSEvents/inotify delivery is
+still recovered within `ceil(N / maxPerTick)` ticks for N known paths — without
+walking the filesystem tree or statting every cold file every interval.
+Priority hot paths are always checked first.
 
 ## Path filters
 
