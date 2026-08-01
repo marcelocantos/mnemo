@@ -5,6 +5,7 @@ package store
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
 	"sort"
@@ -81,9 +82,23 @@ func (s *Store) RecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*Cl
 	if err != nil {
 		return nil, err
 	}
-	clusters := clusterDocs(docs, p)
 
-	run, err := s.writeThemes(docs, clusters, started, trigger)
+	// Vectorise via the configured engine. The embeddings path runs only
+	// when opted in AND a provider is available; otherwise it falls back
+	// to TF-IDF and the fall-back reason is logged. This is the egress
+	// gate: no provider is constructed unless engine=="embeddings".
+	vecs, engine, warns := s.buildVectors(docs, p)
+	for _, w := range warns {
+		slog.Warn("vault_clustering: " + w)
+	}
+	clusters := clusterWithVecs(docs, vecs, p)
+
+	// LLM labelling post-pass (opt-in, gated) replaces bigram labels with
+	// Haiku-generated ones where a labeller is available; a no-op
+	// otherwise. Also fully gated — no provider unless label.engine=="llm".
+	s.applyLLMLabels(clusters, docs, p)
+
+	run, err := s.writeThemes(docs, clusters, started, trigger, engine)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +115,14 @@ func (s *Store) RecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*Cl
 // is the thing T64.8's acceptance requires the document engine not to
 // reproduce.
 func clusterDocs(docs []ClusterCorpusDoc, p ClusterParams) []themeCluster {
+	return clusterWithVecs(docs, tfidfVectors(docs), p)
+}
+
+// clusterWithVecs is the vector-agnostic core: given precomputed
+// per-document vectors (TF-IDF sparse maps or dense embeddings encoded as
+// dimension-indexed maps), form themes as the connected components of the
+// "cosine ≥ threshold" graph. Both engines share this downstream path.
+func clusterWithVecs(docs []ClusterCorpusDoc, vecs []map[string]float64, p ClusterParams) []themeCluster {
 	n := len(docs)
 	if n == 0 {
 		return nil
@@ -107,7 +130,6 @@ func clusterDocs(docs []ClusterCorpusDoc, p ClusterParams) []themeCluster {
 	if p.Threshold <= 0 {
 		p = DefaultClusterParams()
 	}
-	vecs := tfidfVectors(docs)
 	extraExclude, _ := compileUserFilenameExclude(p.LabelFilenameExtra)
 
 	uf := newUnionFind(n)
@@ -335,7 +357,10 @@ func slugify(label string) string {
 // from segment docs (the dormant clusterer) are left untouched: the
 // delete is scoped to clusterDocKinds, and only themes orphaned by that
 // delete are removed.
-func (s *Store) writeThemes(docs []ClusterCorpusDoc, clusters []themeCluster, started time.Time, trigger string) (*ClusterRun, error) {
+func (s *Store) writeThemes(docs []ClusterCorpusDoc, clusters []themeCluster, started time.Time, trigger, engine string) (*ClusterRun, error) {
+	if engine == "" {
+		engine = heuristicEngineName
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.writeDB.Begin()
 	if err != nil {
@@ -401,7 +426,7 @@ func (s *Store) writeThemes(docs []ClusterCorpusDoc, clusters []themeCluster, st
 	res, err := tx.Exec(`
 		INSERT INTO cluster_runs (started_at, ended_at, engine, input_docs, output_themes, trigger)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, started.Format(time.RFC3339), ended, heuristicEngineName, len(docs), len(clusters), trigger)
+	`, started.Format(time.RFC3339), ended, engine, len(docs), len(clusters), trigger)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +437,7 @@ func (s *Store) writeThemes(docs []ClusterCorpusDoc, clusters []themeCluster, st
 	}
 	return &ClusterRun{
 		ID: runID, StartedAt: started.Format(time.RFC3339), EndedAt: ended,
-		Engine: heuristicEngineName, InputDocs: len(docs), OutputThemes: len(clusters),
+		Engine: engine, InputDocs: len(docs), OutputThemes: len(clusters),
 		Trigger: trigger,
 	}, nil
 }

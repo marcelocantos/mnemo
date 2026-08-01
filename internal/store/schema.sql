@@ -660,6 +660,19 @@ CREATE TABLE theme_pins (
 			reason TEXT NOT NULL DEFAULT ''
 		);
 
+-- 🎯T64.8: manual cluster-quality overrides (split/merge/relabel). The
+-- split/merge tools are follow-up placeholders in this release; the
+-- table is created now so the directive history has a home and the
+-- schema is stable. Rows are marked applied_at rather than deleted so
+-- the directive log survives. Additive per 🎯T49.
+CREATE TABLE theme_overrides (
+			theme_id TEXT PRIMARY KEY,
+			directive TEXT NOT NULL DEFAULT '',
+			payload TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT '',
+			applied_at TEXT NOT NULL DEFAULT ''
+		);
+
 -- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash
 -- drives incremental skip, and (size, mtime) is the write-back
 -- fingerprint that lets a mutation detect an external edit since the

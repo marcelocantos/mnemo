@@ -71,6 +71,11 @@ type ClusterParams struct {
 	LabelEngine        string
 	LabelUserMinTokens int
 	LabelFilenameExtra []string
+
+	// ForceReembed is a transient per-call flag (not from config): the
+	// mnemo_vault_recluster force_reembed option, which invalidates the
+	// embedding cache for the active fingerprint before a pass.
+	ForceReembed bool
 }
 
 // DefaultClusterParams is the parameter set used when no config is

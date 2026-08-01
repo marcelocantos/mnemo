@@ -3190,14 +3190,21 @@ func (h *callHandler) vaultBridgeList(ctl ConfigController) (string, bool, error
 // and not wired in this release, so an "embeddings" override is
 // rejected rather than silently downgraded.
 func (h *callHandler) vaultRecluster(args map[string]any, ctl ConfigController) (string, bool, error) {
-	if engine, _ := args["engine"].(string); engine == "embeddings" {
-		return "engine \"embeddings\" is not available: the embeddings engine is opt-in (vault_clustering.engine) and not wired in this release. Re-run without an engine override to use the heuristic engine.", true, nil
-	}
-
 	p := store.DefaultClusterParams()
 	if ctl != nil {
 		p = ctl.Get().ResolvedClusterParams(nil)
 	}
+
+	// An "embeddings" override is honoured only when the config already
+	// opts into embeddings — the egress posture is not overridable from a
+	// tool call (per docs/design/vault-clustering.md § MCP tools).
+	if engine, _ := args["engine"].(string); engine == "embeddings" && p.Engine != "embeddings" {
+		return "engine \"embeddings\" is rejected: the embeddings engine is opt-in via vault_clustering.engine=\"embeddings\" in ~/.mnemo/config.json and cannot be enabled from this tool call. The heuristic engine runs by default.", true, nil
+	}
+	if force, _ := args["force_reembed"].(bool); force {
+		p.ForceReembed = true
+	}
+
 	vaultRoot := ""
 	if h.vault != nil {
 		vaultRoot = h.vault.Path()
