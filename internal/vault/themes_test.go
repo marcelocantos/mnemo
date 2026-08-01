@@ -6,6 +6,7 @@ package vault
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -71,6 +72,39 @@ func TestThemeProvenanceHeading(t *testing.T) {
 	mixed := []store.ThemeMemberView{{Kind: "decision"}, {Kind: "pattern"}}
 	if got := themeProvenanceHeading(mixed); got != "Underlying entities" {
 		t.Errorf("mixed heading = %q", got)
+	}
+}
+
+func TestThemeArchivePath(t *testing.T) {
+	if got := themeArchivePath(sampleThemeView()); got != "_mnemo/themes/_archive/schema-migration.md" {
+		t.Errorf("themeArchivePath = %q", got)
+	}
+}
+
+func TestThemeRetired(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	retire := 180 * 24 * time.Hour
+
+	old := now.Add(-200 * 24 * time.Hour).Format(time.RFC3339)
+	recent := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339)
+
+	if !themeRetired(old, retire, now) {
+		t.Error("a 200-day-old theme past a 180-day window should retire")
+	}
+	if themeRetired(recent, retire, now) {
+		t.Error("a 10-day-old theme should not retire")
+	}
+	// retire_after 0 disables retirement.
+	if themeRetired(old, 0, now) {
+		t.Error("retireAfter=0 must never retire")
+	}
+	// Unparseable/empty last_touched fails safe (not retired).
+	if themeRetired("", retire, now) || themeRetired("garbage", retire, now) {
+		t.Error("empty/unparseable last_touched must not retire")
+	}
+	// Date-only stamp parses.
+	if !themeRetired("2026-01-01", retire, now) {
+		t.Error("date-only old stamp should retire")
 	}
 }
 

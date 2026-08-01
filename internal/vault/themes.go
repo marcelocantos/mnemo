@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -26,9 +27,45 @@ func themePath(v store.ThemeView) string {
 	return filepath.Join(mnemoWingDir, "themes", slug+".md")
 }
 
+// themeArchivePath returns the retired-theme path under themes/_archive/
+// (docs/design/vault-clustering.md § retirement). A theme whose newest
+// member is older than retire_after fades here unless pinned.
+func themeArchivePath(v store.ThemeView) string {
+	base := filepath.Base(themePath(v))
+	return filepath.Join(mnemoWingDir, "themes", "_archive", base)
+}
+
 // themesIndexPath returns the library-wing themes collection index.
 func themesIndexPath() string {
 	return filepath.Join(mnemoWingDir, "themes", "_index.md")
+}
+
+// themeRetired reports whether a theme should be archived: its newest
+// member (last_touched) is older than retireAfter. A pinned theme is
+// exempt (checked by the caller). retireAfter <= 0 disables retirement;
+// an empty or unparseable timestamp is treated as not retired, so a
+// theme is never archived on a parse failure alone.
+func themeRetired(lastTouched string, retireAfter time.Duration, now time.Time) bool {
+	if retireAfter <= 0 || lastTouched == "" {
+		return false
+	}
+	t := parseThemeTS(lastTouched)
+	if t.IsZero() {
+		return false
+	}
+	return now.Sub(t) > retireAfter
+}
+
+func parseThemeTS(ts string) time.Time {
+	for _, layout := range []string{
+		time.RFC3339Nano, time.RFC3339,
+		"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02",
+	} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 // renderTheme produces one _mnemo/themes/<slug>.md page. label-source is

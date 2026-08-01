@@ -44,6 +44,7 @@ type ThemeView struct {
 	FirstSeen   string            `json:"first_seen"`
 	LastTouched string            `json:"last_touched"`
 	ComputedAt  string            `json:"computed_at"`
+	Pinned      bool              `json:"pinned"`
 	Members     []ThemeMemberView `json:"members"`
 }
 
@@ -55,8 +56,10 @@ type ThemeView struct {
 func (s *Store) ThemesForRender(minWeight float64, limit int) ([]ThemeView, error) {
 	q := `
 		SELECT t.id, t.label, t.summary, t.weight, t.repos,
-		       t.first_seen, t.last_touched, t.computed_at
+		       t.first_seen, t.last_touched, t.computed_at,
+		       CASE WHEN p.theme_id IS NULL THEN 0 ELSE 1 END AS pinned
 		FROM themes t
+		LEFT JOIN theme_pins p ON p.theme_id = t.id
 		WHERE t.weight >= ?
 		  AND EXISTS (
 		    SELECT 1 FROM theme_members m
@@ -79,10 +82,12 @@ func (s *Store) ThemesForRender(minWeight float64, limit int) ([]ThemeView, erro
 	for rows.Next() {
 		var v ThemeView
 		var reposJSON string
+		var pinned int
 		if err := rows.Scan(&v.ID, &v.Label, &v.Summary, &v.Weight, &reposJSON,
-			&v.FirstSeen, &v.LastTouched, &v.ComputedAt); err != nil {
+			&v.FirstSeen, &v.LastTouched, &v.ComputedAt, &pinned); err != nil {
 			return nil, err
 		}
+		v.Pinned = pinned == 1
 		_ = json.Unmarshal([]byte(reposJSON), &v.Repos)
 		v.Slug = slugify(v.Label)
 		out = append(out, v)

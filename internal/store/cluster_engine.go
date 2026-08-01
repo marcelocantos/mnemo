@@ -37,6 +37,8 @@ type themeCluster struct {
 	weight  float64
 	repos   []string
 	summary string // representative (centroid-closest) member text
+	firstTS string // earliest member timestamp — theme first_seen
+	lastTS  string // latest member timestamp — theme last_touched (drives retirement)
 	// simTo is centroid cosine per member index, for theme_members.similarity.
 	simTo map[int]float64
 }
@@ -141,6 +143,17 @@ func buildThemeCluster(docs []ClusterCorpusDoc, vecs []map[string]float64, membe
 		tc.weight += docs[mi].Weight
 		if r := docs[mi].Repo; r != "" {
 			repoSet[r] = struct{}{}
+		}
+		// first_seen / last_touched are the member timestamp extent, not
+		// the pass time — a theme built from old work must read as old so
+		// retirement can fire. String compare is valid for RFC3339/ISO.
+		if ts := docs[mi].TS; ts != "" {
+			if tc.firstTS == "" || ts < tc.firstTS {
+				tc.firstTS = ts
+			}
+			if ts > tc.lastTS {
+				tc.lastTS = ts
+			}
 		}
 		for t, v := range vecs[mi] {
 			cent[t] += v
@@ -330,13 +343,21 @@ func (s *Store) writeThemes(docs []ClusterCorpusDoc, clusters []themeCluster, st
 		sort.Strings(ids)
 		themeID := themeIDFromMembers(ids)
 
+		firstSeen, lastTouched := tc.firstTS, tc.lastTS
+		if firstSeen == "" {
+			firstSeen = now
+		}
+		if lastTouched == "" {
+			lastTouched = now
+		}
 		if _, err := tx.Exec(`
 			INSERT INTO themes (id, label, summary, weight, repos, depth, first_seen, last_touched, computed_at)
 			VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				label = excluded.label, summary = excluded.summary, weight = excluded.weight,
-				repos = excluded.repos, last_touched = excluded.last_touched, computed_at = excluded.computed_at
-		`, themeID, tc.label, tc.summary, tc.weight, reposJSON(tc.repos), now, now, now); err != nil {
+				repos = excluded.repos, first_seen = excluded.first_seen,
+				last_touched = excluded.last_touched, computed_at = excluded.computed_at
+		`, themeID, tc.label, tc.summary, tc.weight, reposJSON(tc.repos), firstSeen, lastTouched, now); err != nil {
 			return nil, fmt.Errorf("insert theme %s: %w", themeID, err)
 		}
 		for _, mi := range tc.members {

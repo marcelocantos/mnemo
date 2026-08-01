@@ -484,12 +484,27 @@ func (e *Exporter) syncThemes(ctx context.Context, layout string) error {
 		return fmt.Errorf("vault: themes for render: %w", err)
 	}
 
-	written, skipped := 0, 0
+	now := time.Now().UTC()
+	written, skipped, retired := 0, 0, 0
+	active := make([]store.ThemeView, 0, len(themes))
 	for _, v := range themes {
 		if ctx.Err() != nil {
 			break
 		}
-		relPath := themePath(v)
+		isRetired := !v.Pinned && themeRetired(v.LastTouched, p.RetireAfter, now)
+
+		relPath, otherPath := themePath(v), themeArchivePath(v)
+		if isRetired {
+			relPath, otherPath = themeArchivePath(v), themePath(v)
+			retired++
+		} else {
+			active = append(active, v)
+		}
+		// On an active↔retired transition the theme's page moves between
+		// themes/ and themes/_archive/; remove the stale counterpart (file
+		// + manifest row) so a theme never shows in both places.
+		e.removeThemeCounterpart(otherPath)
+
 		absPath := filepath.Join(e.path, relPath)
 		if !needsUpdate(absPath, v.ComputedAt) {
 			skipped++
@@ -504,16 +519,36 @@ func (e *Exporter) syncThemes(ctx context.Context, layout string) error {
 		written++
 	}
 
+	// The index lists active themes only; archived ones are intentionally
+	// out of the main view.
 	idxPath := themesIndexPath()
-	idxContent := renderThemesIndex(themes)
+	idxContent := renderThemesIndex(active)
 	if err := writeNote(filepath.Join(e.path, idxPath), idxContent, ""); err != nil {
 		slog.Warn("vault: write themes index failed", "path", idxPath, "err", err)
 	} else {
 		e.recordOutput(idxPath, "theme_index", "themes", idxContent)
 	}
 
-	slog.Info("vault: themes synced", "written", written, "skipped", skipped, "layout", layout)
+	slog.Info("vault: themes synced",
+		"written", written, "skipped", skipped, "retired", retired, "layout", layout)
 	return nil
+}
+
+// removeThemeCounterpart deletes a theme page at the given vault-relative
+// path (and its manifest row) if it exists, so a theme moving between the
+// active dir and _archive/ never lingers in both.
+func (e *Exporter) removeThemeCounterpart(relPath string) {
+	abs := filepath.Join(e.path, relPath)
+	if _, err := os.Stat(abs); err != nil {
+		return // nothing there
+	}
+	if err := os.Remove(abs); err != nil {
+		slog.Warn("vault: remove stale theme note failed", "path", abs, "err", err)
+		return
+	}
+	if err := e.backend.RemoveVaultManifestRow(relPath); err != nil {
+		slog.Warn("vault: remove theme manifest row failed", "path", relPath, "err", err)
+	}
 }
 
 // syncPlans writes a vault note for every indexed plan.

@@ -147,6 +147,51 @@ func TestRecomputeThemesLeavesSegmentThemes(t *testing.T) {
 	}
 }
 
+// TestRecomputeThemesDerivesMemberTimestamps: a theme's last_touched
+// reflects its newest member, not the pass time — otherwise retirement
+// could never fire (every pass would refresh the stamp to now).
+func TestRecomputeThemesDerivesMemberTimestamps(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO session_meta (session_id, repo) VALUES ('sess', 'mnemo')`); err != nil {
+		t.Fatal(err)
+	}
+	// Two clustering decisions dated well in the past.
+	oldTS := "2026-01-01T00:00:00Z"
+	longAgo := time.Now().UTC().Add(-200 * 24 * time.Hour).Format(time.RFC3339)
+	txt := "schema migration must stay additive because a new sqlite column with a default keeps old binaries safe and never drops data or tightens a constraint on existing rows"
+	for i, ts := range []string{longAgo, oldTS} {
+		if _, err := s.writeDB.Exec(
+			`INSERT INTO decisions (id, session_id, proposal_text, confirmation_text, repo, timestamp)
+			 VALUES (?, 'sess', ?, 'confirmed that is the right approach for us', 'mnemo', ?)`,
+			i+1, txt, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RecomputeThemes("", "manual", DefaultClusterParams()); err != nil {
+		t.Fatal(err)
+	}
+	var lastTouched string
+	if err := s.readDB.QueryRow(
+		`SELECT last_touched FROM themes ORDER BY weight DESC LIMIT 1`).Scan(&lastTouched); err != nil {
+		t.Fatal(err)
+	}
+	// last_touched must be one of the member timestamps, not "now".
+	got := parseThemeTSForTest(t, lastTouched)
+	if time.Since(got) < 100*24*time.Hour {
+		t.Errorf("last_touched %q looks like pass time, not the newest member", lastTouched)
+	}
+}
+
+func parseThemeTSForTest(t *testing.T, ts string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t.Fatalf("last_touched not RFC3339: %q", ts)
+	}
+	return parsed
+}
+
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
 		"Schema Migration": "schema-migration",
