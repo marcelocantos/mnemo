@@ -58,6 +58,12 @@ type Backend interface {
 	// ListPatterns reads persisted workaround patterns (🎯T64.7). The
 	// vault exporter uses it directly so rendering never triggers a mine.
 	ListPatterns(q PatternQuery) ([]PatternCandidate, error)
+	// ThemesForRender returns heuristic-engine themes at or above a weight
+	// floor, with members, for the vault theme pages (🎯T64.8).
+	ThemesForRender(minWeight float64) ([]ThemeView, error)
+	// MaybeRecomputeThemes runs a clustering pass if the last is older
+	// than interval, so the cadence rides the vault sync loop (🎯T64.8).
+	MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*ClusterRun, error)
 	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
 	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)

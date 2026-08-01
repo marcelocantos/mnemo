@@ -167,6 +167,12 @@ func (f *fakeBackend) DiscoverPatterns(days int, repoFilter string, minOccurrenc
 func (f *fakeBackend) ListPatterns(q store.PatternQuery) ([]store.PatternCandidate, error) {
 	panic("unexpected ListPatterns call")
 }
+func (f *fakeBackend) ThemesForRender(minWeight float64) ([]store.ThemeView, error) {
+	panic("unexpected ThemesForRender call")
+}
+func (f *fakeBackend) MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*store.ClusterRun, error) {
+	panic("unexpected MaybeRecomputeThemes call")
+}
 func (f *fakeBackend) SearchImages(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
 	panic("unexpected SearchImages call")
 }

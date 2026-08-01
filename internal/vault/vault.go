@@ -234,6 +234,8 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	setErr(e.syncMemories(ctx, layout))
 	// Patterns: wing-only second-order abstraction. (🎯T64.7)
 	setErr(e.syncPatterns(ctx, layout))
+	// Themes: wing-only clustered abstraction. (🎯T64.8)
+	setErr(e.syncThemes(ctx, layout))
 
 	setErr(e.syncPlans(ctx))
 	setErr(e.syncTargets(ctx))
@@ -442,6 +444,60 @@ func (e *Exporter) syncPatterns(ctx context.Context, layout string) error {
 	}
 
 	slog.Info("vault: patterns synced", "written", written, "skipped", skipped, "layout", layout)
+	return nil
+}
+
+// syncThemes clusters the corpus (at most once per interval, riding this
+// sync loop) and writes a page per theme above the render weight floor,
+// plus a collection index. (🎯T64.8)
+func (e *Exporter) syncThemes(ctx context.Context, layout string) error {
+	if layout == store.VaultLayoutV1 {
+		return nil
+	}
+
+	// A recompute failure must not sink the sync — render whatever the
+	// last successful pass left in the table.
+	if run, err := e.backend.MaybeRecomputeThemes(e.path, store.DefaultClusterInterval, "interval"); err != nil {
+		slog.Warn("vault: theme recompute failed", "err", err)
+	} else if run != nil {
+		slog.Info("vault: themes reclustered",
+			"input_docs", run.InputDocs, "output_themes", run.OutputThemes)
+	}
+
+	themes, err := e.backend.ThemesForRender(store.DefaultMinClusterWeight)
+	if err != nil {
+		return fmt.Errorf("vault: themes for render: %w", err)
+	}
+
+	written, skipped := 0, 0
+	for _, v := range themes {
+		if ctx.Err() != nil {
+			break
+		}
+		relPath := themePath(v)
+		absPath := filepath.Join(e.path, relPath)
+		if !needsUpdate(absPath, v.ComputedAt) {
+			skipped++
+			continue
+		}
+		content := renderTheme(v)
+		if err := writeNote(absPath, content, v.ComputedAt); err != nil {
+			slog.Warn("vault: write theme note failed", "path", absPath, "err", err)
+			continue
+		}
+		e.recordOutput(relPath, "theme", v.ID, content)
+		written++
+	}
+
+	idxPath := themesIndexPath()
+	idxContent := renderThemesIndex(themes)
+	if err := writeNote(filepath.Join(e.path, idxPath), idxContent, ""); err != nil {
+		slog.Warn("vault: write themes index failed", "path", idxPath, "err", err)
+	} else {
+		e.recordOutput(idxPath, "theme_index", "themes", idxContent)
+	}
+
+	slog.Info("vault: themes synced", "written", written, "skipped", skipped, "layout", layout)
 	return nil
 }
 

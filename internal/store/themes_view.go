@@ -1,0 +1,135 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// Cluster-render defaults (docs/design/vault-clustering.md § config).
+// Config wiring (vault_clustering.*) lands in a later phase; these are
+// the design defaults used until then.
+const (
+	// DefaultMinClusterWeight is the weight floor for *rendering* a theme
+	// as a page. Themes below it stay in the table but get no page.
+	DefaultMinClusterWeight = 3.0
+	// DefaultClusterInterval is the recompute cadence: clustering output
+	// is noisy on short windows and the pass is non-trivial, so it runs
+	// at most this often.
+	DefaultClusterInterval = 24 * time.Hour
+)
+
+// ThemeMemberView is one member of a theme, for the renderer's evidence
+// and provenance sections.
+type ThemeMemberView struct {
+	Kind       string  `json:"kind"`
+	EntityID   string  `json:"entity_id"`
+	Similarity float64 `json:"similarity"`
+}
+
+// ThemeView is a rendered theme: the themes row plus its members and a
+// derived slug. Slug is computed from the label rather than stored (no
+// slug column yet); rendered themes are few and multi-member, so
+// label-collisions are unlikely.
+type ThemeView struct {
+	ID          string            `json:"id"`
+	Label       string            `json:"label"`
+	Slug        string            `json:"slug"`
+	Summary     string            `json:"summary"`
+	Weight      float64           `json:"weight"`
+	Repos       []string          `json:"repos"`
+	MemberCount int               `json:"member_count"`
+	FirstSeen   string            `json:"first_seen"`
+	LastTouched string            `json:"last_touched"`
+	ComputedAt  string            `json:"computed_at"`
+	Members     []ThemeMemberView `json:"members"`
+}
+
+// ThemesForRender returns heuristic-engine themes at or above minWeight,
+// heaviest first, each with its members. Segment-clusterer themes
+// (doc_kind='segment') are excluded — this view is the four-stream
+// corpus engine's output.
+func (s *Store) ThemesForRender(minWeight float64) ([]ThemeView, error) {
+	rows, err := s.readDB.Query(`
+		SELECT t.id, t.label, t.summary, t.weight, t.repos,
+		       t.first_seen, t.last_touched, t.computed_at
+		FROM themes t
+		WHERE t.weight >= ?
+		  AND EXISTS (
+		    SELECT 1 FROM theme_members m
+		    WHERE m.theme_id = t.id
+		      AND m.doc_kind IN ('decision','compaction','pattern','vault_user')
+		  )
+		ORDER BY t.weight DESC, t.id
+	`, minWeight)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ThemeView
+	for rows.Next() {
+		var v ThemeView
+		var reposJSON string
+		if err := rows.Scan(&v.ID, &v.Label, &v.Summary, &v.Weight, &reposJSON,
+			&v.FirstSeen, &v.LastTouched, &v.ComputedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(reposJSON), &v.Repos)
+		v.Slug = slugify(v.Label)
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Members per theme, ordered by similarity so the representative
+	// leads the evidence section.
+	for i := range out {
+		mrows, err := s.readDB.Query(`
+			SELECT doc_kind, entity_id, COALESCE(similarity, 0)
+			FROM theme_members
+			WHERE theme_id = ?
+			  AND doc_kind IN ('decision','compaction','pattern','vault_user')
+			ORDER BY similarity DESC, entity_id
+		`, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		for mrows.Next() {
+			var m ThemeMemberView
+			if err := mrows.Scan(&m.Kind, &m.EntityID, &m.Similarity); err != nil {
+				mrows.Close()
+				return nil, err
+			}
+			out[i].Members = append(out[i].Members, m)
+		}
+		mrows.Close()
+		out[i].MemberCount = len(out[i].Members)
+	}
+	return out, nil
+}
+
+// MaybeRecomputeThemes runs a clustering pass only if the last one is
+// older than interval (or none exists). Called from the vault sync loop
+// so the recompute cadence rides the existing timer without a dedicated
+// goroutine: however often sync fires, clustering runs at most once per
+// interval. Returns the run when one happened, nil when skipped.
+func (s *Store) MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*ClusterRun, error) {
+	if interval <= 0 {
+		interval = DefaultClusterInterval
+	}
+	var last string
+	// A missing row scans to '' → zero time → always due.
+	_ = s.readDB.QueryRow(`SELECT COALESCE(MAX(started_at), '') FROM cluster_runs`).Scan(&last)
+	if last != "" {
+		if t, err := time.Parse(time.RFC3339, last); err == nil {
+			if time.Since(t) < interval {
+				return nil, nil
+			}
+		}
+	}
+	return s.RecomputeThemes(vaultRoot, trigger)
+}
