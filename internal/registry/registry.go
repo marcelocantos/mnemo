@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/breaker"
@@ -32,6 +31,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 	"github.com/marcelocantos/mnemo/internal/streamseg"
 	"github.com/marcelocantos/mnemo/internal/throttle"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
@@ -1001,42 +1001,22 @@ func (r *Registry) startVaultWorkers(username string, e *userEntry) context.Cont
 
 	// Vault file watcher: re-indexes human annotations (content below the
 	// <!-- mnemo:generated --> fence) within ~2 seconds of any .md save.
-	// IngestVaultAnnotations extracts only below-fence content, so
-	// generated blocks are never re-ingested and there is no feedback loop.
+	// Uses fswatch (FSEvents on Darwin) — not recursive kqueue Add (🎯T142).
 	e.vaultWorkers.Add(1)
 	go func() {
 		defer e.vaultWorkers.Done()
 		vaultPath := vp.Path()
-		// vault.New already called os.MkdirAll; the directory exists.
 
-		fw, err := fsnotify.NewWatcher()
+		fw, err := fswatch.New(fswatch.Config{
+			Roots: []string{vaultPath},
+			Mode:  fswatch.ModeVault,
+		})
 		if err != nil {
 			logger.Warn("vault: file watcher init failed", "err", err)
 			return
 		}
 		defer fw.Close()
-
-		// Add vault root and all existing subdirectories.
-		// fsnotify v1.9 does not expose a public WithRecursive option
-		// on all platforms, so we walk and add manually, then
-		// re-add any newly created subdirectory on CREATE events.
-		// Hidden dirs (.obsidian/, .git/, .trash/) are skipped to
-		// avoid wasting inotify slots on Linux and to skip Obsidian
-		// internal-state churn that has no signal for mnemo.
-		addVaultDirs := func(root string) {
-			_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-				if err != nil || !d.IsDir() {
-					return nil
-				}
-				if p != root && strings.HasPrefix(d.Name(), ".") {
-					return filepath.SkipDir
-				}
-				_ = fw.Add(p)
-				return nil
-			})
-		}
-		addVaultDirs(vaultPath)
-		logger.Info("vault: file watcher started", "path", vaultPath)
+		logger.Info("vault: file watcher started", "path", vaultPath, "backend", fw.Backend())
 
 		const quietPeriod = 2 * time.Second
 		debounce := time.NewTimer(quietPeriod)
@@ -1047,22 +1027,14 @@ func (r *Registry) startVaultWorkers(username string, e *userEntry) context.Cont
 			select {
 			case <-vctx.Done():
 				return
-			case ev, ok := <-fw.Events:
+			case ev, ok := <-fw.Events():
 				if !ok {
 					return
 				}
-				// Watch newly created non-hidden subdirectories so notes
-				// written into new sections are also picked up.
-				if ev.Has(fsnotify.Create) {
-					if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() &&
-						!strings.HasPrefix(filepath.Base(ev.Name), ".") {
-						_ = fw.Add(ev.Name)
-					}
-				}
-				if strings.HasSuffix(ev.Name, ".md") {
+				if strings.HasSuffix(ev.Path, ".md") {
 					debounce.Reset(quietPeriod)
 				}
-			case err, ok := <-fw.Errors:
+			case err, ok := <-fw.Errors():
 				if !ok {
 					return
 				}
