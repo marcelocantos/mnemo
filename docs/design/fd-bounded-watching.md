@@ -60,6 +60,17 @@ Watch-related open FDs must stay **well under 5k** for a full corpus (target
 class: O(roots) on Darwin). Historical files are covered by the tree
 subscription or the safety poll — never as individual permanent watches.
 
+**Watch roots** (production): Claude/Codex/Grok trees + skills + configured
+`workspace_roots` (default `~/work`). Individual known git checkouts are **not**
+each registered as separate FSEvents paths — that previously produced hundreds of
+roots and thousands of DIR FDs. Nested repo files under a workspace root still
+receive events via the tree stream; repos outside workspace roots still get
+boot-time `Ingest*` catch-up.
+
+Live measurement on the author's full corpus (2026-08-01, ~25GB `mnemo.db`,
+~60k session files): **backend=fsevents, roots=6, process open FDs ≈ 80**,
+only ~3 FDs under transcript corpus paths (was ~72k with kqueue Walk+Add).
+
 `MaxDirWatches` (4096) caps fsnotify dir expansion; exceeding it **fails soft**
 (log + continue; safety poll covers the rest).
 
@@ -91,3 +102,15 @@ Denied: Grok `terminal/`, non-ingested Grok sidecars (`events.jsonl`,
 `internal/store/fswatch.TestFDBoundOracle` starts the **shipped** `fswatch.New`
 API over a synthetic multi-thousand-file tree and asserts process open-FD delta
 is far below file count (not ≥ half the files) and under 5k.
+
+## Telemetry surfaces
+
+| Surface | Field / check |
+|---------|----------------|
+| `mnemo_status` → `diagnostics.watch` | `WatchTelemetry` JSON (backend, roots, dir_watches, cap_hit, process_open_fds, events, poll_*) |
+| `mnemo_stats` → `watch` | same snapshot |
+| `mnemo_doctor` / `GET /health` | check **`watch.fds`** (fast): ok / warn (≥3k FDs or cap hit / not running) / fail (≥8k FDs) |
+| daemon log | `watching for changes` includes `backend`, `open_fds`, `cap_hit` |
+
+`Store.WatchTelemetrySnapshot()` is the single source; poll ticks refresh
+`process_open_fds` via `fswatch.OpenFDCount()`.

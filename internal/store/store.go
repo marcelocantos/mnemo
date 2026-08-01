@@ -99,6 +99,10 @@ type Store struct {
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
 
+	// watchTel is live 🎯T142 tree-watch telemetry (backend, FDs, poll).
+	// Own mutex; not guarded by mu.
+	watchTel watchTelemetryState
+
 	// vaultPath is the configured vault root, mirrored from
 	// registry/config (🎯T68.6) so the vault divergence gatherer and
 	// the vault GC can find it without re-reading config. "" when the
@@ -467,6 +471,8 @@ type StatsResult struct {
 	TotalMessages int              `json:"total_messages"`
 	ByType        []TypeStats      `json:"by_type"`
 	Streams       []BackfillStatus `json:"streams,omitempty"`
+	// Watch is live tree-watch telemetry (🎯T142).
+	Watch *WatchTelemetry `json:"watch,omitempty"`
 }
 
 // UsageRow holds aggregated token usage for a single group (date, model, repo, session, or block).
@@ -3743,20 +3749,22 @@ func (s *Store) Watch(ctx context.Context) error {
 		roots = append(roots, sdir)
 	}
 
+	// Repo map is for event dispatch (which repo a CLAUDE.md belongs to).
+	// Do NOT add every known repo as its own watch root: on Darwin FSEvents
+	// that multiplies open DIR FDs (~1 per path). Subscribe to workspace
+	// roots instead; nested checkouts are covered by the tree stream (🎯T142).
 	repoRoots := s.knownRepoRoots()
 	repoForRoot := map[string]string{}
 	for _, rr := range repoRoots {
 		repoForRoot[rr.root] = rr.repo
-		roots = append(roots, rr.root)
-		docsDir := filepath.Join(rr.root, "docs")
-		if info, err := os.Stat(docsDir); err == nil && info.IsDir() {
-			roots = append(roots, docsDir)
-		}
-		planDir := filepath.Join(rr.root, ".planning")
-		if info, err := os.Stat(planDir); err == nil && info.IsDir() {
-			roots = append(roots, planDir)
+	}
+	s.rootsMu.RLock()
+	for _, wr := range s.workspaceRoots {
+		if wr != "" {
+			roots = append(roots, wr)
 		}
 	}
+	s.rootsMu.RUnlock()
 
 	watcher, err := fswatch.New(fswatch.Config{
 		Roots: roots,
@@ -3766,12 +3774,16 @@ func (s *Store) Watch(ctx context.Context) error {
 		return err
 	}
 	defer watcher.Close()
+	defer s.noteWatchStopped()
+
+	s.noteWatchStarted(watcher.Backend(), len(watcher.Roots()), watcher.DirWatchCount(), watcher.CapHit())
 
 	slog.Info("watching for changes",
 		"backend", watcher.Backend(),
 		"roots", len(watcher.Roots()),
 		"dir_watches", watcher.DirWatchCount(),
 		"cap_hit", watcher.CapHit(),
+		"open_fds", s.WatchTelemetrySnapshot().ProcessOpenFDs,
 		"transcripts", projectDirs,
 		"repos", len(repoRoots),
 	)
@@ -3910,6 +3922,7 @@ func (s *Store) Watch(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
+			s.noteWatchEvent()
 			writeOrCreate := ev.Op.Has(fswatch.OpWrite) || ev.Op.Has(fswatch.OpCreate)
 			removeOrRename := ev.Op.Has(fswatch.OpRemove) || ev.Op.Has(fswatch.OpRename)
 			handlePath(ev.Path, writeOrCreate, removeOrRename)
@@ -3919,11 +3932,14 @@ func (s *Store) Watch(ctx context.Context) error {
 			}
 			slog.Error("watcher error", "err", err)
 		case <-pollTick.C:
+			var candN int
 			s.safetyPoll(poller, func(path string) {
+				candN++
 				db.enqueue(path, func() {
 					s.ingestJSONLPath(path)
 				})
 			})
+			s.noteWatchPoll(candN, poller)
 		}
 	}
 }
@@ -4451,6 +4467,9 @@ func (s *Store) Stats() (*StatsResult, error) {
 		}
 		strRows.Close()
 	}
+
+	wt := s.WatchTelemetrySnapshot()
+	result.Watch = &wt
 
 	return &result, nil
 }
