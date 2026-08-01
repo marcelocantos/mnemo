@@ -109,6 +109,19 @@ type Exporter struct {
 	// state.json sidecar. Empty falls back to ~/.mnemo/state.json.
 	// Injectable for tests. (🎯T64.2)
 	statePath string
+
+	// profile is the resolved PKM dialect the exporter renders for
+	// (🎯T64.5). Empty (zero value) renders as generic. Governs link
+	// syntax via Profile.Link.
+	profile Profile
+
+	// bridges maps a bridge collection name to its vault-relative
+	// anchor file (🎯T64.6). Empty disables bridge writing.
+	bridges map[string]string
+
+	// bridgesMaxLinks caps the links a single bridge block emits.
+	// Zero renders as the store default.
+	bridgesMaxLinks int
 }
 
 // Options carries optional Exporter wiring. Each zero-valued field
@@ -127,6 +140,19 @@ type Options struct {
 	// StatePath overrides the ~/.mnemo/state.json sidecar location.
 	// Tests pass a tempdir path; production wiring leaves this empty.
 	StatePath string
+
+	// Profile selects the PKM dialect the exporter renders for (🎯T64.5).
+	// Empty defaults to generic. Use store.ResolvedVaultProfile to
+	// compute the value from the current Config + on-disk vault shape.
+	Profile string
+
+	// Bridges maps a bridge collection name to a vault-relative anchor
+	// file (🎯T64.6). Empty disables bridges. Pass cfg.VaultBridges.
+	Bridges map[string]string
+
+	// BridgesMaxLinks caps a bridge block's link count. Zero uses the
+	// store default. Pass cfg.ResolvedVaultBridgesMaxLinks().
+	BridgesMaxLinks int
 }
 
 // New creates a new Exporter rooted at path. The directory is created if
@@ -137,11 +163,14 @@ func New(backend store.Backend, path string, opts Options) (*Exporter, error) {
 		return nil, fmt.Errorf("vault: create root %s: %w", path, err)
 	}
 	return &Exporter{
-		backend:   backend,
-		path:      path,
-		layout:    opts.Layout,
-		soakWarn:  opts.SoakWarnAfter,
-		statePath: opts.StatePath,
+		backend:         backend,
+		path:            path,
+		layout:          opts.Layout,
+		soakWarn:        opts.SoakWarnAfter,
+		statePath:       opts.StatePath,
+		profile:         profileFrom(opts.Profile),
+		bridges:         opts.Bridges,
+		bridgesMaxLinks: opts.BridgesMaxLinks,
 	}, nil
 }
 

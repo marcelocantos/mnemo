@@ -391,13 +391,13 @@ Bridge bodies differ by collection. The default renderings are:
 - `themes`, `patterns`, `cross-repo`, `lessons`, `decisions` — flat
   bulleted list of wikilinks to the collection's pages, sorted by
   weight (or last-touched for decisions), capped at
-  `vault_bridges.max_links` (default 50) per bridge to avoid the
+  `vault_bridges_max_links` (default 50) per bridge to avoid the
   bridge becoming its own hairball.
 - `memories` — grouped by source project; subsections of the form
   `### <project-name>` followed by the wikilinks to that project's
   memories. Because memories use `<project>-<name>.md` filename
   namespacing, the bridge is the place where they become navigable
-  by project. Capped per project at `vault_bridges.max_links`.
+  by project. Capped per project at `vault_bridges_max_links`.
 
 Templates from `~/.mnemo/vault_templates/v2/bridge_<collection>.tmpl`
 override the per-collection rendering. Standard template
@@ -969,6 +969,7 @@ woven into a single coherent fictional corpus.
     "themes":   "10-areas/knowledge/Themes MOC.md",
     "patterns": "10-areas/knowledge/Patterns.md"
   },
+  "vault_bridges_max_links": 50,
   "vault_indexing_scope": "_mnemo_only",
   "vault_indexing_includes": [],
   "vault_indexing_ignore_file": ".mnemoignore",
@@ -987,6 +988,7 @@ woven into a single coherent fictional corpus.
 | `vault_layout`               | `"v2"` for new vaults; `"both"` for v1-populated vaults | yes |
 | `vault_layout.soak_warn_after` | `"720h"` (30 days; soak window before "both"-layout warning fires) | yes |
 | `vault_bridges`              | `{}`                             | yes         |
+| `vault_bridges_max_links`    | `50`                                 | yes         |
 | `vault_indexing_scope`       | `"_mnemo_only"` for new vaults; `"full"` for v1-populated vaults | yes |
 | `vault_indexing_includes`    | `[]`                             | yes         |
 | `vault_indexing_ignore_file` | `".mnemoignore"`                 | yes         |
@@ -996,7 +998,6 @@ woven into a single coherent fictional corpus.
 | `vault_clustering.retire_after` | `"4320h"` (180 days)            | yes         |
 | `vault_clustering.max_themes` | `200`                               | yes         |
 | `vault_clustering.max_cross_repo` | `50`                            | yes         |
-| `vault_bridges.max_links`    | `50`                                 | yes         |
 | `vault_legacy_annotations.max_file_kb` | `512` (split aggregate when exceeded) | yes |
 
 `vault_layout` accepted values:
@@ -1248,7 +1249,7 @@ a v1 footgun. The exclusion is observable via
 ### Back-pressure on clustering pass output
 
 Several sections demand caps (`max_themes`, `max_cross_repo`,
-`vault_bridges.max_links`). The implementation enforces them
+`vault_bridges_max_links`). The implementation enforces them
 **before** the expensive work:
 
 - Embedding pass cost is bounded by the total corpus size at the
@@ -1265,7 +1266,7 @@ Several sections demand caps (`max_themes`, `max_cross_repo`,
 - LLM labelling is invoked at most `max_themes` times per pass;
   excess clusters use the bigram fallback even if LLM labelling is
   otherwise enabled.
-- Bridge writer truncates lists at `vault_bridges.max_links` and
+- Bridge writer truncates lists at `vault_bridges_max_links` and
   appends a "(N more, see <collection>/_index.md)" trailing line so
   the truncation is visible.
 
@@ -1960,7 +1961,7 @@ gates passing; metrics are reviewed in the post-launch retro.
     location, seeds fresh defaults for the new path, and surfaces a
     warning if a `_mnemo/` wing remains at the old path.
 20. **[gate]** Back-pressure: `max_themes`, `max_cross_repo`,
-    `vault_bridges.max_links` short-circuit the expensive paths
+    `vault_bridges_max_links` short-circuit the expensive paths
     (embedding, LLM labelling, rendering) and not just the final
     output stage.
 21. **[gate]** `_mnemo/` is registered with the path-exclusion
