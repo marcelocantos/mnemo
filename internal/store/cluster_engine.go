@@ -60,18 +60,23 @@ type ClusterRun struct {
 //
 // vaultRoot is passed to ClusterCorpus (empty omits the vault_user
 // stream). trigger is a free label for the cluster_runs row
-// ("manual" / "interval" / "opportunistic").
-func (s *Store) RecomputeThemes(vaultRoot, trigger string) (*ClusterRun, error) {
+// ("manual" / "interval" / "opportunistic"). p carries the resolved
+// engine parameters (threshold, label config); a zero p resolves to
+// DefaultClusterParams.
+func (s *Store) RecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*ClusterRun, error) {
 	started := time.Now().UTC()
 	if trigger == "" {
 		trigger = "manual"
+	}
+	if p.Threshold <= 0 {
+		p = DefaultClusterParams()
 	}
 
 	docs, err := s.ClusterCorpus(vaultRoot)
 	if err != nil {
 		return nil, err
 	}
-	clusters := clusterDocs(docs, HeuristicThreshold)
+	clusters := clusterDocs(docs, p.Threshold)
 
 	run, err := s.writeThemes(docs, clusters, started, trigger)
 	if err != nil {

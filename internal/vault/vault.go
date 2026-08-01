@@ -122,6 +122,11 @@ type Exporter struct {
 	// bridgesMaxLinks caps the links a single bridge block emits.
 	// Zero renders as the store default.
 	bridgesMaxLinks int
+
+	// clusterParams are the resolved theme-clustering parameters
+	// (🎯T64.8). A zero value resolves to store.DefaultClusterParams at
+	// use time so an Options{} caller still clusters with the defaults.
+	clusterParams store.ClusterParams
 }
 
 // Options carries optional Exporter wiring. Each zero-valued field
@@ -153,6 +158,10 @@ type Options struct {
 	// BridgesMaxLinks caps a bridge block's link count. Zero uses the
 	// store default. Pass cfg.ResolvedVaultBridgesMaxLinks().
 	BridgesMaxLinks int
+
+	// ClusterParams are the resolved theme-clustering parameters (🎯T64.8).
+	// Zero value uses store defaults. Pass cfg.ResolvedClusterParams(nil).
+	ClusterParams store.ClusterParams
 }
 
 // New creates a new Exporter rooted at path. The directory is created if
@@ -171,6 +180,7 @@ func New(backend store.Backend, path string, opts Options) (*Exporter, error) {
 		profile:         profileFrom(opts.Profile),
 		bridges:         opts.Bridges,
 		bridgesMaxLinks: opts.BridgesMaxLinks,
+		clusterParams:   opts.ClusterParams,
 	}, nil
 }
 
@@ -455,16 +465,21 @@ func (e *Exporter) syncThemes(ctx context.Context, layout string) error {
 		return nil
 	}
 
+	p := e.clusterParams
+	if p.Threshold <= 0 {
+		p = store.DefaultClusterParams()
+	}
+
 	// A recompute failure must not sink the sync — render whatever the
 	// last successful pass left in the table.
-	if run, err := e.backend.MaybeRecomputeThemes(e.path, store.DefaultClusterInterval, "interval"); err != nil {
+	if run, err := e.backend.MaybeRecomputeThemes(e.path, "interval", p); err != nil {
 		slog.Warn("vault: theme recompute failed", "err", err)
 	} else if run != nil {
 		slog.Info("vault: themes reclustered",
 			"input_docs", run.InputDocs, "output_themes", run.OutputThemes)
 	}
 
-	themes, err := e.backend.ThemesForRender(store.DefaultMinClusterWeight)
+	themes, err := e.backend.ThemesForRender(p.MinClusterWeight, p.MaxThemes)
 	if err != nil {
 		return fmt.Errorf("vault: themes for render: %w", err)
 	}

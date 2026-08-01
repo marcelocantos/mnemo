@@ -1079,7 +1079,7 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	case "mnemo_vault_bridge_list":
 		return ch.vaultBridgeList(h.cfgCtl)
 	case "mnemo_vault_recluster":
-		return ch.vaultRecluster(args)
+		return ch.vaultRecluster(args, h.cfgCtl)
 	case "mnemo_vault_themes_inspect":
 		return ch.vaultThemesInspect(args)
 	case "mnemo_vault_themes_pin":
@@ -3089,6 +3089,27 @@ func (h *callHandler) vaultStatus(ctl ConfigController) (string, bool, error) {
 		b.WriteString("\n")
 	}
 
+	// Theme clustering block (🎯T64.8): the resolved engine parameters and
+	// any warnings from validating vault_clustering.* (a typo degrades one
+	// setting rather than blocking a pass, and the reason surfaces here).
+	var clusterWarn []string
+	cp := cfg.ResolvedClusterParams(&clusterWarn)
+	b.WriteString("Theme clustering:\n")
+	fmt.Fprintf(&b, "  engine:           %s\n", cp.Engine)
+	fmt.Fprintf(&b, "  threshold:        %.2f\n", cp.Threshold)
+	fmt.Fprintf(&b, "  min_weight:       %.1f\n", cp.MinClusterWeight)
+	fmt.Fprintf(&b, "  recompute_every:  %s\n", cp.RecomputeInterval)
+	fmt.Fprintf(&b, "  max_themes:       %d\n", cp.MaxThemes)
+	fmt.Fprintf(&b, "  retire_after:     %s\n", cp.RetireAfter)
+	fmt.Fprintf(&b, "  label_engine:     %s\n", cp.LabelEngine)
+	if len(clusterWarn) > 0 {
+		b.WriteString("  warnings:\n")
+		for _, w := range clusterWarn {
+			fmt.Fprintf(&b, "    - %s\n", w)
+		}
+	}
+	b.WriteString("\n")
+
 	b.WriteString("Notes on disk:\n")
 	total := 0
 	for _, sec := range sections {
@@ -3168,16 +3189,20 @@ func (h *callHandler) vaultBridgeList(ctl ConfigController) (string, bool, error
 // immediate heuristic clustering pass. The embeddings engine is opt-in
 // and not wired in this release, so an "embeddings" override is
 // rejected rather than silently downgraded.
-func (h *callHandler) vaultRecluster(args map[string]any) (string, bool, error) {
+func (h *callHandler) vaultRecluster(args map[string]any, ctl ConfigController) (string, bool, error) {
 	if engine, _ := args["engine"].(string); engine == "embeddings" {
 		return "engine \"embeddings\" is not available: the embeddings engine is opt-in (vault_clustering.engine) and not wired in this release. Re-run without an engine override to use the heuristic engine.", true, nil
 	}
 
+	p := store.DefaultClusterParams()
+	if ctl != nil {
+		p = ctl.Get().ResolvedClusterParams(nil)
+	}
 	vaultRoot := ""
 	if h.vault != nil {
 		vaultRoot = h.vault.Path()
 	}
-	run, err := h.mem.RecomputeThemes(vaultRoot, "manual")
+	run, err := h.mem.RecomputeThemes(vaultRoot, "manual", p)
 	if err != nil {
 		return fmt.Sprintf("recluster failed: %v", err), true, nil
 	}

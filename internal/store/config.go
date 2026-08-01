@@ -155,6 +155,13 @@ type Config struct {
 	// default (DefaultVaultBridgesMaxLinks).
 	VaultBridgesMaxLinks int `json:"vault_bridges_max_links,omitempty"`
 
+	// VaultClustering configures the theme clustering engine (🎯T64.8):
+	// engine choice, thresholds, cadence, render caps, and the labelling
+	// chain. Every field is optional; zero values resolve to the
+	// documented defaults via ResolvedClusterParams, which warns and
+	// defaults on any invalid value rather than blocking a pass.
+	VaultClustering VaultClusteringConfig `json:"vault_clustering,omitempty"`
+
 	// VaultLayoutSoakWarnAfter is the duration (Go time.ParseDuration
 	// format) that vault_layout="both" may sit before mnemo emits the
 	// weekly "opt into v2" structured warning. Empty defaults to "720h"

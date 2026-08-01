@@ -84,7 +84,7 @@ func TestRecomputeThemesWritesAndIsStable(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	seedClusterCorpus(t, s)
 
-	run, err := s.RecomputeThemes("", "manual")
+	run, err := s.RecomputeThemes("", "manual", DefaultClusterParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestRecomputeThemesWritesAndIsStable(t *testing.T) {
 	// A second pass over the unchanged corpus is idempotent: same theme
 	// count, same ids (ids derive from the sorted member set).
 	idsBefore := themeIDs(t, s)
-	if _, err := s.RecomputeThemes("", "manual"); err != nil {
+	if _, err := s.RecomputeThemes("", "manual", DefaultClusterParams()); err != nil {
 		t.Fatal(err)
 	}
 	idsAfter := themeIDs(t, s)
@@ -134,7 +134,7 @@ func TestRecomputeThemesLeavesSegmentThemes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.RecomputeThemes("", "manual"); err != nil {
+	if _, err := s.RecomputeThemes("", "manual", DefaultClusterParams()); err != nil {
 		t.Fatal(err)
 	}
 	if got := countScalar(t, s,

@@ -345,6 +345,7 @@ func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry,
 			Profile:         cfg.ResolvedVaultProfile(vaultPath),
 			Bridges:         cfg.VaultBridges,
 			BridgesMaxLinks: cfg.ResolvedVaultBridgesMaxLinks(),
+			ClusterParams:   cfg.ResolvedClusterParams(nil),
 		})
 		if err != nil {
 			slog.Warn("vault: exporter creation failed", "path", vaultPath, "err", err)
@@ -1308,8 +1309,8 @@ func signalSourcesEqual(a, b []store.SignalSource) bool {
 }
 
 // vaultOptionsChanged reports whether any non-path vault exporter option
-// (profile / bridges / bridge cap) differs between two configs, for
-// Reload change detection. (🎯T64.5/T64.6)
+// (profile / bridges / bridge cap / clustering) differs between two
+// configs, for Reload change detection. (🎯T64.5/T64.6/T64.8)
 func vaultOptionsChanged(a, b store.Config) bool {
 	if a.VaultProfile != b.VaultProfile || a.VaultBridgesMaxLinks != b.VaultBridgesMaxLinks {
 		return true
@@ -1321,6 +1322,21 @@ func vaultOptionsChanged(a, b store.Config) bool {
 		if b.VaultBridges[k] != v {
 			return true
 		}
+	}
+	// Any vault_clustering.* change rebuilds the exporter so the new
+	// params take effect on the next sync (🎯T64.8). Compare the resolved
+	// params scalars plus the label-exclude slice.
+	pa, pb := a.ResolvedClusterParams(nil), b.ResolvedClusterParams(nil)
+	if pa.Engine != pb.Engine || pa.Threshold != pb.Threshold ||
+		pa.MinClusterWeight != pb.MinClusterWeight || pa.RecomputeInterval != pb.RecomputeInterval ||
+		pa.MaxThemes != pb.MaxThemes || pa.RetireAfter != pb.RetireAfter ||
+		pa.EmbeddingProvider != pb.EmbeddingProvider || pa.EmbeddingModel != pb.EmbeddingModel ||
+		pa.EmbeddingModelVer != pb.EmbeddingModelVer ||
+		pa.LabelEngine != pb.LabelEngine || pa.LabelUserMinTokens != pb.LabelUserMinTokens {
+		return true
+	}
+	if !stringSlicesEqual(pa.LabelFilenameExtra, pb.LabelFilenameExtra) {
+		return true
 	}
 	return false
 }
@@ -1405,6 +1421,7 @@ func (r *Registry) swapVault(username string, e *userEntry, newPath string) erro
 		Profile:         r.cfg.ResolvedVaultProfile(newPath),
 		Bridges:         r.cfg.VaultBridges,
 		BridgesMaxLinks: r.cfg.ResolvedVaultBridgesMaxLinks(),
+		ClusterParams:   r.cfg.ResolvedClusterParams(nil),
 	})
 	if err != nil {
 		logger.Warn("vault: exporter creation failed on reload", "path", newPath, "err", err)

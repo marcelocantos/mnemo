@@ -59,14 +59,16 @@ type Backend interface {
 	// vault exporter uses it directly so rendering never triggers a mine.
 	ListPatterns(q PatternQuery) ([]PatternCandidate, error)
 	// ThemesForRender returns heuristic-engine themes at or above a weight
-	// floor, with members, for the vault theme pages (🎯T64.8).
-	ThemesForRender(minWeight float64) ([]ThemeView, error)
+	// floor (capped at limit; 0 = uncapped), with members, for the vault
+	// theme pages (🎯T64.8).
+	ThemesForRender(minWeight float64, limit int) ([]ThemeView, error)
 	// MaybeRecomputeThemes runs a clustering pass if the last is older
-	// than interval, so the cadence rides the vault sync loop (🎯T64.8).
-	MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*ClusterRun, error)
+	// than p.RecomputeInterval, so the cadence rides the vault sync loop
+	// (🎯T64.8).
+	MaybeRecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*ClusterRun, error)
 	// RecomputeThemes forces an immediate clustering pass, for the
 	// mnemo_vault_recluster tool (🎯T64.8).
-	RecomputeThemes(vaultRoot, trigger string) (*ClusterRun, error)
+	RecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*ClusterRun, error)
 	// InspectTheme resolves a theme by id or slug for
 	// mnemo_vault_themes_inspect; nil when nothing matches (🎯T64.8).
 	InspectTheme(ref string) (*ThemeInspect, error)

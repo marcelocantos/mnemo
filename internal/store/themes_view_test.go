@@ -42,7 +42,7 @@ func TestThemesForRenderWeightFloor(t *testing.T) {
 	insertTheme(t, s, "theme_seg", "Seg", 9.0, `[]`)
 	insertThemeMember(t, s, "theme_seg", "segment", "seg1", 1.0)
 
-	views, err := s.ThemesForRender(3.0)
+	views, err := s.ThemesForRender(3.0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +136,11 @@ func TestMaybeRecomputeThemesGating(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	seedClusterCorpus(t, s)
 
+	p := DefaultClusterParams()
+	p.RecomputeInterval = time.Hour
+
 	// First call: no prior run → executes.
-	run, err := s.MaybeRecomputeThemes("", time.Hour, "interval")
+	run, err := s.MaybeRecomputeThemes("", "interval", p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +149,7 @@ func TestMaybeRecomputeThemesGating(t *testing.T) {
 	}
 
 	// Immediate second call within the interval → skipped.
-	run2, err := s.MaybeRecomputeThemes("", time.Hour, "interval")
+	run2, err := s.MaybeRecomputeThemes("", "interval", p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,13 +157,13 @@ func TestMaybeRecomputeThemesGating(t *testing.T) {
 		t.Errorf("second call within interval should skip, got run %+v", run2)
 	}
 
-	// A zero interval forces a run every time.
-	run3, err := s.MaybeRecomputeThemes("", 0, "interval")
+	// A zero interval resolves to DefaultClusterInterval, so still skipped.
+	pz := DefaultClusterParams()
+	pz.RecomputeInterval = 0
+	run3, err := s.MaybeRecomputeThemes("", "interval", pz)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 0 resolves to DefaultClusterInterval, so still skipped — assert the
-	// documented behaviour rather than a re-run.
 	if run3 != nil {
 		t.Errorf("zero interval resolves to default and should skip, got %+v", run3)
 	}

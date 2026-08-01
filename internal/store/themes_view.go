@@ -48,11 +48,12 @@ type ThemeView struct {
 }
 
 // ThemesForRender returns heuristic-engine themes at or above minWeight,
-// heaviest first, each with its members. Segment-clusterer themes
-// (doc_kind='segment') are excluded — this view is the four-stream
-// corpus engine's output.
-func (s *Store) ThemesForRender(minWeight float64) ([]ThemeView, error) {
-	rows, err := s.readDB.Query(`
+// heaviest first, each with its members. limit caps the count (the
+// max_themes render cap); limit <= 0 means no cap. Segment-clusterer
+// themes (doc_kind='segment') are excluded — this view is the
+// four-stream corpus engine's output.
+func (s *Store) ThemesForRender(minWeight float64, limit int) ([]ThemeView, error) {
+	q := `
 		SELECT t.id, t.label, t.summary, t.weight, t.repos,
 		       t.first_seen, t.last_touched, t.computed_at
 		FROM themes t
@@ -62,8 +63,13 @@ func (s *Store) ThemesForRender(minWeight float64) ([]ThemeView, error) {
 		    WHERE m.theme_id = t.id
 		      AND m.doc_kind IN ('decision','compaction','pattern','vault_user')
 		  )
-		ORDER BY t.weight DESC, t.id
-	`, minWeight)
+		ORDER BY t.weight DESC, t.id`
+	args := []any{minWeight}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +133,7 @@ type ThemeInspect struct {
 func (s *Store) InspectTheme(ref string) (*ThemeInspect, error) {
 	// Load all non-segment themes (small set) and match by id or slug.
 	// Matching slug in Go avoids duplicating slugify in SQL.
-	views, err := s.ThemesForRender(0)
+	views, err := s.ThemesForRender(0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -171,11 +177,12 @@ func (s *Store) SetThemePin(themeID, reason string, unpin bool) error {
 }
 
 // MaybeRecomputeThemes runs a clustering pass only if the last one is
-// older than interval (or none exists). Called from the vault sync loop
-// so the recompute cadence rides the existing timer without a dedicated
-// goroutine: however often sync fires, clustering runs at most once per
-// interval. Returns the run when one happened, nil when skipped.
-func (s *Store) MaybeRecomputeThemes(vaultRoot string, interval time.Duration, trigger string) (*ClusterRun, error) {
+// older than p.RecomputeInterval (or none exists). Called from the vault
+// sync loop so the recompute cadence rides the existing timer without a
+// dedicated goroutine: however often sync fires, clustering runs at most
+// once per interval. Returns the run when one happened, nil when skipped.
+func (s *Store) MaybeRecomputeThemes(vaultRoot, trigger string, p ClusterParams) (*ClusterRun, error) {
+	interval := p.RecomputeInterval
 	if interval <= 0 {
 		interval = DefaultClusterInterval
 	}
@@ -189,5 +196,5 @@ func (s *Store) MaybeRecomputeThemes(vaultRoot string, interval time.Duration, t
 			}
 		}
 	}
-	return s.RecomputeThemes(vaultRoot, trigger)
+	return s.RecomputeThemes(vaultRoot, trigger, p)
 }
