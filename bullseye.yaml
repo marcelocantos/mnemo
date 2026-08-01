@@ -1612,6 +1612,164 @@ targets:
     - salvaged-from-pr158
     origin: manual
     discovered: 2026-07-31
+  T142:
+    name: mnemo daemon never exhausts macOS system vnodes / open-file table under full corpus load
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Root cause of observed ~72k concurrent open FDs (mostly REG+DIR under ~/.claude/projects and ~/.grok/sessions) is identified with a named code path or intentional design choice, not a guess
+    - Under a representative full-corpus ingest/watch load on a Mac with default kern.maxvnodes (~263k), steady-state mnemo open-FD count stays bounded (document the bound; target well under 5k unless justified) and kern.num_vnodes does not climb to 100% solely due to mnemo
+    - 'If a leak or unbounded open-every-file walk is found: fix lands with a regression test or stress oracle that fails if FD count grows unboundedly during corpus walk/watch'
+    - 'If intentional: design is documented (what is held open and why), plus a hard safety limit and fail-soft behaviour so mnemo cannot push the host into launchd SIGBUS / initproc-exited kernel panic'
+    - 'Incident reproduction notes preserved: macOS 26.5.2 (25F84), panic string initproc exited namespace 2 subcode 0xa (SIGBUS), mnemo brew service homebrew.mxcl.mnemo, mnemo.db ~24GB, vnodes 263168/263168 while mnemo held ~72k FDs'
+    context: |-
+      2026-08-01 host kernel panic: initproc exited / SIGBUS after vnode table exhaustion. mnemo brew service held ~72k FDs (~65k REG + ~7k DIR) under ~/.claude/projects and ~/.grok/sessions; stopping mnemo dropped system open files ~88k→~8.8k. mnemo.db ~25GB. Service left stopped as mitigation.
+
+      **Root cause (2026-08-01 investigation, named path):** not a classic unclosed-handle leak. `Store.Watch` (`internal/store/store.go`) recursively `filepath.Walk`s transcript roots and `fsnotify.Add`s every directory. On Darwin, fsnotify uses **kqueue**, which opens an FD for every watched path and, on `Add(dir)`, opens **every file in that directory** (`watchDirectoryFiles`) to emulate inotify child writes. Live corpus math matched the incident: ~4.5k dirs + ~61k files ≈ ~65k FDs. Vault watcher uses the same recursive fsnotify pattern. fsnotify has no FSEvents backend (fsnotify#11).
+
+      **Harness I/O (mixed):** Codex holds rollout jsonl open; Grok holds events.jsonl open but updates.jsonl (ingested) often open/write/close; Claude liveness assumes held-open jsonl. Appends are same-path growth, not per-event creates — tree/root watches + size>offset poll, not per-file kqueue, are the right model.
+
+      **Backend matrix (product decision):** Darwin **FSEvents** on roots; Linux **inotify dirs** (fsnotify); Windows **ReadDirectoryChangesW** (fsnotify); all platforms **bounded safety poll** (incomplete/live/recent) + **hard FD/watch cap** fail-soft. Subscribe to roots; do not reify historical files as individual watches.
+
+      **Decomposition:** T142.1 shared API/filters/cap → T142.2 Darwin / T142.3 Linux / T142.4 Windows / T142.5 poll → T142.6 oracle+docs. Parent achieved when all leaves are.
+    depends_on:
+    - T142.1
+    - T142.2
+    - T142.3
+    - T142.4
+    - T142.5
+    - T142.6
+    tags:
+    - reliability
+    - macos
+    - incident
+    - fd-leak
+    - vnodes
+    origin: incident:2026-08-01-kernel-panic-initproc
+    discovered: 2026-08-01
+    achieved: 2026-08-01
+  T142.1:
+    name: Realtime ingest uses a platform-abstracted tree watcher with path filters and a hard open-watch/FD safety cap
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Store.Watch (and vault file watching) go through a single internal watch API (roots + onEvent), not ad-hoc recursive fsnotify.Add loops in call sites
+    - 'Path allow/deny filter is shared: ingest-relevant names (Claude/Codex session jsonl, Grok updates.jsonl, memory/skills/docs/planning/vault md as today); high-churn junk (e.g. Grok terminal/, non-ingested Grok sidecars) is excluded before enqueue'
+    - A documented hard cap bounds watch expansion and/or process open-FD count; exceeding it fails soft (log + keep safety poll / live paths) rather than approaching kern.maxvnodes
+    - Unit tests cover filter allow/deny and cap fail-soft behaviour
+    context: 'Shared product layer for T142. Investigation 2026-08-01: root cause is Store.Watch recursive filepath.Walk + fsnotify.Add on every directory; on Darwin kqueue that opens every file in each dir (~65k FDs on full corpus). Fix is not ''raise ulimits'' but subscribe to roots with an OS-appropriate backend, filter paths, and never reify the historical corpus as individual watches.'
+    tags:
+    - reliability
+    - watch
+    - ingest
+    origin: subdivide(🎯T142)
+    discovered: 2026-08-01
+    achieved: 2026-08-01
+  T142.2:
+    name: On Darwin, transcript and vault trees are watched via FSEvents (not fsnotify/kqueue)
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - darwin build of the watch backend uses FSEvents (or equivalent CoreServices tree API), not github.com/fsnotify/fsnotify kqueue, for Claude/Grok/Codex roots and the vault tree
+    - Steady-state open FDs attributable to tree watching scale with number of roots/streams, not number of historical files under those roots
+    - Create and content-change under a root still drive debounced ingest for allowlisted paths
+    - 'Regression: synthetic corpus of tens of thousands of files under a watched root does not open one FD per file'
+    context: Optimal Darwin backend. fsnotify v1.9 has no FSEvents implementation (fsnotify#11); kqueue requires one FD per watched path and opens every file when Add(dir) runs. FSEvents watches a root subtree with O(roots) cost and covers history without per-file subscriptions.
+    depends_on:
+    - T142.1
+    tags:
+    - reliability
+    - macos
+    - FSEvents
+    - watch
+    origin: subdivide(🎯T142)
+    discovered: 2026-08-01
+    achieved: 2026-08-01
+  T142.3:
+    name: On Linux, tree watching uses inotify directory watches (fsnotify) without per-file watch FDs
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - linux backend watches directories (recursive roots as needed) via inotify/fsnotify; it does not add a watch FD per historical regular file
+    - Allowlisted create/write under watched trees still reach ingest
+    - Documented guidance if fs.inotify.max_user_watches is the limiting factor for very large dir counts; mnemo still fails soft under the shared cap from T142.1
+    context: Optimal Linux backend. inotify dir watches report child modifications without opening every file — current Walk+Add(dir) shape is roughly right on Linux; keep it behind the shared API and filters rather than inventing FSEvents on Linux.
+    depends_on:
+    - T142.1
+    tags:
+    - reliability
+    - linux
+    - inotify
+    - watch
+    origin: subdivide(🎯T142)
+    discovered: 2026-08-01
+    achieved: 2026-08-01
+  T142.4:
+    name: On Windows, tree watching uses ReadDirectoryChangesW (fsnotify) at root/subtree scope
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - windows backend uses ReadDirectoryChangesW via fsnotify (recursive/subtree per root preferred) rather than emulating per-file kqueue watches
+    - Allowlisted create/write under watched trees still reach ingest
+    - Open handle count for watching stays O(roots or watched dirs), not O(historical files)
+    context: Optimal Windows backend. fsnotify already maps to ReadDirectoryChangesW; prefer few root/subtree watches behind the shared API.
+    depends_on:
+    - T142.1
+    tags:
+    - reliability
+    - windows
+    - watch
+    origin: subdivide(🎯T142)
+    discovered: 2026-08-01
+    achieved: 2026-08-01
+  T142.5:
+    name: Bounded safety poll covers incomplete, live, and recent transcript paths on all platforms
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'A platform-independent poller re-stats a bounded set: ingest_state paths with size>offset, live sessions (existing liveness signals), and optionally recent mtime — not the full historical corpus every tick'
+    - Poll recovers appends when tree events are coalesced, missed, or when writers open/write/close without a durable held FD (e.g. observed Grok updates.jsonl)
+    - Poll cadence and set size are documented and covered by a test that the cold fully-ingested corpus is not fully scanned every interval
+    context: Seatbelt for all backends. Harnesses mix hold-open (Codex rollouts, Grok events) and open/write/close (Grok updates.jsonl). Directory/tree events are not a substitute for size>offset catch-up. Poll must stay O(hot set), not O(archive).
+    depends_on:
+    - T142.1
+    tags:
+    - reliability
+    - watch
+    - poll
+    - ingest
+    origin: subdivide(🎯T142)
+    discovered: 2026-08-01
+    achieved: 2026-08-01
+  T142.6:
+    name: FD/vnode stress oracle and design notes lock the T142 bound
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Automated test or stress oracle fails if Watch over a large synthetic corpus causes open-FD count to grow unboundedly with file count (Darwin especially)
+    - Documented steady-state bound (target well under 5k open FDs from watching unless justified) and platform backend matrix (Darwin FSEvents, Linux inotify dirs, Windows RDCW)
+    - 'Incident notes retained: macOS panic initproc/SIGBUS, ~72k FDs, kqueue+recursive Add root cause, brew service left stopped as mitigation'
+    context: 'Closes the measurement and memory of the 2026-08-01 incident. Root cause is identified (not a classic leak): intentional recursive fsnotify watches × kqueue semantics. Oracle prevents regression to open-every-file watching.'
+    depends_on:
+    - T142.2
+    - T142.3
+    - T142.4
+    - T142.5
+    tags:
+    - reliability
+    - oracle
+    - macos
+    - incident
+    origin: subdivide(🎯T142)
+    discovered: 2026-08-01
+    achieved: 2026-08-01
   T15:
     name: Federated queries across linked mnemo instances expose session history from every host as one searchable surface
     status: achieved
