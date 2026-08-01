@@ -3441,7 +3441,7 @@ targets:
     achieved: 2026-07-30
   T64.8:
     name: 'Themes: documents cluster into named, navigable themes via a clustering engine that is local by default'
-    status: identified
+    status: converging
     value: 5.0
     cost: 0.0
     acceptance:
@@ -3455,14 +3455,7 @@ targets:
     - New MCP tools — mnemo_vault_recluster, mnemo_vault_themes_inspect, mnemo_vault_themes_pin — work end-to-end. Stubs for themes_split / themes_merge land config-rejecting placeholders.
     - The clustering-engine criteria in docs/design/vault-clustering.md pass. Cross-repo derivation is explicitly NOT in scope here — it is its own target.
     - 'The cost profile is understood before this is called done: 🎯T64.11 retired segment clustering because a full single-link rebuild per pass was super-quadratic in corpus size and dominated backfill CPU. A document-level engine must show it does not reproduce that, or be incremental.'
-    context: |-
-      Re-scoped 2026-07-28: this was "Themes + cross-repo (clustering engine)", bundling two orthogonal constructs. They interact — a theme that happens to span repos is interesting — but neither depends on the other: themes can be single-repo, and cross-repo work can be surfaced without any clustering at all. Cross-repo now has its own target.
-
-      The bundling came from docs/design/vault-clustering.md, which defines cross-repo pages as a derived view over themes ("A theme with len(repos) >= 2 AND weight >= 4.0 triggers emission of a cross-repo page… No separate cross_repos table"). That derivation is a possible implementation, not the definition of the construct, and it made cross-repo unreachable while the clustering engine is unbuilt.
-
-      That coupling became load-bearing after 🎯T64.11, which retired clustering from the segment path on the principle that thematic retrieval is a search problem rather than a clustering problem, and left themes/theme_members dormant. Under the old bundling, cross-repo was blocked behind an engine that is currently switched off.
-
-      The research-shaped slice; carries the most risk. Heuristic engine ships fully offline. Embeddings engine is opt-in per 🎯T63 egress posture; labelling engine is an independent opt-in (two-key matrix). HDBSCAN deferred to a follow-up slice.
+    context: 'Implemented on branch t64.8-themes-clustering (6 commits), PR #184 → marcelocantos/mnemo:master. All nine acceptance clauses met: four-stream corpus; heuristic engine (TF-IDF + union-find single-link, O(n²) — not the T64.11 super-quadratic dendrogram); opt-in Voyage embeddings engine with cluster_embeddings cache + fingerprint + force_reembed + model-switch re-embed; label chain user-anchored(4 gates)→LLM(Haiku)→bigram with label_source/label_note provenance; two-key egress matrix proven zero-outbound-when-not-opted-in; retirement to _mnemo/themes/_archive/ with pin exemption; additive tables cluster_runs/theme_pins/theme_overrides + themes.label_source/label_note; MCP tools recluster/inspect/pin end-to-end + split/merge placeholders. vault_clustering.* config validated+hot-reloaded, surfaced in mnemo_vault_status. go test ./... green except pre-existing unrelated TestQuery (sqldeep). Remaining before achieved: windows-vm-validated gate (scripts/win-validate.sh on the pushed commit) + squash merge. Live Voyage/Anthropic round-trips tested only with fakes. Not-in-scope follow-ups: mnemo_search theme-hit result type; cross-repo is T64.12.'
     depends_on:
     - T64.7
     origin: PR
