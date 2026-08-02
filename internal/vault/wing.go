@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -91,7 +92,7 @@ func (e *Exporter) syncMnemoWing(ctx context.Context, now time.Time) {
 					slog.Warn("vault: write wing note failed", "path", absPath, "err", err)
 					continue
 				}
-				e.recordOutput(filepath.Join(mnemoWingDir, f.name), "mnemo_wing", "wing", content)
+				e.recordOutput(path.Join(mnemoWingDir, f.name), "mnemo_wing", "wing", content)
 			}
 		}
 

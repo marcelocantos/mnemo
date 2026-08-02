@@ -5,6 +5,7 @@ package vault
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -119,7 +120,7 @@ func sessionPath(info store.SessionInfo) string {
 		topic = "session"
 	}
 	name := date + "-" + slugify(topic) + "-" + shortID(info.SessionID)
-	return filepath.Join("sessions", repo, name+".md")
+	return path.Join("sessions", repo, name+".md")
 }
 
 // decisionPath returns the v1 vault-relative path for a decision note.
@@ -127,13 +128,13 @@ func sessionPath(info store.SessionInfo) string {
 func decisionPath(d store.DecisionInfo) string {
 	repo := decisionRepoSlug(d.Repo)
 	date := dateOf(d.Timestamp)
-	return filepath.Join("decisions", repo, date+"-"+shortID(d.SessionID)+".md")
+	return path.Join("decisions", repo, date+"-"+shortID(d.SessionID)+".md")
 }
 
 // decisionPathV2 returns the library-wing path for a decision note (🎯T64.3).
 // Format: _mnemo/decisions/<short-repo>/YYYY-MM-DD-<session-id8>.md
 func decisionPathV2(d store.DecisionInfo) string {
-	return filepath.Join(mnemoWingDir, decisionPath(d))
+	return path.Join(mnemoWingDir, decisionPath(d))
 }
 
 // decisionPathsForLayout returns the set of relative paths a decision
@@ -168,13 +169,13 @@ func memoryPath(m store.MemoryInfo) string {
 	if name == "" || name == "untitled" {
 		name = "memory"
 	}
-	return filepath.Join("memories", proj+"-"+name+".md")
+	return path.Join("memories", proj+"-"+name+".md")
 }
 
 // memoryPathV2 returns the library-wing path for a memory note (🎯T64.3).
 // Format: _mnemo/memories/<short-project>-<name-slug>.md
 func memoryPathV2(m store.MemoryInfo) string {
-	return filepath.Join(mnemoWingDir, memoryPath(m))
+	return path.Join(mnemoWingDir, memoryPath(m))
 }
 
 // memoryPathsForLayout mirrors decisionPathsForLayout for memories.
@@ -211,12 +212,12 @@ func patternPath(p store.PatternCandidate) string {
 	if suffix == "" {
 		suffix = "unknown"
 	}
-	return filepath.Join(mnemoWingDir, "patterns", kind+"-"+slugify(suffix)+".md")
+	return path.Join(mnemoWingDir, "patterns", kind+"-"+slugify(suffix)+".md")
 }
 
 // patternsIndexPath returns the library-wing patterns collection index.
 func patternsIndexPath() string {
-	return filepath.Join(mnemoWingDir, "patterns", "_index.md")
+	return path.Join(mnemoWingDir, "patterns", "_index.md")
 }
 
 // writesRawSignalReports whether layout still materialises v1 raw-signal
@@ -244,7 +245,7 @@ func planPath(p store.PlanInfo) string {
 	if base == "" {
 		base = "plan"
 	}
-	return filepath.Join("plans", repo+"-"+slugify(base)+".md")
+	return path.Join("plans", repo+"-"+slugify(base)+".md")
 }
 
 // targetPath returns the vault-relative path for a convergence target note.
@@ -258,7 +259,7 @@ func targetPath(t store.TargetInfo) string {
 	if id == "" || id == "untitled" {
 		id = fmt.Sprintf("target-%d", t.ID)
 	}
-	return filepath.Join("targets", repo, id+".md")
+	return path.Join("targets", repo, id+".md")
 }
 
 // ciRunPath returns the vault-relative path for a CI run note.
@@ -270,7 +271,7 @@ func ciRunPath(r store.CIRun) string {
 	}
 	date := dateOf(r.StartedAt)
 	name := fmt.Sprintf("%s-%s-%04d", date, slugify(r.Workflow), r.RunID%10000)
-	return filepath.Join("ci", repo, name+".md")
+	return path.Join("ci", repo, name+".md")
 }
 
 // prPath returns the vault-relative path for a PR or issue note.
@@ -282,13 +283,13 @@ func prPath(r store.GitHubActivityResult) string {
 	}
 	date := dateOf(r.CreatedAt)
 	name := fmt.Sprintf("%s-%s-%d-%s", date, r.Type, r.Number, slugify(r.Title))
-	return filepath.Join("prs", repo, name+".md")
+	return path.Join("prs", repo, name+".md")
 }
 
 // repoIndexPath returns the vault-relative path for a repo index note.
 // Format: repos/<short-repo>.md
 func repoIndexPath(repo string) string {
-	return filepath.Join("repos", shortProjectName(repo)+".md")
+	return path.Join("repos", shortProjectName(repo)+".md")
 }
 
 // skillPath returns the vault-relative path for a skill note.
@@ -299,7 +300,7 @@ func skillPath(s store.SkillInfo) string {
 	if name == "" || name == "untitled" {
 		name = "skill"
 	}
-	return filepath.Join("skills", name+".md")
+	return path.Join("skills", name+".md")
 }
 
 // configPath returns the vault-relative path for a CLAUDE.md config note.
@@ -309,7 +310,7 @@ func configPath(c store.ClaudeConfigInfo) string {
 	if repo == "" || repo == "untitled" {
 		repo = "global"
 	}
-	return filepath.Join("configs", repo+".md")
+	return path.Join("configs", repo+".md")
 }
 
 // repoSlugFor extracts a human-readable short slug from a SessionInfo's Repo

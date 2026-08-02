@@ -5,7 +5,7 @@ package vault
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -24,20 +24,20 @@ func themePath(v store.ThemeView) string {
 	if slug == "" || slug == "untitled" {
 		slug = slugify(strings.TrimPrefix(v.ID, "theme_"))
 	}
-	return filepath.Join(mnemoWingDir, "themes", slug+".md")
+	return path.Join(mnemoWingDir, "themes", slug+".md")
 }
 
 // themeArchivePath returns the retired-theme path under themes/_archive/
 // (docs/design/vault-clustering.md § retirement). A theme whose newest
 // member is older than retire_after fades here unless pinned.
 func themeArchivePath(v store.ThemeView) string {
-	base := filepath.Base(themePath(v))
-	return filepath.Join(mnemoWingDir, "themes", "_archive", base)
+	base := path.Base(themePath(v))
+	return path.Join(mnemoWingDir, "themes", "_archive", base)
 }
 
 // themesIndexPath returns the library-wing themes collection index.
 func themesIndexPath() string {
-	return filepath.Join(mnemoWingDir, "themes", "_index.md")
+	return path.Join(mnemoWingDir, "themes", "_index.md")
 }
 
 // themeRetired reports whether a theme should be archived: its newest
@@ -159,7 +159,7 @@ func renderThemesIndex(views []store.ThemeView) string {
 	}
 
 	for _, v := range views {
-		link := strings.TrimSuffix(filepath.ToSlash(themePath(v)), ".md")
+		link := strings.TrimSuffix(themePath(v), ".md")
 		fmt.Fprintf(&b, "- [[%s|%s]] — weight %.1f · %s\n",
 			link, v.Label, v.Weight, pluralize(v.MemberCount, "member"))
 	}
