@@ -166,7 +166,7 @@ func TestMemoryPath(t *testing.T) {
 
 func TestRepoIndexPath(t *testing.T) {
 	got := repoIndexPath("My Repo")
-	if got != filepath.Join("repos", "my-repo.md") {
+	if got != "repos/my-repo.md" {
 		t.Errorf("repoIndexPath = %q, want repos/my-repo.md", got)
 	}
 }
@@ -693,7 +693,7 @@ func TestWriteYAMLTabEscaping(t *testing.T) {
 func TestSkillPath(t *testing.T) {
 	s := store.SkillInfo{Name: "My Skill", FilePath: "/home/user/.claude/skills/my-skill.md"}
 	got := skillPath(s)
-	if got != filepath.Join("skills", "my-skill.md") {
+	if got != "skills/my-skill.md" {
 		t.Errorf("skillPath = %q, want skills/my-skill.md", got)
 	}
 }
@@ -701,7 +701,7 @@ func TestSkillPath(t *testing.T) {
 func TestConfigPath(t *testing.T) {
 	c := store.ClaudeConfigInfo{Repo: "-Users-alice-dev-myapp", FilePath: "/Users/alice/dev/myapp/CLAUDE.md"}
 	got := configPath(c)
-	if got != filepath.Join("configs", "myapp.md") {
+	if got != "configs/myapp.md" {
 		t.Errorf("configPath = %q, want configs/myapp.md", got)
 	}
 }
