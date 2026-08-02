@@ -131,6 +131,25 @@ mnemo/
 go test -tags "sqlite_fts5" ./...
 ```
 
+## Cross-platform paths
+
+Vault-relative paths are **logical identifiers** — manifest keys
+(`vault_outputs`) and Obsidian wikilinks — and must be forward-slash
+on every OS. Build them with **`path.Join`**, never `filepath.Join`
+(which emits `\` on Windows). Reserve `path/filepath` for paths that
+touch the real filesystem: joins against an OS-absolute root
+(`filepath.Join(e.path, relPath)` — this re-normalises the slash
+relPath to the OS separator on write), `filepath.Base`/`Dir` on host
+source paths, `os.*`, `Glob`, `Stat`.
+
+The same split applies in **tests**: assert logical paths against
+literal `"/"` strings (or wrap output in `filepath.ToSlash`), never
+against `filepath.Join`. A `filepath.Join` assertion passes on Unix
+(where it equals the slash literal) and silently masks a Windows
+break — the failure only surfaces in the non-required `windows-latest`
+CI job. This bit T64.8 twice: once in the path builders, once in the
+assertions hiding it.
+
 ## Schema policy
 
 The schema of `~/.mnemo/mnemo.db` is an append-only contract.
