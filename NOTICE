@@ -12,6 +12,7 @@ BSD and MIT notice-retention terms attach to.
   github.com/dlclark/regexp2 — MIT License
   github.com/dop251/goja — MIT License
   github.com/fsnotify/fsnotify — BSD 3-Clause License
+  github.com/fsnotify/fsevents — BSD 3-Clause License
   github.com/go-sourcemap/sourcemap — BSD 2-Clause License
   github.com/google/jsonschema-go — MIT License
   github.com/google/pprof — Apache License 2.0
@@ -35,8 +36,19 @@ The following are the author's own modules, licensed Apache 2.0:
   github.com/marcelocantos/sqldeep
   github.com/marcelocantos/sqlift
 
+Non-Go code linked into the binary via CGO (attribution retained from
+the upstream modules' NOTICE files):
+
+  nlohmann/json (via sqlift) — MIT License
+  deepparser / liteparser (via sqldeep) — MIT License
+
 The optional CLIP image-embedding feature (off by default; see
 `image_embeddings` in the config) shells out to a Python script that
 resolves its own dependencies via `uv` at runtime and downloads the
 clip-ViT-B-32 weights from Hugging Face. Those components are not
+bundled or distributed with mnemo.
+
+The optional vault clustering embeddings/labelling engines (off by
+default; see `vault_clustering` in the config) call Voyage AI and/or
+Anthropic only when explicitly opted in. Those services are not
 bundled or distributed with mnemo.

@@ -90,6 +90,12 @@ mnemo --addr :8080   # custom port
 claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
+**Grok Build** (writes `~/.grok/config.toml`):
+
+```bash
+grok mcp add --transport http mnemo http://localhost:19419/mcp
+```
+
 **Generic MCP client** JSON config:
 
 ```json
@@ -689,6 +695,46 @@ Parameters:
 - `context_before` — context messages before the match (default 3)
 - `context_after` — context messages after the match (default 3)
 
+### mnemo_vault_recluster / mnemo_vault_themes_* (🎯T64.8)
+
+Document-level themes cluster decisions, compaction summaries,
+patterns, and (when indexed) user vault notes into named groups.
+
+Default engine is fully local: TF-IDF + single-link agglomerative
+clustering, bigram labels. Two independent opt-ins open egress
+(API keys alone never call out):
+
+```json
+{
+  "vault_clustering": {
+    "engine": "embeddings",
+    "label": { "engine": "llm" }
+  }
+}
+```
+
+- `engine: "embeddings"` + `VOYAGE_API_KEY` → Voyage vectors (cached in
+  `cluster_embeddings`); falls back to heuristic on outage when
+  `fallback_to_heuristic_on_outage` is true (default).
+- `label.engine: "llm"` + `ANTHROPIC_API_KEY` → Haiku labels; otherwise
+  bigram / user-anchor labels.
+
+Tools:
+
+- `mnemo_vault_recluster` — run a clustering pass now. Params:
+  `engine` (optional override: `heuristic` | `embeddings`),
+  `force_reembed` (bool, default false). Returns a `cluster_runs` row.
+- `mnemo_vault_themes_inspect` — full members, centroid, pin/archive
+  state, and `label_path` / `label_gate` for a theme id or slug.
+- `mnemo_vault_themes_pin` — pin/unpin so `retire_after` (default 180d)
+  does not auto-archive. Params: `theme`, `unpin`, `reason`.
+- `mnemo_vault_themes_split` / `mnemo_vault_themes_merge` — **stubs**:
+  record a `theme_overrides` directive only; live apply is a follow-up.
+
+Vault pages land at `_mnemo/themes/<slug>.md` (archived under
+`_mnemo/themes/_archive/`). A 24h reconciler also runs when the daemon
+is up; use recluster for an immediate pass.
+
 ### mnemo_config
 
 Read or update mnemo's runtime configuration (`~/.mnemo/config.json`)
@@ -712,6 +758,11 @@ Hot-reload coverage:
   `"both"` (dual-write for migration), `"v2"` (new `_mnemo/` namespace,
   default for new vaults). See `internal/vault/README.md` for the
   migration path from v1 to v2.
+- `vault_profile`, `vault_bridges`, `vault_bridges_max_links` — applied
+  live (🎯T64.5 / 🎯T64.6). Profile selects Obsidian/Logseq/Foam/generic
+  link dialect; bridges inject fenced link blocks into user-owned anchors.
+- `vault_clustering` — read per clustering pass (no restart). Controls
+  engine, thresholds, label chain, and retire_after (🎯T64.8).
 - `workspace_roots`, `extra_project_dirs`, `synthesis_roots`,
   `todo_globs` — applied live; subsequent ingest passes pick up the new
   roots/globs.
