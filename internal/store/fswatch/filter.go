@@ -11,12 +11,12 @@ import (
 // grokSidecarJSONL are Grok files under the session tree that mnemo must not
 // ingest (and should not enqueue from watches).
 var grokSidecarJSONL = map[string]bool{
-	"chat_history.jsonl":    true,
-	"events.jsonl":          true,
-	"rewind_points.jsonl":   true,
-	"prompt_history.jsonl":  true,
-	"hunk_records.jsonl":    true,
-	"feedback.jsonl":        true,
+	"chat_history.jsonl":   true,
+	"events.jsonl":         true,
+	"rewind_points.jsonl":  true,
+	"prompt_history.jsonl": true,
+	"hunk_records.jsonl":   true,
+	"feedback.jsonl":       true,
 }
 
 // Interest reports whether path should be delivered to realtime ingest for mode.

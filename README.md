@@ -276,6 +276,12 @@ leaving the upgrade to you.
 claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
+**Grok Build** (writes `~/.grok/config.toml`):
+
+```bash
+grok mcp add --transport http mnemo http://localhost:19419/mcp
+```
+
 **Generic MCP client** JSON config:
 
 ```json
@@ -428,10 +434,26 @@ primitive lives in the harness, not the daemon.
 
 ### Vault
 
+Configure `vault_path` in `~/.mnemo/config.json` to export the knowledge
+graph as Markdown (Obsidian/Logseq-friendly). Layout lives under
+`_mnemo/` in v2. **Themes** (🎯T64.8) cluster decisions, compactions,
+patterns, and user notes via local TF-IDF by default; set
+`vault_clustering.engine: "embeddings"` and/or
+`vault_clustering.label.engine: "llm"` to opt into Voyage / Anthropic
+(keys alone never open egress). Design:
+[`docs/design/vault-clustering.md`](docs/design/vault-clustering.md).
+
 | Tool | Description |
 |---|---|
 | `mnemo_vault_sync` | Trigger an immediate vault sync (writes all changed notes to `vault_path`) |
-| `mnemo_vault_status` | Show vault path and current Markdown file count |
+| `mnemo_vault_status` | Vault path, layout/profile, indexing scope, note counts, bridges |
+| `mnemo_vault_migration_doc` | Preview or write `_mnemo/MIGRATION.md` (v1→v2) |
+| `mnemo_vault_bridge_list` | Configured collection→anchor bridges and last-sync errors |
+| `mnemo_vault_gc` | Inspect (and optionally clean) vault GC orphans |
+| `mnemo_vault_recluster` | Run document-level themes clustering now (`engine`, `force_reembed`) |
+| `mnemo_vault_themes_inspect` | Members, centroid, pin/archive, labelling path/gate for a theme |
+| `mnemo_vault_themes_pin` | Pin/unpin a theme against auto-archive |
+| `mnemo_vault_themes_split` / `_merge` | Stubs — record overrides only; live apply is a follow-up |
 
 ### Runtime configuration
 

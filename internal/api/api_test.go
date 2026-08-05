@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -236,6 +237,24 @@ func (f *fakeBackend) ScanVaultOrphans(vaultPath string) (store.VaultOrphans, er
 	return store.VaultOrphans{}, nil
 }
 func (f *fakeBackend) RemoveVaultManifestRow(notePath string) error { return nil }
+func (f *fakeBackend) RunCluster(ctx context.Context, args store.ClusterRunArgs) (*store.ClusterRunResult, error) {
+	panic("unexpected RunCluster call")
+}
+func (f *fakeBackend) InspectTheme(ref string) (*store.ThemeInspect, error) {
+	panic("unexpected InspectTheme call")
+}
+func (f *fakeBackend) PinTheme(themeID string, unpin bool, reason string) error {
+	panic("unexpected PinTheme call")
+}
+func (f *fakeBackend) SetThemeOverride(themeID, directive, payload string) error {
+	panic("unexpected SetThemeOverride call")
+}
+func (f *fakeBackend) LatestClusterRun() (*store.ClusterRunResult, error) {
+	panic("unexpected LatestClusterRun call")
+}
+func (f *fakeBackend) ListThemes(includeArchived bool) ([]store.ThemeSummary, error) {
+	panic("unexpected ListThemes call")
+}
 
 // newTestHandler returns a Handler and ServeMux wired up with a fakeBackend.
 func newTestHandler(fb *fakeBackend) (*Handler, *http.ServeMux) {

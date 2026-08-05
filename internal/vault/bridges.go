@@ -205,6 +205,8 @@ func (e *Exporter) renderBridgeBody(name string) ([]string, error) {
 		return e.bridgeDecisionLines(max)
 	case "memories":
 		return e.bridgeMemoryLines(max)
+	case "themes":
+		return e.bridgeThemeLines(max)
 	case "patterns":
 		return e.bridgePatternLines(max)
 	default:
@@ -257,6 +259,30 @@ func (e *Exporter) bridgePatternLines(max int) ([]string, error) {
 			alias = "pattern"
 		}
 		lines = append(lines, "- "+e.profile.Link(bridgeTarget(patternPath(p)), alias))
+	}
+	return lines, nil
+}
+
+// bridgeThemeLines returns links to active theme pages (🎯T64.8).
+func (e *Exporter) bridgeThemeLines(max int) ([]string, error) {
+	themes, err := e.backend.ListThemes(false)
+	if err != nil {
+		return nil, fmt.Errorf("list themes: %w", err)
+	}
+	lines := make([]string, 0, len(themes))
+	for _, th := range themes {
+		if len(lines) >= max {
+			break
+		}
+		slug := th.Slug
+		if slug == "" {
+			slug = th.ID
+		}
+		alias := th.Label
+		if alias == "" {
+			alias = slug
+		}
+		lines = append(lines, "- "+e.profile.Link(bridgeTarget(themePath(slug, false)), alias))
 	}
 	return lines, nil
 }

@@ -592,7 +592,15 @@ CREATE TABLE themes (
 			depth INTEGER,
 			first_seen TEXT NOT NULL DEFAULT '',
 			last_touched TEXT NOT NULL DEFAULT '',
-			computed_at TEXT NOT NULL DEFAULT ''
+			computed_at TEXT NOT NULL DEFAULT '',
+			-- 🎯T64.8 additive columns (document-level clustering engine).
+			slug TEXT NOT NULL DEFAULT '',
+			source_engine TEXT NOT NULL DEFAULT '',
+			member_count INTEGER NOT NULL DEFAULT 0,
+			centroid_text TEXT NOT NULL DEFAULT '',
+			archived INTEGER NOT NULL DEFAULT 0,
+			label_path TEXT NOT NULL DEFAULT '',
+			label_gate TEXT NOT NULL DEFAULT ''
 		);
 
 CREATE INDEX idx_themes_parent ON themes(parent_theme_id);
@@ -603,6 +611,10 @@ CREATE TABLE theme_members (
 			entity_id TEXT NOT NULL,
 			membership_kind TEXT,
 			similarity REAL,
+			-- 🎯T64.8 additive columns.
+			repo TEXT NOT NULL DEFAULT '',
+			ts TEXT NOT NULL DEFAULT '',
+			distance REAL,
 			PRIMARY KEY (theme_id, doc_kind, entity_id)
 		);
 
@@ -619,6 +631,46 @@ CREATE TABLE cluster_embeddings (
 			vector BLOB,
 			computed_at TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (doc_kind, entity_id, content_hash, provider, model, model_version)
+		);
+
+CREATE INDEX cluster_embeddings_by_fingerprint
+			ON cluster_embeddings (provider, model, model_version);
+
+-- 🎯T64.8: clustering pass telemetry (append-only run log).
+CREATE TABLE cluster_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			engine TEXT NOT NULL,
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			model_version TEXT NOT NULL DEFAULT '',
+			input_docs INTEGER NOT NULL DEFAULT 0,
+			output_themes INTEGER NOT NULL DEFAULT 0,
+			embedding_calls INTEGER NOT NULL DEFAULT 0,
+			estimated_cost REAL NOT NULL DEFAULT 0,
+			failure_mode TEXT NOT NULL DEFAULT '',
+			trigger TEXT NOT NULL DEFAULT '',
+			embeddings_bytes INTEGER NOT NULL DEFAULT 0,
+			embeddings_rows INTEGER NOT NULL DEFAULT 0
+		);
+
+CREATE INDEX cluster_runs_by_started ON cluster_runs (started_at DESC);
+
+-- 🎯T64.8: user directives applied on the next clustering pass.
+CREATE TABLE theme_overrides (
+			theme_id TEXT PRIMARY KEY,
+			directive TEXT NOT NULL,
+			payload TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			applied_at TEXT
+		);
+
+-- 🎯T64.8: pinned themes are exempt from retire_after auto-archive.
+CREATE TABLE theme_pins (
+			theme_id TEXT PRIMARY KEY,
+			pinned_at TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT ''
 		);
 
 -- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash

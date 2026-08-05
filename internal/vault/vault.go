@@ -234,6 +234,8 @@ func (e *Exporter) Sync(ctx context.Context) error {
 	setErr(e.syncMemories(ctx, layout))
 	// Patterns: wing-only second-order abstraction. (🎯T64.7)
 	setErr(e.syncPatterns(ctx, layout))
+	// Themes: document-level clustering pages. (🎯T64.8)
+	setErr(e.syncThemes(ctx, layout))
 
 	setErr(e.syncPlans(ctx))
 	setErr(e.syncTargets(ctx))

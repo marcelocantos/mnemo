@@ -3,7 +3,10 @@
 
 package store
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Backend is the interface for querying the transcript store.
 type Backend interface {
@@ -86,4 +89,12 @@ type Backend interface {
 	ScanVaultOrphans(vaultPath string) (VaultOrphans, error)
 	RemoveVaultManifestRow(notePath string) error
 	DBPath() string
+
+	// Document-level themes engine (🎯T64.8).
+	RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRunResult, error)
+	InspectTheme(ref string) (*ThemeInspect, error)
+	PinTheme(themeID string, unpin bool, reason string) error
+	SetThemeOverride(themeID, directive, payload string) error
+	LatestClusterRun() (*ClusterRunResult, error)
+	ListThemes(includeArchived bool) ([]ThemeSummary, error)
 }

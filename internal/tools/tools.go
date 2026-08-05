@@ -829,6 +829,34 @@ Dry-run by default. Setting confirm=true is required to act on manifest_path_mis
 			mcp.WithString("vault_path", mcp.Required(), mcp.Description("Absolute path to the vault root.")),
 			mcp.WithBoolean("confirm", mcp.Description("If true, remove manifest rows for manifest_path_missing orphans. Default false (dry-run; reports candidates only).")),
 		),
+		mcp.NewTool("mnemo_vault_recluster",
+			mcp.WithDescription(`Trigger an immediate document-level themes clustering pass (🎯T64.8).
+
+Clusters decisions, compaction summaries, patterns, and (when indexed) user vault notes into named themes via TF-IDF + single-link agglomerative clustering by default. Embeddings engine is opt-in via vault_clustering.engine="embeddings" (or the engine parameter); API key presence alone never opens egress.
+
+Returns the new cluster_runs row (input docs, output themes, engine, any warnings).`),
+			mcp.WithString("engine", mcp.Description(`Optional engine override for this pass only: "heuristic" (default) or "embeddings". Rejected when embeddings is requested without vault_clustering.engine configured and a provider key — falls back with a warning.`)),
+			mcp.WithBoolean("force_reembed", mcp.Description("If true, invalidate embedding cache rows for the active model fingerprint and re-embed. Default false.")),
+		),
+		mcp.NewTool("mnemo_vault_themes_inspect",
+			mcp.WithDescription(`Inspect a theme by id or slug (🎯T64.8): full member list with distances, centroid text, source engine, pin/archive state, and labelling path. When a vault_user anchor was rejected, label_gate names which quality gate fired (not_centroid_closest / below_min_tokens / filename_pattern / title_content_no_overlap).`),
+			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id (theme_<sha1…>) or slug.")),
+		),
+		mcp.NewTool("mnemo_vault_themes_pin",
+			mcp.WithDescription(`Pin or unpin a theme so it is exempt from vault_clustering.retire_after auto-archive (🎯T64.8). Cluster id is stable across archive→active round-trips when membership is unchanged.`),
+			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id or slug.")),
+			mcp.WithBoolean("unpin", mcp.Description("If true, remove the pin. Default false (pin).")),
+			mcp.WithString("reason", mcp.Description("Optional reason stored on the pin row.")),
+		),
+		mcp.NewTool("mnemo_vault_themes_split",
+			mcp.WithDescription(`STUB (🎯T64.8): mark a theme for split on the next clustering pass. Live split application ships in a follow-up; this records a theme_overrides directive only.`),
+			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id or slug.")),
+		),
+		mcp.NewTool("mnemo_vault_themes_merge",
+			mcp.WithDescription(`STUB (🎯T64.8): mark themes for merge on the next clustering pass. Live merge application ships in a follow-up; this records a theme_overrides directive only.`),
+			mcp.WithString("theme", mcp.Required(), mcp.Description("Primary theme id or slug.")),
+			mcp.WithString("with", mcp.Required(), mcp.Description("Other theme id or slug to merge with.")),
+		),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
 
@@ -1058,6 +1086,16 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.sourceDrift()
 	case "mnemo_vault_gc":
 		return ch.vaultGC(args)
+	case "mnemo_vault_recluster":
+		return ch.vaultRecluster(args, h.cfgCtl)
+	case "mnemo_vault_themes_inspect":
+		return ch.vaultThemesInspect(args)
+	case "mnemo_vault_themes_pin":
+		return ch.vaultThemesPin(args)
+	case "mnemo_vault_themes_split":
+		return ch.vaultThemesSplit(args)
+	case "mnemo_vault_themes_merge":
+		return ch.vaultThemesMerge(args)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
 	case "mnemo_thread_list":
