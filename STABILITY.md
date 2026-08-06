@@ -9,7 +9,38 @@ new product. The pre-1.0 period exists to get these surfaces right.
 
 ## Interaction surface catalogue
 
-Snapshot as of v0.33.0.
+Snapshot as of v0.33.0, amended for the 🎯T143 tool-surface reduction
+(see the v0.84.0 note below).
+
+**v0.84.0 note — MCP tool surface reduced from 70 tools to 38 (🎯T143).**
+This is the largest breaking change to the tool surface before 1.0, and
+it is deliberately made now: this document's own commitment is that
+backwards compatibility binds at 1.0 and "the pre-1.0 period exists to
+get these surfaces right". An audit on 2026-08-07 found that of 70
+registered tools, only 40 had ever been called by an agent and 15 in the
+previous 30 days, with `mnemo_search` alone accounting for 55% of all
+calls.
+
+*Removed* (no consumer in four months): `mnemo_plans`, `mnemo_ci`,
+`mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
+`mnemo_images`, `mnemo_get_memory`, `mnemo_tool_result`,
+`mnemo_source_drift`, `mnemo_todos`, `mnemo_todo_add`,
+`mnemo_todo_set`. The plan, CI and image **indexes are retained** and
+remain queryable through `mnemo_query`; only the todo index was removed
+with its tools, since nothing else read it.
+
+*Consolidated* behind an `op` parameter, capability-for-capability:
+`mnemo_vault` (was 10 `mnemo_vault_*` tools), `mnemo_thread` (was 5),
+`mnemo_note` (was 3), `mnemo_ops` (was `mnemo_doctor`,
+`mnemo_compactor_status`, `mnemo_divergence`, `mnemo_backup_status`,
+`mnemo_backup_now`, `mnemo_restore`). `mnemo_status` and `mnemo_stats`
+were deliberately **not** folded in — they carry real traffic, and for
+a tool agents already find, a name beats an op.
+
+An unknown `op` returns an error naming the valid ops, and a parameter
+belonging to a different op is rejected rather than ignored.
+**Stability**: the consolidated tools are Needs review; the `op`
+vocabulary may still change before 1.0.
 
 **v0.33.0 note**: Cost-tracking trio (🎯T43 🎯T44 🎯T45) plus
 Homebrew formula runtime deps (🎯T47). `mnemo_usage` gains
@@ -410,16 +441,6 @@ intended to remain stable.
 
 **Added in v0.12.0.** Searches `docs/targets.md` from all repos. **Stability**: Needs review.
 
-#### mnemo_plans
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `.planning/` directories from all repos. **Stability**: Needs review.
-
 #### mnemo_who_ran
 
 | Parameter | Type | Required | Description | Stability |
@@ -440,18 +461,6 @@ intended to remain stable.
 | `limit` | number | no | Max results per category (default 20) | Stable |
 
 **Added in v0.13.0.** Analyzes tool_use patterns to suggest allowedTools rules. **Stability**: Needs review.
-
-#### mnemo_ci
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `conclusion` | string | no | Filter: success, failure, cancelled, skipped | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Stable |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.13.0.** Indexes GitHub Actions runs from repos in session history. Failed run logs indexed for FTS. **Stability**: Needs review.
 
 #### mnemo_query
 
@@ -573,38 +582,7 @@ shapes (normalised), and recurring mnemo_search queries. Feeds the
 "self-improving tool discovery" feedback loop. **Stability**: Fluid —
 detection heuristics are first-cut.
 
-#### mnemo_define
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `name` | string | yes | Template name (unique) | Needs review |
-| `description` | string | no | What the template does | Needs review |
-| `query` | string | yes | SQL with `{{param}}` placeholders | Needs review |
-| `params` | array | no | Parameter names referenced in the query | Needs review |
-
-**Added in v0.17.0.** Stores a reusable parameterised query template
-in `query_templates`. Upserts on name collision. **Stability**: Needs
-review.
-
-#### mnemo_evaluate
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `name` | string | yes | Template name | Needs review |
-| `params` | object | no | Parameter values as key-value pairs | Needs review |
-
-**Added in v0.17.0.** Executes a named query template with parameters.
-Validates that all declared parameters are supplied; substitutes
-`{{param}}` placeholders; delegates to mnemo_query. **Stability**:
-Needs review.
-
-#### mnemo_list_templates
-
-No parameters. **Added in v0.17.0.** Lists all saved query templates
-with names, descriptions, and parameter definitions. **Stability**:
-Stable.
-
-#### mnemo_restore
+#### mnemo_ops (op=restore)
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
@@ -671,35 +649,6 @@ has been removed entirely in v0.18.0. Under v0.17 and earlier, chain
 rows were written at ingest time with `mechanism='time_heuristic'` /
 `'cwd_most_recent'`. Those values no longer appear on fresh indexes.
 
-#### mnemo_images
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Text for 'text' or 'semantic' mode; omit for recent list | Needs review |
-| `mode` | string | no | `text` (default), `semantic`, or `similar` | Needs review |
-| `similar_to` | number | no | Image ID for `similar` mode | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `session` | string | no | Session ID prefix filter | Needs review |
-| `days` | number | no | Recency window in days (default 90) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-| `search_fields` | string | no | `both` (default), `description`, or `ocr` — applies to text mode | Needs review |
-
-**Added in v0.17.0.** Unified image search across three complementary
-indexes:
-
-- `text` mode: FTS5 over AI-generated descriptions and OCR text
-- `semantic` mode: embeds the query via CLIP (SigLIP/ViT-B-32) and does
-  brute-force k-NN cosine search over stored image embeddings
-- `similar` mode: visual similarity using the target image's stored
-  embedding
-
-Every ingested image triggers three sidecars (OCR via Apple Vision/CGO
-or Tesseract, AI description via batched `claude -p` calls, and CLIP
-embedding via a local Python helper). Backfill runs at startup; fresh
-images process on arrival throttled by a shared `runtime.NumCPU()`
-semaphore. **Stability**: Fluid — output format, score field
-interpretation, mode set, and descriptor vs OCR balance may evolve.
-
 #### mnemo_session_structure
 
 | Parameter | Type | Required | Description | Stability |
@@ -715,39 +664,6 @@ shape designed to be diffable across sessions. Replaces the
 inline-Python `Counter()` JSONL introspection pattern observed in 16
 post-mnemo sessions. **Stability**: Needs review — shape may add
 fields (e.g. byte counts per kind) before 1.0.
-
-#### mnemo_tool_result
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `session_id` | string | yes | Full ID or prefix | Needs review |
-| `tool_use_id` | string | yes | Tool-use identifier from a prior tool_use block | Needs review |
-| `offset` | number | no | Byte offset into the payload (default 0) | Needs review |
-| `truncate_len` | number | no | Max bytes to return; 0 = full payload | Needs review |
-
-**Added in v0.30.0** (🎯T29). Returns the raw text of a single
-tool-result payload by `(session_id, tool_use_id)` lookup against the
-indexed `messages` table (O(1) via existing `idx_messages_tool_use_id`).
-Output prefixes `total_len=N`, optional `offset=N` and
-`truncated=true` markers, then a blank line and the (possibly sliced)
-payload. Replaces `cat ~/.claude/projects/<project>/<session>/tool-results/<id>.txt`
-as a workaround. **Stability**: Needs review — header format and
-default truncate behaviour may change.
-
-#### mnemo_get_memory
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `project` | string | yes | Project name or path fragment | Needs review |
-| `name` | string | no | Memory file name (frontmatter name OR file stem). Omit to list all memories for the project. | Needs review |
-
-**Added in v0.30.0** (🎯T30). Returns the raw markdown body of a
-named memory file; lists available memories when `name` is omitted.
-Project lookup uses the same substring matching as `mnemo_memories`.
-Name matching is case-insensitive against the YAML frontmatter `name`
-field OR the file stem (basename without `.md`). Replaces `cat
-/Users/.../memory/<name>.md` workarounds. **Stability**: Needs
-review — listing format may evolve.
 
 #### mnemo_locate_uuid
 
@@ -1019,10 +935,9 @@ local-only deployments.
 `server_error`, `malformed_response`, `connect_failed`,
 `unknown_instance`, `unknown`. Peers are sorted by instance name for
 deterministic ordering. Tools that bypass federation: `mnemo_self`,
-`mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
-`mnemo_restore`, `mnemo_whatsup`, `mnemo_docs`, `mnemo_synthesis`,
+`mnemo_ops`, `mnemo_whatsup`, `mnemo_docs`, `mnemo_synthesis`,
 `mnemo_permissions`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
-`mnemo_chain`. **Stability**: Fluid — envelope shape may evolve
+`mnemo_chain`, `mnemo_vault`, `mnemo_thread`, `mnemo_note`. **Stability**: Fluid — envelope shape may evolve
 (per-record attribution vs envelope wrapping; rank normalisation
 across instances) before 1.0.
 

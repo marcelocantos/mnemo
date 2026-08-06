@@ -490,26 +490,6 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
 		),
-		mcp.NewTool("mnemo_backup_status",
-			mcp.WithDescription(`List existing backups of ~/.mnemo/mnemo.db with size, age, and tag (daily / pre-migration / manual).
-
-Backups are taken by the daemon's periodic worker (03:00–04:00 local during a quiescent window), by the migration path (before any sqlift.Apply), or manually via mnemo_backup_now. The retention pool is shared across all tags — older backups are GC'd after each daily run.
-
-Returns the newest first. Restore is manual:
-  gunzip -c ~/.mnemo/backups/<file>.db.gz > ~/.mnemo/mnemo.db.restored
-  brew services stop marcelocantos/tap/mnemo
-  mv ~/.mnemo/mnemo.db ~/.mnemo/mnemo.db.bak
-  mv ~/.mnemo/mnemo.db.restored ~/.mnemo/mnemo.db
-  brew services start marcelocantos/tap/mnemo`),
-		),
-		mcp.NewTool("mnemo_backup_now",
-			mcp.WithDescription(`Trigger an immediate backup of ~/.mnemo/mnemo.db. Tagged "manual" so retention GC distinguishes it from automatic dailies.
-
-Idempotency: skips if any backup was taken within the last hour, unless force=true. The VACUUM INTO + gzip step takes ~1-2 minutes on a multi-GB DB; the call blocks until the snapshot is on disk.
-
-Useful before risky operations (manual schema edits, large deletes via mnemo_query, etc.).`),
-			mcp.WithBoolean("force", mcp.Description("Force a new snapshot even if a recent backup exists (default false)")),
-		),
 		mcp.NewTool("mnemo_prs",
 			mcp.WithDescription(`Search GitHub PRs and issues across all indexed repos. Uses FTS5 for keyword search on titles and bodies. Data is polled from GitHub repos that appear in session history and backfilled at startup.
 
@@ -536,14 +516,6 @@ Supports filtering by state, author, and recency. Results include both PRs and i
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_restore",
-			mcp.WithDescription(`Return the compacted context for a session chain — all compaction summaries across the full /clear-bounded chain, oldest first.
-
-Use this at the start of a session to restore context from a previous run. Given any session ID in a chain (including the current one), it returns the structured summaries (targets, decisions, files touched, open threads) produced by the background compactor across all segments of that chain.
-
-Returns nothing if no compactions have been produced yet (the background compactor runs every 5 minutes on active sessions).`),
-			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix).")),
 		),
 		mcp.NewTool("mnemo_chain",
 			mcp.WithDescription(`Retrieve the /clear-bounded session chain for any session ID.
@@ -651,108 +623,7 @@ Use this to build a rework diagnosis context: the bullseye_rework tool accepts t
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment (optional).")),
 			mcp.WithNumber("limit", mcp.Description("Max attempts to return (default 20).")),
 		),
-		mcp.NewTool("mnemo_vault_sync",
-			mcp.WithDescription(`Synchronise the vault: write or update Markdown notes for every session, decision, memory, plan, target, CI run, and PR in the knowledge graph, then re-ingest the vault directory so human-added notes and edits are searchable.
-
-Notes whose vault file is already up to date (file mtime > entity timestamp) are skipped, making repeated syncs fast.
-
-Human content added below the <!-- mnemo:generated --> fence in any vault note is preserved across re-syncs and is indexed by mnemo's FTS5 search, feeding back into mnemo's associations.
-
-Vault must be configured via vault_path in ~/.mnemo/config.json.`),
-		),
-		mcp.NewTool("mnemo_vault_status",
-			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, the active vault_layout (v1/both/v2) with days_in_both and a soak recommendation, and a count of notes on disk by section."),
-		),
-		mcp.NewTool("mnemo_vault_migration_doc",
-			mcp.WithDescription(`Return or regenerate _mnemo/MIGRATION.md for the configured vault (🎯T64.2).
-
-MIGRATION.md is written once when mnemo first detects a v1-shape vault and then never touched again — a user who deletes the file has acknowledged it. This tool is the only legitimate way to bring the doc back.
-
-Modes:
-  - write=false (default): return the snapshot content mnemo would write right now, without touching the filesystem. Useful for previewing the doc via MCP or reading it without grepping the vault.
-  - write=true: write the snapshot to <vault>/_mnemo/MIGRATION.md, overwriting any existing file. The vault_layout is irrelevant — the tool always writes when asked.
-
-Requires vault to be configured (vault_path set in ~/.mnemo/config.json).`),
-			mcp.WithBoolean("write", mcp.Description("If true, write the snapshot to _mnemo/MIGRATION.md, overwriting any existing file. Default false (preview only).")),
-		),
-		mcp.NewTool("mnemo_vault_bridge_list",
-			mcp.WithDescription(`List the vault bridges mnemo maintains (🎯T64.6).
-
-A bridge injects a fenced block of links to a mnemo collection (themes, patterns, cross-repo, lessons, decisions, memories) into a user-owned anchor file anywhere in the vault, so mnemo content is navigable from the user's own MOCs without mnemo owning the file.
-
-Returns, for the configured vault:
-  - active bridges: each collection → anchor file path, and whether its block has been written to disk yet;
-  - any bridge errors from the last sync (unknown collection, duplicate fence, unwritable anchor, etc.) with the reason and detail.
-
-Configured via the vault_bridges map (and vault_bridges_max_links) in ~/.mnemo/config.json. Requires vault to be enabled.`),
-		),
-		mcp.NewTool("mnemo_doctor",
-			mcp.WithDescription(`Run mnemo's self-diagnostics and report health (🎯T83). Returns a per-check report — name, severity (ok/warn/fail), tier (fast/full), detail, and a remediation hint — covering the summariser working directory, claude on PATH, configured roots, the compaction circuit-breaker (a tripped breaker means every compaction is failing systemically), whether the indexer has backfilled since startup, and database responsiveness. The single "is mnemo healthy, and what do I do about it" call; the same data backs the dashboard health page (http://localhost:19419/#health) and opt-out OS notifications.`),
-		),
-		mcp.NewTool("mnemo_compactor_status",
-			mcp.WithDescription(`Report the live state of mnemo's background session compactor (🎯T67). Returns:
-
-  - Last scan timestamp and number of candidates the scan returned.
-  - Last tick timestamp and its outcome (one of: compacted,
-    nothing_to_compact, budget_exceeded, failed, timeout, skipped_self).
-  - In-flight session ID, if a tick is currently running.
-  - Lifetime counts of each tick outcome since the daemon started.
-  - Configuration in effect: scan interval, idle timeout, per-tick
-    timeout, minimum delta-messages trigger, per-scan compaction cap,
-    and the configured max token-budget ratio.
-  - Backlog: the count of owed-but-uncompacted sessions (the gap to
-    the compactor's fixed point).
-
-Use this to answer "is the compactor working?" without grepping the
-daemon log. A LastScanAt that is older than ScanInterval × 2 is the
-clearest "watcher is wedged" signal.`),
-		),
-		mcp.NewTool("mnemo_divergence",
-			mcp.WithDescription(`Report, per derived data stream, the gap between desired and actual state — how far each stream is from its convergence fixed point (🎯T68.4).
-
-For each stream returns: whether a gap metric is known, the gap (in the stream's unit; 0 = converged), when it last reconciled, and a note. Streams with a cheap metric today: compactions (owed-but-uncompacted sessions), transcript_index (un-ingested transcript bytes), and the repo-level document streams (docs:* — files on disk not yet indexed). Streams not yet instrumented (images, vault, github_mirrors) report known=false rather than a fabricated number; each becomes known as its reconciler slice lands.
-
-Use this to see what derived state is stale and by how much — the single surface for "is anything behind?" across the data plane.`),
-		),
-		mcp.NewTool("mnemo_vault_gc",
-			mcp.WithDescription(`Inspect (and optionally clean up) vault GC orphans (🎯T68.6).
-
-Two orphan classes are reported, both via exact set-difference over the vault_outputs manifest:
-  - manifest_path_missing: manifest rows whose note_path is not on disk anymore (the user or another process removed the file). With confirm=true, the GC removes these manifest rows (no filesystem action).
-  - disk_not_in_manifest: *.md files under the vault with no manifest entry. INFORMATIONAL ONLY in this version — the tool reports them but never deletes them (user content lives here; deletion needs higher-level policy + below-fence checks).
-
-Dry-run by default. Setting confirm=true is required to act on manifest_path_missing.`),
-			mcp.WithString("vault_path", mcp.Required(), mcp.Description("Absolute path to the vault root.")),
-			mcp.WithBoolean("confirm", mcp.Description("If true, remove manifest rows for manifest_path_missing orphans. Default false (dry-run; reports candidates only).")),
-		),
-		mcp.NewTool("mnemo_vault_recluster",
-			mcp.WithDescription(`Trigger an immediate document-level themes clustering pass (🎯T64.8).
-
-Clusters decisions, compaction summaries, patterns, and (when indexed) user vault notes into named themes via TF-IDF + single-link agglomerative clustering by default. Embeddings engine is opt-in via vault_clustering.engine="embeddings" (or the engine parameter); API key presence alone never opens egress.
-
-Returns the new cluster_runs row (input docs, output themes, engine, any warnings).`),
-			mcp.WithString("engine", mcp.Description(`Optional engine override for this pass only: "heuristic" (default) or "embeddings". Rejected when embeddings is requested without vault_clustering.engine configured and a provider key — falls back with a warning.`)),
-			mcp.WithBoolean("force_reembed", mcp.Description("If true, invalidate embedding cache rows for the active model fingerprint and re-embed. Default false.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_inspect",
-			mcp.WithDescription(`Inspect a theme by id or slug (🎯T64.8): full member list with distances, centroid text, source engine, pin/archive state, and labelling path. When a vault_user anchor was rejected, label_gate names which quality gate fired (not_centroid_closest / below_min_tokens / filename_pattern / title_content_no_overlap).`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id (theme_<sha1…>) or slug.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_pin",
-			mcp.WithDescription(`Pin or unpin a theme so it is exempt from vault_clustering.retire_after auto-archive (🎯T64.8). Cluster id is stable across archive→active round-trips when membership is unchanged.`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id or slug.")),
-			mcp.WithBoolean("unpin", mcp.Description("If true, remove the pin. Default false (pin).")),
-			mcp.WithString("reason", mcp.Description("Optional reason stored on the pin row.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_split",
-			mcp.WithDescription(`STUB (🎯T64.8): mark a theme for split on the next clustering pass. Live split application ships in a follow-up; this records a theme_overrides directive only.`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id or slug.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_merge",
-			mcp.WithDescription(`STUB (🎯T64.8): mark themes for merge on the next clustering pass. Live merge application ships in a follow-up; this records a theme_overrides directive only.`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Primary theme id or slug.")),
-			mcp.WithString("with", mcp.Required(), mcp.Description("Other theme id or slug to merge with.")),
-		),
+		vaultTool(),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
 
@@ -774,55 +645,9 @@ Response includes which fields changed, which were adopted live, and which requi
 			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),
 			mcp.WithObject("patch", mcp.Description("For op=write: object with the keys to update. Same shape as ~/.mnemo/config.json. Omitted keys are left unchanged.")),
 		),
-		mcp.NewTool("mnemo_note_post",
-			mcp.WithDescription(`Post a cross-session inbox note for another Claude Code session to pick up (🎯T65).
-
-The "inbox" is a directory path identifying the recipient — typically the root of the repo whose session should receive the note. It may be absolute, or relative to YOUR session's initial working directory (e.g. "../ytt" from a session rooted at ~/work/.../mnemo posts to ~/work/.../ytt). The path must not start with "~" (shell home-expansion is ambiguous) and must resolve to an existing directory; symlinks and ./.. are collapsed so different spellings of the same directory address one inbox.
-
-from_session and from_repo are stamped automatically from your MCP connection identity (resolved via mnemo_self) — pass them only to override. Relative inbox paths REQUIRE a known session cwd, so call mnemo_self once first (the /post and /inbox skills do this for you) or use an absolute path.
-
-The consumer reads the note with mnemo_note_recv. For the wait-on-event case, the consumer runs "/loop /inbox" and walks away until the note arrives.`),
-			mcp.WithString("inbox", mcp.Required(), mcp.Description("Recipient directory path (absolute, or relative to your session's initial cwd). Must exist; no '~'.")),
-			mcp.WithString("body", mcp.Required(), mcp.Description("The note text.")),
-			mcp.WithString("from_session", mcp.Description("Override the sender session id (defaults from connection identity).")),
-			mcp.WithString("from_repo", mcp.Description("Override the sender repo (defaults from connection identity).")),
-		),
-		mcp.NewTool("mnemo_note_recv",
-			mcp.WithDescription(`Receive cross-session inbox notes addressed to a directory (🎯T65).
-
-By default returns only unread notes and marks them read (mark-read is idempotent — concurrent receivers never double-deliver). Notes are retained after delivery and remain browsable via mnemo_note_list. The "inbox" is canonicalized identically to mnemo_note_post: absolute, or relative to your session's initial cwd; no leading "~"; must resolve to an existing directory.`),
-			mcp.WithString("inbox", mcp.Required(), mcp.Description("Your inbox directory path (absolute, or relative to your session's initial cwd).")),
-			mcp.WithBoolean("unread_only", mcp.Description("Return only undelivered notes (default true).")),
-			mcp.WithBoolean("mark_read", mcp.Description("Stamp the returned notes read (default true).")),
-			mcp.WithNumber("limit", mcp.Description("Maximum notes to return (default: no limit).")),
-		),
-		mcp.NewTool("mnemo_note_list",
-			mcp.WithDescription(`Browse inbox notes without consuming them (🎯T65).
-
-Omitting "inbox" lists every inbox touched within the window (default 30 days), newest first — useful to see which inboxes have traffic. Supplying "inbox" restricts to that directory (canonicalized as in mnemo_note_post). Read state is preserved; this never marks notes read.`),
-			mcp.WithString("inbox", mcp.Description("Restrict to one inbox directory (absolute, or relative to your session's initial cwd). Omit to list all inboxes.")),
-			mcp.WithNumber("days", mcp.Description("Look-back window in days (default 30).")),
-		),
-		mcp.NewTool("mnemo_thread_list",
-			mcp.WithDescription(`List Threads (🎯T85): per-initiative directories under the configured threads root (default ~/think/threads), each scoping a Claude Code session via its CLAUDE.md. Returns JSON sorted by newest activity (active threads first, then inactive), with per-thread state (from the ## Status first word), current focus, working-file count, and activity timestamp.`),
-		),
-		mcp.NewTool("mnemo_thread_show",
-			mcp.WithDescription("Show one thread: its CLAUDE.md context and a listing of its non-hidden working files (newest first). Returns JSON."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (kebab-case directory name under the threads root).")),
-		),
-		mcp.NewTool("mnemo_thread_new",
-			mcp.WithDescription("Create a new thread: validate the kebab-case name, reject reserved/existing names, scaffold CLAUDE.md from the _template (substituting {{NAME}}). Does not open a terminal tab — that is mnemo_thread_go's job. Returns the created thread as JSON."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("New thread name. Must match ^[a-z0-9][a-z0-9-]*$ and not be reserved (_template, _archived).")),
-		),
-		mcp.NewTool("mnemo_thread_archive",
-			mcp.WithDescription("Archive a thread by moving it into _archived/ under the threads root. Refuses reserved names and existing destinations."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name to archive.")),
-		),
-		mcp.NewTool("mnemo_thread_go",
-			mcp.WithDescription("Open a thread's iTerm2 tab: focus the existing tab tagged for the thread, or spawn and tag a new one running `claude` in the thread's directory (🎯T85.2). Requires iTerm2 and the daemon's Automation permission. Returns {action: focused|spawned, path}."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (resolved under the threads root) or an absolute/~ path.")),
-			mcp.WithBoolean("no_resume", mcp.Description("Always spawn a fresh, untagged, ephemeral tab (plain `claude`) instead of focus-or-spawn.")),
-		),
+		noteTool(),
+		threadTool(),
+		opsTool(),
 		mcp.NewTool("mnemo_session_go",
 			mcp.WithDescription(`Reopen a past conversation (🎯T125): resolve a loose reference to one session, open an iTerm2 tab in the directory that session ran in, and resume it there.
 
@@ -904,10 +729,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.docs(args)
 	case "mnemo_synthesis":
 		return ch.synthesis(args)
-	case "mnemo_backup_status":
-		return ch.backupStatus()
-	case "mnemo_backup_now":
-		return ch.backupNow(args)
 	case "mnemo_who_ran":
 		return ch.whoRan(args)
 	case "mnemo_permissions":
@@ -918,14 +739,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.commits(args)
 	case "mnemo_decisions":
 		return ch.decisions(args)
-	case "mnemo_note_post":
-		return ch.notePost(args)
-	case "mnemo_note_recv":
-		return ch.noteRecv(args)
-	case "mnemo_note_list":
-		return ch.noteList(args)
-	case "mnemo_restore":
-		return ch.restore(args)
 	case "mnemo_chain":
 		return ch.chain(args)
 	case "mnemo_compacted_session":
@@ -942,44 +755,16 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.sessionStructure(args)
 	case "mnemo_rework_history":
 		return ch.reworkHistory(args)
-	case "mnemo_vault_sync":
-		return ch.vaultSync()
-	case "mnemo_vault_status":
-		return ch.vaultStatus(h.cfgCtl)
-	case "mnemo_vault_migration_doc":
-		return ch.vaultMigrationDoc(args)
-	case "mnemo_vault_bridge_list":
-		return ch.vaultBridgeList(h.cfgCtl)
-	case "mnemo_compactor_status":
-		return ch.compactorStatus(h.resolveCompactor)
-	case "mnemo_doctor":
-		return ch.doctor(h.diagRunner)
-	case "mnemo_divergence":
-		return ch.divergence()
-	case "mnemo_vault_gc":
-		return ch.vaultGC(args)
-	case "mnemo_vault_recluster":
-		return ch.vaultRecluster(args, h.cfgCtl)
-	case "mnemo_vault_themes_inspect":
-		return ch.vaultThemesInspect(args)
-	case "mnemo_vault_themes_pin":
-		return ch.vaultThemesPin(args)
-	case "mnemo_vault_themes_split":
-		return ch.vaultThemesSplit(args)
-	case "mnemo_vault_themes_merge":
-		return ch.vaultThemesMerge(args)
+	case "mnemo_thread":
+		return ch.threadDispatch(args)
+	case "mnemo_note":
+		return ch.noteDispatch(args)
+	case "mnemo_ops":
+		return ch.opsDispatch(args, h.resolveCompactor, h.diagRunner)
+	case "mnemo_vault":
+		return ch.vaultDispatch(args, h.cfgCtl)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
-	case "mnemo_thread_list":
-		return ch.threadList(args)
-	case "mnemo_thread_show":
-		return ch.threadShow(args)
-	case "mnemo_thread_new":
-		return ch.threadNew(args)
-	case "mnemo_thread_archive":
-		return ch.threadArchive(args)
-	case "mnemo_thread_go":
-		return ch.threadGo(args)
 	case "mnemo_session_go":
 		return ch.sessionGo(args)
 	default:

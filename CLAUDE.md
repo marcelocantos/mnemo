@@ -69,10 +69,8 @@ user. Good moments to reach for mnemo:
 - `mnemo_agent_trees` — Sub-agent fan-outs reconstructed and costed **as a whole**, ranked by aggregate tree cost (🎯T137). For the failure a per-session ranking cannot see: forty individually-unremarkable agents that collectively trip the wire. Reports the skill and turn that started each tree, `tree_cost_usd` vs `direct_cost_usd`, depth, and whether it is still running. Claude-only.
 - `mnemo_audit` — Search across audit logs (docs/audit-log.md) from all repos. Filters by repo, skill (release/audit/docs). Use to check when a project was last released or find maintenance patterns.
 - `mnemo_targets` — Search across convergence targets (`docs/targets.md`) from all repos. Filters by repo, status. Cross-project target search. **Note**: today the indexer only reads `docs/targets.md`. mnemo's own targets live in `bullseye.yaml` at the repo root (matching the global bullseye convention) and are therefore not visible to this tool. Teaching the indexer to also read `bullseye.yaml` is a known follow-up.
-- `mnemo_plans` — Search across implementation plans (.planning/ directories) from all repos. Use this to find past design decisions or understand how features were planned.
 - `mnemo_who_ran` — Find sessions that ran a specific shell command. Searches Bash tool_use entries by command pattern, returning session, repo, command, and timestamp. Supports days window and repo filter.
 - `mnemo_permissions` — Analyze tool_use patterns to identify most-used tools and Bash command prefixes, then suggest concrete allowedTools rules for settings.json.
-- `mnemo_ci` — Search CI/CD run history across repos. Indexes GitHub Actions runs from repos seen in session history. Supports filtering by repo, conclusion (success/failure/cancelled/skipped), recency, and FTS across workflow names, branches, and failure logs.
 - `mnemo_query` — SQL SELECT/WITH or sqldeep nested syntax (FROM ... SELECT { }) against the transcript database. Tables include: audit_entries (id, repo, file_path, date, skill, version, summary, raw_text), audit_entries_fts; targets (id, repo, file_path, target_id, name, status, weight, description, raw_text), targets_fts; plans (id, repo, file_path, phase, content, updated_at), plans_fts; ci_runs (id, repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url), ci_runs_fts.
 - `mnemo_recent_activity` — Per-repo summary of recent session activity (counts, recency, work types, topics)
 - `mnemo_status` — Rich status report: repos → sessions → truncated conversation excerpts with drill-down offsets, PLUS a transcript-ingest freshness diagnostics block (🎯T75): now_utc + freshest-indexed lag, per-stream divergence, per-project-dir coverage (files behind, pending bytes, forensic examples), and a repo-specific section when filtered. First-line check for "is the index stale/behind for this repo?" Also `diagnostics.watch` (🎯T142): tree-watch backend, open FDs, roots, poll counters — first-line check for "will mnemo exhaust vnodes again?"
@@ -82,33 +80,35 @@ user. Good moments to reach for mnemo:
 - `mnemo_compacted_session` — Return the compacted view of a session: its compaction summaries (the dense, durable layer) plus the addenda tail (substantive messages past the latest compaction cursor, computed live). The token-volume retrieval form (🎯T72) — use instead of `mnemo_read_session` when you want the distilled view rather than the raw transcript.
 - `mnemo_self` — Session self-identification via nonce protocol
 - `mnemo_decisions` — Search past decisions (proposal + confirmation pairs) across all sessions. Decisions detected automatically during ingest and backfilled for existing sessions.
-- `mnemo_todos` — Query TODO items indexed from `TODO.md` / `todos.md` files across all repos (Obsidian Tasks dialect: 📅 due, ⏳ scheduled, 🛫 start, ✅/❌ done/cancelled, 🔺⏫🔼🔽⏬ priority, 🔁 recurrence, #tags, [[wikilinks]]). Filters compose: repo, status, tag, priority, section, full-text, and date predicates (due before/after/on, overdue, due-soon-N-days, no-date). Each result carries its source `file_path` and `line`. Discovery walks every known root — git repos (from workspace_roots and session cwds) and non-git synthesis roots (planning spaces such as `~/think`) — for default names plus any `todo_globs` in config, honouring `.gitignore` and the loop-safety exclusion fence.
-- `mnemo_todo_set` — Edit an existing TODO item in place (status / due / priority) by `id` from `mnemo_todos`. Rewrites only the target line, preserving the rest of the file byte-for-byte; atomic (tmp + fsync + rename) and guarded against concurrent external edits. `done`/`cancelled` stamp today's completion date.
-- `mnemo_todo_add` — Append a new TODO item to an already-tracked TODO file (the `file_path` from `mnemo_todos`), optionally filed under a heading (created if absent). Text may carry Obsidian decorations.
-- `mnemo_note_post` — Post a cross-session inbox note (🎯T65) for another Claude Code session to pick up. `inbox` is a directory path (absolute, or relative to the calling session's *initial* cwd derived from connection identity — not pwd); `body` is required. `from_session`/`from_repo` default from the MCP connection identity. Inbox canonicalization rejects a leading `~` (shell home-expansion), collapses `./..`, resolves symlinks, and requires the directory to exist (a non-existent inbox errors and inserts no row), so every spelling of one directory addresses one inbox. The producer half of the directory-addressed inbox primitive that supersedes 🎯T42's message bus.
-- `mnemo_note_recv` — Receive inbox notes addressed to a directory. Defaults: `unread_only=true`, `mark_read=true` (idempotent — concurrent receivers never double-deliver). Notes are retained after delivery (append-only) and stay browsable via `mnemo_note_list`. Inbox canonicalized identically to `mnemo_note_post`. The consumer half; the `/inbox` skill wraps it, and `/loop /inbox` covers the wait-on-event case.
-- `mnemo_note_list` — Browse inbox notes without consuming them. Omit `inbox` to list every inbox touched within the window (default 30 days), newest first; supply `inbox` to scope to one directory. Never marks notes read.
 - `mnemo_whatsup` — Live session resource monitor: per-session CPU%, RSS, CPU time correlated with session metadata (repo, topic, work type), plus system memory pressure.
-- `mnemo_doctor` — Run mnemo's self-diagnostics (🎯T83) and return a per-check health report: name, severity (ok/warn/fail), tier (fast/full), detail, remediation. Checks the summariser working dir, `claude` on PATH, configured roots, the compaction circuit-breaker (a tripped breaker = every compaction failing systemically), backfill-since-startup, db responsiveness, and **`watch.fds`** (🎯T142: tree-watch backend + process open-FD bound; warn ≥3k, fail ≥8k). A scheduler runs the full suite at startup, fast checks every ~3m, full hourly; fail-severity transitions fire **opt-out, local-only** OS notifications (disable via `disable_health_notifications: true` in config) that deep-link the dashboard health page (`http://localhost:19419/#health`). The same report is served at `GET /health`. (Distinct from the one-shot `mnemo diagnose` CLI subcommand.) Repeatedly-failing background tasks trip a circuit-breaker (🎯T84) and back off instead of hammering.
-- `mnemo_define` — Define a reusable parameterised query template with {{param}} placeholders. Templates persist in SQLite across sessions.
-- `mnemo_evaluate` — Execute a named query template with parameter values. Returns results like mnemo_query.
-- `mnemo_list_templates` — List all saved query templates.
 - `mnemo_commits` — Search git commits across all indexed repos. FTS5 on commit messages. Supports repo, author, date range filters. Retroactive: indexes full history from all known repos at startup.
 - `mnemo_prs` — Search GitHub PRs and issues across all indexed repos. FTS5 on title/body. Supports state, author, type (pr/issue) filters. Retroactive: backfills from GitHub API at startup.
 - `mnemo_discover_patterns` — Workaround patterns suggesting missing features: direct JSONL reads, transcript-dir greps, repeated query shapes, recurring searches. Served from the persisted `patterns` table, refreshed hourly by a reconciler (🎯T64.7), so patterns accumulate a real `first_seen` instead of being re-derived per call, and the reported mine timestamp says how fresh the answer is. `occurrence_count` and `session_count` are different numbers and both are reported — one session that read six transcript files is 6 occurrences across 1 session — and the emission gate is occurrence ≥ 3 across ≥ 2 sessions, because a single session's habit is not yet a pattern. The same gate governs the `_mnemo/patterns/` vault pages and the clustering corpus stream, so the three can never disagree about which patterns exist.
-- `mnemo_images` — Search images captured from transcripts. Inline base64 and file-path image references are extracted at ingest, stored as BLOBs with width/height/MIME metadata, and described by AI using surrounding conversation context. Searchable via FTS5 on descriptions. Requires ANTHROPIC_API_KEY for description generation.
 - `mnemo_rework_history` — Return prior rework attempts for a bullseye target, ordered most-recent first. Sourced from compaction spans where the target appeared in targets_active or targets_progressed. Returns session_id, timestamp, repo, progress note, prose summary, and open threads. Feed output as `mnemo_history` to `bullseye_rework` to avoid repeating prior failed approaches.
 - `mnemo_session_go` — Reopen a past conversation (🎯T125). Resolves a loose reference — a session id or unique prefix, a repo/project fragment, `latest`, or `latest:<scope>` — then opens an iTerm2 tab in the directory that session ran in and resumes it there. An exact id always wins, so the natural flow works: find the session with `mnemo_search`/`mnemo_sessions`, then hand the id back to reopen it. Resumes Claude Code and Grok CLI (`claude --resume` / `grok --resume`, neither forking); Codex/ChatGPT sessions are indexed but refused by name, having no verified terminal resume. A recorded cwd that no longer exists is reported rather than silently substituted. `mnemo resume [<ref>]` is the CLI twin for when no agent is running; both go through the daemon's `POST /api/session/go`, which owns the terminal Automation grant.
 - `mnemo_config` — Read or update mnemo's runtime configuration (`~/.mnemo/config.json`) without restarting the daemon. `op=read` returns the current config + resolved paths; `op=write` with a `patch` object merges and persists. Hot-reload covers `vault_path`, `vault_profile`, `vault_bridges`, `vault_bridges_max_links` (🎯T64.5/T64.6, re-derived by rebuilding the vault exporter in place), `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2 enable/disable); `linked_instances` is persisted but requires a restart.
-- `mnemo_vault_sync` — Synchronise the vault: write/update Markdown notes for every session, decision, memory, plan, target, CI run, and PR, then re-ingest the vault so human-added notes and below-fence edits are searchable. Up-to-date notes are skipped. Requires `vault_path`.
-- `mnemo_vault_status` — Report vault configuration: enabled state, root path, active indexing scope + `.mnemoignore` state, active `vault_layout` (v1/both/v2) with soak recommendation, note counts by section, the detected/overridden PKM `vault_profile` (🎯T64.5), and the configured bridges (🎯T64.6).
-- `mnemo_vault_migration_doc` — Return or (with `write=true`) regenerate `_mnemo/MIGRATION.md`, the once-written v1→v2 explainer. Preview-only by default. Requires `vault_path`.
-- `mnemo_vault_bridge_list` — List the vault bridges mnemo maintains (🎯T64.6): each configured collection (themes/patterns/cross-repo/lessons/decisions/memories) → anchor file, whether its fenced block is written yet, plus any per-bridge errors from the last sync. Configured via `vault_bridges` + `vault_bridges_max_links`.
-- `mnemo_vault_gc` — Inspect (and with `confirm=true`, clean up) vault GC orphans: `manifest_path_missing` rows (removable) and `disk_not_in_manifest` files (informational only — user content). Dry-run by default.
-- `mnemo_vault_recluster` — Trigger an immediate document-level themes clustering pass (🎯T64.8). Default engine is local TF-IDF + single-link; embeddings is opt-in via `vault_clustering.engine` or the `engine` param. Returns the new `cluster_runs` row.
-- `mnemo_vault_themes_inspect` — Full membership, centroid, pin/archive state, and labelling path/gate for a theme id or slug.
-- `mnemo_vault_themes_pin` — Pin/unpin a theme so it is exempt from `retire_after` auto-archive.
-- `mnemo_vault_themes_split` / `mnemo_vault_themes_merge` — Stubs that record `theme_overrides` only; live apply ships in a follow-up.
+
+### Consolidated tools (🎯T143)
+
+Four op-dispatched entry points replace 24 narrow tools. Each takes a
+required `op`; an unknown op answers with the valid list, and a
+parameter belonging to a different op is **rejected rather than
+ignored**, so a wrong guess fails loudly.
+
+- `mnemo_vault` — Vault operations. `op=status|sync|gc|migration_doc|bridge_list|recluster|themes_inspect|themes_pin|themes_split|themes_merge`. Requires `vault_path`. `themes_split`/`themes_merge` remain stubs that record a `theme_overrides` row without applying live, and the description says so.
+- `mnemo_thread` — Thread navigation. `op=list|show|new|archive|go`. Same data as the daemon's `/api/thread/*` endpoints, which the menubar app uses.
+- `mnemo_note` — Cross-session inbox notes (🎯T65). `op=post|recv|list`. `recv` keeps its `unread_only=true` / `mark_read=true` defaults and its idempotency, so concurrent receivers never double-deliver. Inbox canonicalization is unchanged: a leading `~` is rejected, `./..` collapsed, symlinks resolved, and the directory must exist.
+- `mnemo_ops` — Operational surface. `op=doctor|compactor|divergence|backup_status|backup_now|restore`. `op=restore` is destructive and requires an explicit `session_id`. Note that `mnemo_status` and `mnemo_stats` are deliberately **not** folded in: they carry real traffic, and for a tool agents already find, a name beats an op.
+
+**Removed in 🎯T143.1** (no consumer in four months): `mnemo_plans`,
+`mnemo_ci`, `mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
+`mnemo_images`, `mnemo_get_memory`, `mnemo_tool_result`,
+`mnemo_source_drift`, `mnemo_todos`, `mnemo_todo_add`,
+`mnemo_todo_set`. The image, plan and CI **indexes remain** and stay
+reachable through `mnemo_query`; only the todo index went with its
+tools, because nothing else read it. Adding a tool now means adding a
+line to the ledger in `internal/tools/surface.go` — a ratchet test
+fails on any drift in either direction.
 
 ## Code Structure
 
@@ -322,8 +322,11 @@ opted in.
 
 Only embedding-backed image search (`semantic` / `similar`) depends on
 this. Image extraction, OCR, AI descriptions and FTS are unaffected.
+Note that 🎯T143.1 removed the `mnemo_images` tool — the pipeline and
+its tables remain, and are reached through `mnemo_query`
+(`images`, `image_ocr` / `image_ocr_fts`, `image_descriptions`).
 Whether the embedder ran or was skipped, and why, is reported by the
-`images.embedder` check in `mnemo_doctor` / `GET /health`; per-image
+`images.embedder` check in `mnemo_ops` (op=doctor) / `GET /health`; per-image
 outcomes are in the `image_embedding_attempts` table.
 
 **Vault clustering (🎯T64.8).** Two independent egress surfaces, each

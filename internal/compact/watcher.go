@@ -134,7 +134,7 @@ type storeSource interface {
 	RecordCompactionFailure(sessionID, errMsg string) error
 	ClearCompactionFailure(sessionID string) error
 	// QuarantinedCount reports how many sessions are currently excluded
-	// by the quarantine, for mnemo_compactor_status.
+	// by the quarantine, for mnemo_ops op=compactor.
 	QuarantinedCount(threshold int, since time.Time) int
 	// CompactionScanWatermark returns MAX(entries.id) — a cheap O(1)
 	// activity signal (🎯T91). The watcher skips the candidate scan
@@ -225,7 +225,7 @@ func NewWatcher(src storeSource, c *Compactor, cfg WatcherConfig) *Watcher {
 }
 
 // HealthSnapshot is the externally-visible state of the watcher,
-// surfaced by the mnemo_compactor_status MCP tool. Lets agents (and
+// surfaced by the mnemo_ops op=compactor MCP tool. Lets agents (and
 // humans) answer "is the compactor working, what was its last
 // outcome, what is it doing right now?" without grepping the daemon
 // log.

@@ -425,7 +425,7 @@ func (r *Registry) VaultFor(username string) *vault.Exporter {
 
 // CompactWatcherFor returns the compaction Watcher for username, or
 // nil when the user has not yet been initialised. Used by the
-// mnemo_compactor_status MCP tool (🎯T67) to surface watcher health
+// mnemo_ops op=compactor MCP tool (🎯T67) to surface watcher health
 // — last scan / tick timestamps, in-flight session, lifetime tick
 // counts — without grepping the daemon log.
 func (r *Registry) CompactWatcherFor(username string) *compact.Watcher {

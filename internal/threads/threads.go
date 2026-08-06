@@ -9,7 +9,7 @@
 // files accumulate. This package owns the filesystem model — listing,
 // status/focus parsing, activity timestamps, scaffolding, archiving — and
 // is deliberately free of any mnemo store/MCP/HTTP dependency so it unit-
-// tests fast. The CLI, the mnemo_thread_* MCP tools, and the /api/thread/*
+// tests fast. The CLI, the mnemo_thread MCP tools, and the /api/thread/*
 // endpoints are all thin adapters over a *Manager.
 //
 // The model is a live filesystem projection: nothing here is persisted to

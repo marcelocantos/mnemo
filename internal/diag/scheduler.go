@@ -11,7 +11,7 @@ import (
 
 // Default scheduler cadences (🎯T83). Fast checks run often; the full
 // suite (env re-validation, convergence) runs at startup, on the full
-// interval, and on demand via mnemo_doctor.
+// interval, and on demand via mnemo_ops op=doctor.
 const (
 	DefaultFastInterval = 3 * time.Minute
 	DefaultFullInterval = time.Hour
@@ -20,7 +20,7 @@ const (
 // Scheduler drives a diagnostics Registry on a cadence and feeds each
 // report to a Notifier. The full suite runs once at startup, the Fast
 // tier runs every FastInterval, and the full suite re-runs every
-// FullInterval. The /health endpoint and mnemo_doctor call the Registry
+// FullInterval. The /health endpoint and mnemo_ops op=doctor call the Registry
 // directly, so the scheduler exists purely to keep the timed checks (and
 // thus notifications) flowing.
 type Scheduler struct {

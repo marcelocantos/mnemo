@@ -7,7 +7,7 @@
 // (Fast or Full). Run executes them and returns a Report of per-check
 // Results — a severity (ok/warn/fail), a human-facing detail, and a
 // remediation hint. The same Report drives three surfaces: the
-// mnemo_doctor MCP tool (on-demand full run), the dashboard health page
+// mnemo_ops op=doctor MCP tool (on-demand full run), the dashboard health page
 // (the /health endpoint), and OS notifications (on a transition into
 // fail). Startup runs the full set once; a timer runs Fast checks
 // frequently and the Full set hourly.
@@ -142,7 +142,7 @@ type DynamicProvider func() []Check
 
 // Registry holds the registered checks. Build one with NewRegistry,
 // Register checks at startup, then Run it from the scheduler, the
-// mnemo_doctor tool, and the /health endpoint.
+// mnemo_ops(op=doctor) tool, and the /health endpoint.
 type Registry struct {
 	checks  []Check
 	dynamic DynamicProvider // optional; expanded on every Run
