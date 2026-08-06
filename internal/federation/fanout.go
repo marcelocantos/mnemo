@@ -39,11 +39,8 @@ var FanoutToolNames = map[string]struct{}{
 	"mnemo_who_ran":           {},
 	"mnemo_audit":             {},
 	"mnemo_targets":           {},
-	"mnemo_plans":             {},
 	"mnemo_skills":            {},
 	"mnemo_configs":           {},
-	"mnemo_ci":                {},
-	"mnemo_images":            {},
 	"mnemo_discover_patterns": {},
 	"mnemo_rework_history":    {},
 }

@@ -138,15 +138,6 @@ func (f *fakeBackend) Chain(sessionID string) ([]store.ChainLink, error) {
 func (f *fakeBackend) SearchDecisions(query string, repo string, days int, limit int) ([]store.DecisionInfo, error) {
 	panic("unexpected SearchDecisions call")
 }
-func (f *fakeBackend) SearchTodos(q store.TodoQuery) ([]store.TodoInfo, error) {
-	panic("unexpected SearchTodos call")
-}
-func (f *fakeBackend) MutateTodo(m store.TodoMutation) (*store.TodoInfo, error) {
-	panic("unexpected MutateTodo call")
-}
-func (f *fakeBackend) AddTodo(a store.TodoAdd) (*store.TodoInfo, error) {
-	panic("unexpected AddTodo call")
-}
 func (f *fakeBackend) PostNote(p store.NotePostParams) (*store.Note, error) {
 	panic("unexpected PostNote call")
 }

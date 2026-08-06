@@ -3888,17 +3888,6 @@ func (s *Store) Watch(ctx context.Context) error {
 					})
 				}
 			}
-			if isTodoFileName(base) {
-				repoRoot := dir
-				if filepath.Base(dir) == "docs" {
-					repoRoot = filepath.Dir(dir)
-				}
-				if repo, ok := repoForRoot[repoRoot]; ok {
-					db.enqueue(name, func() {
-						s.ingestTodoFile(name, repo)
-					})
-				}
-			}
 			if strings.HasSuffix(name, ".md") && strings.Contains(name, "/.planning/") {
 				for root, repo := range repoForRoot {
 					planDir := filepath.Join(root, ".planning")

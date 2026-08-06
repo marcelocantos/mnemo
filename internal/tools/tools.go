@@ -376,15 +376,6 @@ Use this to find decisions, preferences, and context captured in any project —
 			mcp.WithString("project", mcp.Description("Filter by project name substring")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
-		mcp.NewTool("mnemo_get_memory",
-			mcp.WithDescription(`Return the raw markdown content of a named memory file, or list available memories when name is omitted.
-
-Replaces the cat ~/.claude/projects/<project>/memory/<name>.md workaround. Project is matched as a substring (consistent with mnemo_memories). Name is matched case-insensitively against the frontmatter name field and the file base name (without .md extension).
-
-When name is omitted, returns a list of all memories for the project with their name, type, and description.`),
-			mcp.WithString("project", mcp.Required(), mcp.Description(`Project to look up. Accepts bare name ("mnemo"), org/repo fragment ("marcelocantos/mnemo"), or path fragment ("-Users-marcelo-work-github-com-marcelocantos-mnemo").`)),
-			mcp.WithString("name", mcp.Description("Memory name to retrieve (matches frontmatter name or file stem). Omit to list available memories.")),
-		),
 		mcp.NewTool("mnemo_usage",
 			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
 
@@ -464,12 +455,6 @@ CLAUDE ONLY, deliberately. The parentage fields come from Claude Code's record s
 			mcp.WithString("status", mcp.Description("Filter by status: identified, converging, achieved")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
-		mcp.NewTool("mnemo_plans",
-			mcp.WithDescription(`Search across implementation plans (.planning/ directories) from all repos. Plans contain architectural decisions, task breakdowns, and implementation reasoning from GSD workflows. Use this to find past design decisions or understand how features were planned.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
 		mcp.NewTool("mnemo_docs",
 			mcp.WithDescription(`Search across project documentation files (markdown, plain-text, PDF) indexed from all tracked repos. Covers README, CHANGELOG, design notes, and any files under docs/, design/, notes/, papers/ directories. Deduplicates .md/.pdf pairs with same stem — always prefers .md. Use this to find project documentation, design decisions, and release notes across repos.`),
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
@@ -537,22 +522,6 @@ Supports filtering by state, author, and recency. Results include both PRs and i
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
-		mcp.NewTool("mnemo_ci",
-			mcp.WithDescription(`Search CI/CD run history across repos. Indexes GitHub Actions runs from all repos that appear in session history.
-
-Supports FTS search across workflow names, branches, and failure logs. Use this to:
-- Find recent CI failures across projects
-- Check if a specific repo's CI is green
-- Search failure logs for error patterns
-- Correlate CI runs with development sessions
-
-Runs are polled incrementally from GitHub Actions. Failed run logs are indexed for full-text search.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching against workflow, branch, logs). Omit to list recent runs.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
-			mcp.WithString("conclusion", mcp.Description("Filter by conclusion: success, failure, cancelled, skipped")),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
 		mcp.NewTool("mnemo_commits",
 			mcp.WithDescription(`Search git commits across all indexed repos. Uses FTS5 for keyword search on commit messages. Commits are indexed automatically from repos that appear in session history. Supports cross-repo queries with date range filtering.`),
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching on subject/body). Omit to list recent.")),
@@ -567,37 +536,6 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_todos",
-			mcp.WithDescription(`Query TODO items indexed from TODO.md / todos.md files across all repos (Obsidian Tasks dialect: 📅 due, ⏳ scheduled, 🛫 start, ✅/❌ done/cancelled, 🔺⏫🔼🔽⏬ priority, 🔁 recurrence, #tags, [[wikilinks]]). Filters compose. Each result carries its source file_path and line so it can be edited with mnemo_todo_set.`),
-			mcp.WithString("query", mcp.Description("Full-text search over task text, tags, and section (fuzzy OR). Omit to list.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithString("status", mcp.Description("Filter by status: open, done, cancelled, in_progress")),
-			mcp.WithString("tag", mcp.Description("Filter by exact #tag (leading # optional)")),
-			mcp.WithString("priority", mcp.Description("Filter by priority: highest, high, medium, none, low, lowest")),
-			mcp.WithString("section", mcp.Description("Filter by the heading/section a task lives under")),
-			mcp.WithString("due_before", mcp.Description("Tasks with a due date on/before this ISO date (YYYY-MM-DD)")),
-			mcp.WithString("due_after", mcp.Description("Tasks with a due date on/after this ISO date")),
-			mcp.WithString("due_on", mcp.Description("Tasks due exactly on this ISO date")),
-			mcp.WithBoolean("overdue", mcp.Description("Only tasks past their due date and not done/cancelled")),
-			mcp.WithNumber("due_soon_days", mcp.Description("Only tasks due within N days from today and not done/cancelled")),
-			mcp.WithBoolean("no_date", mcp.Description("Only tasks with no due date")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
-		),
-		mcp.NewTool("mnemo_todo_set",
-			mcp.WithDescription(`Edit an existing TODO item in place in its source file (status, due date, and/or priority). Only the target line is rewritten — the rest of the file is preserved byte-for-byte and written atomically (tmp + fsync + rename). The edit is guarded against concurrent external changes: if the line moved or changed since indexing, it fails without touching the file. Get the id from mnemo_todos.`),
-			mcp.WithNumber("id", mcp.Required(), mcp.Description("Task id from mnemo_todos")),
-			mcp.WithString("status", mcp.Description("New status: open, done, cancelled, in_progress. done/cancelled stamps today's completion date (✅/❌).")),
-			mcp.WithString("due", mcp.Description("Set the due date (ISO YYYY-MM-DD). Pass 'clear' (or empty) to remove it.")),
-			mcp.WithString("priority", mcp.Description("Set priority: highest, high, medium, low, lowest, or none to clear.")),
-			mcp.WithString("text", mcp.Description("Replace the task prose. Trailing emoji-metadata (dates/priority/recurrence) is preserved; include any #tags or [[links]] you want to keep.")),
-		),
-		mcp.NewTool("mnemo_todo_add",
-			mcp.WithDescription(`Append a new TODO item to an already-tracked TODO file (the file must appear as file_path in mnemo_todos output). Optionally file it under a heading, created at end of file if absent. Text may carry Obsidian decorations, e.g. "review spec 📅 2026-07-01 ⏫ #docs". Written atomically and re-indexed immediately.`),
-			mcp.WithString("file", mcp.Required(), mcp.Description("Absolute path to a tracked TODO file (from mnemo_todos file_path)")),
-			mcp.WithString("text", mcp.Required(), mcp.Description("Task text, optionally with Obsidian Tasks decorations")),
-			mcp.WithString("section", mcp.Description("Heading to file the task under (created if absent)")),
-			mcp.WithString("status", mcp.Description("Initial status: open (default), done, cancelled, in_progress")),
 		),
 		mcp.NewTool("mnemo_restore",
 			mcp.WithDescription(`Return the compacted context for a session chain — all compaction summaries across the full /clear-bounded chain, oldest first.
@@ -656,21 +594,6 @@ Phase 2: Call again with the nonce. mnemo searches for the session containing it
 Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonce "mnemo:abc123" → get your session ID. Then use mnemo_read_session to read your own transcript.`),
 			mcp.WithString("nonce", mcp.Description("The nonce returned by a previous mnemo_self call. Omit on first call to generate a new nonce.")),
 		),
-		mcp.NewTool("mnemo_define",
-			mcp.WithDescription(`Define a reusable parameterised query template. Templates persist across sessions in SQLite. Use {{param_name}} placeholders in the query. If a template with the same name exists, it is updated.`),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Template name (unique identifier)")),
-			mcp.WithString("description", mcp.Description("What this template does")),
-			mcp.WithString("query", mcp.Required(), mcp.Description("SQL query with {{param}} placeholders")),
-			mcp.WithArray("params", mcp.Description("List of parameter names referenced in the query (e.g. [\"days\", \"repo\"])")),
-		),
-		mcp.NewTool("mnemo_evaluate",
-			mcp.WithDescription(`Execute a named query template with parameters. Returns results in the same format as mnemo_query.`),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Template name")),
-			mcp.WithObject("params", mcp.Description(`Parameter values as key-value pairs (e.g. {"days": "7", "repo": "mnemo"})`)),
-		),
-		mcp.NewTool("mnemo_list_templates",
-			mcp.WithDescription(`List all saved query templates with their names, descriptions, and parameter definitions.`),
-		),
 		mcp.NewTool("mnemo_discover_patterns",
 			mcp.WithDescription(`Workaround patterns mined from transcript history — places where an agent reached around mnemo instead of through it, and therefore candidate missing features.
 
@@ -717,28 +640,6 @@ Returns a structured result with session_id, entry_id, entry type, timestamp, ma
 			mcp.WithString("uuid", mcp.Required(), mcp.Description("Full UUID or prefix to locate (e.g. \"abc12345\" or the full UUID)")),
 			mcp.WithNumber("context_before", mcp.Description("Number of messages before the entry to include (default 3)")),
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after the entry to include (default 3)")),
-		),
-		mcp.NewTool("mnemo_images",
-			mcp.WithDescription(`Search images captured from Claude Code transcripts. Three search modes: (1) text (default) — FTS5 over AI descriptions and OCR text; (2) semantic — embed the query text and find images by meaning using CLIP k-NN (requires embed backend); (3) similar — find visually similar images given an image ID. Use 'text' to find images by paraphrase, 'semantic' for conceptual matches like "architecture diagram", and 'similar' to browse related screenshots.`),
-			mcp.WithString("query", mcp.Description("Search query. Used in 'text' and 'semantic' modes. Omit to list recent (text mode).")),
-			mcp.WithString("mode", mcp.Description(`Search mode: "text" (FTS5 over descriptions + OCR, default), "semantic" (embed query, k-NN on CLIP vectors), or "similar" (visual similarity to another image, requires similar_to).`)),
-			mcp.WithNumber("similar_to", mcp.Description("Image ID to find visually similar images (used with mode='similar').")),
-			mcp.WithString("repo", mcp.Description("Filter by repo (session's repo)")),
-			mcp.WithString("session", mcp.Description("Filter by session ID prefix")),
-			mcp.WithNumber("days", mcp.Description("Recency window (default 90)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-			mcp.WithString("search_fields", mcp.Description(`For text mode: which indexes to search: "both" (default), "description" (AI descriptions only), or "ocr" (extracted text only).`)),
-		),
-		mcp.NewTool("mnemo_tool_result",
-			mcp.WithDescription(`Return the raw tool-result payload for a specific tool invocation.
-
-Looks up the tool-result body stored at ingest time, identified by its tool_use_id within a session. Replaces the cat ~/.claude/projects/<project>/<session>/tool-results/<id>.txt workaround.
-
-Returns the full text, is_error flag, and total byte length. Use offset and truncate_len to page through large payloads.`),
-			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (or unique prefix) containing the tool invocation.")),
-			mcp.WithString("tool_use_id", mcp.Required(), mcp.Description("The tool_use_id of the tool invocation whose result you want.")),
-			mcp.WithNumber("offset", mcp.Description("Skip the first N bytes of the result text (default 0).")),
-			mcp.WithNumber("truncate_len", mcp.Description("Maximum bytes to return (default: no limit). Use with offset to page.")),
 		),
 		mcp.NewTool("mnemo_rework_history",
 			mcp.WithDescription(`Return prior rework attempts for a bullseye target, ordered most-recent first.
@@ -812,11 +713,6 @@ clearest "watcher is wedged" signal.`),
 For each stream returns: whether a gap metric is known, the gap (in the stream's unit; 0 = converged), when it last reconciled, and a note. Streams with a cheap metric today: compactions (owed-but-uncompacted sessions), transcript_index (un-ingested transcript bytes), and the repo-level document streams (docs:* — files on disk not yet indexed). Streams not yet instrumented (images, vault, github_mirrors) report known=false rather than a fabricated number; each becomes known as its reconciler slice lands.
 
 Use this to see what derived state is stale and by how much — the single surface for "is anything behind?" across the data plane.`),
-		),
-		mcp.NewTool("mnemo_source_drift",
-			mcp.WithDescription(`Report indexed transcript sources that have been pruned or truncated out from under the index (🎯T68.6).
-
-Returns counts of "deleted" (the source .jsonl no longer exists) and "truncated" (its current size is below the ingested offset — pruned or rewritten shorter), plus example paths. Under mnemo's durable-tier model this is NOT an error: Claude Code prunes transcripts, and the index is the authoritative durable copy of that content. This surface exists so you can see how much indexed content no longer has a live source — informational, not a reconcile gap.`),
 		),
 		mcp.NewTool("mnemo_vault_gc",
 			mcp.WithDescription(`Inspect (and optionally clean up) vault GC orphans (🎯T68.6).
@@ -990,8 +886,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.stats()
 	case "mnemo_memories":
 		return ch.memories(args)
-	case "mnemo_get_memory":
-		return ch.getMemory(args)
 	case "mnemo_skills":
 		return ch.skills(args)
 	case "mnemo_usage":
@@ -1006,8 +900,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.auditLogs(args)
 	case "mnemo_targets":
 		return ch.targets(args)
-	case "mnemo_plans":
-		return ch.plans(args)
 	case "mnemo_docs":
 		return ch.docs(args)
 	case "mnemo_synthesis":
@@ -1022,18 +914,10 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.permissions(args)
 	case "mnemo_prs":
 		return ch.prs(args)
-	case "mnemo_ci":
-		return ch.ci(args)
 	case "mnemo_commits":
 		return ch.commits(args)
 	case "mnemo_decisions":
 		return ch.decisions(args)
-	case "mnemo_todos":
-		return ch.todos(args)
-	case "mnemo_todo_set":
-		return ch.todoSet(args)
-	case "mnemo_todo_add":
-		return ch.todoAdd(args)
 	case "mnemo_note_post":
 		return ch.notePost(args)
 	case "mnemo_note_recv":
@@ -1050,22 +934,12 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.self(args)
 	case "mnemo_whatsup":
 		return ch.whatsup(args)
-	case "mnemo_define":
-		return ch.defineTemplate(args)
-	case "mnemo_evaluate":
-		return ch.evaluateTemplate(args)
-	case "mnemo_list_templates":
-		return ch.listTemplates()
 	case "mnemo_discover_patterns":
 		return ch.discoverPatterns(args)
 	case "mnemo_locate_uuid":
 		return ch.locateUUID(args)
-	case "mnemo_images":
-		return ch.images(args)
 	case "mnemo_session_structure":
 		return ch.sessionStructure(args)
-	case "mnemo_tool_result":
-		return ch.toolResult(args)
 	case "mnemo_rework_history":
 		return ch.reworkHistory(args)
 	case "mnemo_vault_sync":
@@ -1082,8 +956,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.doctor(h.diagRunner)
 	case "mnemo_divergence":
 		return ch.divergence()
-	case "mnemo_source_drift":
-		return ch.sourceDrift()
 	case "mnemo_vault_gc":
 		return ch.vaultGC(args)
 	case "mnemo_vault_recluster":
@@ -1523,47 +1395,6 @@ func (h *callHandler) memories(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *callHandler) getMemory(args map[string]any) (string, bool, error) {
-	project, _ := args["project"].(string)
-	name, _ := args["name"].(string)
-
-	if project == "" {
-		return "project is required", true, nil
-	}
-
-	// When name is omitted, list all memories for the project.
-	if name == "" {
-		results, err := h.mem.SearchMemories("", "", project, 100)
-		if err != nil {
-			return fmt.Sprintf("memory list failed: %v", err), true, nil
-		}
-		if len(results) == 0 {
-			return fmt.Sprintf("No memories found for project %q.", project), false, nil
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "Memories for project %q:\n\n", project)
-		for _, m := range results {
-			fmt.Fprintf(&b, "- **%s** [%s]: %s\n", m.Name, m.MemoryType, m.Description)
-		}
-		return b.String(), false, nil
-	}
-
-	m, err := h.mem.GetMemory(project, name)
-	if err != nil {
-		return fmt.Sprintf("get memory failed: %v", err), true, nil
-	}
-	if m == nil {
-		// Check whether the project itself exists.
-		all, listErr := h.mem.SearchMemories("", "", project, 1)
-		if listErr == nil && len(all) == 0 {
-			return fmt.Sprintf("Project %q not found.", project), false, nil
-		}
-		return fmt.Sprintf("Memory %q not found in project %q.", name, project), false, nil
-	}
-
-	return m.Content, false, nil
-}
-
 func (h *callHandler) skills(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	limit := 20
@@ -1742,33 +1573,6 @@ func (h *callHandler) targets(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *callHandler) plans(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repoFilter, _ := args["repo"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchPlans(query, repoFilter, limit)
-	if err != nil {
-		return fmt.Sprintf("plan search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No plans found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, p := range results {
-		phase := p.Phase
-		if phase == "" {
-			phase = "(root)"
-		}
-		fmt.Fprintf(&b, "## %s [phase: %s] (%s)\n\n%s\n\n", p.FilePath, phase, p.Repo, p.Content)
-	}
-	return b.String(), false, nil
-}
-
 func (h *callHandler) docs(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repoFilter, _ := args["repo"].(string)
@@ -1905,32 +1709,6 @@ func (h *callHandler) prs(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *callHandler) ci(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	conclusion, _ := args["conclusion"].(string)
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	results, err := h.mem.SearchCI(query, repo, conclusion, days, limit)
-	if err != nil {
-		return fmt.Sprintf("CI search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No CI runs found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
 func (h *callHandler) commits(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
@@ -1979,105 +1757,6 @@ func (h *callHandler) decisions(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) todos(args map[string]any) (string, bool, error) {
-	var q store.TodoQuery
-	q.Query, _ = args["query"].(string)
-	q.Repo, _ = args["repo"].(string)
-	q.Status, _ = args["status"].(string)
-	q.Tag, _ = args["tag"].(string)
-	q.Priority, _ = args["priority"].(string)
-	q.Section, _ = args["section"].(string)
-	q.DueBefore, _ = args["due_before"].(string)
-	q.DueAfter, _ = args["due_after"].(string)
-	q.DueOn, _ = args["due_on"].(string)
-	q.Overdue, _ = args["overdue"].(bool)
-	q.NoDate, _ = args["no_date"].(bool)
-	if v, ok := args["due_soon_days"].(float64); ok && v > 0 {
-		q.DueSoonDays = int(v)
-	}
-	if v, ok := args["limit"].(float64); ok && v > 0 {
-		q.Limit = int(v)
-	}
-	if q.Status != "" && !validTodoStatus(q.Status) {
-		return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", q.Status), true, nil
-	}
-	results, err := h.mem.SearchTodos(q)
-	if err != nil {
-		return fmt.Sprintf("todos search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No matching todos found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) todoSet(args map[string]any) (string, bool, error) {
-	idf, ok := args["id"].(float64)
-	if !ok {
-		return "id is required", true, nil
-	}
-	m := store.TodoMutation{ID: int64(idf)}
-	if v, ok := args["status"].(string); ok && v != "" {
-		if !validTodoStatus(v) {
-			return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", v), true, nil
-		}
-		m.Status = v
-	}
-	if v, ok := args["due"].(string); ok {
-		due := v
-		if v == "clear" || v == "none" {
-			due = ""
-		}
-		m.Due = &due
-	}
-	if v, ok := args["priority"].(string); ok && v != "" {
-		if !validTodoPriority(v) {
-			return fmt.Sprintf("invalid priority %q (want highest/high/medium/low/lowest/none)", v), true, nil
-		}
-		p := v
-		m.Priority = &p
-	}
-	if v, ok := args["text"].(string); ok && v != "" {
-		txt := v
-		m.Text = &txt
-	}
-	if m.Status == "" && m.Due == nil && m.Priority == nil && m.Text == nil {
-		return "nothing to change: pass at least one of status, due, priority, text", true, nil
-	}
-	updated, err := h.mem.MutateTodo(m)
-	if err != nil {
-		return fmt.Sprintf("todo update failed: %v", err), true, nil
-	}
-	out, _ := json.MarshalIndent(updated, "", "  ")
-	return string(out), false, nil
-}
-
-func (h *callHandler) todoAdd(args map[string]any) (string, bool, error) {
-	file, _ := args["file"].(string)
-	text, _ := args["text"].(string)
-	if file == "" || text == "" {
-		return "file and text are required", true, nil
-	}
-	a := store.TodoAdd{File: file, Text: text}
-	a.Section, _ = args["section"].(string)
-	if v, ok := args["status"].(string); ok && v != "" {
-		if !validTodoStatus(v) {
-			return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", v), true, nil
-		}
-		a.Status = v
-	}
-	added, err := h.mem.AddTodo(a)
-	if err != nil {
-		return fmt.Sprintf("todo add failed: %v", err), true, nil
-	}
-	out, _ := json.MarshalIndent(added, "", "  ")
 	return string(out), false, nil
 }
 
@@ -2564,85 +2243,6 @@ func (h *callHandler) whatsup(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *callHandler) defineTemplate(args map[string]any) (string, bool, error) {
-	name, _ := args["name"].(string)
-	if name == "" {
-		return "name is required", true, nil
-	}
-	query, _ := args["query"].(string)
-	if query == "" {
-		return "query is required", true, nil
-	}
-	description, _ := args["description"].(string)
-
-	var paramNames []string
-	if raw, ok := args["params"]; ok && raw != nil {
-		switch v := raw.(type) {
-		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					paramNames = append(paramNames, s)
-				}
-			}
-		case []string:
-			paramNames = v
-		}
-	}
-
-	if err := h.mem.DefineTemplate(name, description, query, paramNames); err != nil {
-		return fmt.Sprintf("define template failed: %v", err), true, nil
-	}
-	return fmt.Sprintf("Template %q saved.", name), false, nil
-}
-
-func (h *callHandler) evaluateTemplate(args map[string]any) (string, bool, error) {
-	name, _ := args["name"].(string)
-	if name == "" {
-		return "name is required", true, nil
-	}
-
-	params := make(map[string]string)
-	if raw, ok := args["params"]; ok && raw != nil {
-		if m, ok := raw.(map[string]any); ok {
-			for k, v := range m {
-				params[k] = fmt.Sprintf("%v", v)
-			}
-		}
-	}
-
-	rows, err := h.mem.EvaluateTemplate(name, params)
-	if err != nil {
-		return fmt.Sprintf("evaluate template failed: %v", err), true, nil
-	}
-	if len(rows) == 0 {
-		return "No rows returned.", false, nil
-	}
-
-	var b strings.Builder
-	for _, row := range rows {
-		for k, v := range row {
-			fmt.Fprintf(&b, "%s: %v  ", k, v)
-		}
-		b.WriteByte('\n')
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) listTemplates() (string, bool, error) {
-	templates, err := h.mem.ListTemplates()
-	if err != nil {
-		return fmt.Sprintf("list templates failed: %v", err), true, nil
-	}
-	if len(templates) == 0 {
-		return "No templates defined.", false, nil
-	}
-	out, err := json.MarshalIndent(templates, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
 func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error) {
 	days := 90
 	if d, ok := args["days"].(float64); ok && d > 0 {
@@ -2702,121 +2302,6 @@ func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error
 	return b.String(), false, nil
 }
 
-func (h *callHandler) images(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	mode, _ := args["mode"].(string)
-	repo, _ := args["repo"].(string)
-	session, _ := args["session"].(string)
-	searchFields, _ := args["search_fields"].(string)
-	days := 90
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	similarTo := 0
-	if st, ok := args["similar_to"].(float64); ok && st > 0 {
-		similarTo = int(st)
-	}
-
-	if mode == "" {
-		mode = "text"
-	}
-
-	var results []store.ImageSearchResult
-	var err error
-
-	switch mode {
-	case "semantic":
-		if query == "" {
-			return "query is required for semantic mode", true, nil
-		}
-		results, err = h.mem.SearchImagesSemantic(query, repo, session, days, limit)
-		if err != nil {
-			return fmt.Sprintf("semantic image search failed: %v", err), true, nil
-		}
-	case "similar":
-		if similarTo <= 0 {
-			return "similar_to (image ID) is required for similar mode", true, nil
-		}
-		results, err = h.mem.SearchImagesSimilar(similarTo, repo, session, days, limit)
-		if err != nil {
-			return fmt.Sprintf("similar image search failed: %v", err), true, nil
-		}
-	default: // "text"
-		results, err = h.mem.SearchImagesFiltered(query, repo, session, days, limit, searchFields)
-		if err != nil {
-			return fmt.Sprintf("search images failed: %v", err), true, nil
-		}
-	}
-
-	if len(results) == 0 {
-		switch mode {
-		case "semantic":
-			return "No images found via semantic search. Ensure embeddings are populated (embed backend requires uv + sentence-transformers).", false, nil
-		case "similar":
-			return fmt.Sprintf("No similar images found for image ID %d. The image may not have an embedding yet.", similarTo), false, nil
-		default:
-			if query != "" {
-				return "No images found matching query. Descriptions require ANTHROPIC_API_KEY; OCR requires Apple Vision (macOS) or tesseract.", false, nil
-			}
-			return "No images indexed yet. Images are extracted from transcripts during ingest.", false, nil
-		}
-	}
-
-	var b strings.Builder
-	for _, r := range results {
-		img := r.Image
-		sid := ""
-		if len(r.Occurrences) > 0 {
-			sid = r.Occurrences[0].SessionID
-			if len(sid) > 8 {
-				sid = sid[:8]
-			}
-		}
-		fmt.Fprintf(&b, "[image id=%d] %s %dx%d %s (%.1f KB)",
-			img.ID, img.MimeType, img.Width, img.Height, img.PixelFormat,
-			float64(img.ByteSize)/1024)
-		if img.OriginalPath != "" {
-			fmt.Fprintf(&b, " path=%s", img.OriginalPath)
-		}
-		if sid != "" {
-			fmt.Fprintf(&b, " session=%s", sid)
-		}
-		if r.MatchSource != "" {
-			fmt.Fprintf(&b, " match=%s", r.MatchSource)
-		}
-		if r.Score > 0 {
-			fmt.Fprintf(&b, " score=%.3f", r.Score)
-		}
-		b.WriteByte('\n')
-		if r.Description != "" {
-			fmt.Fprintf(&b, "  [desc] %s\n", r.Description)
-		} else {
-			b.WriteString("  [desc] (pending)\n")
-		}
-		if r.OCRText != "" {
-			// Truncate long OCR text for display.
-			ocrDisplay := r.OCRText
-			if len(ocrDisplay) > 300 {
-				ocrDisplay = ocrDisplay[:300] + "…"
-			}
-			fmt.Fprintf(&b, "  [ocr]  %s\n", ocrDisplay)
-		}
-		for _, occ := range r.Occurrences {
-			occSID := occ.SessionID
-			if len(occSID) > 8 {
-				occSID = occSID[:8]
-			}
-			fmt.Fprintf(&b, "  seen in %s (%s) at %s\n", occSID, occ.SourceType, occ.OccurredAt)
-		}
-		b.WriteByte('\n')
-	}
-	return b.String(), false, nil
-}
-
 func (h *callHandler) sessionStructure(args map[string]any) (string, bool, error) {
 	sessionID, _ := args["session_id"].(string)
 	if sessionID == "" {
@@ -2831,45 +2316,6 @@ func (h *callHandler) sessionStructure(args map[string]any) (string, bool, error
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
-}
-
-func (h *callHandler) toolResult(args map[string]any) (string, bool, error) {
-	sessionID, _ := args["session_id"].(string)
-	if sessionID == "" {
-		return "session_id is required", true, nil
-	}
-	toolUseID, _ := args["tool_use_id"].(string)
-	if toolUseID == "" {
-		return "tool_use_id is required", true, nil
-	}
-	offset := 0
-	if o, ok := args["offset"].(float64); ok && o >= 0 {
-		offset = int(o)
-	}
-	truncateLen := 0
-	if t, ok := args["truncate_len"].(float64); ok && t > 0 {
-		truncateLen = int(t)
-	}
-
-	payload, err := h.mem.ToolResult(sessionID, toolUseID, offset, truncateLen)
-	if err != nil {
-		return fmt.Sprintf("tool_result lookup failed: %v", err), true, nil
-	}
-
-	var b strings.Builder
-	if payload.IsError {
-		b.WriteString("[error] ")
-	}
-	fmt.Fprintf(&b, "total_len=%d", payload.TotalLen)
-	if offset > 0 {
-		fmt.Fprintf(&b, " offset=%d", offset)
-	}
-	if payload.Truncated {
-		fmt.Fprintf(&b, " truncated=true")
-	}
-	b.WriteString("\n\n")
-	b.WriteString(payload.Text)
-	return b.String(), false, nil
 }
 
 func (h *callHandler) locateUUID(args map[string]any) (string, bool, error) {
@@ -3350,32 +2796,6 @@ func (h *callHandler) divergence() (string, bool, error) {
 		}
 	}
 	fmt.Fprintf(&b, "\n%d stream(s) reported; %d converged (gap=0).\n", len(rows), converged)
-	return b.String(), false, nil
-}
-
-// sourceDrift implements mnemo_source_drift (🎯T68.6): a read-only
-// report of indexed transcript sources pruned/truncated out from under
-// the index. Informational under the durable-tier model — the index
-// retains the content.
-func (h *callHandler) sourceDrift() (string, bool, error) {
-	rep := h.mem.SourceDrift()
-
-	var b strings.Builder
-	b.WriteString("Source drift (indexed transcripts whose source is gone or shrank):\n\n")
-	fmt.Fprintf(&b, "  deleted:    %d (source .jsonl no longer exists)\n", rep.Deleted)
-	fmt.Fprintf(&b, "  truncated:  %d (current size below ingested offset)\n", rep.Truncated)
-	fmt.Fprintf(&b, "  rewritten:  %d (same size, mtime moved — in-place edit)\n", rep.Rewritten)
-	if rep.Deleted == 0 && rep.Truncated == 0 && rep.Rewritten == 0 {
-		b.WriteString("\nNo drift — every indexed source is still present and intact.\n")
-		return b.String(), false, nil
-	}
-	b.WriteString("\nThe index retains this content (durable tier); this is informational, not a reconcile gap.\n")
-	if len(rep.Examples) > 0 {
-		b.WriteString("\nExamples:\n")
-		for _, e := range rep.Examples {
-			fmt.Fprintf(&b, "  %-10s offset=%d size=%d  %s\n", e.Kind+":", e.Offset, e.Size, e.Path)
-		}
-	}
 	return b.String(), false, nil
 }
 

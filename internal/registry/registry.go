@@ -548,9 +548,6 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		if err := e.store.IngestSynthesis(); err != nil {
 			logger.Error("synthesis ingest failed", "err", err)
 		}
-		if err := e.store.IngestTodos(); err != nil {
-			logger.Error("todo ingest failed", "err", err)
-		}
 		// 🎯T93: refresh planner statistics once the initial ingest has
 		// landed its bulk writes. On a fresh install (which skips the
 		// migration ANALYZE) this gives the planner its first stats so

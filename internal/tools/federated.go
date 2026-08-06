@@ -37,14 +37,11 @@ var FederatedToolNames = map[string]struct{}{
 	"mnemo_configs":           {},
 	"mnemo_audit":             {},
 	"mnemo_targets":           {},
-	"mnemo_plans":             {},
 	"mnemo_who_ran":           {},
 	"mnemo_prs":               {},
-	"mnemo_ci":                {},
 	"mnemo_commits":           {},
 	"mnemo_decisions":         {},
 	"mnemo_chain":             {},
-	"mnemo_images":            {},
 	"mnemo_discover_patterns": {},
 }
 
