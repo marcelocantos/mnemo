@@ -340,7 +340,6 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
 | `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
-| `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
 
@@ -540,7 +539,7 @@ on top of them:
 - **Cross-repo knowledge lookups** — search memories, configs, targets,
   and plans from any project without leaving your current session
 - **Session forensics** — trace a multi-session work span with
-  replay decisions with `mnemo_decisions`, or audit
+  replay decisions with `mnemo_search(kinds: "decision")`, or audit
   what commands were run with `mnemo_who_ran`
 - **Custom dashboards** — use `mnemo_query` with SQL or sqldeep syntax
   to build project-specific analytics (message volume, tool usage

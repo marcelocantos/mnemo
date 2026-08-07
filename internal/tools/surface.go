@@ -49,9 +49,7 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_recent_activity":   consumerAgent, // 154 / 136, skill-driven
 	"mnemo_read_session":      consumerAgent, // 131 / 58
 	"mnemo_sessions":          consumerAgent, // 99 / 63
-	"mnemo_decisions":         consumerAgent, // 83 / 77 (one July fan-out)
 	"mnemo_compacted_session": consumerAgent, // 6 / 4
-	"mnemo_segments":          consumerAgent, // 8 / 2
 	"mnemo_session_structure": consumerAgent, // 6 / 5
 	"mnemo_locate_uuid":       consumerAgent, // 1 / 1
 

@@ -146,11 +146,9 @@ URLs + per-peer pinned certs. New CLI subcommands: `print-endpoint`
 (emit URL peers paste into their config), `ping-peer <name>`
 (invoke `mnemo_stats` on a configured peer). New flag
 `--federated-addr` (default `:19420`; empty disables). When
-`linked_instances` is non-empty, 16 read-shaped tools (mnemo_search,
-mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits,
-mnemo_prs, mnemo_memories, mnemo_who_ran, mnemo_audit, mnemo_targets,
-mnemo_plans, mnemo_skills, mnemo_configs, mnemo_ci, mnemo_images,
-mnemo_discover_patterns) wrap their response in a `FanoutEnvelope`
+`linked_instances` is non-empty, the read-shaped tools (mnemo_search,
+mnemo_sessions, mnemo_recent_activity, mnemo_read_session, mnemo_repos,
+mnemo_query, mnemo_stats, mnemo_status, mnemo_usage) wrap their response in a `FanoutEnvelope`
 (`{local, peers[], warnings[]}`) attributing results per instance;
 write- and control-shaped tools bypass federation. Slow or offline
 peers are dropped with a typed warning rather than blocking the
@@ -410,21 +408,6 @@ activity. Filter matching uses SQL LIKE with `*` mapped to `%`.
 
 No parameters. Returns session/message counts by type, including a Streams
 table showing per-stream ingest state (added in v0.16.0). **Stability**: Stable.
-
-#### mnemo_decisions
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.17.0.** Surfaces past decisions across all sessions.
-Detects proposal+confirmation patterns (assistant proposes, user
-confirms with "yes"/"lgtm"/etc) at ingest time and stores them in
-`decisions` FTS5 table. Retroactive backfill runs at startup. **Stability**:
-Fluid — detection heuristic is first-cut and tuning is expected.
 
 #### mnemo_ops (op=restore)
 

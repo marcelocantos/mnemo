@@ -31,7 +31,6 @@ var FederatedToolNames = map[string]struct{}{
 	"mnemo_recent_activity": {},
 	"mnemo_status":          {},
 	"mnemo_usage":           {},
-	"mnemo_decisions":       {},
 }
 
 // RegisterFederatedTools attaches only the read-only subset of tools

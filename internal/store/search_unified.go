@@ -38,6 +38,12 @@ type UnifiedHit struct {
 	// second tool.
 	SegmentLabel   string `json:"segment_label,omitempty"`
 	SegmentSummary string `json:"segment_summary,omitempty"`
+
+	// Message carries the full pre-🎯T144 message result — surrounding
+	// context, session, role — for hits from the message corpus. Agents
+	// that already parse mnemo_search output keep the shape they know;
+	// the typed wrapper is additive.
+	Message *SearchResult `json:"message,omitempty"`
 }
 
 // UnifiedSearchResult carries the hits plus the honesty fields: which
@@ -64,18 +70,46 @@ const unifiedFetchPerCorpus = 50
 // should not assert that a corpus's #1 is excellent.
 const rrfK = 60.0
 
+// UnifiedOpts carries the message-corpus filters that predate 🎯T144.
+//
+// mnemo_search is 55% of all agent calls, and its session-type, repo and
+// context-expansion behaviour is the most exercised path in the product.
+// Unified search must not quietly drop it: when the message corpus is in
+// scope, it goes through the same Search() those calls already use, and
+// only its RANKING changes. Everything else about a message hit is what
+// it was.
+type UnifiedOpts struct {
+	Kinds           []string
+	Limit           int
+	SessionType     string
+	Repo            string
+	ContextBefore   int
+	ContextAfter    int
+	SubstantiveOnly bool
+}
+
 // UnifiedSearch queries every corpus in scope and merges the results.
+//
+// Thin wrapper preserving the simple form; see UnifiedSearchOpts.
+func (s *Store) UnifiedSearch(query string, kinds []string, limit int, now time.Time) (*UnifiedSearchResult, error) {
+	return s.UnifiedSearchOpts(query, UnifiedOpts{
+		Kinds: kinds, Limit: limit, SessionType: "all", SubstantiveOnly: true,
+	}, now)
+}
+
+// UnifiedSearchOpts is the full form.
 //
 // kinds selects corpora by their registry kind; empty means the default
 // set. Ranking is by calibrated quantile where a corpus has a fresh
 // distribution, and by reciprocal rank fusion where it does not —
 // never by raw BM25 comparison, which is not meaningful across indexes
 // with different avgdl.
-func (s *Store) UnifiedSearch(query string, kinds []string, limit int, now time.Time) (*UnifiedSearchResult, error) {
+func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time) (*UnifiedSearchResult, error) {
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 20
 	}
-	specs, err := resolveCorpora(kinds)
+	specs, err := resolveCorpora(opts.Kinds)
 	if err != nil {
 		return nil, err
 	}
@@ -94,26 +128,44 @@ func (s *Store) UnifiedSearch(query string, kinds []string, limit int, now time.
 		type scored struct {
 			id  int64
 			mag float64
-		}
-		//nolint:gosec // table name comes from the internal corpus registry
-		rows, qerr := s.readDB.Query(
-			`SELECT rowid, rank FROM `+spec.fts+` WHERE `+spec.fts+` MATCH ? ORDER BY rank LIMIT ?`,
-			ftsQuery, unifiedFetchPerCorpus)
-		if qerr != nil {
-			// A corpus that cannot be queried must not fail the whole
-			// search — the other corpora still have answers.
-			out.Degraded[spec.kind] = "query failed: " + qerr.Error()
-			continue
+			msg *SearchResult
 		}
 		var raw []scored
-		for rows.Next() {
-			var id int64
-			var rank float64
-			if err := rows.Scan(&id, &rank); err == nil {
-				raw = append(raw, scored{id: id, mag: -rank})
+
+		if spec.kind == "message" {
+			// The message corpus keeps its pre-🎯T144 path: session-type
+			// and repo filtering, context expansion, noise handling. Only
+			// its ranking is new.
+			msgs, merr := s.Search(query, unifiedFetchPerCorpus, opts.SessionType,
+				opts.Repo, opts.ContextBefore, opts.ContextAfter, opts.SubstantiveOnly)
+			if merr != nil {
+				out.Degraded[spec.kind] = "query failed: " + merr.Error()
+				continue
 			}
+			for i := range msgs {
+				m := msgs[i]
+				raw = append(raw, scored{id: int64(m.MessageID), mag: -m.Rank, msg: &m})
+			}
+		} else {
+			//nolint:gosec // table name comes from the internal corpus registry
+			rows, qerr := s.readDB.Query(
+				`SELECT rowid, rank FROM `+spec.fts+` WHERE `+spec.fts+` MATCH ? ORDER BY rank LIMIT ?`,
+				ftsQuery, unifiedFetchPerCorpus)
+			if qerr != nil {
+				// A corpus that cannot be queried must not fail the whole
+				// search — the other corpora still have answers.
+				out.Degraded[spec.kind] = "query failed: " + qerr.Error()
+				continue
+			}
+			for rows.Next() {
+				var id int64
+				var rank float64
+				if err := rows.Scan(&id, &rank); err == nil {
+					raw = append(raw, scored{id: id, mag: -rank})
+				}
+			}
+			rows.Close()
 		}
-		rows.Close()
 		if len(raw) == 0 {
 			continue
 		}
@@ -129,7 +181,7 @@ func (s *Store) UnifiedSearch(query string, kinds []string, limit int, now time.
 		}
 
 		for i, r := range raw {
-			h := UnifiedHit{Kind: spec.kind, ID: r.id}
+			h := UnifiedHit{Kind: spec.kind, ID: r.id, Message: r.msg}
 			if stale {
 				// Degraded: rank fusion. Quality-blind by construction,
 				// so it must not be presented as a quantile.

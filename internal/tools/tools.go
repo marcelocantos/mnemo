@@ -206,7 +206,13 @@ For exact matching, use explicit FTS5 operators:
 - Exclude terms: "QR NOT test"
 - Proximity: NEAR(QR transfer, 5)
 
-By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.`),
+By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.
+
+SPANS THE INDEX (🎯T144). One search covers messages AND the other indexed corpora, returning typed hits each labelled with the corpus they came from. Default kinds: message, segment, decision, doc, target, commit, pr, memory. On request: plan, config, skill, audit. (These are the exact values the kinds parameter accepts.) Use the kinds parameter to scope. This replaces the per-corpus search tools that were removed: their content is reachable here rather than only through raw SQL.
+
+RANKING ACROSS CORPORA. BM25 scores are not comparable between indexes (the length-normalisation baseline is per-index), so hits are ranked by CALIBRATED QUANTILE: a score maps to its position within its own corpus's distribution, and quantiles compete. Each hit reports a "ranking" field — "calibrated", or "fusion" when that corpus has no fresh distribution yet, in which case "degraded" names the corpus and why. Never raw score comparison.
+
+COST. One FTS query per corpus in scope: 8 by default. Narrow kinds when you know where to look.`),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words use OR (fuzzy). Use AND/NOT/NEAR/quotes for precise control.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
@@ -215,25 +221,7 @@ By default searches only interactive sessions (excludes subagents, worktrees, ep
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after each hit to include (default 3)")),
 			mcp.WithString("context_filter", mcp.Description(`Filter for context messages. "substantive" (default): only non-noise user/assistant messages. "all": include everything (tool calls, system messages, noise).`)),
 			mcp.WithString("expand", mcp.Description(`Expand each hit to a topic segment (🎯T64.10). "none" (default): ±N context only. "segment": smallest enclosing sealed segment. "segment:coarse": top-level span. Default remains "none" until boundary-quality gates clear.`)),
-		),
-		mcp.NewTool("mnemo_segments",
-			mcp.WithDescription(`Query hierarchical topic segments (🎯T64.10, folded into summarisation by 🎯T64.11). Segments are precomputed topic-coherent spans over a session's substantive messages.
-
-Query shapes (provide one primary filter):
-- query: FTS over segment label/summary — the thematic search shape. Returns spans from many sessions ranked by relevance; use this to find "that thing about X" without knowing the session.
-- session_id: topic-AST of one session
-- containing_msg_id: spans that enclose a message id
-- theme_id / overlaps_theme_a + overlaps_theme_b: DORMANT. Cross-session theme clustering is off (🎯T64.11) — thematic retrieval is served by the query shape above, so these return nothing on a current index.
-
-Spans come from three layers, in precedence order: 'llm' (drawn by the summariser inside a window it compacted), 'compaction' (a window-level span projected from a compaction, covering all summarised history), and 'structural' (always-on local pass, zero egress, covers everything else). The method field on each result says which. expand on mnemo_search stays default-off until quality gates pass.`),
-			mcp.WithString("session_id", mcp.Description("Session ID to list segments for")),
-			mcp.WithString("theme_id", mcp.Description("Theme ID — return segment members")),
-			mcp.WithNumber("containing_msg_id", mcp.Description("Message id — enclosing segments")),
-			mcp.WithString("query", mcp.Description("FTS over label/summary")),
-			mcp.WithString("overlaps_theme_a", mcp.Description("First theme id for intersection query")),
-			mcp.WithString("overlaps_theme_b", mcp.Description("Second theme id for intersection query")),
-			mcp.WithBoolean("sealed_only", mcp.Description("Only sealed segments (default false)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
+			mcp.WithString("kinds", mcp.Description("Comma-separated corpora to search (\U0001F3AFT144). Omit for the default set: message, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit \u2014 outside the default because each corpus is another FTS query on the most-called tool in the product. Message hits keep their full shape (context, session, repo filters) and carry the enclosing topic span when one exists.")),
 		),
 		mcp.NewTool("mnemo_sessions",
 			mcp.WithDescription("List transcript sessions, sorted by most recent activity. By default shows only interactive sessions with at least 6 substantive messages."),
@@ -402,13 +390,6 @@ A top-level "freshness" field reports the RFC3339 timestamp of the most recently
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
 			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", "repo", "session" (one row per Claude Code session ID), or "block" (one row per 5-hour Anthropic billing block, boundaries aligned to UTC and matching what /cost and ccusage report).`)),
 		),
-		mcp.NewTool("mnemo_decisions",
-			mcp.WithDescription(`Search past decisions across all sessions. Decisions are automatically detected from proposal + confirmation patterns in conversations (e.g., assistant proposes an approach, user confirms with "yes", "go ahead", "lgtm"). Use this to recall what was decided and why.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
 		mcp.NewTool("mnemo_compacted_session",
 			mcp.WithDescription(`Return the compacted view of a session: its compaction summaries (the dense, durable layer) followed by the addenda tail — the substantive messages past the latest compaction cursor, computed live from the index.
 
@@ -513,8 +494,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	switch name {
 	case "mnemo_search":
 		return ch.search(args)
-	case "mnemo_segments":
-		return ch.segments(args)
 	case "mnemo_sessions":
 		return ch.sessions(args)
 	case "mnemo_read_session":
@@ -531,8 +510,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.stats()
 	case "mnemo_usage":
 		return ch.usage(args)
-	case "mnemo_decisions":
-		return ch.decisions(args)
 	case "mnemo_compacted_session":
 		return ch.compactedSession(args)
 	case "mnemo_locate_uuid":
@@ -582,6 +559,15 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 	expand, _ := args["expand"].(string)
 	if expand == "" {
 		expand = store.DefaultSegmentExpand
+	}
+
+	// 🎯T144: when the caller asks for corpora beyond messages — or takes
+	// the default set — the search spans the index. The message corpus
+	// still goes through the same path as before, so every existing
+	// filter and the context expansion below behave identically.
+	if kinds, ok := args["kinds"].(string); ok && strings.TrimSpace(kinds) != "" {
+		return h.unifiedSearch(query, kinds, limit, sessionType, repoFilter,
+			contextBefore, contextAfter, substantiveOnly)
 	}
 
 	results, err := h.mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly)
@@ -637,53 +623,6 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 			fmt.Fprintf(&b, "  [%s] %s\n", cm.Role, cm.Text)
 		}
 		b.WriteByte('\n')
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) segments(args map[string]any) (string, bool, error) {
-	q := store.SegmentQuery{}
-	q.SessionID, _ = args["session_id"].(string)
-	q.ThemeID, _ = args["theme_id"].(string)
-	if v, ok := args["containing_msg_id"].(float64); ok && v > 0 {
-		q.ContainingMsgID = int(v)
-	}
-	q.FTSQuery, _ = args["query"].(string)
-	q.OverlapsThemeA, _ = args["overlaps_theme_a"].(string)
-	q.OverlapsThemeB, _ = args["overlaps_theme_b"].(string)
-	if v, ok := args["sealed_only"].(bool); ok {
-		q.SealedOnly = v
-	}
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		q.Limit = int(l)
-	}
-	segs, err := h.mem.QuerySegments(q)
-	if err != nil {
-		return fmt.Sprintf("segments query failed: %v", err), true, nil
-	}
-	if len(segs) == 0 {
-		return "No segments matched.", false, nil
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Topic segments (%d)\n\n", len(segs))
-	for _, s := range segs {
-		sealed := "open"
-		if s.Sealed {
-			sealed = "sealed"
-		}
-		fmt.Fprintf(&b, "## %s · L%d · %s\n", s.ID, s.Level, sealed)
-		fmt.Fprintf(&b, "- session: `%s`\n", s.SessionID)
-		fmt.Fprintf(&b, "- range: msgs %d–%d\n", s.FromMsgID, s.ToMsgID)
-		if s.ParentID != "" {
-			fmt.Fprintf(&b, "- parent: `%s`\n", s.ParentID)
-		}
-		if s.Label != "" {
-			fmt.Fprintf(&b, "- label: %s\n", s.Label)
-		}
-		if s.Summary != "" {
-			fmt.Fprintf(&b, "- summary: %s\n", s.Summary)
-		}
-		fmt.Fprintf(&b, "- method: %s · confidence: %.2f\n\n", s.Method, s.Confidence)
 	}
 	return b.String(), false, nil
 }
@@ -956,31 +895,6 @@ func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) decisions(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	results, err := h.mem.SearchDecisions(query, repo, days, limit)
-	if err != nil {
-		return fmt.Sprintf("decisions search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No decisions found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

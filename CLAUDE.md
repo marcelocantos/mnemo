@@ -58,7 +58,7 @@ user. Good moments to reach for mnemo:
 
 ## MCP Tools
 
-- `mnemo_search` — Full-text search with context (default 3 before/after). Supports repo filter.
+- `mnemo_search` — Full-text search spanning the index (🎯T144). Covers messages plus segment, decision, doc, target, commit, pr and memory corpora by default; plan/config/skill/audit on request via `kinds`. Message hits keep context (default 3 before/after), repo and session_type filters, and carry the enclosing topic span. Cross-corpus ranking is by **calibrated quantile** — a BM25 score maps to its position in its own corpus's distribution, because BM25 is not comparable between indexes (avgdl is per-index). Each hit reports `ranking`: `calibrated`, or `fusion` when a corpus has no fresh distribution, with `degraded` naming which and why. Cost is one FTS query per corpus in scope (8 by default).
 - `mnemo_sessions` — List sessions by recency, type, project, repo, work type
 - `mnemo_read_session` — Read messages from a specific session (supports prefix IDs)
 - `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with costs. Filters by repo, model, date range. Groups by day, model, repo, session, or 5-hour billing block. Costs come from a fetched rate card matched on the **exact** model identifier — no prefix matching, no fallback (🎯T135). Two disclosure fields matter as much as the totals: `unpriced_models` (counted but not costed, because the card has no entry — normal for a newly released model, which is exactly the spend you want to see) and `uncounted` (volume EXCLUDED from every total, per source, with the reason: a record with no message id cannot be deduplicated, and deduplication is worth 1.95x-2.83x).
@@ -68,7 +68,6 @@ user. Good moments to reach for mnemo:
 - `mnemo_repos` — List repos with paths, session counts, last activity. Supports globs.
 - `mnemo_stats` — Index statistics
 - `mnemo_compacted_session` — Return the compacted view of a session: its compaction summaries (the dense, durable layer) plus the addenda tail (substantive messages past the latest compaction cursor, computed live). The token-volume retrieval form (🎯T72) — use instead of `mnemo_read_session` when you want the distilled view rather than the raw transcript.
-- `mnemo_decisions` — Search past decisions (proposal + confirmation pairs) across all sessions. Decisions detected automatically during ingest and backfilled for existing sessions.
 - `mnemo_rework_history` — Return prior rework attempts for a bullseye target, ordered most-recent first. Sourced from compaction spans where the target appeared in targets_active or targets_progressed. Returns session_id, timestamp, repo, progress note, prose summary, and open threads. Feed output as `mnemo_history` to `bullseye_rework` to avoid repeating prior failed approaches.
 - `mnemo_config` — Read or update mnemo's runtime configuration (`~/.mnemo/config.json`) without restarting the daemon. `op=read` returns the current config + resolved paths; `op=write` with a `patch` object merges and persists. Hot-reload covers `vault_path`, `vault_profile`, `vault_bridges`, `vault_bridges_max_links` (🎯T64.5/T64.6, re-derived by rebuilding the vault exporter in place), `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2 enable/disable); `linked_instances` is persisted but requires a restart.
 

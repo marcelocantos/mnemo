@@ -43,6 +43,7 @@ type Backend interface {
 	Successor(sessionID string) (string, error)
 	Chain(sessionID string) ([]ChainLink, error)
 	SearchDecisions(query string, repo string, days int, limit int) ([]DecisionInfo, error)
+	UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time) (*UnifiedSearchResult, error)
 	PostNote(p NotePostParams) (*Note, error)
 	RecvNotes(p NoteRecvParams) ([]Note, error)
 	ListNotes(p NoteListParams) ([]Note, error)

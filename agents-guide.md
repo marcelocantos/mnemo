@@ -565,7 +565,7 @@ and which require a restart.
 
 If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
 tools (`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
-`mnemo_decisions`, `mnemo_commits`, `mnemo_prs`, `mnemo_memories`,
+
 `mnemo_who_ran`, `mnemo_audit`, `mnemo_targets`,
 `mnemo_skills`, `mnemo_configs`) wrap their result in a `FanoutEnvelope`
 attributing per-instance results:

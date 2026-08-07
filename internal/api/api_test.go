@@ -135,6 +135,9 @@ func (f *fakeBackend) Successor(sessionID string) (string, error) {
 func (f *fakeBackend) Chain(sessionID string) ([]store.ChainLink, error) {
 	panic("unexpected Chain call")
 }
+func (f *fakeBackend) UnifiedSearchOpts(string, store.UnifiedOpts, time.Time) (*store.UnifiedSearchResult, error) {
+	panic("unexpected UnifiedSearchOpts call")
+}
 func (f *fakeBackend) SearchDecisions(query string, repo string, days int, limit int) ([]store.DecisionInfo, error) {
 	panic("unexpected SearchDecisions call")
 }

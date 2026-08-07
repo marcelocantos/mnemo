@@ -167,3 +167,13 @@ func corpusByKind(kind string) (corpusSpec, bool) {
 	}
 	return corpusSpec{}, false
 }
+
+// AllCorpusKinds returns every registered corpus kind, for callers that
+// deliberately want the full sweep rather than the default set.
+func AllCorpusKinds() []string {
+	var out []string
+	for _, c := range searchCorpora() {
+		out = append(out, c.kind)
+	}
+	return out
+}
