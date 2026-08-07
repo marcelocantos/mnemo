@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/marcelocantos/mnemo/internal/diag"
@@ -557,15 +556,6 @@ Use postmortem=true when no live sessions are detected (e.g. after a machine cra
 Use this to answer "what is Claude doing right now?" — especially useful when the machine is hot or fans are spinning.`),
 			mcp.WithBoolean("postmortem", mcp.Description("When true and no live sessions exist, report directories with recent Claude activity from transcript mtimes (last 24h).")),
 		),
-		mcp.NewTool("mnemo_self",
-			mcp.WithDescription(`Discover the calling session's ID. Two-phase protocol:
-
-Phase 1: Call with no arguments. Returns a unique nonce. This nonce appears in your transcript as the tool response.
-Phase 2: Call again with the nonce. mnemo searches for the session containing it and returns your session ID.
-
-Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonce "mnemo:abc123" → get your session ID. Then use mnemo_read_session to read your own transcript.`),
-			mcp.WithString("nonce", mcp.Description("The nonce returned by a previous mnemo_self call. Omit on first call to generate a new nonce.")),
-		),
 		mcp.NewTool("mnemo_discover_patterns",
 			mcp.WithDescription(`Workaround patterns mined from transcript history — places where an agent reached around mnemo instead of through it, and therefore candidate missing features.
 
@@ -743,8 +733,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.chain(args)
 	case "mnemo_compacted_session":
 		return ch.compactedSession(args)
-	case "mnemo_self":
-		return ch.self(args)
 	case "mnemo_whatsup":
 		return ch.whatsup(args)
 	case "mnemo_discover_patterns":
@@ -1632,34 +1620,6 @@ func (h *callHandler) noteList(args map[string]any) (string, bool, error) {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
-}
-
-func (h *callHandler) self(args map[string]any) (string, bool, error) {
-	cc := h.cc
-	nonce, _ := args["nonce"].(string)
-
-	if nonce == "" {
-		nonce = store.NoncePrefix + uuid.NewString()
-		return nonce, false, nil
-	}
-
-	if !strings.HasPrefix(nonce, store.NoncePrefix) {
-		return "invalid nonce — must be a value returned by a previous mnemo_self call", true, nil
-	}
-
-	sessionID, err := h.mem.ResolveNonce(nonce)
-	if err != nil {
-		return fmt.Sprintf("Nonce not found. The transcript may not be ingested yet — wait a moment and retry. Error: %v", err), true, nil
-	}
-
-	// Record the (MCP session, Claude Code session) binding so the
-	// daemon has an authoritative record of which MCP session is
-	// currently driving this transcript. This is the signal the
-	// compactor / mnemo_restore / chain detection all build on.
-	// No-op if MCPSessionID is empty (e.g. stateless test calls).
-	h.mem.RecordConnectionSession(cc.MCPSessionID, sessionID)
-
-	return fmt.Sprintf("session_id: %s", sessionID), false, nil
 }
 
 func (h *callHandler) whoRan(args map[string]any) (string, bool, error) {

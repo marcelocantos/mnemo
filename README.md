@@ -340,7 +340,6 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
 | `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
 | `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
-| `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
 | `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
@@ -530,10 +529,10 @@ Slow or offline peers drop into `warnings[]` with a typed
 `server_error`, `malformed_response`, `connect_failed`); the local
 response returns regardless. Per-peer timeout default 5s.
 
-Write- and control-shaped tools (`mnemo_self`, template
-`mnemo_ops` (op=restore), `mnemo_whatsup`, `mnemo_docs`,
-`mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`, `mnemo_stats`,
-`mnemo_status`, `mnemo_chain`) bypass federation entirely.
+Write- and control-shaped tools (`mnemo_ops`, `mnemo_whatsup`,
+`mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
+`mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
+`mnemo_thread`, `mnemo_note`) bypass federation entirely.
 
 When `linked_instances` is empty or absent, federation is disabled and
 all tools return their original local-only response shape unchanged

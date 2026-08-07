@@ -81,13 +81,26 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_agent_trees": consumerUser,  // new with 🎯T137
 
 	// Consolidated entry points (🎯T143.3/.4/.5).
-	"mnemo_vault":  consumerUser, // maintenance; 10 tools folded
-	"mnemo_thread": consumerApp,  // menubar app via /api/thread/*
-	"mnemo_note":   consumerAgent,
+	"mnemo_vault":  consumerUser,  // maintenance; 10 tools folded
+	"mnemo_thread": consumerApp,   // menubar app via /api/thread/*
 	"mnemo_ops":    consumerAgent, // 37 across the six folded tools
 
+	// mnemo_note is on notice, and the ledger should say so rather than
+	// carry a stale justification.
+	//
+	// Its 63 calls looked like agent adoption. They were not: 55 came
+	// from two sessions running `/loop /inbox`, and the /inbox and /post
+	// skills that drove them were deleted 2026-08-07 as not having
+	// proven useful. Nothing has called any note op since 2026-07-19.
+	// So the consumer that justified consumerAgent no longer exists.
+	//
+	// Kept for now because 🎯T65 built it deliberately as a primitive
+	// and removing it is a product call, not a cleanup. Marked
+	// consumerUser so the audit reports it cold honestly instead of
+	// citing usage that a deleted skill generated.
+	"mnemo_note": consumerUser,
+
 	// Session control and introspection.
-	"mnemo_self":              consumerAgent, // 11 / 6
 	"mnemo_session_go":        consumerAgent, // new with 🎯T125
 	"mnemo_config":            consumerAgent, // 12 / 4
 	"mnemo_whatsup":           consumerAgent, // 2 / 2

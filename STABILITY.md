@@ -494,15 +494,6 @@ table showing per-stream ingest state (added in v0.16.0). **Stability**: Stable.
 
 **Added in v0.16.0.** Resolves the full /clear-bounded session chain for a given session. Returns an ordered list of ChainLinks (oldest → newest) with per-session summaries and gap/confidence for each link. Single-element result if no chain is found. **Stability**: Needs review — first release, output format may evolve.
 
-#### mnemo_self
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `nonce` | string | no | Nonce from previous call. Omit to generate. | Needs review |
-
-**Notes**: Two-phase nonce protocol. Nonces detected during ingest and
-stored in indexed `session_nonces` table. The mechanism may evolve.
-
 #### mnemo_decisions
 
 | Parameter | Type | Required | Description | Stability |
@@ -586,7 +577,7 @@ detection heuristics are first-cut.
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `session_id` | string | yes | The session for which to restore prior compacted context. Typically the current session (obtain via `mnemo_self`). | Needs review |
+| `session_id` | string | yes | The session for which to restore prior compacted context. Typically the most recent interactive session for the repo (obtain via `mnemo_sessions`). | Needs review |
 
 **Added in v0.18.0 (🎯T10).** Returns the compacted context accumulated
 on the MCP session that owns this Claude Code session — every span
@@ -768,7 +759,7 @@ dependency and cache TTL are implementation details and may change.
 | `ci_runs` | id, repo, run_id (unique), workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url | Needs review |
 | `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion | Needs review |
 | `session_chains` | successor_id (PK), predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at — /clear-bounded chain links | Fluid |
-| `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
+| `session_nonces` | nonce → session_id mapping; **no longer written or read** since mnemo_self was removed in v0.85.0. Retained per the append-only schema policy. | Fluid |
 | `ingest_state` | path, offset | Fluid |
 | `ingest_status` | stream, last_backfill, files_indexed, files_on_disk — per-stream backfill state | Fluid |
 | `decisions` | id, session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp — proposal+confirmation pairs | Fluid |
@@ -934,7 +925,7 @@ local-only deployments.
 `error_kind` values: `timeout`, `connection_refused`, `tls_handshake`,
 `server_error`, `malformed_response`, `connect_failed`,
 `unknown_instance`, `unknown`. Peers are sorted by instance name for
-deterministic ordering. Tools that bypass federation: `mnemo_self`,
+deterministic ordering. Tools that bypass federation:
 `mnemo_ops`, `mnemo_whatsup`, `mnemo_docs`, `mnemo_synthesis`,
 `mnemo_permissions`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
 `mnemo_chain`, `mnemo_vault`, `mnemo_thread`, `mnemo_note`. **Stability**: Fluid — envelope shape may evolve

@@ -38,9 +38,6 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// NoncePrefix is the prefix for self-identification nonces.
-const NoncePrefix = "mnemo:self:"
-
 // CompactorMarker prefixes the prompt of every claudia-spawned
 // compaction run (🎯T72). It lands verbatim as the first user message
 // in the spawned session's transcript, so ingest can flag the session
@@ -3507,12 +3504,6 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 		ws.msgStmt.Exec(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 			m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
 
-		// Detect self-identification nonces.
-		if m.contentType == "text" && strings.HasPrefix(m.text, NoncePrefix) {
-			ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)",
-				strings.TrimSpace(m.text), pf.sessionID)
-		}
-
 		// 🎯T72 recursion guard: flag claudia-spawned compaction runs
 		// by the marker on their opening prompt.
 		if m.contentType == "text" && IsCompactorMarker(m.text) {
@@ -5865,19 +5856,6 @@ func (s *Store) resolveSessionID(id string) (string, error) {
 	}
 }
 
-// ResolveNonce looks up the session ID associated with a self-identification nonce.
-func (s *Store) ResolveNonce(nonce string) (string, error) {
-
-	var sessionID string
-	err := s.readDB.QueryRow(
-		"SELECT session_id FROM session_nonces WHERE nonce = ?", nonce,
-	).Scan(&sessionID)
-	if err != nil {
-		return "", fmt.Errorf("nonce not found — transcript may not be ingested yet")
-	}
-	return sessionID, nil
-}
-
 // liveSessionsTTL is how long to cache lsof results.
 const liveSessionsTTL = 5 * time.Second
 
@@ -6485,12 +6463,6 @@ func (s *Store) ingestFile(path string) error {
 			ws.msgStmt.Exec(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
 				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
 			count++
-
-			// Detect self-identification nonces.
-			if b.ContentType == "text" && strings.HasPrefix(b.Text, NoncePrefix) {
-				nonce := strings.TrimSpace(b.Text)
-				ws.tx.Exec("INSERT OR IGNORE INTO session_nonces (nonce, session_id) VALUES (?, ?)", nonce, sessionID)
-			}
 
 			// 🎯T72 recursion guard: flag claudia-spawned compaction
 			// runs by the marker on their opening prompt.

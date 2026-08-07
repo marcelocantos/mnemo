@@ -68,7 +68,7 @@ func TestToolSurfaceRatchet(t *testing.T) {
 // than accumulated.
 func TestToolSurfaceSize(t *testing.T) {
 	// Baseline set by 🎯T143 on 2026-08-07, down from 70 pre-audit.
-	const baseline = 38
+	const baseline = 37
 	if got := len(registeredToolNames(t)); got != baseline {
 		t.Errorf("registered tool count is %d, ledger baseline is %d.\n"+
 			"If this change is intended, move the baseline in the same commit "+
@@ -159,7 +159,7 @@ func TestConsolidationPreservesCapabilities(t *testing.T) {
 func TestRemovedToolsStayRemoved(t *testing.T) {
 	registered := registeredToolNames(t)
 	for _, name := range []string{
-		"mnemo_plans", "mnemo_ci", "mnemo_define", "mnemo_evaluate",
+		"mnemo_plans", "mnemo_ci", "mnemo_define", "mnemo_evaluate", "mnemo_self",
 		"mnemo_list_templates", "mnemo_images", "mnemo_get_memory",
 		"mnemo_tool_result", "mnemo_source_drift",
 		"mnemo_todos", "mnemo_todo_add", "mnemo_todo_set",

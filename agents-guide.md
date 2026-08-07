@@ -606,17 +606,6 @@ to ask. Both routes go through the daemon's `POST /api/session/go`, so
 they behave identically; the daemon holds the single terminal Automation
 grant, which is why neither the CLI nor a shim drives iTerm2 directly.
 
-### mnemo_self
-
-Discover the calling session's ID. Two-phase nonce protocol:
-
-1. Call `mnemo_self` with no arguments — returns a unique nonce
-2. Call `mnemo_self` with `nonce: "<the nonce>"` — returns your session ID
-
-The nonce appears in your transcript and is detected during ingestion.
-Use the resolved session ID with `mnemo_read_session` to read your own
-transcript.
-
 ### mnemo_session_structure
 
 Returns a structural summary of a session — counts of entry types,
@@ -778,7 +767,7 @@ Per-peer timeout default 5s.
 
 When `linked_instances` is empty or absent, all tools return their
 original local-only response shape unchanged. Write- and
-control-shaped tools (`mnemo_self`, `mnemo_ops`, `mnemo_whatsup`,
+control-shaped tools (`mnemo_ops`, `mnemo_whatsup`,
 `mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
 `mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
 `mnemo_thread`, `mnemo_note`) bypass federation entirely.
