@@ -40,8 +40,22 @@ func (s *Store) StreamReconcilers() []StreamReconciler {
 		mirrorReconcilerStream{s},
 		sourceStateReconcilerStream{s},
 		patternsReconcilerStream{s},
-		clusterReconcilerStream{s},
+		// Calibration goes BEFORE clustering, and the order is load-bearing.
+		//
+		// The worker drives these sequentially, so a reconciler that runs
+		// long starves everything after it. Clustering is a 24h-cadence
+		// pass over the whole corpus and, on this machine, was observed
+		// never to finish: four cluster_runs rows with ended_at NULL,
+		// the oldest from a prior daemon. Registered after it, calibration
+		// never executed once in ten minutes of live running — search
+		// stayed on the degraded fusion path indefinitely while every
+		// unit test passed, because the tests call Reconcile directly and
+		// never through the shared worker.
+		//
+		// Ordering is a workaround, not the fix. The real defect is that
+		// one slow stream can starve the rest; that is 🎯T145.
 		calibrationReconcilerStream{s},
+		clusterReconcilerStream{s},
 	}
 }
 
@@ -82,9 +96,22 @@ func (c calibrationReconcilerStream) Reconcile(ctx context.Context, now time.Tim
 			continue
 		}
 		if _, err := c.s.CalibrateCorpus(ctx, spec, now); err != nil {
-			// A corpus too small or too sparse to calibrate is a normal
-			// state, not a fault: search degrades to fusion for it.
-			slog.Debug("calibration skipped", "corpus", spec.kind, "err", err)
+			// A corpus too small to yield a distribution is a normal
+			// state, not a fault: search degrades to fusion for it, and
+			// saying so every minute would be noise.
+			//
+			// A corpus with ample documents that still fails to calibrate
+			// is the opposite — something is wrong and the consequence
+			// (ranking silently stuck on the degraded path) is invisible
+			// from the outside. That one is worth a line.
+			if docs > calibrationMinSamples {
+				slog.Warn("calibration failed for a corpus large enough to calibrate; "+
+					"its hits will rank by fusion until this clears",
+					"corpus", spec.kind, "docs", docs, "err", err)
+			} else {
+				slog.Debug("calibration skipped: corpus too small",
+					"corpus", spec.kind, "docs", docs, "err", err)
+			}
 			continue
 		}
 		changed++
