@@ -24,7 +24,7 @@ import (
 // registry (🎯T83), capturing the config, the summariser workdir, and an
 // accessor for the default user's store + compaction watcher. daemonStart
 // anchors the "backfill ran since startup" check. The returned registry is
-// wired into the /health endpoint (via SetDiagRunner), the mnemo_doctor
+// wired into the /health endpoint (via SetDiagRunner), the mnemo_ops op=doctor
 // tool, and the diag scheduler.
 //
 // Optional upgrade detector and background lease (🎯T97.2 / 🎯T97.4) are

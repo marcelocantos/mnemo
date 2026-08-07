@@ -83,8 +83,8 @@ type mirrorReconcilerStream struct{ s *Store }
 
 func (m mirrorReconcilerStream) Name() string            { return "mirror" }
 func (m mirrorReconcilerStream) Interval() time.Duration { return time.Minute }
-func (m mirrorReconcilerStream) Reconcile(_ context.Context, now time.Time) (int, error) {
-	return m.s.ReconcileStaleMirrors(now)
+func (m mirrorReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
+	return m.s.ReconcileStaleMirrors(ctx, now)
 }
 
 type sourceStateReconcilerStream struct{ s *Store }

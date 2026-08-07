@@ -153,6 +153,19 @@ type Store struct {
 	liveCache     map[string]int // sessionID → PID
 	liveCacheTime time.Time
 
+	// notCheckout memoises repo roots the commits stream has established
+	// are not git checkouts, so it stops re-shelling `git` at them every
+	// pass (🎯T124). The gh streams got this via 🎯T116/🎯T117 identity
+	// resolution plus 🎯T91 backoff; the local stream got the session
+	// scoping but not the "stop asking" half.
+	//
+	// Deliberately in-memory rather than persisted: a directory CAN
+	// become a checkout later (`git init`), and process lifetime is a
+	// reasonable re-check interval for something this cheap. Persisting
+	// it would make a one-off observation permanent.
+	notCheckoutMu sync.Mutex
+	notCheckout   map[string]bool
+
 	// imageSem caps the total number of image-sidecar goroutines
 	// (OCR + description + embedding, across all images) running at
 	// once. Sized at runtime.NumCPU(). A burst of images fans out
@@ -3060,8 +3073,8 @@ type ghRunJSON struct {
 // and called fetchRunLog inside the loop, holding the lock across
 // seconds of subprocess + HTTP latency per repo. Now logs are
 // fetched first, then a short upsert-only section completes per repo.
-func (s *Store) pollCIForRepo(ghPath, repo string) error {
-	out, err := exec.Command(ghPath, "run", "list",
+func (s *Store) pollCIForRepo(ctx context.Context, ghPath, repo string) error {
+	out, err := ctxCommand(ctx, ghPath, "run", "list",
 		"--repo", repo,
 		"--json", "databaseId,workflowName,headBranch,headSha,status,conclusion,createdAt,updatedAt,url",
 		"--limit", "20",
@@ -3082,7 +3095,7 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 	logSummaries := make([]string, len(runs))
 	for i, run := range runs {
 		if run.Conclusion == "failure" {
-			logSummaries[i] = s.fetchRunLog(ghPath, repo, run.DatabaseID)
+			logSummaries[i] = s.fetchRunLog(ctx, ghPath, repo, run.DatabaseID)
 		}
 	}
 
@@ -3106,8 +3119,8 @@ func (s *Store) pollCIForRepo(ghPath, repo string) error {
 }
 
 // fetchRunLog retrieves the last 50 lines of a failed run's log.
-func (s *Store) fetchRunLog(ghPath, repo string, runID int64) string {
-	out, err := exec.Command(ghPath, "run", "view",
+func (s *Store) fetchRunLog(ctx context.Context, ghPath, repo string, runID int64) string {
+	out, err := ctxCommand(ctx, ghPath, "run", "view",
 		fmt.Sprintf("%d", runID),
 		"--repo", repo,
 		"--log",
@@ -3872,17 +3885,6 @@ func (s *Store) Watch(ctx context.Context) error {
 						if err := s.ingestTargetFile(name, repo); err != nil {
 							slog.Error("ingest targets failed", "file", name, "err", err)
 						}
-					})
-				}
-			}
-			if isTodoFileName(base) {
-				repoRoot := dir
-				if filepath.Base(dir) == "docs" {
-					repoRoot = filepath.Dir(dir)
-				}
-				if repo, ok := repoForRoot[repoRoot]; ok {
-					db.enqueue(name, func() {
-						s.ingestTodoFile(name, repo)
 					})
 				}
 			}
@@ -7321,7 +7323,7 @@ func (s *Store) SearchGitHubActivity(query string, repo string, state string, au
 }
 
 // pollGitHubForRepo fetches and upserts PRs and issues for a single repo.
-func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
+func (s *Store) pollGitHubForRepo(ctx context.Context, ghPath, repo string) error {
 	// Find the most recent updated_at for incremental fetches.
 	var lastPR, lastIssue string
 	s.readDB.QueryRow(`SELECT MAX(updated_at) FROM github_prs WHERE repo = ?`, repo).Scan(&lastPR)
@@ -7333,14 +7335,14 @@ func (s *Store) pollGitHubForRepo(ghPath, repo string) error {
 	// retried every interval forever — the source of thousands of
 	// identical warnings per night.
 	var errs []error
-	if err := s.fetchAndUpsertPRs(ghPath, repo, lastPR); err != nil {
+	if err := s.fetchAndUpsertPRs(ctx, ghPath, repo, lastPR); err != nil {
 		if reason := permanentGitHubSkip(err); reason != "" {
 			slog.Debug("PR fetch skipped", "repo", repo, "reason", reason)
 		} else {
 			errs = append(errs, fmt.Errorf("prs: %w", err))
 		}
 	}
-	if err := s.fetchAndUpsertIssues(ghPath, repo, lastIssue); err != nil {
+	if err := s.fetchAndUpsertIssues(ctx, ghPath, repo, lastIssue); err != nil {
 		if reason := permanentGitHubSkip(err); reason != "" {
 			slog.Debug("issue fetch skipped", "repo", repo, "reason", reason)
 		} else {
@@ -7378,8 +7380,8 @@ func permanentGitHubSkip(err error) string {
 }
 
 // fetchAndUpsertPRs fetches PRs from GitHub and upserts into github_prs.
-func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
-	out, err := exec.Command(ghPath, "pr", "list",
+func (s *Store) fetchAndUpsertPRs(ctx context.Context, ghPath, repo, lastUpdated string) error {
+	out, err := ctxCommand(ctx, ghPath, "pr", "list",
 		"--repo", repo,
 		"--state", "all",
 		"--json", "number,title,body,state,author,createdAt,updatedAt,mergedAt,url",
@@ -7430,8 +7432,8 @@ func (s *Store) fetchAndUpsertPRs(ghPath, repo, lastUpdated string) error {
 }
 
 // fetchAndUpsertIssues fetches issues from GitHub and upserts into github_issues.
-func (s *Store) fetchAndUpsertIssues(ghPath, repo, lastUpdated string) error {
-	out, err := exec.Command(ghPath, "issue", "list",
+func (s *Store) fetchAndUpsertIssues(ctx context.Context, ghPath, repo, lastUpdated string) error {
+	out, err := ctxCommand(ctx, ghPath, "issue", "list",
 		"--repo", repo,
 		"--state", "all",
 		"--json", "number,title,body,state,author,createdAt,updatedAt,url,labels",
@@ -7645,14 +7647,29 @@ func (s *Store) SearchCommits(query string, repo string, author string, days int
 	return results, nil
 }
 
+// errNotGitCheckout reports that a path the commits stream was asked to
+// index is not a git checkout at all. The caller memoises this so the
+// path is skipped without re-shelling on every pass (🎯T124).
+var errNotGitCheckout = errors.New("not a git checkout")
+
 // ingestGitCommits fetches and indexes commits for a single repo root.
 // If afterDate is non-empty, only commits after that date are fetched (incremental).
 // If afterDate is empty, fetches the last 365 days (initial backfill).
-func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) int {
+//
+// Returns the number of commits indexed. A repo with no commits yet is
+// NOT an error: `git log` exits 128 there ("your current branch 'master'
+// does not have any commits yet"), which is a settled fact about a
+// never-pushed `git init` scaffold rather than a fault to report. Before
+// 🎯T124 that exit status was warned about on every pass, indefinitely —
+// three per reconcile pass on this machine alone.
+func ingestGitCommits(ctx context.Context, db *sql.DB, repoPath, repoName string, afterDate string) (int, error) {
 	// Verify this is actually a git repo.
-	checkCmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir")
+	checkCmd := ctxCommand(ctx, "git", "-C", repoPath, "rev-parse", "--git-dir")
 	if err := checkCmd.Run(); err != nil {
-		return 0
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		return 0, errNotGitCheckout
 	}
 
 	var after string
@@ -7669,21 +7686,27 @@ func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) i
 		"--format=%H%x00%an%x00%ae%x00%aI%x00%s%x00%b%x1e",
 		"--after=" + after,
 	}
-	cmd := exec.Command("git", gitArgs...)
+	cmd := ctxCommand(ctx, "git", gitArgs...)
 	out, err := cmd.Output()
 	if err != nil {
-		slog.Warn("git log failed", "repo", repoName, "err", err)
-		return 0
+		switch {
+		case ctx.Err() != nil:
+			return 0, ctx.Err()
+		case isEmptyRepoErr(err):
+			// A checkout with no commits yet. Nothing to index, nothing
+			// wrong, and nothing to say about it.
+			return 0, nil
+		}
+		return 0, fmt.Errorf("git log: %w", err)
 	}
 
 	if len(out) == 0 {
-		return 0
+		return 0, nil
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		slog.Warn("git commits tx begin failed", "repo", repoName, "err", err)
-		return 0
+		return 0, fmt.Errorf("git commits tx begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -7691,8 +7714,7 @@ func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) i
 		(repo, commit_hash, author_name, author_email, commit_date, subject, body)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		slog.Warn("git commits prepare failed", "repo", repoName, "err", err)
-		return 0
+		return 0, fmt.Errorf("git commits prepare: %w", err)
 	}
 	defer stmt.Close()
 
@@ -7728,10 +7750,23 @@ func ingestGitCommits(db *sql.DB, repoPath, repoName string, afterDate string) i
 	}
 
 	if err := tx.Commit(); err != nil {
-		slog.Warn("git commits tx commit failed", "repo", repoName, "err", err)
-		return 0
+		return 0, fmt.Errorf("git commits tx commit: %w", err)
 	}
-	return count
+	return count, nil
+}
+
+// isEmptyRepoErr reports whether a `git log` failure is the
+// no-commits-yet case. git exits 128 with a message on stderr; there is
+// no distinct exit code for it, so the message is the only signal.
+// Matched on the stable fragment rather than the whole sentence, which
+// varies with the branch name ("your current branch 'master' does not
+// have any commits yet") and with git's locale.
+func isEmptyRepoErr(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	return strings.Contains(string(ee.Stderr), "does not have any commits yet")
 }
 
 // --- Image indexing ---

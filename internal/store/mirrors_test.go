@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -123,7 +124,7 @@ func TestMirrorReconcilersRegistered(t *testing.T) {
 // — it must not panic or error regardless of gh availability.
 func TestReconcileStaleMirrorsEmpty(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
-	n, err := s.ReconcileStaleMirrors(time.Now().UTC())
+	n, err := s.ReconcileStaleMirrors(context.Background(), time.Now().UTC())
 	if err != nil {
 		t.Fatalf("ReconcileStaleMirrors: %v", err)
 	}

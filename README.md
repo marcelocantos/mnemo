@@ -43,7 +43,7 @@ browser dashboard is served on the same port at `http://localhost:19419`
   continuous work spans, with definitive detection for live transitions
   and heuristic fallback for historical sessions
 - **Context compaction** — background summariser preserves context
-  across `/clear` boundaries; `mnemo_restore` retrieves it
+  across `/clear` boundaries; `mnemo_ops` (op=restore) retrieves it
 - **Token usage analytics** — aggregated input/output/cache tokens with
   cost estimates, grouped by day, model, or repo
 - **Query templates** — save and reuse parameterised SQL queries
@@ -233,7 +233,7 @@ Confirm the new binary is the one actually serving:
 mnemo --version
 ```
 
-or check the `upgrade.available` entry in `mnemo_doctor` / `GET /health`,
+or check the `upgrade.available` entry in `mnemo_ops` (op=doctor) / `GET /health`,
 which reports the running version against the latest release.
 
 ### The first start after an upgrade may take a while
@@ -250,7 +250,7 @@ The daemon serves throughout, on the *old* schema, and says so:
 schema upgrade deferred to background (store serving on current schema)
 ```
 
-`mnemo_doctor`'s `schema.upgrade` check reports the same thing. This is
+`mnemo_ops` (op=doctor)'s `schema.upgrade` check reports the same thing. This is
 normal, and it is the one moment worth **not** restarting the daemon —
 let the backup and migration finish. Search and the MCP tools keep
 working the whole time.
@@ -338,12 +338,11 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_compacted_session` | Distilled view of a session — compaction summaries plus the live addenda tail past the latest cursor |
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
-| `mnemo_doctor` | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
+| `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
 | `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
 | `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
 | `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
-| `mnemo_tool_result` | Raw tool-result payload by `(session_id, tool_use_id)` — supports byte offset + truncation |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
 | `mnemo_session_go` | Reopen a past conversation: resolve a loose reference (id/prefix, repo fragment, `latest`, `latest:<scope>`) and resume it in an iTerm2 tab in the directory that session ran in. Claude Code and Grok CLI; Codex/ChatGPT refused by name |
 
@@ -352,11 +351,9 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | Tool | Description |
 |---|---|
 | `mnemo_memories` | Search auto-memory files from all projects |
-| `mnemo_get_memory` | Read the raw markdown body of a named memory file (or list memories) |
 | `mnemo_skills` | Search skill files from `~/.claude/skills/` |
 | `mnemo_configs` | Search CLAUDE.md project instructions from all repos |
 | `mnemo_targets` | Search convergence targets from all repos |
-| `mnemo_plans` | Search implementation plans from all repos |
 | `mnemo_audit` | Search audit logs from all repos |
 | `mnemo_docs` | Search markdown, text, and PDF documentation from all repos |
 | `mnemo_todos` | Query TODO items indexed from TODO.md / todos.md files (Obsidian Tasks dialect) — filter by status, tag, priority, section, due date (overdue/due-soon/no-date), and full text |
@@ -401,8 +398,6 @@ primitive lives in the harness, not the daemon.
 |---|---|
 | `mnemo_commits` | Search git commits across all tracked repos |
 | `mnemo_prs` | Search GitHub PRs and issues across all repos |
-| `mnemo_ci` | Search CI/CD run history (GitHub Actions) with failure log indexing |
-| `mnemo_images` | Search images via FTS on descriptions/OCR, semantic embeddings, or visual similarity |
 
 ### Analytics and observability
 
@@ -422,15 +417,12 @@ primitive lives in the harness, not the daemon.
 | `mnemo_query` | Read-only SQL or sqldeep nested syntax against the full database |
 | `mnemo_repos` | List repos with paths, session counts, last activity. Supports globs. |
 | `mnemo_stats` | Index statistics — sessions and messages by type |
-| `mnemo_define` | Save a reusable parameterised query template |
-| `mnemo_evaluate` | Execute a named query template with parameters |
-| `mnemo_list_templates` | List all saved query templates |
 
 ### Context restoration
 
 | Tool | Description |
 |---|---|
-| `mnemo_restore` | Retrieve compacted context from prior `/clear` boundaries |
+| `mnemo_ops` (op=restore) | Retrieve compacted context from prior `/clear` boundaries |
 
 ### Vault
 
@@ -539,7 +531,7 @@ Slow or offline peers drop into `warnings[]` with a typed
 response returns regardless. Per-peer timeout default 5s.
 
 Write- and control-shaped tools (`mnemo_self`, template
-register/evaluate, `mnemo_restore`, `mnemo_whatsup`, `mnemo_docs`,
+`mnemo_ops` (op=restore), `mnemo_whatsup`, `mnemo_docs`,
 `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`, `mnemo_stats`,
 `mnemo_status`, `mnemo_chain`) bypass federation entirely.
 
@@ -552,7 +544,7 @@ all tools return their original local-only response shape unchanged
 mnemo's tools are building blocks. Some examples of what you can build
 on top of them:
 
-- **Context restoration after `/clear`** — use `mnemo_restore` to
+- **Context restoration after `/clear`** — use `mnemo_ops` (op=restore) to
   retrieve compacted summaries from prior conversation spans, so a
   fresh session can pick up where the last one left off
 - **"Where are we?" briefings** — combine `mnemo_recent_activity` and

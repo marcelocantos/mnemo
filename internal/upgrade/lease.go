@@ -218,7 +218,7 @@ type Status struct {
 	LocalHolderID string
 }
 
-// Status inspects the lease file and local state for mnemo_doctor.
+// Status inspects the lease file and local state for mnemo_ops op=doctor.
 func (l *Lease) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()

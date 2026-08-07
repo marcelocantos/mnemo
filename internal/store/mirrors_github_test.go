@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,7 +33,7 @@ func TestPollGitHubPropagatesFailure(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	gh := fakeGh(t, `echo "GraphQL: Could not resolve to a Repository with the name 'o/r'." >&2; exit 1`)
 
-	err := s.pollGitHubForRepo(gh, "o/r")
+	err := s.pollGitHubForRepo(context.Background(), gh, "o/r")
 	if err == nil {
 		t.Fatal("a repo that cannot be resolved must return an error so the backoff engages")
 	}
@@ -63,7 +64,7 @@ if [ "$1" = "issue" ]; then
 fi
 echo '[]'`)
 
-	if err := s.pollGitHubForRepo(gh, "o/r"); err != nil {
+	if err := s.pollGitHubForRepo(context.Background(), gh, "o/r"); err != nil {
 		t.Errorf("disabled issues must be a quiet skip, not a failure: %v", err)
 	}
 }
@@ -74,7 +75,7 @@ func TestPollGitHubSucceedsWhenBothStreamsReturn(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	gh := fakeGh(t, `echo '[]'`)
 
-	if err := s.pollGitHubForRepo(gh, "o/r"); err != nil {
+	if err := s.pollGitHubForRepo(context.Background(), gh, "o/r"); err != nil {
 		t.Errorf("expected a clean reconcile, got %v", err)
 	}
 }

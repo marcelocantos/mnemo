@@ -13,8 +13,7 @@ import (
 
 // FederatedToolNames is the curated set of read-only tools exposed on
 // the mTLS federated endpoint (🎯T15.3). Write- or control-shaped
-// tools (mnemo_self session binding, mnemo_define / mnemo_evaluate /
-// mnemo_list_templates template registration, mnemo_restore,
+// tools (mnemo_self session binding, mnemo_ops op=restore,
 // mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions) are
 // deliberately absent — federated peers are a different identity
 // domain and must not influence local state.
@@ -37,14 +36,11 @@ var FederatedToolNames = map[string]struct{}{
 	"mnemo_configs":           {},
 	"mnemo_audit":             {},
 	"mnemo_targets":           {},
-	"mnemo_plans":             {},
 	"mnemo_who_ran":           {},
 	"mnemo_prs":               {},
-	"mnemo_ci":                {},
 	"mnemo_commits":           {},
 	"mnemo_decisions":         {},
 	"mnemo_chain":             {},
-	"mnemo_images":            {},
 	"mnemo_discover_patterns": {},
 }
 

@@ -285,7 +285,7 @@ func (c *Compactor) checkBudget(sessionID string) error {
 //
 // connectionID is the mcpbridge ConnContext ID of the live proxy
 // driving this session. It is recorded on the compaction so that
-// mnemo_restore can resolve session → connection → prior compactions
+// mnemo_ops op=restore can resolve session → connection → prior compactions
 // across /clear boundaries without needing a chain heuristic.
 //
 // targets, when non-nil, anchors the summariser's output in the

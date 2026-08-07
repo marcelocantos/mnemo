@@ -154,7 +154,7 @@ Three things that trip agents up here:
    binary on disk while the old daemon keeps running. Without the
    restart you will report a successful upgrade that did not take
    effect. Confirm with `mnemo --version`, or the `upgrade.available`
-   check in `mnemo_doctor`, which compares running against latest.
+   check in `mnemo_ops` (op=doctor), which compares running against latest.
 2. **Do not re-register the MCP server.** The registration is a stable
    URL; `register-mcp` is for first-time setup only. A running agent
    session reconnects on its own.
@@ -162,7 +162,7 @@ Three things that trip agents up here:
    normal.** If the release changes the schema, mnemo takes a full
    pre-migration backup before applying it — around 11 minutes on a
    21 GB index. The daemon serves on the old schema throughout and
-   logs `schema upgrade deferred to background`; `mnemo_doctor`'s
+   logs `schema upgrade deferred to background`; `mnemo_ops` (op=doctor)'s
    `schema.upgrade` check says the same. **Do not restart it to "fix"
    this** — let the migration finish. Tools keep working meanwhile.
 
@@ -456,7 +456,7 @@ An unrecognised value resolves to the default rather than being honoured.
 Once a soft limit is breached, mnemo throttles the agents it invokes
 itself — compactor, segmenter, reviewer, image description — and nothing
 else. Throttling is soft (a delay between runs, never a refusal) and
-loud (`mnemo_doctor` reports the level, reason, and what would lift it).
+loud (`mnemo_ops` (op=doctor) reports the level, reason, and what would lift it).
 
 ### mnemo_skills
 
@@ -499,16 +499,6 @@ Parameters:
 - `status` — filter: identified, converging, achieved
 - `limit` — max results (default 20)
 
-### mnemo_plans
-
-Search across implementation plans (.planning/ directories) from all
-repos. Find past design decisions or understand how features were planned.
-
-Parameters:
-- `query` — search query (fuzzy OR matching). Omit to list all.
-- `repo` — repo filter
-- `limit` — max results (default 20)
-
 ### mnemo_who_ran
 
 Find sessions that ran a specific shell command. Searches Bash tool_use
@@ -531,18 +521,6 @@ Parameters:
 - `days` — recency window (default 30)
 - `repo` — repo filter
 - `limit` — max results per category (default 20)
-
-### mnemo_ci
-
-Search CI/CD run history across repos. Indexes GitHub Actions runs from
-repos in session history. Failed run logs indexed for full-text search.
-
-Parameters:
-- `query` — search query (fuzzy OR matching against workflow, branch, logs). Omit to list recent runs.
-- `repo` — repo filter
-- `conclusion` — filter: success, failure, cancelled, skipped
-- `days` — recency window (default 30)
-- `limit` — max results (default 20)
 
 ### mnemo_chain
 
@@ -651,34 +629,6 @@ without deep-reading the transcript, or to compare session shapes.
 Parameters:
 - `session_id` (required) — full ID or prefix
 
-### mnemo_tool_result
-
-Returns the raw text payload of a single tool-result by
-`(session_id, tool_use_id)`. Output prefixes a header line
-(`total_len=N` plus optional `offset=N` / `truncated=true` markers),
-a blank line, then the (possibly sliced) payload. Use when
-`mnemo_read_session` shows a `tool_use` whose result you need to
-inspect in full — particularly large Bash/Read outputs that the
-inline display truncated.
-
-Parameters:
-- `session_id` (required) — full ID or prefix
-- `tool_use_id` (required) — the id from the prior `tool_use` block
-- `offset` — byte offset into the payload (default 0)
-- `truncate_len` — max bytes to return (0 = full payload)
-
-### mnemo_get_memory
-
-Returns the raw markdown body of a named memory file, or lists all
-memories for a project when `name` is omitted. Project matching is
-substring; name matching is case-insensitive against the YAML
-frontmatter `name` field OR the file stem. Use when you know the
-project and the memory name and want the body directly.
-
-Parameters:
-- `project` (required) — project name or path fragment
-- `name` — memory name; omit to list available memories
-
 ### mnemo_locate_uuid
 
 Locates an entry by full or prefix UUID across all sessions. Searches
@@ -695,7 +645,13 @@ Parameters:
 - `context_before` — context messages before the match (default 3)
 - `context_after` — context messages after the match (default 3)
 
-### mnemo_vault_recluster / mnemo_vault_themes_* (🎯T64.8)
+### mnemo_vault (🎯T143.3)
+
+All vault operations behind one `op`: `status`, `sync`, `gc`,
+`migration_doc`, `bridge_list`, `recluster`, `themes_inspect`,
+`themes_pin`, `themes_split`, `themes_merge`. Ten tools were folded
+here; none had ever been called by an agent. `themes_split` and
+`themes_merge` remain stubs recording a `theme_overrides` row.
 
 Document-level themes cluster decisions, compaction summaries,
 patterns, and (when indexed) user vault notes into named groups.
@@ -777,7 +733,7 @@ Hot-reload coverage:
   that prints `MNEMO_PLUGIN_PORT <port>` on stdout. Ready plugins are
   reverse-proxied at `/plugins/<name>/*`. Facet adapters (reconcile /
   check / notify) ride the existing scheduler and diag surface.
-  Health: `plugin.<name>.ready` on `mnemo_doctor` / `/health`.
+  Health: `plugin.<name>.ready` on `mnemo_ops` (op=doctor) / `/health`.
   UI (🎯T102.9): `GET /api/plugins` lists each ready plugin's menu
   contribution; the menu-bar popup renders footer rows and loads
   `preview_url` in a live WKWebView. `plugin.reload` on `/api/events`
@@ -789,68 +745,20 @@ Hot-reload coverage:
 - `signal_sources` (🎯T102.8) — pure-config liveness probes
   (`file_mtime`, `launchd`, `newest_artifact`, `last_commit`) with
   `cadence` + `grace_multiple`. Surface as `signal.<name>` on
-  `mnemo_doctor` / `/health` without a plugin process.
+  `mnemo_ops` (op=doctor) / `/health` without a plugin process.
 - `linked_instances` — persisted but requires a daemon restart (the
   federation client is wired once at startup).
 
 The write response lists which fields changed, which were adopted live,
 and which require a restart.
 
-### mnemo_todos / mnemo_todo_set / mnemo_todo_add
-
-mnemo indexes TODO items from `TODO.md` and `todos.md` files found at
-any depth under every known root — both git repos (discovered from
-`workspace_roots` and from session cwds, including the canonical
-`docs/TODO.md` convention and the repo-root `TODO.md`) and non-git
-`synthesis_roots` (planning spaces such as `~/think`) — plus any
-`todo_globs` you configure, parsed in the **Obsidian Tasks** dialect.
-Discovery honours `.gitignore`, the shared doc-exclude dirs, and the
-loop-safety exclusion fence; a file is re-parsed only when its content
-hash changes.
-
-Recognised decorations: 📅 due, ⏳ scheduled, 🛫 start, ➕ created,
-✅ done, ❌ cancelled, 🔁 recurrence; priority 🔺 highest, ⏫ high,
-🔼 medium, 🔽 low, ⏬ lowest; `#tags` and `[[wikilinks]]`. Checkbox
-state maps `- [ ]`→open, `- [x]`→done, `- [-]`→cancelled,
-`- [/]`→in_progress. Priority orders Highest > High > Medium > None >
-Low > Lowest (an unmarked task sits between medium and low, as Obsidian
-displays it).
-
-**Query — `mnemo_todos`.** Filters compose:
-- `query` — full-text over task text, tags, and section (fuzzy OR)
-- `repo`, `status`, `tag`, `priority`, `section`
-- date predicates: `due_before` / `due_after` / `due_on` (ISO dates),
-  `overdue` (past due and not done/cancelled), `due_soon_days` (within
-  N days), `no_date`
-- `limit` (default 50)
-
-Each result carries `file_path` and `line` — the coordinates the
-write-back tools need.
-
-**Edit — `mnemo_todo_set`.** Given an `id` from `mnemo_todos`, change
-`status`, `due`, and/or `priority` in the source file. Only the target
-line is rewritten; the rest of the file is preserved byte-for-byte and
-written atomically (tmp + fsync + rename). The edit is **stale-guarded**:
-if the line changed since it was indexed (someone edited the file), the
-call fails and the file is left untouched — re-query and retry.
-Transitioning to `done`/`cancelled` stamps today's ✅/❌ date; pass
-`due: "clear"` to drop a due date, `priority: "none"` to drop priority.
-
-**Add — `mnemo_todo_add`.** Append a new task to a tracked TODO file
-(`file` = a `file_path` from `mnemo_todos`). Optional `section` files it
-under a heading (created at end of file if absent); `text` may carry
-Obsidian decorations, e.g. `"review spec 📅 2026-07-01 ⏫ #docs"`.
-
-Typical loop: `mnemo_todos {overdue: true}` → pick an `id` →
-`mnemo_todo_set {id, status: "done"}`.
-
 ## Federation across linked instances
 
 If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
 tools (`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
 `mnemo_decisions`, `mnemo_commits`, `mnemo_prs`, `mnemo_memories`,
-`mnemo_who_ran`, `mnemo_audit`, `mnemo_targets`, `mnemo_plans`,
-`mnemo_skills`, `mnemo_configs`, `mnemo_ci`, `mnemo_images`,
+`mnemo_who_ran`, `mnemo_audit`, `mnemo_targets`,
+`mnemo_skills`, `mnemo_configs`,
 `mnemo_discover_patterns`) wrap their result in a `FanoutEnvelope`
 attributing per-instance results:
 
@@ -870,11 +778,10 @@ Per-peer timeout default 5s.
 
 When `linked_instances` is empty or absent, all tools return their
 original local-only response shape unchanged. Write- and
-control-shaped tools (`mnemo_self`, `mnemo_define`, `mnemo_evaluate`,
-`mnemo_list_templates`, `mnemo_restore`, `mnemo_whatsup`,
+control-shaped tools (`mnemo_self`, `mnemo_ops`, `mnemo_whatsup`,
 `mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
-`mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_todos`,
-`mnemo_todo_set`, `mnemo_todo_add`) bypass federation entirely.
+`mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
+`mnemo_thread`, `mnemo_note`) bypass federation entirely.
 
 Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,
@@ -898,7 +805,7 @@ running with per-outcome counts; failures are never retried past their
 attempt budget, and are also queryable in `image_embedding_attempts`).
 
 Three surfaces expose the same report:
-- **`mnemo_doctor`** (MCP) — runs the full suite on demand: the single
+- **`mnemo_ops` (op=doctor)** (MCP) — runs the full suite on demand: the single
   "is mnemo healthy, and what do I do about it" call.
 - **`GET /health`** — the JSON report; backs the dashboard **health
   page** at `http://localhost:19419/#health` (issues sorted by severity,
@@ -918,7 +825,7 @@ compaction watcher when every tick fails (a missing summariser cwd,
 circuit-breaker and backs off for a cooldown instead of retrying hot.
 This stops one broken task from burning CPU and contending the SQLite
 writer, so it can never starve ingestion. A tripped breaker surfaces as
-a fail-severity `mnemo_doctor` check.
+a fail-severity `mnemo_ops` (op=doctor) check.
 
 ## Index freshness
 

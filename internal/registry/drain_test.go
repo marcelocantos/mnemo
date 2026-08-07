@@ -82,14 +82,40 @@ func TestCloseCheckpointsDespiteStuckWorker(t *testing.T) {
 	}
 }
 
-// NOTE: there is deliberately no test asserting that Close returns
-// FASTER than the grace when workers are well behaved. Writing one
-// showed that it does not: with a real user entry, ForUser starts the
-// daemon's own workers and at least one of them does not observe
-// cancellation within 3s, so Close waits out the grace even in the
-// healthy case. That is a property worth improving (making the mirror
-// subprocesses context-aware would do it) but it is not one the code
-// has today, and asserting an aspiration would just make the suite lie.
+// TestClosePromptWhenWorkersCooperate is the test 🎯T123 had to delete,
+// reinstated by 🎯T124.
+//
+// It was removed because it failed: with a real user entry, ForUser
+// starts the daemon's own workers and at least one did not observe
+// cancellation within the grace, so Close waited the full 3s even with
+// nothing wrong. The cause was the mirror streams shelling out via
+// exec.Command with no context — a `gh` or `git log` subprocess in
+// flight ran to completion whatever shutdown wanted, and the worker
+// driving it could not return until it did.
+//
+// With those subprocesses context-aware, the bounded wait added by
+// 🎯T122 becomes a genuine backstop rather than something the healthy
+// path relies on. If this test starts failing again, a worker has
+// stopped observing cancellation — that is the regression to hunt, not
+// a reason to widen the bound.
+func TestClosePromptWhenWorkersCooperate(t *testing.T) {
+	t.Setenv(store.MnemoHomeEnv, t.TempDir())
+
+	r := NewRegistry(context.Background(), store.Config{}, "")
+	if _, err := r.ForUser(currentUser(t)); err != nil {
+		t.Fatalf("ForUser: %v", err)
+	}
+
+	start := time.Now()
+	r.Close()
+	elapsed := time.Since(start)
+
+	if elapsed >= workerDrainGrace {
+		t.Errorf("Close took %s, reaching the %s grace with no stuck worker — "+
+			"some worker is not observing cancellation, so shutdown is "+
+			"abandoning it rather than draining it", elapsed, workerDrainGrace)
+	}
+}
 
 // currentUser returns a username the registry can resolve a home
 // directory for. Hardcoding one works on a dev machine and fails in CI,

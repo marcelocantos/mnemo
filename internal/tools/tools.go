@@ -376,15 +376,6 @@ Use this to find decisions, preferences, and context captured in any project —
 			mcp.WithString("project", mcp.Description("Filter by project name substring")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
-		mcp.NewTool("mnemo_get_memory",
-			mcp.WithDescription(`Return the raw markdown content of a named memory file, or list available memories when name is omitted.
-
-Replaces the cat ~/.claude/projects/<project>/memory/<name>.md workaround. Project is matched as a substring (consistent with mnemo_memories). Name is matched case-insensitively against the frontmatter name field and the file base name (without .md extension).
-
-When name is omitted, returns a list of all memories for the project with their name, type, and description.`),
-			mcp.WithString("project", mcp.Required(), mcp.Description(`Project to look up. Accepts bare name ("mnemo"), org/repo fragment ("marcelocantos/mnemo"), or path fragment ("-Users-marcelo-work-github-com-marcelocantos-mnemo").`)),
-			mcp.WithString("name", mcp.Description("Memory name to retrieve (matches frontmatter name or file stem). Omit to list available memories.")),
-		),
 		mcp.NewTool("mnemo_usage",
 			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
 
@@ -464,12 +455,6 @@ CLAUDE ONLY, deliberately. The parentage fields come from Claude Code's record s
 			mcp.WithString("status", mcp.Description("Filter by status: identified, converging, achieved")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
-		mcp.NewTool("mnemo_plans",
-			mcp.WithDescription(`Search across implementation plans (.planning/ directories) from all repos. Plans contain architectural decisions, task breakdowns, and implementation reasoning from GSD workflows. Use this to find past design decisions or understand how features were planned.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
 		mcp.NewTool("mnemo_docs",
 			mcp.WithDescription(`Search across project documentation files (markdown, plain-text, PDF) indexed from all tracked repos. Covers README, CHANGELOG, design notes, and any files under docs/, design/, notes/, papers/ directories. Deduplicates .md/.pdf pairs with same stem — always prefers .md. Use this to find project documentation, design decisions, and release notes across repos.`),
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
@@ -505,26 +490,6 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
 		),
-		mcp.NewTool("mnemo_backup_status",
-			mcp.WithDescription(`List existing backups of ~/.mnemo/mnemo.db with size, age, and tag (daily / pre-migration / manual).
-
-Backups are taken by the daemon's periodic worker (03:00–04:00 local during a quiescent window), by the migration path (before any sqlift.Apply), or manually via mnemo_backup_now. The retention pool is shared across all tags — older backups are GC'd after each daily run.
-
-Returns the newest first. Restore is manual:
-  gunzip -c ~/.mnemo/backups/<file>.db.gz > ~/.mnemo/mnemo.db.restored
-  brew services stop marcelocantos/tap/mnemo
-  mv ~/.mnemo/mnemo.db ~/.mnemo/mnemo.db.bak
-  mv ~/.mnemo/mnemo.db.restored ~/.mnemo/mnemo.db
-  brew services start marcelocantos/tap/mnemo`),
-		),
-		mcp.NewTool("mnemo_backup_now",
-			mcp.WithDescription(`Trigger an immediate backup of ~/.mnemo/mnemo.db. Tagged "manual" so retention GC distinguishes it from automatic dailies.
-
-Idempotency: skips if any backup was taken within the last hour, unless force=true. The VACUUM INTO + gzip step takes ~1-2 minutes on a multi-GB DB; the call blocks until the snapshot is on disk.
-
-Useful before risky operations (manual schema edits, large deletes via mnemo_query, etc.).`),
-			mcp.WithBoolean("force", mcp.Description("Force a new snapshot even if a recent backup exists (default false)")),
-		),
 		mcp.NewTool("mnemo_prs",
 			mcp.WithDescription(`Search GitHub PRs and issues across all indexed repos. Uses FTS5 for keyword search on titles and bodies. Data is polled from GitHub repos that appear in session history and backfilled at startup.
 
@@ -534,22 +499,6 @@ Supports filtering by state, author, and recency. Results include both PRs and i
 			mcp.WithString("state", mcp.Description("Filter by state: open, closed, merged (PRs only), all (default)")),
 			mcp.WithString("author", mcp.Description("Filter by author username")),
 			mcp.WithString("type", mcp.Description("Filter by type: pr, issue, all (default)")),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_ci",
-			mcp.WithDescription(`Search CI/CD run history across repos. Indexes GitHub Actions runs from all repos that appear in session history.
-
-Supports FTS search across workflow names, branches, and failure logs. Use this to:
-- Find recent CI failures across projects
-- Check if a specific repo's CI is green
-- Search failure logs for error patterns
-- Correlate CI runs with development sessions
-
-Runs are polled incrementally from GitHub Actions. Failed run logs are indexed for full-text search.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching against workflow, branch, logs). Omit to list recent runs.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
-			mcp.WithString("conclusion", mcp.Description("Filter by conclusion: success, failure, cancelled, skipped")),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
@@ -567,45 +516,6 @@ Runs are polled incrementally from GitHub Actions. Failed run logs are indexed f
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_todos",
-			mcp.WithDescription(`Query TODO items indexed from TODO.md / todos.md files across all repos (Obsidian Tasks dialect: 📅 due, ⏳ scheduled, 🛫 start, ✅/❌ done/cancelled, 🔺⏫🔼🔽⏬ priority, 🔁 recurrence, #tags, [[wikilinks]]). Filters compose. Each result carries its source file_path and line so it can be edited with mnemo_todo_set.`),
-			mcp.WithString("query", mcp.Description("Full-text search over task text, tags, and section (fuzzy OR). Omit to list.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithString("status", mcp.Description("Filter by status: open, done, cancelled, in_progress")),
-			mcp.WithString("tag", mcp.Description("Filter by exact #tag (leading # optional)")),
-			mcp.WithString("priority", mcp.Description("Filter by priority: highest, high, medium, none, low, lowest")),
-			mcp.WithString("section", mcp.Description("Filter by the heading/section a task lives under")),
-			mcp.WithString("due_before", mcp.Description("Tasks with a due date on/before this ISO date (YYYY-MM-DD)")),
-			mcp.WithString("due_after", mcp.Description("Tasks with a due date on/after this ISO date")),
-			mcp.WithString("due_on", mcp.Description("Tasks due exactly on this ISO date")),
-			mcp.WithBoolean("overdue", mcp.Description("Only tasks past their due date and not done/cancelled")),
-			mcp.WithNumber("due_soon_days", mcp.Description("Only tasks due within N days from today and not done/cancelled")),
-			mcp.WithBoolean("no_date", mcp.Description("Only tasks with no due date")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
-		),
-		mcp.NewTool("mnemo_todo_set",
-			mcp.WithDescription(`Edit an existing TODO item in place in its source file (status, due date, and/or priority). Only the target line is rewritten — the rest of the file is preserved byte-for-byte and written atomically (tmp + fsync + rename). The edit is guarded against concurrent external changes: if the line moved or changed since indexing, it fails without touching the file. Get the id from mnemo_todos.`),
-			mcp.WithNumber("id", mcp.Required(), mcp.Description("Task id from mnemo_todos")),
-			mcp.WithString("status", mcp.Description("New status: open, done, cancelled, in_progress. done/cancelled stamps today's completion date (✅/❌).")),
-			mcp.WithString("due", mcp.Description("Set the due date (ISO YYYY-MM-DD). Pass 'clear' (or empty) to remove it.")),
-			mcp.WithString("priority", mcp.Description("Set priority: highest, high, medium, low, lowest, or none to clear.")),
-			mcp.WithString("text", mcp.Description("Replace the task prose. Trailing emoji-metadata (dates/priority/recurrence) is preserved; include any #tags or [[links]] you want to keep.")),
-		),
-		mcp.NewTool("mnemo_todo_add",
-			mcp.WithDescription(`Append a new TODO item to an already-tracked TODO file (the file must appear as file_path in mnemo_todos output). Optionally file it under a heading, created at end of file if absent. Text may carry Obsidian decorations, e.g. "review spec 📅 2026-07-01 ⏫ #docs". Written atomically and re-indexed immediately.`),
-			mcp.WithString("file", mcp.Required(), mcp.Description("Absolute path to a tracked TODO file (from mnemo_todos file_path)")),
-			mcp.WithString("text", mcp.Required(), mcp.Description("Task text, optionally with Obsidian Tasks decorations")),
-			mcp.WithString("section", mcp.Description("Heading to file the task under (created if absent)")),
-			mcp.WithString("status", mcp.Description("Initial status: open (default), done, cancelled, in_progress")),
-		),
-		mcp.NewTool("mnemo_restore",
-			mcp.WithDescription(`Return the compacted context for a session chain — all compaction summaries across the full /clear-bounded chain, oldest first.
-
-Use this at the start of a session to restore context from a previous run. Given any session ID in a chain (including the current one), it returns the structured summaries (targets, decisions, files touched, open threads) produced by the background compactor across all segments of that chain.
-
-Returns nothing if no compactions have been produced yet (the background compactor runs every 5 minutes on active sessions).`),
-			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix).")),
 		),
 		mcp.NewTool("mnemo_chain",
 			mcp.WithDescription(`Retrieve the /clear-bounded session chain for any session ID.
@@ -656,21 +566,6 @@ Phase 2: Call again with the nonce. mnemo searches for the session containing it
 Example: call mnemo_self → get nonce "mnemo:abc123". Call mnemo_self with nonce "mnemo:abc123" → get your session ID. Then use mnemo_read_session to read your own transcript.`),
 			mcp.WithString("nonce", mcp.Description("The nonce returned by a previous mnemo_self call. Omit on first call to generate a new nonce.")),
 		),
-		mcp.NewTool("mnemo_define",
-			mcp.WithDescription(`Define a reusable parameterised query template. Templates persist across sessions in SQLite. Use {{param_name}} placeholders in the query. If a template with the same name exists, it is updated.`),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Template name (unique identifier)")),
-			mcp.WithString("description", mcp.Description("What this template does")),
-			mcp.WithString("query", mcp.Required(), mcp.Description("SQL query with {{param}} placeholders")),
-			mcp.WithArray("params", mcp.Description("List of parameter names referenced in the query (e.g. [\"days\", \"repo\"])")),
-		),
-		mcp.NewTool("mnemo_evaluate",
-			mcp.WithDescription(`Execute a named query template with parameters. Returns results in the same format as mnemo_query.`),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Template name")),
-			mcp.WithObject("params", mcp.Description(`Parameter values as key-value pairs (e.g. {"days": "7", "repo": "mnemo"})`)),
-		),
-		mcp.NewTool("mnemo_list_templates",
-			mcp.WithDescription(`List all saved query templates with their names, descriptions, and parameter definitions.`),
-		),
 		mcp.NewTool("mnemo_discover_patterns",
 			mcp.WithDescription(`Workaround patterns mined from transcript history — places where an agent reached around mnemo instead of through it, and therefore candidate missing features.
 
@@ -718,28 +613,6 @@ Returns a structured result with session_id, entry_id, entry type, timestamp, ma
 			mcp.WithNumber("context_before", mcp.Description("Number of messages before the entry to include (default 3)")),
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after the entry to include (default 3)")),
 		),
-		mcp.NewTool("mnemo_images",
-			mcp.WithDescription(`Search images captured from Claude Code transcripts. Three search modes: (1) text (default) — FTS5 over AI descriptions and OCR text; (2) semantic — embed the query text and find images by meaning using CLIP k-NN (requires embed backend); (3) similar — find visually similar images given an image ID. Use 'text' to find images by paraphrase, 'semantic' for conceptual matches like "architecture diagram", and 'similar' to browse related screenshots.`),
-			mcp.WithString("query", mcp.Description("Search query. Used in 'text' and 'semantic' modes. Omit to list recent (text mode).")),
-			mcp.WithString("mode", mcp.Description(`Search mode: "text" (FTS5 over descriptions + OCR, default), "semantic" (embed query, k-NN on CLIP vectors), or "similar" (visual similarity to another image, requires similar_to).`)),
-			mcp.WithNumber("similar_to", mcp.Description("Image ID to find visually similar images (used with mode='similar').")),
-			mcp.WithString("repo", mcp.Description("Filter by repo (session's repo)")),
-			mcp.WithString("session", mcp.Description("Filter by session ID prefix")),
-			mcp.WithNumber("days", mcp.Description("Recency window (default 90)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-			mcp.WithString("search_fields", mcp.Description(`For text mode: which indexes to search: "both" (default), "description" (AI descriptions only), or "ocr" (extracted text only).`)),
-		),
-		mcp.NewTool("mnemo_tool_result",
-			mcp.WithDescription(`Return the raw tool-result payload for a specific tool invocation.
-
-Looks up the tool-result body stored at ingest time, identified by its tool_use_id within a session. Replaces the cat ~/.claude/projects/<project>/<session>/tool-results/<id>.txt workaround.
-
-Returns the full text, is_error flag, and total byte length. Use offset and truncate_len to page through large payloads.`),
-			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (or unique prefix) containing the tool invocation.")),
-			mcp.WithString("tool_use_id", mcp.Required(), mcp.Description("The tool_use_id of the tool invocation whose result you want.")),
-			mcp.WithNumber("offset", mcp.Description("Skip the first N bytes of the result text (default 0).")),
-			mcp.WithNumber("truncate_len", mcp.Description("Maximum bytes to return (default: no limit). Use with offset to page.")),
-		),
 		mcp.NewTool("mnemo_rework_history",
 			mcp.WithDescription(`Return prior rework attempts for a bullseye target, ordered most-recent first.
 
@@ -750,113 +623,7 @@ Use this to build a rework diagnosis context: the bullseye_rework tool accepts t
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment (optional).")),
 			mcp.WithNumber("limit", mcp.Description("Max attempts to return (default 20).")),
 		),
-		mcp.NewTool("mnemo_vault_sync",
-			mcp.WithDescription(`Synchronise the vault: write or update Markdown notes for every session, decision, memory, plan, target, CI run, and PR in the knowledge graph, then re-ingest the vault directory so human-added notes and edits are searchable.
-
-Notes whose vault file is already up to date (file mtime > entity timestamp) are skipped, making repeated syncs fast.
-
-Human content added below the <!-- mnemo:generated --> fence in any vault note is preserved across re-syncs and is indexed by mnemo's FTS5 search, feeding back into mnemo's associations.
-
-Vault must be configured via vault_path in ~/.mnemo/config.json.`),
-		),
-		mcp.NewTool("mnemo_vault_status",
-			mcp.WithDescription("Report vault configuration: whether vault is enabled, the vault root path, the active indexing scope (vault_indexing_scope) with its includes and .mnemoignore file state, the active vault_layout (v1/both/v2) with days_in_both and a soak recommendation, and a count of notes on disk by section."),
-		),
-		mcp.NewTool("mnemo_vault_migration_doc",
-			mcp.WithDescription(`Return or regenerate _mnemo/MIGRATION.md for the configured vault (🎯T64.2).
-
-MIGRATION.md is written once when mnemo first detects a v1-shape vault and then never touched again — a user who deletes the file has acknowledged it. This tool is the only legitimate way to bring the doc back.
-
-Modes:
-  - write=false (default): return the snapshot content mnemo would write right now, without touching the filesystem. Useful for previewing the doc via MCP or reading it without grepping the vault.
-  - write=true: write the snapshot to <vault>/_mnemo/MIGRATION.md, overwriting any existing file. The vault_layout is irrelevant — the tool always writes when asked.
-
-Requires vault to be configured (vault_path set in ~/.mnemo/config.json).`),
-			mcp.WithBoolean("write", mcp.Description("If true, write the snapshot to _mnemo/MIGRATION.md, overwriting any existing file. Default false (preview only).")),
-		),
-		mcp.NewTool("mnemo_vault_bridge_list",
-			mcp.WithDescription(`List the vault bridges mnemo maintains (🎯T64.6).
-
-A bridge injects a fenced block of links to a mnemo collection (themes, patterns, cross-repo, lessons, decisions, memories) into a user-owned anchor file anywhere in the vault, so mnemo content is navigable from the user's own MOCs without mnemo owning the file.
-
-Returns, for the configured vault:
-  - active bridges: each collection → anchor file path, and whether its block has been written to disk yet;
-  - any bridge errors from the last sync (unknown collection, duplicate fence, unwritable anchor, etc.) with the reason and detail.
-
-Configured via the vault_bridges map (and vault_bridges_max_links) in ~/.mnemo/config.json. Requires vault to be enabled.`),
-		),
-		mcp.NewTool("mnemo_doctor",
-			mcp.WithDescription(`Run mnemo's self-diagnostics and report health (🎯T83). Returns a per-check report — name, severity (ok/warn/fail), tier (fast/full), detail, and a remediation hint — covering the summariser working directory, claude on PATH, configured roots, the compaction circuit-breaker (a tripped breaker means every compaction is failing systemically), whether the indexer has backfilled since startup, and database responsiveness. The single "is mnemo healthy, and what do I do about it" call; the same data backs the dashboard health page (http://localhost:19419/#health) and opt-out OS notifications.`),
-		),
-		mcp.NewTool("mnemo_compactor_status",
-			mcp.WithDescription(`Report the live state of mnemo's background session compactor (🎯T67). Returns:
-
-  - Last scan timestamp and number of candidates the scan returned.
-  - Last tick timestamp and its outcome (one of: compacted,
-    nothing_to_compact, budget_exceeded, failed, timeout, skipped_self).
-  - In-flight session ID, if a tick is currently running.
-  - Lifetime counts of each tick outcome since the daemon started.
-  - Configuration in effect: scan interval, idle timeout, per-tick
-    timeout, minimum delta-messages trigger, per-scan compaction cap,
-    and the configured max token-budget ratio.
-  - Backlog: the count of owed-but-uncompacted sessions (the gap to
-    the compactor's fixed point).
-
-Use this to answer "is the compactor working?" without grepping the
-daemon log. A LastScanAt that is older than ScanInterval × 2 is the
-clearest "watcher is wedged" signal.`),
-		),
-		mcp.NewTool("mnemo_divergence",
-			mcp.WithDescription(`Report, per derived data stream, the gap between desired and actual state — how far each stream is from its convergence fixed point (🎯T68.4).
-
-For each stream returns: whether a gap metric is known, the gap (in the stream's unit; 0 = converged), when it last reconciled, and a note. Streams with a cheap metric today: compactions (owed-but-uncompacted sessions), transcript_index (un-ingested transcript bytes), and the repo-level document streams (docs:* — files on disk not yet indexed). Streams not yet instrumented (images, vault, github_mirrors) report known=false rather than a fabricated number; each becomes known as its reconciler slice lands.
-
-Use this to see what derived state is stale and by how much — the single surface for "is anything behind?" across the data plane.`),
-		),
-		mcp.NewTool("mnemo_source_drift",
-			mcp.WithDescription(`Report indexed transcript sources that have been pruned or truncated out from under the index (🎯T68.6).
-
-Returns counts of "deleted" (the source .jsonl no longer exists) and "truncated" (its current size is below the ingested offset — pruned or rewritten shorter), plus example paths. Under mnemo's durable-tier model this is NOT an error: Claude Code prunes transcripts, and the index is the authoritative durable copy of that content. This surface exists so you can see how much indexed content no longer has a live source — informational, not a reconcile gap.`),
-		),
-		mcp.NewTool("mnemo_vault_gc",
-			mcp.WithDescription(`Inspect (and optionally clean up) vault GC orphans (🎯T68.6).
-
-Two orphan classes are reported, both via exact set-difference over the vault_outputs manifest:
-  - manifest_path_missing: manifest rows whose note_path is not on disk anymore (the user or another process removed the file). With confirm=true, the GC removes these manifest rows (no filesystem action).
-  - disk_not_in_manifest: *.md files under the vault with no manifest entry. INFORMATIONAL ONLY in this version — the tool reports them but never deletes them (user content lives here; deletion needs higher-level policy + below-fence checks).
-
-Dry-run by default. Setting confirm=true is required to act on manifest_path_missing.`),
-			mcp.WithString("vault_path", mcp.Required(), mcp.Description("Absolute path to the vault root.")),
-			mcp.WithBoolean("confirm", mcp.Description("If true, remove manifest rows for manifest_path_missing orphans. Default false (dry-run; reports candidates only).")),
-		),
-		mcp.NewTool("mnemo_vault_recluster",
-			mcp.WithDescription(`Trigger an immediate document-level themes clustering pass (🎯T64.8).
-
-Clusters decisions, compaction summaries, patterns, and (when indexed) user vault notes into named themes via TF-IDF + single-link agglomerative clustering by default. Embeddings engine is opt-in via vault_clustering.engine="embeddings" (or the engine parameter); API key presence alone never opens egress.
-
-Returns the new cluster_runs row (input docs, output themes, engine, any warnings).`),
-			mcp.WithString("engine", mcp.Description(`Optional engine override for this pass only: "heuristic" (default) or "embeddings". Rejected when embeddings is requested without vault_clustering.engine configured and a provider key — falls back with a warning.`)),
-			mcp.WithBoolean("force_reembed", mcp.Description("If true, invalidate embedding cache rows for the active model fingerprint and re-embed. Default false.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_inspect",
-			mcp.WithDescription(`Inspect a theme by id or slug (🎯T64.8): full member list with distances, centroid text, source engine, pin/archive state, and labelling path. When a vault_user anchor was rejected, label_gate names which quality gate fired (not_centroid_closest / below_min_tokens / filename_pattern / title_content_no_overlap).`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id (theme_<sha1…>) or slug.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_pin",
-			mcp.WithDescription(`Pin or unpin a theme so it is exempt from vault_clustering.retire_after auto-archive (🎯T64.8). Cluster id is stable across archive→active round-trips when membership is unchanged.`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id or slug.")),
-			mcp.WithBoolean("unpin", mcp.Description("If true, remove the pin. Default false (pin).")),
-			mcp.WithString("reason", mcp.Description("Optional reason stored on the pin row.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_split",
-			mcp.WithDescription(`STUB (🎯T64.8): mark a theme for split on the next clustering pass. Live split application ships in a follow-up; this records a theme_overrides directive only.`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Theme id or slug.")),
-		),
-		mcp.NewTool("mnemo_vault_themes_merge",
-			mcp.WithDescription(`STUB (🎯T64.8): mark themes for merge on the next clustering pass. Live merge application ships in a follow-up; this records a theme_overrides directive only.`),
-			mcp.WithString("theme", mcp.Required(), mcp.Description("Primary theme id or slug.")),
-			mcp.WithString("with", mcp.Required(), mcp.Description("Other theme id or slug to merge with.")),
-		),
+		vaultTool(),
 		mcp.NewTool("mnemo_config",
 			mcp.WithDescription(`Read or update mnemo's runtime configuration (~/.mnemo/config.json).
 
@@ -878,55 +645,9 @@ Response includes which fields changed, which were adopted live, and which requi
 			mcp.WithString("op", mcp.Description("Operation: \"read\" (default) or \"write\".")),
 			mcp.WithObject("patch", mcp.Description("For op=write: object with the keys to update. Same shape as ~/.mnemo/config.json. Omitted keys are left unchanged.")),
 		),
-		mcp.NewTool("mnemo_note_post",
-			mcp.WithDescription(`Post a cross-session inbox note for another Claude Code session to pick up (🎯T65).
-
-The "inbox" is a directory path identifying the recipient — typically the root of the repo whose session should receive the note. It may be absolute, or relative to YOUR session's initial working directory (e.g. "../ytt" from a session rooted at ~/work/.../mnemo posts to ~/work/.../ytt). The path must not start with "~" (shell home-expansion is ambiguous) and must resolve to an existing directory; symlinks and ./.. are collapsed so different spellings of the same directory address one inbox.
-
-from_session and from_repo are stamped automatically from your MCP connection identity (resolved via mnemo_self) — pass them only to override. Relative inbox paths REQUIRE a known session cwd, so call mnemo_self once first (the /post and /inbox skills do this for you) or use an absolute path.
-
-The consumer reads the note with mnemo_note_recv. For the wait-on-event case, the consumer runs "/loop /inbox" and walks away until the note arrives.`),
-			mcp.WithString("inbox", mcp.Required(), mcp.Description("Recipient directory path (absolute, or relative to your session's initial cwd). Must exist; no '~'.")),
-			mcp.WithString("body", mcp.Required(), mcp.Description("The note text.")),
-			mcp.WithString("from_session", mcp.Description("Override the sender session id (defaults from connection identity).")),
-			mcp.WithString("from_repo", mcp.Description("Override the sender repo (defaults from connection identity).")),
-		),
-		mcp.NewTool("mnemo_note_recv",
-			mcp.WithDescription(`Receive cross-session inbox notes addressed to a directory (🎯T65).
-
-By default returns only unread notes and marks them read (mark-read is idempotent — concurrent receivers never double-deliver). Notes are retained after delivery and remain browsable via mnemo_note_list. The "inbox" is canonicalized identically to mnemo_note_post: absolute, or relative to your session's initial cwd; no leading "~"; must resolve to an existing directory.`),
-			mcp.WithString("inbox", mcp.Required(), mcp.Description("Your inbox directory path (absolute, or relative to your session's initial cwd).")),
-			mcp.WithBoolean("unread_only", mcp.Description("Return only undelivered notes (default true).")),
-			mcp.WithBoolean("mark_read", mcp.Description("Stamp the returned notes read (default true).")),
-			mcp.WithNumber("limit", mcp.Description("Maximum notes to return (default: no limit).")),
-		),
-		mcp.NewTool("mnemo_note_list",
-			mcp.WithDescription(`Browse inbox notes without consuming them (🎯T65).
-
-Omitting "inbox" lists every inbox touched within the window (default 30 days), newest first — useful to see which inboxes have traffic. Supplying "inbox" restricts to that directory (canonicalized as in mnemo_note_post). Read state is preserved; this never marks notes read.`),
-			mcp.WithString("inbox", mcp.Description("Restrict to one inbox directory (absolute, or relative to your session's initial cwd). Omit to list all inboxes.")),
-			mcp.WithNumber("days", mcp.Description("Look-back window in days (default 30).")),
-		),
-		mcp.NewTool("mnemo_thread_list",
-			mcp.WithDescription(`List Threads (🎯T85): per-initiative directories under the configured threads root (default ~/think/threads), each scoping a Claude Code session via its CLAUDE.md. Returns JSON sorted by newest activity (active threads first, then inactive), with per-thread state (from the ## Status first word), current focus, working-file count, and activity timestamp.`),
-		),
-		mcp.NewTool("mnemo_thread_show",
-			mcp.WithDescription("Show one thread: its CLAUDE.md context and a listing of its non-hidden working files (newest first). Returns JSON."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (kebab-case directory name under the threads root).")),
-		),
-		mcp.NewTool("mnemo_thread_new",
-			mcp.WithDescription("Create a new thread: validate the kebab-case name, reject reserved/existing names, scaffold CLAUDE.md from the _template (substituting {{NAME}}). Does not open a terminal tab — that is mnemo_thread_go's job. Returns the created thread as JSON."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("New thread name. Must match ^[a-z0-9][a-z0-9-]*$ and not be reserved (_template, _archived).")),
-		),
-		mcp.NewTool("mnemo_thread_archive",
-			mcp.WithDescription("Archive a thread by moving it into _archived/ under the threads root. Refuses reserved names and existing destinations."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name to archive.")),
-		),
-		mcp.NewTool("mnemo_thread_go",
-			mcp.WithDescription("Open a thread's iTerm2 tab: focus the existing tab tagged for the thread, or spawn and tag a new one running `claude` in the thread's directory (🎯T85.2). Requires iTerm2 and the daemon's Automation permission. Returns {action: focused|spawned, path}."),
-			mcp.WithString("name", mcp.Required(), mcp.Description("Thread name (resolved under the threads root) or an absolute/~ path.")),
-			mcp.WithBoolean("no_resume", mcp.Description("Always spawn a fresh, untagged, ephemeral tab (plain `claude`) instead of focus-or-spawn.")),
-		),
+		noteTool(),
+		threadTool(),
+		opsTool(),
 		mcp.NewTool("mnemo_session_go",
 			mcp.WithDescription(`Reopen a past conversation (🎯T125): resolve a loose reference to one session, open an iTerm2 tab in the directory that session ran in, and resume it there.
 
@@ -990,8 +711,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.stats()
 	case "mnemo_memories":
 		return ch.memories(args)
-	case "mnemo_get_memory":
-		return ch.getMemory(args)
 	case "mnemo_skills":
 		return ch.skills(args)
 	case "mnemo_usage":
@@ -1006,42 +725,20 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.auditLogs(args)
 	case "mnemo_targets":
 		return ch.targets(args)
-	case "mnemo_plans":
-		return ch.plans(args)
 	case "mnemo_docs":
 		return ch.docs(args)
 	case "mnemo_synthesis":
 		return ch.synthesis(args)
-	case "mnemo_backup_status":
-		return ch.backupStatus()
-	case "mnemo_backup_now":
-		return ch.backupNow(args)
 	case "mnemo_who_ran":
 		return ch.whoRan(args)
 	case "mnemo_permissions":
 		return ch.permissions(args)
 	case "mnemo_prs":
 		return ch.prs(args)
-	case "mnemo_ci":
-		return ch.ci(args)
 	case "mnemo_commits":
 		return ch.commits(args)
 	case "mnemo_decisions":
 		return ch.decisions(args)
-	case "mnemo_todos":
-		return ch.todos(args)
-	case "mnemo_todo_set":
-		return ch.todoSet(args)
-	case "mnemo_todo_add":
-		return ch.todoAdd(args)
-	case "mnemo_note_post":
-		return ch.notePost(args)
-	case "mnemo_note_recv":
-		return ch.noteRecv(args)
-	case "mnemo_note_list":
-		return ch.noteList(args)
-	case "mnemo_restore":
-		return ch.restore(args)
 	case "mnemo_chain":
 		return ch.chain(args)
 	case "mnemo_compacted_session":
@@ -1050,64 +747,24 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.self(args)
 	case "mnemo_whatsup":
 		return ch.whatsup(args)
-	case "mnemo_define":
-		return ch.defineTemplate(args)
-	case "mnemo_evaluate":
-		return ch.evaluateTemplate(args)
-	case "mnemo_list_templates":
-		return ch.listTemplates()
 	case "mnemo_discover_patterns":
 		return ch.discoverPatterns(args)
 	case "mnemo_locate_uuid":
 		return ch.locateUUID(args)
-	case "mnemo_images":
-		return ch.images(args)
 	case "mnemo_session_structure":
 		return ch.sessionStructure(args)
-	case "mnemo_tool_result":
-		return ch.toolResult(args)
 	case "mnemo_rework_history":
 		return ch.reworkHistory(args)
-	case "mnemo_vault_sync":
-		return ch.vaultSync()
-	case "mnemo_vault_status":
-		return ch.vaultStatus(h.cfgCtl)
-	case "mnemo_vault_migration_doc":
-		return ch.vaultMigrationDoc(args)
-	case "mnemo_vault_bridge_list":
-		return ch.vaultBridgeList(h.cfgCtl)
-	case "mnemo_compactor_status":
-		return ch.compactorStatus(h.resolveCompactor)
-	case "mnemo_doctor":
-		return ch.doctor(h.diagRunner)
-	case "mnemo_divergence":
-		return ch.divergence()
-	case "mnemo_source_drift":
-		return ch.sourceDrift()
-	case "mnemo_vault_gc":
-		return ch.vaultGC(args)
-	case "mnemo_vault_recluster":
-		return ch.vaultRecluster(args, h.cfgCtl)
-	case "mnemo_vault_themes_inspect":
-		return ch.vaultThemesInspect(args)
-	case "mnemo_vault_themes_pin":
-		return ch.vaultThemesPin(args)
-	case "mnemo_vault_themes_split":
-		return ch.vaultThemesSplit(args)
-	case "mnemo_vault_themes_merge":
-		return ch.vaultThemesMerge(args)
+	case "mnemo_thread":
+		return ch.threadDispatch(args)
+	case "mnemo_note":
+		return ch.noteDispatch(args)
+	case "mnemo_ops":
+		return ch.opsDispatch(args, h.resolveCompactor, h.diagRunner)
+	case "mnemo_vault":
+		return ch.vaultDispatch(args, h.cfgCtl)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
-	case "mnemo_thread_list":
-		return ch.threadList(args)
-	case "mnemo_thread_show":
-		return ch.threadShow(args)
-	case "mnemo_thread_new":
-		return ch.threadNew(args)
-	case "mnemo_thread_archive":
-		return ch.threadArchive(args)
-	case "mnemo_thread_go":
-		return ch.threadGo(args)
 	case "mnemo_session_go":
 		return ch.sessionGo(args)
 	default:
@@ -1523,47 +1180,6 @@ func (h *callHandler) memories(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *callHandler) getMemory(args map[string]any) (string, bool, error) {
-	project, _ := args["project"].(string)
-	name, _ := args["name"].(string)
-
-	if project == "" {
-		return "project is required", true, nil
-	}
-
-	// When name is omitted, list all memories for the project.
-	if name == "" {
-		results, err := h.mem.SearchMemories("", "", project, 100)
-		if err != nil {
-			return fmt.Sprintf("memory list failed: %v", err), true, nil
-		}
-		if len(results) == 0 {
-			return fmt.Sprintf("No memories found for project %q.", project), false, nil
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "Memories for project %q:\n\n", project)
-		for _, m := range results {
-			fmt.Fprintf(&b, "- **%s** [%s]: %s\n", m.Name, m.MemoryType, m.Description)
-		}
-		return b.String(), false, nil
-	}
-
-	m, err := h.mem.GetMemory(project, name)
-	if err != nil {
-		return fmt.Sprintf("get memory failed: %v", err), true, nil
-	}
-	if m == nil {
-		// Check whether the project itself exists.
-		all, listErr := h.mem.SearchMemories("", "", project, 1)
-		if listErr == nil && len(all) == 0 {
-			return fmt.Sprintf("Project %q not found.", project), false, nil
-		}
-		return fmt.Sprintf("Memory %q not found in project %q.", name, project), false, nil
-	}
-
-	return m.Content, false, nil
-}
-
 func (h *callHandler) skills(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	limit := 20
@@ -1742,33 +1358,6 @@ func (h *callHandler) targets(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *callHandler) plans(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repoFilter, _ := args["repo"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchPlans(query, repoFilter, limit)
-	if err != nil {
-		return fmt.Sprintf("plan search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No plans found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, p := range results {
-		phase := p.Phase
-		if phase == "" {
-			phase = "(root)"
-		}
-		fmt.Fprintf(&b, "## %s [phase: %s] (%s)\n\n%s\n\n", p.FilePath, phase, p.Repo, p.Content)
-	}
-	return b.String(), false, nil
-}
-
 func (h *callHandler) docs(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repoFilter, _ := args["repo"].(string)
@@ -1905,32 +1494,6 @@ func (h *callHandler) prs(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *callHandler) ci(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	conclusion, _ := args["conclusion"].(string)
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	results, err := h.mem.SearchCI(query, repo, conclusion, days, limit)
-	if err != nil {
-		return fmt.Sprintf("CI search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No CI runs found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
 func (h *callHandler) commits(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
@@ -1979,105 +1542,6 @@ func (h *callHandler) decisions(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) todos(args map[string]any) (string, bool, error) {
-	var q store.TodoQuery
-	q.Query, _ = args["query"].(string)
-	q.Repo, _ = args["repo"].(string)
-	q.Status, _ = args["status"].(string)
-	q.Tag, _ = args["tag"].(string)
-	q.Priority, _ = args["priority"].(string)
-	q.Section, _ = args["section"].(string)
-	q.DueBefore, _ = args["due_before"].(string)
-	q.DueAfter, _ = args["due_after"].(string)
-	q.DueOn, _ = args["due_on"].(string)
-	q.Overdue, _ = args["overdue"].(bool)
-	q.NoDate, _ = args["no_date"].(bool)
-	if v, ok := args["due_soon_days"].(float64); ok && v > 0 {
-		q.DueSoonDays = int(v)
-	}
-	if v, ok := args["limit"].(float64); ok && v > 0 {
-		q.Limit = int(v)
-	}
-	if q.Status != "" && !validTodoStatus(q.Status) {
-		return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", q.Status), true, nil
-	}
-	results, err := h.mem.SearchTodos(q)
-	if err != nil {
-		return fmt.Sprintf("todos search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No matching todos found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) todoSet(args map[string]any) (string, bool, error) {
-	idf, ok := args["id"].(float64)
-	if !ok {
-		return "id is required", true, nil
-	}
-	m := store.TodoMutation{ID: int64(idf)}
-	if v, ok := args["status"].(string); ok && v != "" {
-		if !validTodoStatus(v) {
-			return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", v), true, nil
-		}
-		m.Status = v
-	}
-	if v, ok := args["due"].(string); ok {
-		due := v
-		if v == "clear" || v == "none" {
-			due = ""
-		}
-		m.Due = &due
-	}
-	if v, ok := args["priority"].(string); ok && v != "" {
-		if !validTodoPriority(v) {
-			return fmt.Sprintf("invalid priority %q (want highest/high/medium/low/lowest/none)", v), true, nil
-		}
-		p := v
-		m.Priority = &p
-	}
-	if v, ok := args["text"].(string); ok && v != "" {
-		txt := v
-		m.Text = &txt
-	}
-	if m.Status == "" && m.Due == nil && m.Priority == nil && m.Text == nil {
-		return "nothing to change: pass at least one of status, due, priority, text", true, nil
-	}
-	updated, err := h.mem.MutateTodo(m)
-	if err != nil {
-		return fmt.Sprintf("todo update failed: %v", err), true, nil
-	}
-	out, _ := json.MarshalIndent(updated, "", "  ")
-	return string(out), false, nil
-}
-
-func (h *callHandler) todoAdd(args map[string]any) (string, bool, error) {
-	file, _ := args["file"].(string)
-	text, _ := args["text"].(string)
-	if file == "" || text == "" {
-		return "file and text are required", true, nil
-	}
-	a := store.TodoAdd{File: file, Text: text}
-	a.Section, _ = args["section"].(string)
-	if v, ok := args["status"].(string); ok && v != "" {
-		if !validTodoStatus(v) {
-			return fmt.Sprintf("invalid status %q (want open/done/cancelled/in_progress)", v), true, nil
-		}
-		a.Status = v
-	}
-	added, err := h.mem.AddTodo(a)
-	if err != nil {
-		return fmt.Sprintf("todo add failed: %v", err), true, nil
-	}
-	out, _ := json.MarshalIndent(added, "", "  ")
 	return string(out), false, nil
 }
 
@@ -2564,85 +2028,6 @@ func (h *callHandler) whatsup(args map[string]any) (string, bool, error) {
 	return b.String(), false, nil
 }
 
-func (h *callHandler) defineTemplate(args map[string]any) (string, bool, error) {
-	name, _ := args["name"].(string)
-	if name == "" {
-		return "name is required", true, nil
-	}
-	query, _ := args["query"].(string)
-	if query == "" {
-		return "query is required", true, nil
-	}
-	description, _ := args["description"].(string)
-
-	var paramNames []string
-	if raw, ok := args["params"]; ok && raw != nil {
-		switch v := raw.(type) {
-		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					paramNames = append(paramNames, s)
-				}
-			}
-		case []string:
-			paramNames = v
-		}
-	}
-
-	if err := h.mem.DefineTemplate(name, description, query, paramNames); err != nil {
-		return fmt.Sprintf("define template failed: %v", err), true, nil
-	}
-	return fmt.Sprintf("Template %q saved.", name), false, nil
-}
-
-func (h *callHandler) evaluateTemplate(args map[string]any) (string, bool, error) {
-	name, _ := args["name"].(string)
-	if name == "" {
-		return "name is required", true, nil
-	}
-
-	params := make(map[string]string)
-	if raw, ok := args["params"]; ok && raw != nil {
-		if m, ok := raw.(map[string]any); ok {
-			for k, v := range m {
-				params[k] = fmt.Sprintf("%v", v)
-			}
-		}
-	}
-
-	rows, err := h.mem.EvaluateTemplate(name, params)
-	if err != nil {
-		return fmt.Sprintf("evaluate template failed: %v", err), true, nil
-	}
-	if len(rows) == 0 {
-		return "No rows returned.", false, nil
-	}
-
-	var b strings.Builder
-	for _, row := range rows {
-		for k, v := range row {
-			fmt.Fprintf(&b, "%s: %v  ", k, v)
-		}
-		b.WriteByte('\n')
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) listTemplates() (string, bool, error) {
-	templates, err := h.mem.ListTemplates()
-	if err != nil {
-		return fmt.Sprintf("list templates failed: %v", err), true, nil
-	}
-	if len(templates) == 0 {
-		return "No templates defined.", false, nil
-	}
-	out, err := json.MarshalIndent(templates, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
 func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error) {
 	days := 90
 	if d, ok := args["days"].(float64); ok && d > 0 {
@@ -2702,121 +2087,6 @@ func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error
 	return b.String(), false, nil
 }
 
-func (h *callHandler) images(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	mode, _ := args["mode"].(string)
-	repo, _ := args["repo"].(string)
-	session, _ := args["session"].(string)
-	searchFields, _ := args["search_fields"].(string)
-	days := 90
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	similarTo := 0
-	if st, ok := args["similar_to"].(float64); ok && st > 0 {
-		similarTo = int(st)
-	}
-
-	if mode == "" {
-		mode = "text"
-	}
-
-	var results []store.ImageSearchResult
-	var err error
-
-	switch mode {
-	case "semantic":
-		if query == "" {
-			return "query is required for semantic mode", true, nil
-		}
-		results, err = h.mem.SearchImagesSemantic(query, repo, session, days, limit)
-		if err != nil {
-			return fmt.Sprintf("semantic image search failed: %v", err), true, nil
-		}
-	case "similar":
-		if similarTo <= 0 {
-			return "similar_to (image ID) is required for similar mode", true, nil
-		}
-		results, err = h.mem.SearchImagesSimilar(similarTo, repo, session, days, limit)
-		if err != nil {
-			return fmt.Sprintf("similar image search failed: %v", err), true, nil
-		}
-	default: // "text"
-		results, err = h.mem.SearchImagesFiltered(query, repo, session, days, limit, searchFields)
-		if err != nil {
-			return fmt.Sprintf("search images failed: %v", err), true, nil
-		}
-	}
-
-	if len(results) == 0 {
-		switch mode {
-		case "semantic":
-			return "No images found via semantic search. Ensure embeddings are populated (embed backend requires uv + sentence-transformers).", false, nil
-		case "similar":
-			return fmt.Sprintf("No similar images found for image ID %d. The image may not have an embedding yet.", similarTo), false, nil
-		default:
-			if query != "" {
-				return "No images found matching query. Descriptions require ANTHROPIC_API_KEY; OCR requires Apple Vision (macOS) or tesseract.", false, nil
-			}
-			return "No images indexed yet. Images are extracted from transcripts during ingest.", false, nil
-		}
-	}
-
-	var b strings.Builder
-	for _, r := range results {
-		img := r.Image
-		sid := ""
-		if len(r.Occurrences) > 0 {
-			sid = r.Occurrences[0].SessionID
-			if len(sid) > 8 {
-				sid = sid[:8]
-			}
-		}
-		fmt.Fprintf(&b, "[image id=%d] %s %dx%d %s (%.1f KB)",
-			img.ID, img.MimeType, img.Width, img.Height, img.PixelFormat,
-			float64(img.ByteSize)/1024)
-		if img.OriginalPath != "" {
-			fmt.Fprintf(&b, " path=%s", img.OriginalPath)
-		}
-		if sid != "" {
-			fmt.Fprintf(&b, " session=%s", sid)
-		}
-		if r.MatchSource != "" {
-			fmt.Fprintf(&b, " match=%s", r.MatchSource)
-		}
-		if r.Score > 0 {
-			fmt.Fprintf(&b, " score=%.3f", r.Score)
-		}
-		b.WriteByte('\n')
-		if r.Description != "" {
-			fmt.Fprintf(&b, "  [desc] %s\n", r.Description)
-		} else {
-			b.WriteString("  [desc] (pending)\n")
-		}
-		if r.OCRText != "" {
-			// Truncate long OCR text for display.
-			ocrDisplay := r.OCRText
-			if len(ocrDisplay) > 300 {
-				ocrDisplay = ocrDisplay[:300] + "…"
-			}
-			fmt.Fprintf(&b, "  [ocr]  %s\n", ocrDisplay)
-		}
-		for _, occ := range r.Occurrences {
-			occSID := occ.SessionID
-			if len(occSID) > 8 {
-				occSID = occSID[:8]
-			}
-			fmt.Fprintf(&b, "  seen in %s (%s) at %s\n", occSID, occ.SourceType, occ.OccurredAt)
-		}
-		b.WriteByte('\n')
-	}
-	return b.String(), false, nil
-}
-
 func (h *callHandler) sessionStructure(args map[string]any) (string, bool, error) {
 	sessionID, _ := args["session_id"].(string)
 	if sessionID == "" {
@@ -2831,45 +2101,6 @@ func (h *callHandler) sessionStructure(args map[string]any) (string, bool, error
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
 	return string(out), false, nil
-}
-
-func (h *callHandler) toolResult(args map[string]any) (string, bool, error) {
-	sessionID, _ := args["session_id"].(string)
-	if sessionID == "" {
-		return "session_id is required", true, nil
-	}
-	toolUseID, _ := args["tool_use_id"].(string)
-	if toolUseID == "" {
-		return "tool_use_id is required", true, nil
-	}
-	offset := 0
-	if o, ok := args["offset"].(float64); ok && o >= 0 {
-		offset = int(o)
-	}
-	truncateLen := 0
-	if t, ok := args["truncate_len"].(float64); ok && t > 0 {
-		truncateLen = int(t)
-	}
-
-	payload, err := h.mem.ToolResult(sessionID, toolUseID, offset, truncateLen)
-	if err != nil {
-		return fmt.Sprintf("tool_result lookup failed: %v", err), true, nil
-	}
-
-	var b strings.Builder
-	if payload.IsError {
-		b.WriteString("[error] ")
-	}
-	fmt.Fprintf(&b, "total_len=%d", payload.TotalLen)
-	if offset > 0 {
-		fmt.Fprintf(&b, " offset=%d", offset)
-	}
-	if payload.Truncated {
-		fmt.Fprintf(&b, " truncated=true")
-	}
-	b.WriteString("\n\n")
-	b.WriteString(payload.Text)
-	return b.String(), false, nil
 }
 
 func (h *callHandler) locateUUID(args map[string]any) (string, bool, error) {
@@ -3350,32 +2581,6 @@ func (h *callHandler) divergence() (string, bool, error) {
 		}
 	}
 	fmt.Fprintf(&b, "\n%d stream(s) reported; %d converged (gap=0).\n", len(rows), converged)
-	return b.String(), false, nil
-}
-
-// sourceDrift implements mnemo_source_drift (🎯T68.6): a read-only
-// report of indexed transcript sources pruned/truncated out from under
-// the index. Informational under the durable-tier model — the index
-// retains the content.
-func (h *callHandler) sourceDrift() (string, bool, error) {
-	rep := h.mem.SourceDrift()
-
-	var b strings.Builder
-	b.WriteString("Source drift (indexed transcripts whose source is gone or shrank):\n\n")
-	fmt.Fprintf(&b, "  deleted:    %d (source .jsonl no longer exists)\n", rep.Deleted)
-	fmt.Fprintf(&b, "  truncated:  %d (current size below ingested offset)\n", rep.Truncated)
-	fmt.Fprintf(&b, "  rewritten:  %d (same size, mtime moved — in-place edit)\n", rep.Rewritten)
-	if rep.Deleted == 0 && rep.Truncated == 0 && rep.Rewritten == 0 {
-		b.WriteString("\nNo drift — every indexed source is still present and intact.\n")
-		return b.String(), false, nil
-	}
-	b.WriteString("\nThe index retains this content (durable tier); this is informational, not a reconcile gap.\n")
-	if len(rep.Examples) > 0 {
-		b.WriteString("\nExamples:\n")
-		for _, e := range rep.Examples {
-			fmt.Fprintf(&b, "  %-10s offset=%d size=%d  %s\n", e.Kind+":", e.Offset, e.Size, e.Path)
-		}
-	}
 	return b.String(), false, nil
 }
 

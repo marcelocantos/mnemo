@@ -1083,7 +1083,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// the full suite at startup, fast checks every few minutes, the full
 	// suite hourly. A fail-severity transition fires an opt-out OS
 	// notification that deep-links to the dashboard health page. The same
-	// registry backs the /health endpoint and the mnemo_doctor tool.
+	// registry backs the /health endpoint and the mnemo_ops(op=doctor) tool.
 	// Built before the store opens so /health can report boot phases
 	// (startup.ready) during pre-migration backup.
 	daemonStart := time.Now()
@@ -1203,9 +1203,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	}
 	handler := tools.NewHandler(resolve)
 
-	// Wire the per-user vault syncer resolver so mnemo_vault_sync and
-	// mnemo_vault_status work. Returns nil when vault is not configured
-	// for the requested user; the tool handlers gracefully report this.
+	// Wire the per-user vault syncer resolver so mnemo_vault's sync and
+	// status ops work. Returns nil when vault is not configured for the
+	// requested user; the tool handlers gracefully report this.
 	handler.SetVaultResolver(func(username string) tools.VaultSyncer {
 		u, ok := effectiveUser(username)
 		if !ok {
@@ -1219,7 +1219,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	})
 
 	// Wire the per-user compactor health reporter so
-	// mnemo_compactor_status (🎯T67) can surface live watcher state.
+	// mnemo_ops op=compactor (🎯T67) can surface live watcher state.
 	// Returns nil when the user's workers haven't started yet; the
 	// tool gracefully reports "not available" in that case.
 	handler.SetCompactorResolver(func(username string) tools.CompactorHealthReporter {
@@ -1248,7 +1248,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		onMenuBar: publishUIConfig,
 	})
 
-	// Wire the self-diagnostics registry into mnemo_doctor (🎯T83) — the
+	// Wire the self-diagnostics registry into mnemo_ops op=doctor (🎯T83) — the
 	// same registry that backs the /health endpoint and the scheduler.
 	handler.SetDiagRunner(diagReg)
 

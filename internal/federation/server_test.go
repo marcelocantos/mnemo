@@ -58,9 +58,13 @@ func TestFederatedRoundTrip(t *testing.T) {
 			t.Errorf("federated tool %q missing from server tool list", name)
 		}
 	}
+	// 🎯T143.1 removed mnemo_define / mnemo_evaluate / mnemo_list_templates
+	// from the product, so they are no longer meaningful leak candidates —
+	// a tool that does not exist cannot leak. The remaining names are
+	// write- or control-shaped tools that DO exist and must stay off the
+	// federated endpoint.
 	for _, leaked := range []string{
-		"mnemo_self", "mnemo_define", "mnemo_evaluate",
-		"mnemo_list_templates", "mnemo_restore", "mnemo_whatsup",
+		"mnemo_self", "mnemo_restore", "mnemo_whatsup",
 		"mnemo_docs", "mnemo_synthesis", "mnemo_permissions",
 	} {
 		if _, ok := got[leaked]; ok {

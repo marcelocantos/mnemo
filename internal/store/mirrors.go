@@ -4,6 +4,8 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"os/exec"
 	"time"
@@ -15,12 +17,15 @@ import (
 // than Interval, replacing the former boot-once backfill / fixed poll.
 // Adding a stream is one entry here, not a new scheduler — the
 // convergence-engine "register a stream" shape (cf. 🎯T68.4).
+// reconcile takes a context (🎯T124) so cancelling the worker reaches
+// the `gh` / `git` subprocesses each stream shells out to, rather than
+// letting one mid-flight run to completion whatever shutdown wants.
 type mirrorReconciler struct {
 	stream    string
 	interval  time.Duration
 	needsGh   bool
 	listRepos func() ([]string, error)
-	reconcile func(ghPath, repo string) error
+	reconcile func(ctx context.Context, ghPath, repo string) error
 }
 
 // mirrorReconcilers is the registry of converted mirror streams
@@ -74,15 +79,32 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 			interval:  30 * time.Minute,
 			needsGh:   false,
 			listRepos: func() ([]string, error) { return commitNames, nil },
-			reconcile: func(_, repo string) error {
+			reconcile: func(ctx context.Context, _, repo string) error {
 				root := commitRoots[repo]
 				if root == "" {
 					return nil // no local checkout → nothing to index
 				}
+				// Already established as not a checkout: skip without
+				// spawning git at all (🎯T124).
+				if s.isNotCheckout(root) {
+					return nil
+				}
 				var lastDate string
 				_ = s.readDB.QueryRow(
 					`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`, repo).Scan(&lastDate)
-				ingestGitCommits(s.writeDB, root, repo, lastDate)
+				if _, err := ingestGitCommits(ctx, s.writeDB, root, repo, lastDate); err != nil {
+					if errors.Is(err, errNotGitCheckout) {
+						// A settled fact, not a fault. Remember it and stay
+						// quiet; returning an error here would swap a
+						// recurring "git log failed" for a recurring
+						// "mirror: reconcile failed".
+						s.markNotCheckout(root)
+						slog.Debug("commits: not a git checkout, skipping",
+							"repo", repo, "root", root)
+						return nil
+					}
+					return err
+				}
 				return nil
 			},
 		},
@@ -97,9 +119,12 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 // skipped, while a newly-seen repo is picked up on the next tick rather
 // than waiting out a fixed poll cycle. gh-backed streams are skipped
 // silently when gh is not installed.
-func (s *Store) ReconcileStaleMirrors(now time.Time) (int, error) {
+func (s *Store) ReconcileStaleMirrors(ctx context.Context, now time.Time) (int, error) {
 	reconciled := 0
 	for _, mr := range s.mirrorReconcilers() {
+		if err := ctx.Err(); err != nil {
+			return reconciled, err
+		}
 		ghPath := ""
 		if mr.needsGh {
 			p, err := exec.LookPath("gh")
@@ -114,10 +139,21 @@ func (s *Store) ReconcileStaleMirrors(now time.Time) (int, error) {
 			continue
 		}
 		for _, repo := range repos {
+			if err := ctx.Err(); err != nil {
+				return reconciled, err
+			}
 			if !s.mirrorDue(repo, mr.stream, mr.interval, now) {
 				continue
 			}
-			if err := mr.reconcile(ghPath, repo); err != nil {
+			if err := mr.reconcile(ctx, ghPath, repo); err != nil {
+				// Cancellation is shutdown, not a fault of the repo
+				// (🎯T124). Counting it would let a few restarts back a
+				// healthy repo off for hours, and the backoff would be
+				// attributed to a failure that never happened.
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) ||
+					errors.Is(err, context.DeadlineExceeded) {
+					return reconciled, err
+				}
 				slog.Warn("mirror: reconcile failed", "stream", mr.stream, "repo", repo, "err", err)
 				// 🎯T91: stamp the failure so a persistently-failing repo
 				// (no Actions, deleted, auth-scoped out) backs off instead of
@@ -134,6 +170,51 @@ func (s *Store) ReconcileStaleMirrors(now time.Time) (int, error) {
 		}
 	}
 	return reconciled, nil
+}
+
+// subprocessWaitDelay bounds how long a cancelled mirror subprocess may
+// keep the call blocked on I/O before its pipes are force-closed.
+//
+// exec.CommandContext alone is NOT sufficient, and CI proved it: it
+// kills the direct child, but Output() blocks until the stdout pipe
+// closes, and a grandchild that inherited the pipe holds it open. A
+// shell script that forks (`sh -c 'sleep 60'` on Linux dash) leaves the
+// sleep holding stdout, so the call waited the full 60 seconds after
+// cancellation. macOS passed because its shell exec's into the last
+// command instead of forking, leaving no grandchild — the same defect,
+// hidden by a platform difference.
+//
+// WaitDelay is the portable fix: after cancellation, Wait gives
+// remaining I/O this long, then closes the pipes and returns. The
+// process may be reparented and linger briefly; what matters for
+// shutdown is that mnemo stops waiting on it.
+const subprocessWaitDelay = time.Second
+
+// ctxCommand builds a subprocess bound to ctx with that bounded wait
+// (🎯T124). Every mirror-stream subprocess goes through here.
+func ctxCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = subprocessWaitDelay
+	return cmd
+}
+
+// isNotCheckout reports whether root has already been established as
+// not being a git checkout, so the commits stream can skip it without
+// spawning git (🎯T124).
+func (s *Store) isNotCheckout(root string) bool {
+	s.notCheckoutMu.Lock()
+	defer s.notCheckoutMu.Unlock()
+	return s.notCheckout[root]
+}
+
+// markNotCheckout records that root is not a git checkout.
+func (s *Store) markNotCheckout(root string) {
+	s.notCheckoutMu.Lock()
+	defer s.notCheckoutMu.Unlock()
+	if s.notCheckout == nil {
+		s.notCheckout = map[string]bool{}
+	}
+	s.notCheckout[root] = true
 }
 
 // mirrorStale reports whether (repo, stream) has no reconcile cursor or
