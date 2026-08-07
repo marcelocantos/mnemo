@@ -15,8 +15,27 @@ import (
 
 // cancelGrace bounds how long a cancelled mirror call may take to
 // return. The subprocesses below sleep far longer than this, so a call
-// that returns inside the grace can only have done so by killing them.
-const cancelGrace = 3 * time.Second
+// that returns inside the grace can only have done so by giving up on
+// them. Comfortably above subprocessWaitDelay so a loaded CI runner
+// does not turn a correct implementation into a red build.
+const cancelGrace = 10 * time.Second
+
+// hangingScript is a subprocess that hangs AND forks, so the sleep is a
+// grandchild holding the inherited stdout pipe.
+//
+// The fork is the point. Killing the direct child does not close a pipe
+// a grandchild still holds, so Output() keeps blocking. That is how the
+// first version of this fix passed on macOS and failed on Linux, taking
+// the full 60 seconds there.
+//
+// HONESTY NOTE: backgrounding was added to force the fork on both
+// platforms, and it does not work — macOS still returns promptly even
+// with WaitDelay removed, so the defect cannot be reproduced locally
+// and this test is only a real oracle on Linux. Do not read a green run
+// on a Mac as evidence that cancellation is bounded; the mechanism that
+// makes macOS release the pipe is not understood, and CI is the oracle
+// that matters here.
+const hangingScript = `sleep 60 & wait`
 
 // TestPollGitHubCancelledMidFetch is the 🎯T124 oracle for the gh half:
 // cancelling the worker context must terminate a `gh` subprocess in
@@ -29,7 +48,7 @@ const cancelGrace = 3 * time.Second
 func TestPollGitHubCancelledMidFetch(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	// A gh that never returns on its own.
-	gh := fakeGh(t, `sleep 60`)
+	gh := fakeGh(t, hangingScript)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -56,7 +75,7 @@ func TestPollGitHubCancelledMidFetch(t *testing.T) {
 // run) on its own path.
 func TestPollCICancelledMidFetch(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
-	gh := fakeGh(t, `sleep 60`)
+	gh := fakeGh(t, hangingScript)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -86,7 +105,7 @@ func TestIngestGitCommitsCancelled(t *testing.T) {
 	// A git that hangs, so cancellation is the only way out. Prepending
 	// its directory to PATH shadows the real binary for this test.
 	dir := t.TempDir()
-	writeExecutable(t, filepath.Join(dir, "git"), `sleep 60`)
+	writeExecutable(t, filepath.Join(dir, "git"), hangingScript)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	ctx, cancel := context.WithCancel(context.Background())

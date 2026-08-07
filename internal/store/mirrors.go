@@ -172,6 +172,32 @@ func (s *Store) ReconcileStaleMirrors(ctx context.Context, now time.Time) (int, 
 	return reconciled, nil
 }
 
+// subprocessWaitDelay bounds how long a cancelled mirror subprocess may
+// keep the call blocked on I/O before its pipes are force-closed.
+//
+// exec.CommandContext alone is NOT sufficient, and CI proved it: it
+// kills the direct child, but Output() blocks until the stdout pipe
+// closes, and a grandchild that inherited the pipe holds it open. A
+// shell script that forks (`sh -c 'sleep 60'` on Linux dash) leaves the
+// sleep holding stdout, so the call waited the full 60 seconds after
+// cancellation. macOS passed because its shell exec's into the last
+// command instead of forking, leaving no grandchild — the same defect,
+// hidden by a platform difference.
+//
+// WaitDelay is the portable fix: after cancellation, Wait gives
+// remaining I/O this long, then closes the pipes and returns. The
+// process may be reparented and linger briefly; what matters for
+// shutdown is that mnemo stops waiting on it.
+const subprocessWaitDelay = time.Second
+
+// ctxCommand builds a subprocess bound to ctx with that bounded wait
+// (🎯T124). Every mirror-stream subprocess goes through here.
+func ctxCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = subprocessWaitDelay
+	return cmd
+}
+
 // isNotCheckout reports whether root has already been established as
 // not being a git checkout, so the commits stream can skip it without
 // spawning git (🎯T124).

@@ -3074,7 +3074,7 @@ type ghRunJSON struct {
 // seconds of subprocess + HTTP latency per repo. Now logs are
 // fetched first, then a short upsert-only section completes per repo.
 func (s *Store) pollCIForRepo(ctx context.Context, ghPath, repo string) error {
-	out, err := exec.CommandContext(ctx, ghPath, "run", "list",
+	out, err := ctxCommand(ctx, ghPath, "run", "list",
 		"--repo", repo,
 		"--json", "databaseId,workflowName,headBranch,headSha,status,conclusion,createdAt,updatedAt,url",
 		"--limit", "20",
@@ -3120,7 +3120,7 @@ func (s *Store) pollCIForRepo(ctx context.Context, ghPath, repo string) error {
 
 // fetchRunLog retrieves the last 50 lines of a failed run's log.
 func (s *Store) fetchRunLog(ctx context.Context, ghPath, repo string, runID int64) string {
-	out, err := exec.CommandContext(ctx, ghPath, "run", "view",
+	out, err := ctxCommand(ctx, ghPath, "run", "view",
 		fmt.Sprintf("%d", runID),
 		"--repo", repo,
 		"--log",
@@ -7381,7 +7381,7 @@ func permanentGitHubSkip(err error) string {
 
 // fetchAndUpsertPRs fetches PRs from GitHub and upserts into github_prs.
 func (s *Store) fetchAndUpsertPRs(ctx context.Context, ghPath, repo, lastUpdated string) error {
-	out, err := exec.CommandContext(ctx, ghPath, "pr", "list",
+	out, err := ctxCommand(ctx, ghPath, "pr", "list",
 		"--repo", repo,
 		"--state", "all",
 		"--json", "number,title,body,state,author,createdAt,updatedAt,mergedAt,url",
@@ -7433,7 +7433,7 @@ func (s *Store) fetchAndUpsertPRs(ctx context.Context, ghPath, repo, lastUpdated
 
 // fetchAndUpsertIssues fetches issues from GitHub and upserts into github_issues.
 func (s *Store) fetchAndUpsertIssues(ctx context.Context, ghPath, repo, lastUpdated string) error {
-	out, err := exec.CommandContext(ctx, ghPath, "issue", "list",
+	out, err := ctxCommand(ctx, ghPath, "issue", "list",
 		"--repo", repo,
 		"--state", "all",
 		"--json", "number,title,body,state,author,createdAt,updatedAt,url,labels",
@@ -7664,7 +7664,7 @@ var errNotGitCheckout = errors.New("not a git checkout")
 // three per reconcile pass on this machine alone.
 func ingestGitCommits(ctx context.Context, db *sql.DB, repoPath, repoName string, afterDate string) (int, error) {
 	// Verify this is actually a git repo.
-	checkCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--git-dir")
+	checkCmd := ctxCommand(ctx, "git", "-C", repoPath, "rev-parse", "--git-dir")
 	if err := checkCmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
@@ -7686,7 +7686,7 @@ func ingestGitCommits(ctx context.Context, db *sql.DB, repoPath, repoName string
 		"--format=%H%x00%an%x00%ae%x00%aI%x00%s%x00%b%x1e",
 		"--after=" + after,
 	}
-	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	cmd := ctxCommand(ctx, "git", gitArgs...)
 	out, err := cmd.Output()
 	if err != nil {
 		switch {
