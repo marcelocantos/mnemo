@@ -182,12 +182,22 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 			continue
 		}
 
-		docs := 0
-		//nolint:gosec // table name comes from the internal corpus registry
-		_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM ` + spec.source).Scan(&docs)
-
+		// Staleness is checked on AGE only, not on corpus growth.
+		//
+		// The growth check needs a live document count, and
+		// `SELECT COUNT(*) FROM messages` costs ~120ms on 2.97M rows —
+		// per search, on the tool carrying 55% of all agent calls. That
+		// made a unified search 137ms against 8ms for the old
+		// message-only path, and the cost was entirely this count:
+		// searching 12 corpora measured the same as searching 1.
+		//
+		// The reconciler already owns growth detection and ticks every
+		// minute, so re-deriving it here bought at most 60 seconds of
+		// freshness for a full-table scan on every query. Passing 0
+		// skips the growth branch (Calibration.Stale guards on
+		// currentDocs > 0) and leaves age as the search-path check.
 		cal := cals[spec.kind]
-		stale, why := cal.Stale(now, docs)
+		stale, why := cal.Stale(now, 0)
 		if stale {
 			out.Degraded[spec.kind] = why
 		}

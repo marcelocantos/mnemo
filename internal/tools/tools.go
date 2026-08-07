@@ -561,11 +561,20 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 		expand = store.DefaultSegmentExpand
 	}
 
-	// 🎯T144: when the caller asks for corpora beyond messages — or takes
-	// the default set — the search spans the index. The message corpus
-	// still goes through the same path as before, so every existing
-	// filter and the context expansion below behave identically.
-	if kinds, ok := args["kinds"].(string); ok && strings.TrimSpace(kinds) != "" {
+	// 🎯T144: search spans the index by DEFAULT, not only when asked.
+	//
+	// This routed to the message-only path unless `kinds` was passed,
+	// out of caution about regressing the tool that carries 55% of all
+	// agent calls. Measurement removed the reason: after dropping a
+	// per-search COUNT(*), a 12-corpus search costs ~16ms against ~15ms
+	// for messages alone — corpus count is not the cost. Defaulting to
+	// one corpus was protecting against an expense that does not exist,
+	// at the price of the feature not being on.
+	//
+	// `expand` still selects the legacy single-corpus renderer, since
+	// segment expansion has its own output shape.
+	if expand == store.SegmentExpandNone || expand == "" {
+		kinds, _ := args["kinds"].(string)
 		return h.unifiedSearch(query, kinds, limit, sessionType, repoFilter,
 			contextBefore, contextAfter, substantiveOnly)
 	}

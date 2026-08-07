@@ -86,3 +86,37 @@ func TestSegmentsAndDecisionsAreSubsumed(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchDefaultsToTheUnifiedSet is the criterion 🎯T144's
+// acceptance actually asks for and that the first implementation did
+// NOT meet: omitting `kinds` must search the default corpus set, not
+// fall back to messages alone.
+//
+// The original routed to unified search only when `kinds` was passed —
+// so the feature was off unless requested, while the target claimed it
+// was the default. Measurement (16ms for 12 corpora vs 15ms for one)
+// removed the performance argument that motivated the caution.
+func TestSearchDefaultsToTheUnifiedSet(t *testing.T) {
+	var desc string
+	for _, tool := range Definitions() {
+		if tool.Name == "mnemo_search" {
+			desc = tool.Description
+		}
+	}
+	if !strings.Contains(desc, "Default kinds:") {
+		t.Error("the description must state what the default set is, since callers " +
+			"cannot see the registry")
+	}
+	// The kinds parameter must be optional — a required one would make
+	// spanning opt-in again by another route.
+	for _, tool := range Definitions() {
+		if tool.Name != "mnemo_search" {
+			continue
+		}
+		for _, req := range tool.InputSchema.Required {
+			if req == "kinds" {
+				t.Error("kinds is required; the unified set must be the default, not a request")
+			}
+		}
+	}
+}
