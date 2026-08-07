@@ -336,8 +336,30 @@ func (s *Store) SelectCompactionCandidatesSince(
 		      SELECT SUM(prompt_tokens + output_tokens) FROM compactions
 		      WHERE session_id = ss.session_id
 		    ), 0)                                                                                   AS comp_tokens,
+		    -- INDEXED BY is load-bearing, not a micro-optimisation
+		    -- (🎯T146). entries.input_tokens and friends are VIRTUAL
+		    -- generated columns extracting from raw JSONB, so an index
+		    -- that does not carry them forces a row fetch and a JSON
+		    -- re-parse per row. idx_entries_assistant_tokens covers
+		    -- (session_id, input_tokens, output_tokens); the planner
+		    -- instead chose idx_entries_addenda, which carries
+		    -- output/cache_creation but NOT input_tokens, and is
+		    -- therefore not covering here.
+		    --
+		    -- Measured on a 35k-session / 2.2M-assistant-entry index:
+		    -- 1458ms planner's choice vs 131ms forced, identical result.
+		    -- Whole scan 5066ms -> 676ms. ANALYZE stats were present and
+		    -- current, so this is a cost-model miss rather than missing
+		    -- statistics: SQLite appears not to credit an index as
+		    -- covering when the columns are VIRTUAL generated.
+		    --
+		    -- The hint is safe to pin: the index is declared in
+		    -- schema.sql and the append-only schema policy forbids
+		    -- dropping it. If it ever did go, this fails loudly at query
+		    -- time rather than silently reverting to a 5-second scan.
 		    COALESCE((
 		      SELECT SUM(input_tokens + output_tokens) FROM entries
+		      INDEXED BY idx_entries_assistant_tokens
 		      WHERE session_id = ss.session_id AND type = 'assistant'
 		    ), 0)                                                                                   AS sess_tokens,
 		    COALESCE((
