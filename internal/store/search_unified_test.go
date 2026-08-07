@@ -124,12 +124,15 @@ func TestUnifiedSearchSpansCorpora(t *testing.T) {
 	}
 }
 
-// TestUnifiedSearchDegradesToFusion is the safety criterion: with no
-// calibration stored, ranking must fall back to rank fusion and SAY so
-// — never to raw BM25 comparison, which is the method calibration
-// exists to replace. A design that degrades into its own rejected
-// failure mode is worse than one that never had the good path.
-func TestUnifiedSearchDegradesToFusion(t *testing.T) {
+// TestUnifiedSearchDegradesToNeutral is the safety criterion: with no
+// calibration stored, hits score at the neutral prior and SAY so —
+// never by raw BM25 comparison, which is the method calibration exists
+// to replace. A design that degrades into its own rejected failure mode
+// is worse than one that never had the good path.
+//
+// Was "DegradesToFusion" before shrinkage replaced the two-tier
+// calibrated/fused ordering with one continuous scale.
+func TestUnifiedSearchDegradesToNeutral(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	seedCorpora(t, s)
 
@@ -141,8 +144,8 @@ func TestUnifiedSearchDegradesToFusion(t *testing.T) {
 		t.Fatal("no hits")
 	}
 	for _, h := range res.Hits {
-		if h.Ranking != "fusion" {
-			t.Errorf("hit %s/%d ranked %q with no calibration stored; want fusion",
+		if h.Ranking != "neutral" {
+			t.Errorf("hit %s/%d ranked %q with no calibration stored; want neutral",
 				h.Kind, h.ID, h.Ranking)
 		}
 	}

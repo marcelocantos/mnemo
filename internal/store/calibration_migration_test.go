@@ -179,8 +179,8 @@ func TestFreshInstallHasCalibrationTable(t *testing.T) {
 
 // TestSearchWorksBeforeAnyCalibration is the migration-day behaviour: a
 // user who upgrades has an empty search_calibration table until the
-// reconciler first runs. Search must work in that window — degraded to
-// fusion, not broken, and not silently comparing raw BM25.
+// reconciler first runs. Search must work in that window — scoring at
+// the neutral prior, not broken, and not silently comparing raw BM25.
 func TestSearchWorksBeforeAnyCalibration(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	seedCorpora(t, s)
@@ -201,8 +201,8 @@ func TestSearchWorksBeforeAnyCalibration(t *testing.T) {
 		t.Fatal("no hits on a freshly-migrated database")
 	}
 	for _, h := range res.Hits {
-		if h.Ranking != "fusion" {
-			t.Errorf("hit ranked %q before any calibration exists; want fusion", h.Ranking)
+		if h.Ranking != "neutral" {
+			t.Errorf("hit ranked %q before any calibration exists; want neutral", h.Ranking)
 		}
 	}
 }

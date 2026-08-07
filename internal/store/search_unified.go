@@ -31,6 +31,10 @@ type UnifiedHit struct {
 	// degraded one. Ranking is the field's meaning; Ranking says which.
 	Score   float64 `json:"score"`
 	Ranking string  `json:"ranking"`
+	// Evidence is the shrinkage weight behind Score, in [0,1]: how much
+	// of this corpus's own distribution was believed. Disclosed because
+	// "quantile 0.97" from 30 samples and from 1000 are different claims.
+	Evidence float64 `json:"evidence"`
 
 	// SegmentLabel/SegmentSummary enrich a message hit with the topic
 	// span that encloses it (🎯T144): segmentation exists to make search
@@ -64,11 +68,19 @@ type UnifiedSearchResult struct {
 // hits rather than exactly one.
 const unifiedFetchPerCorpus = 50
 
-// rrfK damps the contribution of a corpus's head under the degraded
-// path. The conventional 60: large enough that rank 1 and rank 5 are
-// not wildly apart, which is the point — fusion is quality-blind, so it
-// should not assert that a corpus's #1 is excellent.
-const rrfK = 60.0
+// rankingLabel describes how much a hit's score rests on its corpus's
+// own measured distribution versus the neutral prior. Reported per hit
+// so a reader can tell a well-evidenced ranking from a guess.
+func rankingLabel(evidence float64) string {
+	switch {
+	case evidence == 0:
+		return "neutral"
+	case evidence < 0.5:
+		return "weak"
+	default:
+		return "calibrated"
+	}
+}
 
 // UnifiedOpts carries the message-corpus filters that predate 🎯T144.
 //
@@ -180,32 +192,32 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 			out.Degraded[spec.kind] = why
 		}
 
+		// A stale distribution is not used as evidence: it is dropped to
+		// zero-evidence, so its corpus scores at the neutral prior rather
+		// than by numbers that no longer describe it.
+		effective := cal
+		if stale {
+			effective = nil
+		}
+		evidence := effective.Evidence()
 		for i, r := range raw {
-			h := UnifiedHit{Kind: spec.kind, ID: r.id, Message: r.msg}
-			if stale {
-				// Degraded: rank fusion. Quality-blind by construction,
-				// so it must not be presented as a quantile.
-				h.Score = 1.0 / (rrfK + float64(i+1))
-				h.Ranking = "fusion"
-			} else {
-				h.Score = cal.Quantile(r.mag)
-				h.Ranking = "calibrated"
+			h := UnifiedHit{
+				Kind:     spec.kind,
+				ID:       r.id,
+				Message:  r.msg,
+				Score:    effective.Score(r.mag, i),
+				Evidence: evidence,
+				Ranking:  rankingLabel(evidence),
 			}
 			all = append(all, h)
 		}
 	}
 
-	// Fusion scores and quantiles are not on one scale, so sorting them
-	// together would reintroduce exactly the incomparability this exists
-	// to remove. Calibrated hits rank above fused ones, each group
-	// internally ordered; the Degraded map says which corpora landed in
-	// the second group and why.
+	// One scale. Shrinkage put every hit on the same [0,1] axis, so
+	// there is no second tier to sort separately — an unmeasured corpus
+	// sits at the neutral prior and interleaves, rather than being
+	// exiled beneath corpora that merely happen to have been sampled.
 	sort.SliceStable(all, func(i, j int) bool {
-		ci := all[i].Ranking == "calibrated"
-		cj := all[j].Ranking == "calibrated"
-		if ci != cj {
-			return ci
-		}
 		return all[i].Score > all[j].Score
 	})
 	if len(all) > limit {

@@ -210,8 +210,8 @@ func TestRefreshClearsStaleness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-refresh search: %v", err)
 	}
-	if len(res.Hits) == 0 || res.Hits[0].Ranking != "fusion" {
-		t.Fatal("expected fusion before the reconciler has run")
+	if len(res.Hits) == 0 || res.Hits[0].Ranking != "neutral" {
+		t.Fatal("expected the neutral prior before the reconciler has run")
 	}
 	if len(res.Degraded) == 0 {
 		t.Error("pre-refresh search must report degradation")

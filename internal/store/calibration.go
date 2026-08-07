@@ -65,15 +65,54 @@ const (
 	calibrationTopK   = 25
 )
 
-// calibrationMinSamples is the floor below which a distribution is not
-// evidence. Deliberately separate from calibrationQuantiles: the
-// boundary array is interpolated, so it does not need one raw sample per
-// point, and requiring that conflates "how finely we report a quantile"
-// with "how much data stands behind it". A homogeneous corpus — one
-// where every document uses the same handful of words — yields few
-// distinct probe terms, and demanding 101 samples from it would refuse
-// to calibrate a corpus that is perfectly calibratable at 30.
-const calibrationMinSamples = 30
+// calibrationMinSamples is the floor below which no distribution can be
+// built at all — extractQuantiles needs at least a couple of points to
+// interpolate between. It is NOT a trust threshold: how much a
+// distribution is believed is governed by shrinkage (see Score), which
+// is continuous. A hard trust threshold was the earlier design and it
+// was wrong in both directions — see the comment on shrinkageK.
+const calibrationMinSamples = 8
+
+// shrinkageK is the sample count at which a corpus's own distribution
+// is believed half as much as the neutral prior: w = n/(n+k).
+//
+// WHY SHRINKAGE REPLACED A FLOOR. The first design refused to calibrate
+// below 30 samples and ranked every uncalibrated corpus beneath every
+// calibrated one. Both ends were wrong, and the thin end was worse.
+//
+//   - Thin end: a corpus that squeaked past the floor got FULL
+//     confidence. On the live index, `skill` calibrated from 30 samples
+//     over TEN documents, and could hand a hit quantile 1.00 for being
+//     the best of ten — then compete head-to-head with a 1000-sample
+//     distribution over 2.97M messages. That is exactly the failure
+//     ("a corpus whose best hit is poor still maps to 1.0") that
+//     top-N rescaling was rejected for, readmitted through the
+//     small-corpus door.
+//   - Zero end: an uncalibrated corpus was exiled below everything
+//     else regardless of match quality, so a tiny corpus with a perfect
+//     match lost to a large corpus's mediocre one.
+//
+// Shrinkage makes evidence continuous instead of a cliff: a corpus
+// earns influence in proportion to how much data stands behind it.
+// n=0 sits at the neutral prior and interleaves mid-pack; n=30 can move
+// ±0.11 from neutral; n=1000 is essentially its own empirical
+// distribution.
+//
+// k is "how many samples before I half-believe you". 100 is a starting
+// point chosen for shape, not measured — worth revisiting against real
+// query traffic.
+const shrinkageK = 100.0
+
+// neutralQuantile is where a corpus with no evidence sits: the middle.
+// Not zero (which would exile it) and not one (which would let an
+// unmeasured corpus lead).
+const neutralQuantile = 0.5
+
+// rankTiebreak preserves within-corpus ordering among hits that shrink
+// to the same score. Small enough that it cannot reorder corpora that
+// genuinely differ on evidence: at 50 hits per corpus the total drift is
+// 0.005, well inside one quantile point.
+const rankTiebreak = 1e-4
 
 // calibrationStaleAfter is when a stored distribution stops being
 // trusted on age alone. Corpora grow continuously; a distribution is
@@ -119,6 +158,37 @@ func (c *Calibration) Quantile(magnitude float64) float64 {
 		frac = (magnitude - lo) / (hi - lo)
 	}
 	return (float64(i-1) + frac) / float64(n-1)
+}
+
+// Evidence returns the shrinkage weight for this calibration: how much
+// of its own empirical distribution is believed, in [0,1]. A nil or
+// unusable calibration has zero evidence.
+func (c *Calibration) Evidence() float64 {
+	if c == nil || len(c.Quantiles) < 2 || c.SampleSize <= 0 {
+		return 0
+	}
+	n := float64(c.SampleSize)
+	return n / (n + shrinkageK)
+}
+
+// Score is what hits are ranked by: the corpus's empirical quantile,
+// shrunk toward the neutral prior in proportion to how much evidence
+// stands behind that distribution.
+//
+// This is the single scale everything competes on. There is no separate
+// "calibrated" and "uncalibrated" ordering — a corpus with no
+// distribution scores at the neutral prior and interleaves, rather than
+// being ranked beneath corpora that merely happen to have been sampled.
+//
+// rank is the hit's position within its own corpus, used only to break
+// ties among hits that shrink to the same value.
+func (c *Calibration) Score(magnitude float64, rank int) float64 {
+	w := c.Evidence()
+	q := neutralQuantile
+	if w > 0 {
+		q = c.Quantile(magnitude)
+	}
+	return w*q + (1-w)*neutralQuantile - float64(rank)*rankTiebreak
 }
 
 // Stale reports whether this calibration should still be trusted, and
