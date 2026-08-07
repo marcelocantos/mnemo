@@ -368,46 +368,6 @@ Parameters:
 - `model` — model prefix filter (e.g. "claude-opus-4")
 - `group_by` — "day" (default), "model", "repo", "session", or "block"
 
-### mnemo_budget
-
-Spend against a resetting budget period, with projection and culprits.
-
-Alerts on the **projection**, not on a threshold already crossed: *"at
-$47/day, 2026-07 exceeds its $500 cap on the 19th"* is actionable where
-*"80% consumed"* arrives after the decision that caused it. Burn rate is
-measured over a trailing 7 days, so a change in behaviour surfaces in
-days rather than being averaged away.
-
-When severity is not `ok`, names culprit sessions largest-first, each
-resolved to a repo, working directory, and a live pid where the session
-is still running — a live session can be attached to or killed, a
-finished one cannot, and the report says which.
-
-`governed_usd` reports the portion mnemo itself caused. mnemo can only
-throttle its own agents, so a rising total alongside an active throttle
-is expected rather than a malfunction.
-
-No parameters — reads the configured budget.
-
-### mnemo_agent_trees
-
-Sub-agent fan-outs reconstructed and costed **as a whole**, ranked by
-aggregate tree cost.
-
-For the failure a per-session ranking cannot see: forty individually
-unremarkable agents that collectively trip the wire. Reports the skill
-and turn that started each tree, `tree_cost_usd` vs `direct_cost_usd`
-(expensive by itself vs expensive because of its children), depth, and
-whether it is still running.
-
-Claude-only: the parentage fields come from Claude Code's record shape.
-
-Parameters:
-- `days` — recency window (default 7)
-- `since` / `until` — RFC3339 bounds
-- `repo` — repo filter
-- `limit` — max trees (default 20)
-
 ### Budgeting and cost control
 
 Opt in to pricing, and optionally set a cap, in `~/.mnemo/config.json`:
@@ -446,36 +406,6 @@ itself — compactor, segmenter, reviewer, image description — and nothing
 else. Throttling is soft (a delay between runs, never a refusal) and
 loud (`mnemo_ops` (op=doctor) reports the level, reason, and what would lift it).
 
-### mnemo_permissions
-
-Analyze tool usage patterns across sessions to suggest allowedTools
-rules for settings.json. Returns most frequently used tools with counts
-and Bash command prefix analysis with suggested permission rules.
-
-Parameters:
-- `days` — recency window (default 30)
-- `repo` — repo filter
-- `limit` — max results per category (default 20)
-
-### mnemo_chain
-
-Retrieve the full `/clear`-bounded session chain for any session ID.
-When a user types `/clear` in Claude Code, the current JSONL transcript
-ends and a new one begins within ~300ms. mnemo detects these rollovers
-and links successive sessions into chains.
-
-Given any session ID in a chain, returns the complete ordered chain from
-oldest to newest, with per-session summaries (topic, timestamps, repo)
-and the gap/confidence for each link. Single-element result if no chain
-is found.
-
-Parameters:
-- `session_id` (required) — any session ID in the chain (or a prefix)
-
-Use this when you need to understand a work span that crossed `/clear`
-boundaries — e.g., to reconstruct the full context of a multi-session
-task.
-
 ### mnemo_compacted_session
 
 Return the compacted view of a session — its distilled retrieval form
@@ -495,51 +425,6 @@ Parameters:
   `mnemo_read_session`
 - `addenda_limit` — max addenda messages past the cursor to include
   (default 200)
-
-### mnemo_session_go
-
-Reopen a past conversation. Resolves a loose reference to one session,
-opens an iTerm2 tab in the directory that session ran in, and resumes it
-there.
-
-Reach for this when someone wants to pick a conversation back up but
-doesn't have its id — which is the normal case. The usual flow is a
-dialogue: find the session with `mnemo_search` or `mnemo_sessions`, then
-reopen it. An exact id always wins, so handing back an id you just
-discovered does the obvious thing.
-
-Parameters:
-- `session` — how to find it. Omitted, `"latest"`, or `"recent"` for the
-  most recent substantive session; `"latest:<scope>"` (or
-  `"latest <scope>"`) for the newest in a matching repo or project;
-  a session id or unique prefix for that exact session; anything else is
-  treated as a repo/project fragment and matches the newest one.
-
-It reopens in the session's **own** working directory, never the
-caller's. A conversation is about a working tree, so resuming it
-somewhere else hands the agent context that contradicts its own
-transcript. A recorded directory that no longer exists — a deleted repo,
-or a temp dir that has since evaporated — is reported as such rather
-than silently substituted.
-
-Each session gets its own tab rather than stealing one belonging to
-another session that happens to share a working directory.
-
-Claude Code and Grok CLI sessions resume (`claude --resume <id>` and
-`grok --resume <id>`; neither forks). Codex/ChatGPT sessions are indexed
-but have no verified terminal resume — they appear to be Desktop/IDE
-conversations rather than CLI ones — so they are refused by name rather
-than opened as a bare shell.
-
-Requires iTerm2 and the daemon's Automation permission, as
-`mnemo_thread_go` does. Returns `{action: focused|spawned, path,
-session_id, repo, topic, command}`.
-
-There is a CLI twin, `mnemo resume [<ref>]`, taking the same references —
-for the case where someone wants a conversation back with no agent running
-to ask. Both routes go through the daemon's `POST /api/session/go`, so
-they behave identically; the daemon holds the single terminal Automation
-grant, which is why neither the CLI nor a shim drives iTerm2 directly.
 
 ### mnemo_session_structure
 
@@ -682,8 +567,7 @@ If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
 tools (`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
 `mnemo_decisions`, `mnemo_commits`, `mnemo_prs`, `mnemo_memories`,
 `mnemo_who_ran`, `mnemo_audit`, `mnemo_targets`,
-`mnemo_skills`, `mnemo_configs`,
-`mnemo_discover_patterns`) wrap their result in a `FanoutEnvelope`
+`mnemo_skills`, `mnemo_configs`) wrap their result in a `FanoutEnvelope`
 attributing per-instance results:
 
 ```json
@@ -702,9 +586,8 @@ Per-peer timeout default 5s.
 
 When `linked_instances` is empty or absent, all tools return their
 original local-only response shape unchanged. Write- and
-control-shaped tools (`mnemo_ops`, `mnemo_whatsup`,
-`mnemo_permissions`, `mnemo_query`,
-`mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
+control-shaped tools (`mnemo_ops`, `mnemo_query`,
+`mnemo_stats`, `mnemo_status`, `mnemo_vault`,
 `mnemo_thread`, `mnemo_note`) bypass federation entirely.
 
 Setup is documented in the README under "Federation across linked
@@ -804,6 +687,6 @@ an empty source and is surfaced, not hidden.
 - **What files were edited**: `mnemo_query` with `SELECT DISTINCT tool_file_path FROM messages WHERE tool_name = 'Edit'`
 - **What commands were run**: `mnemo_query` with `SELECT tool_command FROM messages WHERE tool_name = 'Bash'`
 - **Search within a repo**: `mnemo_search` with `repo: "mnemo"` and a query term
-- **Trace a work span across /clear**: `mnemo_chain` with any session ID — returns the full chain of linked sessions
+- **Trace a work span across /clear**:  with any session ID — returns the full chain of linked sessions
 - **Which sessions are live?**: `mnemo_sessions` — live sessions are annotated with `[LIVE pid=NNNNN]`
 - **Custom analytics**: `mnemo_query` with SQL — e.g., message volume by day, most active projects

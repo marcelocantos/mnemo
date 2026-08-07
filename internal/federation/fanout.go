@@ -29,12 +29,11 @@ import (
 // (mnemo_stats, mnemo_status, mnemo_chain, mnemo_query — bespoke
 // shapes that callers expect verbatim).
 var FanoutToolNames = map[string]struct{}{
-	"mnemo_search":            {},
-	"mnemo_sessions":          {},
-	"mnemo_recent_activity":   {},
-	"mnemo_decisions":         {},
-	"mnemo_discover_patterns": {},
-	"mnemo_rework_history":    {},
+	"mnemo_search":          {},
+	"mnemo_sessions":        {},
+	"mnemo_recent_activity": {},
+	"mnemo_decisions":       {},
+	"mnemo_rework_history":  {},
 }
 
 // PeerResult holds the raw text response from one peer's instance of

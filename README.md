@@ -141,7 +141,7 @@ PATH — Go cgo does not use MSVC. The simplest setup is
 [MSYS2](https://www.msys2.org/) with the `mingw-w64-x86_64-toolchain`
 package. Release binaries from the GitHub release page are statically
 linked and have no external runtime requirements. Live-session
-discovery (`mnemo_whatsup`, `lsof`-based liveness) degrades gracefully
+discovery (`/api/whatsup`, `lsof`-based liveness) degrades gracefully
 on Windows; transcript indexing and all query tools work identically.
 
 ## Running
@@ -199,7 +199,7 @@ that has since been deleted is reported rather than silently substituted.
 Claude Code and Grok CLI sessions resume. Codex/ChatGPT sessions are
 indexed but refused by name — they have no verified terminal resume.
 
-Agents can do the same through the `mnemo_session_go` MCP tool, which is
+The same resolution is available over HTTP at `POST /api/session/go`, which is
 usually the better route: ask mnemo to find the conversation, then ask it
 to open the one you meant.
 
@@ -340,11 +340,9 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
 | `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
-| `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
 | `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
-| `mnemo_session_go` | Reopen a past conversation: resolve a loose reference (id/prefix, repo fragment, `latest`, `latest:<scope>`) and resume it in an iTerm2 tab in the directory that session ran in. Claude Code and Grok CLI; Codex/ChatGPT refused by name |
 
 ### Cross-project knowledge
 
@@ -396,11 +394,6 @@ primitive lives in the harness, not the daemon.
 | Tool | Description |
 |---|---|
 | `mnemo_usage` | Token usage analytics with costs, grouped by day/model/repo/session/block. Reports what it excludes: unpriced models and undeduplicable sources |
-| `mnemo_budget` | Spend against a resetting monthly budget, alerting on the **projection** rather than a threshold already crossed, and naming the sessions burning it |
-| `mnemo_agent_trees` | Sub-agent fan-outs costed as a whole — for the case where forty individually modest agents collectively blow the budget |
-| `mnemo_whatsup` | Live session resource monitor: CPU%, RSS, memory pressure |
-| `mnemo_permissions` | Analyse tool usage patterns to suggest `allowedTools` rules |
-| `mnemo_discover_patterns` | Workaround patterns suggesting missing features, persisted and refreshed hourly. Reports occurrences and distinct sessions separately, and needs ≥ 3 of the former across ≥ 2 of the latter — one session's habit is not a pattern |
 
 ### Database and templates
 
@@ -522,8 +515,8 @@ Slow or offline peers drop into `warnings[]` with a typed
 `server_error`, `malformed_response`, `connect_failed`); the local
 response returns regardless. Per-peer timeout default 5s.
 
-Write- and control-shaped tools (`mnemo_ops`, `mnemo_whatsup`, `mnemo_permissions`, `mnemo_query`,
-`mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
+Write- and control-shaped tools (`mnemo_ops`, `mnemo_query`,
+`mnemo_stats`, `mnemo_status`, `mnemo_vault`,
 `mnemo_thread`, `mnemo_note`) bypass federation entirely.
 
 When `linked_instances` is empty or absent, federation is disabled and
@@ -547,7 +540,7 @@ on top of them:
 - **Cross-repo knowledge lookups** — search memories, configs, targets,
   and plans from any project without leaving your current session
 - **Session forensics** — trace a multi-session work span with
-  `mnemo_chain`, replay decisions with `mnemo_decisions`, or audit
+  replay decisions with `mnemo_decisions`, or audit
   what commands were run with `mnemo_who_ran`
 - **Custom dashboards** — use `mnemo_query` with SQL or sqldeep syntax
   to build project-specific analytics (message volume, tool usage

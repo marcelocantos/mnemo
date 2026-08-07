@@ -52,7 +52,6 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_decisions":         consumerAgent, // 83 / 77 (one July fan-out)
 	"mnemo_compacted_session": consumerAgent, // 6 / 4
 	"mnemo_segments":          consumerAgent, // 8 / 2
-	"mnemo_chain":             consumerAgent, // 3 / 3
 	"mnemo_session_structure": consumerAgent, // 6 / 5
 	"mnemo_locate_uuid":       consumerAgent, // 1 / 1
 
@@ -64,12 +63,7 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_status": consumerAgent, // 17 / 14
 	"mnemo_stats":  consumerAgent, // 16 / 14
 
-	// Cost. Young — filed 2026-07-30, so absence of calls is absence of
-	// opportunity, not absence of demand. 🎯T140 is building their
-	// surfaces.
-	"mnemo_usage":       consumerAgent, // 13 / 5
-	"mnemo_budget":      consumerUser,  // new with 🎯T135
-	"mnemo_agent_trees": consumerUser,  // new with 🎯T137
+	"mnemo_usage": consumerAgent, // 13 / 5
 
 	// Consolidated entry points (🎯T143.3/.4/.5).
 	"mnemo_vault":  consumerUser,  // maintenance; 10 tools folded
@@ -92,10 +86,6 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_note": consumerUser,
 
 	// Session control and introspection.
-	"mnemo_session_go":        consumerAgent, // new with 🎯T125
-	"mnemo_config":            consumerAgent, // 12 / 4
-	"mnemo_whatsup":           consumerAgent, // 2 / 2
-	"mnemo_permissions":       consumerAgent, // 1 / 1
-	"mnemo_discover_patterns": consumerAgent, // 1 / 1
-	"mnemo_rework_history":    consumerSkill, // bullseye_rework feeds on it
+	"mnemo_config":         consumerAgent, // 12 / 4
+	"mnemo_rework_history": consumerSkill, // bullseye_rework feeds on it
 }

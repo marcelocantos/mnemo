@@ -22,18 +22,16 @@ import (
 // so adding a new tool is a deliberate decision: a new mnemo_X tool
 // does NOT appear on the federated endpoint until it is added here.
 var FederatedToolNames = map[string]struct{}{
-	"mnemo_search":            {},
-	"mnemo_sessions":          {},
-	"mnemo_read_session":      {},
-	"mnemo_query":             {},
-	"mnemo_repos":             {},
-	"mnemo_stats":             {},
-	"mnemo_recent_activity":   {},
-	"mnemo_status":            {},
-	"mnemo_usage":             {},
-	"mnemo_decisions":         {},
-	"mnemo_chain":             {},
-	"mnemo_discover_patterns": {},
+	"mnemo_search":          {},
+	"mnemo_sessions":        {},
+	"mnemo_read_session":    {},
+	"mnemo_query":           {},
+	"mnemo_repos":           {},
+	"mnemo_stats":           {},
+	"mnemo_recent_activity": {},
+	"mnemo_status":          {},
+	"mnemo_usage":           {},
+	"mnemo_decisions":       {},
 }
 
 // RegisterFederatedTools attaches only the read-only subset of tools

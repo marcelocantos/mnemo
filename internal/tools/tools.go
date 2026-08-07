@@ -402,47 +402,6 @@ A top-level "freshness" field reports the RFC3339 timestamp of the most recently
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
 			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", "repo", "session" (one row per Claude Code session ID), or "block" (one row per 5-hour Anthropic billing block, boundaries aligned to UTC and matching what /cost and ccusage report).`)),
 		),
-		mcp.NewTool("mnemo_budget",
-			mcp.WithDescription(`Spend against a resetting budget period, with projection and culprits.
-
-Answers "where am I, and am I heading for trouble" for the current calendar month (resets on the 1st, in the configured timezone).
-
-Alerting is on the PROJECTION, not on a threshold already crossed: "at $47/day, 2026-07 exceeds its $500 cap on the 19th" is something you can act on, where "80% consumed" arrives after the decision that caused it. The burn rate is measured over a trailing 7 days rather than the whole period, so a change in behaviour shows up within days instead of being averaged away.
-
-When severity is not "ok", the report names culprit sessions — largest spend first, each resolved to a repo, a working directory, and a live pid where the session is still running. A live session can be attached to (mnemo_session_go) or killed; a finished one cannot, and is labelled as such.
-
-Configure with {"budget": {"monthly_cap_usd": 500, "timezone": "Australia/Sydney", "warn_at_pct": 100}}. With no cap, spend is still reported and nothing alerts.
-
-Carries the same "unpriced_models" and "uncounted" disclosures as mnemo_usage — a budget figure that silently omits a provider is worse than no figure, because it gets believed.`),
-		),
-		mcp.NewTool("mnemo_agent_trees",
-			mcp.WithDescription(`Sub-agent fan-outs reconstructed and costed as a WHOLE, ranked by aggregate tree cost.
-
-For the failure a per-session ranking cannot see: a fan-out where every individual agent looks reasonable and forty together trip the wire. Ranking sessions by cost shows forty modest entries and nothing obviously wrong; only the aggregate at the root makes the shape visible.
-
-Each tree reports the root cause where the transcript records it — the skill that started it, the agent types spawned, the turn that spawned them and when. "You spent a lot" is not actionable; "the release skill spawned 40 agents at 14:03" is.
-
-tree_cost_usd is the fan-out's aggregate; direct_cost_usd is the session's own main-line spend, so a session that is expensive by itself is distinguishable from one that is expensive because of its children. max_depth is reported because a tree three deep is a different problem from a wide shallow one, and nested fan-outs roll up through every level.
-
-Trees still running carry live=true and a pid, and can be stopped (mnemo_session_go, or kill). Finished ones say so — their spend is already incurred.
-
-CLAUDE ONLY, deliberately. The parentage fields come from Claude Code's record shape; Codex records carry no message id and no parent linkage, and a tree built over them would be noise presented as structure. Trees whose spend cannot be priced report priced=false rather than a plausible $0.00.`),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 7).")),
-			mcp.WithString("since", mcp.Description("RFC3339 lower bound. Overrides days.")),
-			mcp.WithString("until", mcp.Description("RFC3339 upper bound.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment.")),
-			mcp.WithNumber("limit", mcp.Description("Max trees to return (default 20).")),
-		),
-		mcp.NewTool("mnemo_permissions",
-			mcp.WithDescription(`Analyze tool usage patterns across sessions to suggest allowedTools rules for settings.json.
-
-Returns the most frequently used tools with counts and concrete suggestions for permission rules. Also analyzes Bash command patterns to suggest fine-grained Bash permissions (e.g., "Bash(go *)", "Bash(git *)").
-
-Use this to understand which tools agents use most and to tighten permissions without blocking common workflows.`),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
-		),
 		mcp.NewTool("mnemo_decisions",
 			mcp.WithDescription(`Search past decisions across all sessions. Decisions are automatically detected from proposal + confirmation patterns in conversations (e.g., assistant proposes an approach, user confirms with "yes", "go ahead", "lgtm"). Use this to recall what was decided and why.`),
 			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
@@ -450,61 +409,12 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
-		mcp.NewTool("mnemo_chain",
-			mcp.WithDescription(`Retrieve the /clear-bounded session chain for any session ID.
-
-Session chain detection has two layers:
-  - DEFINITIVE: rows in session_chains written live by the daemon
-    when a proxy connection observes successive sessions. These
-    carry mechanism='mcp_connection', confidence='definitive'.
-  - HEURISTIC: query-time inference for sessions the daemon never
-    saw live (first installs, daemon downtime, sessions that never
-    called a mnemo tool). Uses the cwd-most-recent rule.
-
-mode:
-  - "auto" (default) — returns the definitive chain; if the query
-    session has no definitive predecessor, surfaces heuristic
-    candidates.
-  - "strict" — definitive only; empty when no connection observed
-    the rollover.
-  - "candidates" — always returns both definitive rows and
-    heuristic candidates, labelled by mechanism, so the caller can
-    see ambiguity explicitly.`),
-			mcp.WithString("session_id", mcp.Required(), mcp.Description("Any session ID in the chain (or a prefix)")),
-			mcp.WithString("mode", mcp.Description(`"auto" (default), "strict", or "candidates".`)),
-		),
 		mcp.NewTool("mnemo_compacted_session",
 			mcp.WithDescription(`Return the compacted view of a session: its compaction summaries (the dense, durable layer) followed by the addenda tail — the substantive messages past the latest compaction cursor, computed live from the index.
 
 This is the token-volume retrieval form (🎯T72): a converged session is mostly summary plus a bounded tail; a session below the size floor has no summary and the addenda ARE the whole session (its raw entries are its retrieval form). Use this instead of mnemo_read_session when you want the distilled view rather than the raw transcript.`),
 			mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID (exact or prefix, consistent with mnemo_read_session).")),
 			mcp.WithNumber("addenda_limit", mcp.Description("Max addenda messages past the cursor to include (default 200).")),
-		),
-		mcp.NewTool("mnemo_whatsup",
-			mcp.WithDescription(`Report which active Claude Code sessions are doing expensive work right now.
-
-Shows per-session CPU%, RSS memory, CPU time, cwd, and resolved transcript path alongside system-wide memory pressure. Cross-references live session PIDs with session metadata (repo, topic, work type) and reads PWD from each process's environment. Results are sorted by CPU% descending so the busiest session appears first.
-
-Use postmortem=true when no live sessions are detected (e.g. after a machine crash) to recover which directories had recent Claude activity based on transcript file mtimes within the last 24 hours.
-
-Use this to answer "what is Claude doing right now?" — especially useful when the machine is hot or fans are spinning.`),
-			mcp.WithBoolean("postmortem", mcp.Description("When true and no live sessions exist, report directories with recent Claude activity from transcript mtimes (last 24h).")),
-		),
-		mcp.NewTool("mnemo_discover_patterns",
-			mcp.WithDescription(`Workaround patterns mined from transcript history — places where an agent reached around mnemo instead of through it, and therefore candidate missing features.
-
-Detects:
-- direct_jsonl_read: Bash commands that read JSONL transcript files directly (bypassing mnemo)
-- transcript_grep: grep/rg over transcript directories instead of using mnemo_search
-- repeated_query: the same mnemo_query shape run repeatedly (candidate for a template)
-- repeated_search: the same mnemo_search terms run repeatedly (may warrant a dedicated tool)
-
-Served from the persisted patterns table, refreshed hourly by a reconciler, so patterns accumulate a real first_seen instead of being re-derived per call. The reported mine timestamp says how fresh the answer is.
-
-occurrence_count and session_count are different numbers and both are reported: one session that read six transcript files directly is 6 occurrences across 1 session. The emission gate is occurrence >= 3 across >= 2 sessions — a pattern with no corroborating second session is not reported, because a single session's habit is not yet a pattern.`),
-			mcp.WithNumber("days", mcp.Description("Recency window in days, applied to last_seen (default 90)")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment; matches any repo the pattern spans")),
-			mcp.WithNumber("min_occurrences", mcp.Description("Minimum occurrence count to report (default 3). The >= 2 distinct sessions requirement is not adjustable.")),
 		),
 		mcp.NewTool("mnemo_session_structure",
 			mcp.WithDescription(`Return a structural summary of a session's entry types and content-block shapes.
@@ -572,20 +482,6 @@ Response includes which fields changed, which were adopted live, and which requi
 		noteTool(),
 		threadTool(),
 		opsTool(),
-		mcp.NewTool("mnemo_session_go",
-			mcp.WithDescription(`Reopen a past conversation (🎯T125): resolve a loose reference to one session, open an iTerm2 tab in the directory that session ran in, and resume it there.
-
-Use this when someone wants to pick a conversation back up but does not have its id — which is the normal case. The "session" argument is interpreted by content:
-- omitted, "latest", "recent" — the most recent substantive session
-- "latest:<scope>" or "latest <scope>" — most recent in a matching repo/project, e.g. "latest mnemo"
-- a session id or unique prefix — that session (an exact id always wins)
-- anything else — treated as a repo/project fragment, newest match
-
-Reopening happens in the session's OWN working directory, not the caller's: a conversation is about a working tree, and resuming it elsewhere gives the agent context that contradicts its own transcript. A directory that no longer exists is reported rather than silently substituted.
-
-Requires iTerm2 and the daemon's Automation permission (as mnemo_thread_go does). Resumes Claude Code and Grok CLI sessions (claude --resume / grok --resume). Codex/ChatGPT sessions are indexed but have no verified terminal resume — they appear to be Desktop/IDE conversations rather than CLI ones — so they are refused by name rather than opened as a bare shell. Returns {action: focused|spawned, path, session_id, repo, topic, command}.`),
-			mcp.WithString("session", mcp.Description(`Which session to reopen: an id/prefix, a repo or project fragment, "latest", or "latest:<scope>". Omit for the most recent session.`)),
-		),
 	}
 }
 
@@ -635,22 +531,10 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.stats()
 	case "mnemo_usage":
 		return ch.usage(args)
-	case "mnemo_budget":
-		return ch.budget()
-	case "mnemo_agent_trees":
-		return ch.agentTrees(args)
-	case "mnemo_permissions":
-		return ch.permissions(args)
 	case "mnemo_decisions":
 		return ch.decisions(args)
-	case "mnemo_chain":
-		return ch.chain(args)
 	case "mnemo_compacted_session":
 		return ch.compactedSession(args)
-	case "mnemo_whatsup":
-		return ch.whatsup(args)
-	case "mnemo_discover_patterns":
-		return ch.discoverPatterns(args)
 	case "mnemo_locate_uuid":
 		return ch.locateUUID(args)
 	case "mnemo_session_structure":
@@ -667,8 +551,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.vaultDispatch(args, h.cfgCtl)
 	case "mnemo_config":
 		return ch.config(args, h.cfgCtl)
-	case "mnemo_session_go":
-		return ch.sessionGo(args)
 	default:
 		return "", false, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1080,74 +962,6 @@ func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *callHandler) budget() (string, bool, error) {
-	cfg, err := store.LoadConfig()
-	if err != nil {
-		return fmt.Sprintf("read config: %v", err), true, nil
-	}
-	st, err := h.mem.BudgetStatusNow(cfg.Budget, time.Now())
-	if err != nil {
-		return fmt.Sprintf("budget status failed: %v", err), true, nil
-	}
-	out, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) agentTrees(args map[string]any) (string, bool, error) {
-	p := store.AgentTreeParams{}
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		p.Days = int(d)
-	}
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		p.Limit = int(l)
-	}
-	p.Since, _ = args["since"].(string)
-	p.Until, _ = args["until"].(string)
-	p.RepoFilter, _ = args["repo"].(string)
-
-	trees, err := h.mem.AgentTrees(p)
-	if err != nil {
-		return fmt.Sprintf("agent tree query failed: %v", err), true, nil
-	}
-	if len(trees) == 0 {
-		return "No sub-agent fan-outs found in this window.", false, nil
-	}
-	out, err := json.MarshalIndent(trees, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) permissions(args map[string]any) (string, bool, error) {
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	repoFilter, _ := args["repo"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	result, err := h.mem.Permissions(days, repoFilter, limit)
-	if err != nil {
-		return fmt.Sprintf("permissions analysis failed: %v", err), true, nil
-	}
-	if len(result.TopTools) == 0 {
-		return "No tool usage data found.", false, nil
-	}
-
-	out, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
 func (h *callHandler) decisions(args map[string]any) (string, bool, error) {
 	query, _ := args["query"].(string)
 	repo, _ := args["repo"].(string)
@@ -1433,228 +1247,6 @@ func (h *callHandler) compactedSession(args map[string]any) (string, bool, error
 			text = text[:497] + "..."
 		}
 		fmt.Fprintf(&b, "[%s] %s\n", m.Role, text)
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) chain(args map[string]any) (string, bool, error) {
-	sessionID, _ := args["session_id"].(string)
-	if sessionID == "" {
-		return "session_id is required", true, nil
-	}
-	mode, _ := args["mode"].(string)
-	if mode == "" {
-		mode = "auto"
-	}
-
-	links, err := h.mem.Chain(sessionID)
-	if err != nil {
-		return fmt.Sprintf("chain lookup failed: %v", err), true, nil
-	}
-	if len(links) == 0 {
-		return fmt.Sprintf("No session found for ID %s", sessionID), true, nil
-	}
-
-	// Definitive chain has a predecessor if the head of the chain is
-	// not the queried session. Otherwise, the queried session has no
-	// definitive predecessor — heuristic fallback may be relevant.
-	hasDefinitivePred := len(links) > 1 && links[0].SessionID != sessionID
-
-	var candidates []store.ChainCandidate
-	runHeuristic := mode == "candidates" || (mode == "auto" && !hasDefinitivePred)
-	if runHeuristic {
-		if cc, err := h.mem.InferChainHeuristic(sessionID, 3); err == nil {
-			candidates = cc
-		}
-	}
-
-	var b strings.Builder
-	if len(links) == 1 {
-		fmt.Fprintf(&b, "Single session (no chain links detected):\n")
-	} else {
-		fmt.Fprintf(&b, "Chain of %d sessions (oldest → newest):\n", len(links))
-	}
-	for i, link := range links {
-		sid := link.SessionID
-		if len(sid) > 10 {
-			sid = sid[:10]
-		}
-		repo := link.Repo
-		if repo == "" {
-			repo = link.Project
-		}
-		topic := link.Topic
-		if len(topic) > 80 {
-			topic = topic[:77] + "..."
-		}
-		first := link.FirstMsg
-		if len(first) > 19 {
-			first = first[:19]
-		}
-		last := link.LastMsg
-		if len(last) > 19 {
-			last = last[:19]
-		}
-		marker := "  "
-		if link.SessionID == sessionID {
-			marker = ">>"
-		}
-		fmt.Fprintf(&b, "%s [%d] %s  %s  %s→%s  %s\n",
-			marker, i+1, sid, repo, first, last, topic)
-		if i < len(links)-1 && link.Confidence != "" {
-			fmt.Fprintf(&b, "       ↓ gap=%dms confidence=%s\n", link.GapMs, link.Confidence)
-		}
-	}
-	if len(candidates) > 0 {
-		fmt.Fprintf(&b, "\nHeuristic candidates (cwd_most_recent):\n")
-		for _, c := range candidates {
-			pid := c.PredecessorID
-			if len(pid) > 10 {
-				pid = pid[:10]
-			}
-			fmt.Fprintf(&b, "  ? %s  gap=%dms  confidence=%s  mechanism=%s\n",
-				pid, c.GapMs, c.Confidence, c.Mechanism)
-		}
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) whatsup(args map[string]any) (string, bool, error) {
-	postmortem, _ := args["postmortem"].(bool)
-	result, err := h.mem.Whatsup(postmortem)
-	if err != nil {
-		return fmt.Sprintf("whatsup failed: %v", err), true, nil
-	}
-
-	var b strings.Builder
-
-	if len(result.Sessions) == 0 {
-		fmt.Fprintf(&b, "No live Claude Code sessions detected.\n")
-	} else {
-		fmt.Fprintf(&b, "%-12s %-6s %7s %10s %-12s %-20s %s\n",
-			"Session", "PID", "CPU%", "RSS", "WorkType", "Repo", "Topic")
-		fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 90))
-		for _, s := range result.Sessions {
-			sid := s.SessionID
-			if len(sid) > 12 {
-				sid = sid[:12]
-			}
-			rss := fmt.Sprintf("%dMB", s.RSSBytes/1024/1024)
-			repo := s.Repo
-			if len(repo) > 20 {
-				repo = repo[:17] + "..."
-			}
-			topic := s.Topic
-			if len(topic) > 40 {
-				topic = topic[:37] + "..."
-			}
-			workType := s.WorkType
-			if workType == "" {
-				workType = "-"
-			}
-			fmt.Fprintf(&b, "%-12s %-6d %6.1f%% %10s %-12s %-20s %s\n",
-				sid, s.PID, s.CPUPct, rss, workType, repo, topic)
-			if s.Cwd != "" {
-				fmt.Fprintf(&b, "  cwd: %s\n", s.Cwd)
-			}
-			switch len(s.Transcripts) {
-			case 0:
-				// no transcript found — omit
-			case 1:
-				fmt.Fprintf(&b, "  transcript: %s\n", s.Transcripts[0].Path)
-			default:
-				fmt.Fprintf(&b, "  transcripts (multiple — disambiguate by mtime/size):\n")
-				for _, t := range s.Transcripts {
-					fmt.Fprintf(&b, "    %s  mtime=%s size=%d\n",
-						t.Path, t.MTime.Format("2006-01-02T15:04:05"), t.Size)
-				}
-			}
-		}
-	}
-
-	// Postmortem section.
-	if len(result.Postmortem) > 0 {
-		fmt.Fprintf(&b, "\nPostmortem (recent claude activity, no live processes):\n")
-		for _, e := range result.Postmortem {
-			fmt.Fprintf(&b, "  cwd: %s\n", e.Cwd)
-			for _, t := range e.Transcripts {
-				fmt.Fprintf(&b, "    %s  mtime=%s size=%d\n",
-					t.Path, t.MTime.Format("2006-01-02T15:04:05"), t.Size)
-			}
-		}
-	}
-
-	// System metrics section.
-	sys := result.System
-	if sys.MemPagesFree+sys.MemPagesActive+sys.MemPagesInactive+sys.MemPagesWired > 0 {
-		total := sys.MemPagesFree + sys.MemPagesActive + sys.MemPagesInactive + sys.MemPagesWired
-		pageSize := int64(4096) // macOS default page size
-		fmt.Fprintf(&b, "\nSystem memory (4K pages, pressure=%.1f%%):\n", sys.MemPressurePct)
-		fmt.Fprintf(&b, "  Free:     %d pages (%dMB)\n", sys.MemPagesFree, sys.MemPagesFree*pageSize/1024/1024)
-		fmt.Fprintf(&b, "  Active:   %d pages (%dMB)\n", sys.MemPagesActive, sys.MemPagesActive*pageSize/1024/1024)
-		fmt.Fprintf(&b, "  Inactive: %d pages (%dMB)\n", sys.MemPagesInactive, sys.MemPagesInactive*pageSize/1024/1024)
-		fmt.Fprintf(&b, "  Wired:    %d pages (%dMB)\n", sys.MemPagesWired, sys.MemPagesWired*pageSize/1024/1024)
-		fmt.Fprintf(&b, "  Total:    %d pages (%dMB)\n", total, total*pageSize/1024/1024)
-	}
-
-	return b.String(), false, nil
-}
-
-func (h *callHandler) discoverPatterns(args map[string]any) (string, bool, error) {
-	days := 90
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	repoFilter, _ := args["repo"].(string)
-	minOccurrences := store.PatternEmitMinOccurrences
-	if m, ok := args["min_occurrences"].(float64); ok && m > 0 {
-		minOccurrences = int(m)
-	}
-
-	candidates, err := h.mem.DiscoverPatterns(days, repoFilter, minOccurrences)
-	if err != nil {
-		return fmt.Sprintf("discover patterns failed: %v", err), true, nil
-	}
-	if len(candidates) == 0 {
-		return fmt.Sprintf("No workaround patterns found in the last %d days (min_occurrences=%d, min_sessions=%d). The transcript index may not have enough data yet, or agents are already using mnemo tools effectively.",
-			days, minOccurrences, store.PatternEmitMinSessions), false, nil
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Discovered Workaround Patterns (%d days, min_occurrences=%d, min_sessions=%d)\n\n",
-		days, minOccurrences, store.PatternEmitMinSessions)
-	// Freshness is disclosed rather than assumed: these rows come from
-	// the patterns table, refreshed hourly by a reconciler, so a caller
-	// comparing against something they did five minutes ago needs to
-	// know how old the mine is.
-	if len(candidates) > 0 && candidates[0].ComputedAt != "" {
-		fmt.Fprintf(&b, "*Mined %s (persisted; refreshed hourly).*\n\n", candidates[0].ComputedAt)
-	}
-	for _, c := range candidates {
-		fmt.Fprintf(&b, "## %s (%d occurrences across %d sessions)\n", c.PatternType, c.Occurrences, c.SessionCount)
-		fmt.Fprintf(&b, "**Description:** %s\n\n", c.Description)
-		fmt.Fprintf(&b, "**Suggestion:** %s\n\n", c.Suggestion)
-		if c.FirstSeen != "" || c.LastSeen != "" {
-			fmt.Fprintf(&b, "**Seen:** %s → %s\n\n", c.FirstSeen, c.LastSeen)
-		}
-		if len(c.Repos) > 0 {
-			fmt.Fprintf(&b, "**Repos:** %s\n\n", strings.Join(c.Repos, ", "))
-		}
-		if c.Evidence != "" {
-			fmt.Fprintf(&b, "**Example evidence:**\n```\n%s\n```\n\n", c.Evidence)
-		}
-		if len(c.Sessions) > 0 {
-			shown := c.Sessions
-			if len(shown) > 5 {
-				shown = shown[:5]
-			}
-			// Denominator is SessionCount, not len(c.Sessions): the
-			// stored list is itself capped, so counting it would report
-			// the sample size as the population.
-			fmt.Fprintf(&b, "**Sessions (showing %d of %d):** %s\n\n",
-				len(shown), c.SessionCount, strings.Join(shown, ", "))
-		}
-		b.WriteString("---\n\n")
 	}
 	return b.String(), false, nil
 }

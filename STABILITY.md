@@ -387,16 +387,6 @@ Needs review — first cut at the real-time-consumer surface
 (🎯T46 verify pending); `group_by` block/session boundaries are
 intended to remain stable.
 
-#### mnemo_permissions
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `days` | number | no | Recency window in days (default 30) | Stable |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results per category (default 20) | Stable |
-
-**Added in v0.13.0.** Analyzes tool_use patterns to suggest allowedTools rules. **Stability**: Needs review.
-
 #### mnemo_query
 
 | Parameter | Type | Required | Description | Stability |
@@ -421,14 +411,6 @@ activity. Filter matching uses SQL LIKE with `*` mapped to `%`.
 No parameters. Returns session/message counts by type, including a Streams
 table showing per-stream ingest state (added in v0.16.0). **Stability**: Stable.
 
-#### mnemo_chain
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `session_id` | string | yes | Any session ID in the chain (or a prefix) | Needs review |
-
-**Added in v0.16.0.** Resolves the full /clear-bounded session chain for a given session. Returns an ordered list of ChainLinks (oldest → newest) with per-session summaries and gap/confidence for each link. Single-element result if no chain is found. **Stability**: Needs review — first release, output format may evolve.
-
 #### mnemo_decisions
 
 | Parameter | Type | Required | Description | Stability |
@@ -443,37 +425,6 @@ Detects proposal+confirmation patterns (assistant proposes, user
 confirms with "yes"/"lgtm"/etc) at ingest time and stores them in
 `decisions` FTS5 table. Retroactive backfill runs at startup. **Stability**:
 Fluid — detection heuristic is first-cut and tuning is expected.
-
-#### mnemo_whatsup
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `postmortem` | bool | no | Also list directories with recent claude activity even when no live processes are detected (default false) | Fluid |
-
-**Added in v0.17.0.** Live session resource monitor: per-session CPU%,
-RSS, CPU time for active Claude Code processes, plus system memory
-pressure (macOS). Cross-references PIDs via `lsof` with session metadata
-(repo, topic, work type). **v0.18.0 (🎯T24):** each live session is
-enriched with the process's `cwd` (via `ps -E PWD`) and the newest-mtime
-transcript resolved from `~/.claude/projects/<encoded-cwd>/*.jsonl`; a
-new `postmortem` parameter reports directories that had recent claude
-activity even when no live processes are detected. **Stability**:
-Fluid — metric set, output shape, and parameter set may evolve.
-
-#### mnemo_discover_patterns
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `days` | number | no | Recency window in days (default 90) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `min_occurrences` | number | no | Minimum pattern occurrences to report (default 3) | Needs review |
-
-**Added in v0.17.0.** Query-time analysis over the indexed transcript corpus
-to find workaround patterns that suggest missing mnemo features. Detects
-direct JSONL reads, transcript-directory grep, repeated mnemo_query
-shapes (normalised), and recurring mnemo_search queries. Feeds the
-"self-improving tool discovery" feedback loop. **Stability**: Fluid —
-detection heuristics are first-cut.
 
 #### mnemo_ops (op=restore)
 
@@ -495,33 +446,6 @@ restoration. Output is pre-formatted (span headers, targets, files,
 decisions, open threads) with a trailing Budget footer showing the
 compaction-to-session token ratio against the 10% invariant.
 **Stability**: Needs review — first release, output shape may evolve.
-
-#### mnemo_chain
-
-**v0.18.0 update (🎯T25.3)**: gains a `mode` parameter.
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `session_id` | string | yes | Any session ID in the chain (or a prefix) | Stable |
-| `mode` | string | no | `auto` (default) / `strict` / `candidates` | Needs review |
-
-Chain detection has two layers. **Definitive** rows are written by the
-daemon when an MCP session observes transitions between Claude Code
-sessions (rows carry `mechanism='mcp_connection'`, `confidence='definitive'`).
-**Heuristic** candidates are computed on demand at query time via
-`InferChainHeuristic` using the cwd-most-recent rule, for sessions the
-daemon never saw live.
-
-- `auto`: definitive chain, falling through to heuristic candidates only
-  when the query session has no definitive predecessor.
-- `strict`: definitive only.
-- `candidates`: always returns both definitive and heuristic, attributed
-  by mechanism so ambiguity is visible.
-
-The ingest-time heuristic (detectChainForSession / backfillSessionChains)
-has been removed entirely in v0.18.0. Under v0.17 and earlier, chain
-rows were written at ingest time with `mechanism='time_heuristic'` /
-`'cwd_most_recent'`. Those values no longer appear on fresh indexes.
 
 #### mnemo_session_structure
 
