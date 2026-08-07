@@ -38,6 +38,11 @@ func seedAllCorpora(t *testing.T, s *Store) {
 	// discriminate BETWEEN. A fixture with two levels can only ever
 	// produce two score bands, and a test asserting more would be
 	// asserting against the fixture rather than the ranking.
+	//
+	// seededStrength(i) is the GROUND TRUTH: 3 = strongest, 0 = no
+	// match. Tests grade the ranking against it rather than against
+	// distributional proxies, so a regression that reorders results is
+	// caught even when every corpus still contributes.
 	phrase := func(i int) string {
 		switch i % 4 {
 		case 0:
@@ -94,6 +99,39 @@ func seedAllCorpora(t *testing.T, s *Store) {
 			VALUES (?, ?, ?, ?, 0, 'llm', 0.9, 1, ?, ?, 'o/r')`,
 			fmt.Sprintf("seg_%08x", i), fmt.Sprintf("s%d", i), i*10, i*10+9,
 			fmt.Sprintf("span %d", i), p+" "+q)
+	}
+}
+
+// seededStrength is the fixture's ground truth for document i: how
+// relevant it is to the query "watcher descriptor exhaustion".
+// 3 = strongest (terms repeated), 0 = no match at all.
+func seededStrength(i int) int {
+	switch i % 4 {
+	case 0:
+		return 3
+	case 1:
+		return 2
+	case 2:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// strengthOf recovers a hit's seeded strength from its rendered text,
+// which is how the fixture's ground truth is checked without threading
+// ids through the search path.
+func strengthOf(h UnifiedHit) int {
+	text := strings.ToLower(h.Title + " " + h.Body)
+	switch n := strings.Count(text, "watcher"); {
+	case n >= 4:
+		return 3
+	case n >= 2:
+		return 2
+	case n >= 1:
+		return 1
+	default:
+		return 0
 	}
 }
 
@@ -296,4 +334,78 @@ func TestE2ECalibrationCoversAllCorpora(t *testing.T) {
 		t.Errorf("corpora with 60 seeded documents produced no usable "+
 			"calibration: %s", strings.Join(uncalibrated, ", "))
 	}
+}
+
+// TestE2ERankingRecoversKnownRelevance is the relevance control the
+// other e2e tests lack.
+//
+// Everything else here checks DISTRIBUTIONAL properties — every corpus
+// contributes, nothing monopolises, scores discriminate. None of that
+// says the ORDER is right: a ranker that returned every corpus's worst
+// hit first would pass all of them. This grades the ranking against the
+// fixture's ground truth (seededStrength), which is the only thing that
+// makes "reasonable ranking" a claim rather than a vibe.
+//
+// It also guards the inverse error. Distributional assertions can flag
+// a corpus that legitimately deserves to win: `target` in this fixture
+// carries the query phrase in two indexed columns and scores ~40%
+// higher than the other eleven at every percentile, so a strict
+// no-monopoly rule would call correct behaviour a bug.
+func TestE2ERankingRecoversKnownRelevance(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	seedAllCorpora(t, s)
+	now := time.Now()
+	calibrateAll(t, s, now)
+
+	// A window wide enough that the ranking must order ACROSS strengths,
+	// not just return the strongest tier. The fixture holds ~180
+	// strongest-tier documents, so a narrow limit would be satisfied by
+	// any ranker that finds them and says nothing about ordering.
+	res, err := s.UnifiedSearchOpts("watcher descriptor exhaustion",
+		UnifiedOpts{Kinds: AllCorpusKinds(), Limit: 400, SessionType: "all", SubstantiveOnly: true}, now)
+	if err != nil {
+		t.Fatalf("UnifiedSearch: %v", err)
+	}
+	if len(res.Hits) < 200 {
+		t.Fatalf("expected a large result set, got %d", len(res.Hits))
+	}
+
+	// 1. Non-matching documents must never appear. The fixture's
+	// strength-0 rows share no vocabulary with the query.
+	for i, h := range res.Hits {
+		if strengthOf(h) == 0 {
+			t.Errorf("position %d is a %s hit with no query terms at all: %q",
+				i, h.Kind, truncateField(h.Title+" "+h.Body, 80))
+			break
+		}
+	}
+
+	// 2. Mean relevance must fall from head to tail. This is the
+	// ordering claim, stated as a property rather than an exact
+	// sequence — exact positions depend on per-corpus distributions and
+	// pinning them would make the test brittle without making it
+	// stronger.
+	third := len(res.Hits) / 3
+	var headSum, tailSum int
+	for _, h := range res.Hits[:third] {
+		headSum += strengthOf(h)
+	}
+	for _, h := range res.Hits[len(res.Hits)-third:] {
+		tailSum += strengthOf(h)
+	}
+	headMean := float64(headSum) / float64(third)
+	tailMean := float64(tailSum) / float64(third)
+	if headMean <= tailMean {
+		t.Errorf("mean relevance does not decrease down the ranking: head %.2f, "+
+			"tail %.2f. The results are ordered by something, but not by how well "+
+			"they match.", headMean, tailMean)
+	}
+
+	// 3. The strongest documents must actually lead. With four graded
+	// strengths seeded evenly, the top third should skew high.
+	if headMean < 2.5 {
+		t.Errorf("top third has mean strength %.2f of a possible 3; the best "+
+			"content is not reaching the head", headMean)
+	}
+	t.Logf("relevance by third: head %.2f, tail %.2f (max 3)", headMean, tailMean)
 }
