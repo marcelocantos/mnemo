@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,9 +29,22 @@ func seedCalibratableCorpus(t *testing.T, s *Store, n int) {
 		"reconciler", "transcript", "ingest", "calibration", "boundary",
 		"quantile", "corpus", "divergence", "snapshot", "checkpoint"}
 	for i := 0; i < n; i++ {
-		text := fmt.Sprintf(
-			"%s interacts with %s during %s handling, with surrounding prose to give the document length",
-			vocab[i%len(vocab)], vocab[(i+4)%len(vocab)], vocab[(i+9)%len(vocab)])
+		// Vary term count, repetition and document length. A fixture
+		// where every document has the same shape yields identical BM25
+		// scores, a degenerate distribution, and tests that assert
+		// against an artefact rather than the ranking — a mistake made
+		// twice already in this target.
+		terms := 1 + i%5
+		var parts []string
+		for k := 0; k < terms; k++ {
+			w := vocab[(i+k*3)%len(vocab)]
+			for rep := 0; rep <= i%3; rep++ {
+				parts = append(parts, w)
+			}
+		}
+		text := fmt.Sprintf("%s handling under load. %s",
+			strings.Join(parts, " "),
+			strings.Repeat("surrounding prose for document length. ", 1+i%7))
 		mustExec(t, s, `INSERT INTO messages
 			(session_id, project, role, text, timestamp, type, is_noise, content_type)
 			VALUES (?, 'p', 'user', ?, '2026-01-01T00:00:00Z', 'user', 0, 'text')`,

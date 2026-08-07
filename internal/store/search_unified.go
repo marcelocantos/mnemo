@@ -131,6 +131,10 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 	}
 
 	ftsQuery := relaxQuery(query)
+	// Per-term normalisation, matching how the distribution was sampled.
+	// See queryTermCount: without it a hit's quantile tracks the query's
+	// width rather than the hit's quality.
+	terms := float64(queryTermCount(query))
 	out := &UnifiedSearchResult{Degraded: map[string]string{}}
 	var all []UnifiedHit
 
@@ -156,7 +160,7 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 			}
 			for i := range msgs {
 				m := msgs[i]
-				raw = append(raw, scored{id: int64(m.MessageID), mag: -m.Rank, msg: &m})
+				raw = append(raw, scored{id: int64(m.MessageID), mag: -m.Rank / terms, msg: &m})
 			}
 		} else {
 			//nolint:gosec // table name comes from the internal corpus registry
@@ -173,7 +177,7 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 				var id int64
 				var rank float64
 				if err := rows.Scan(&id, &rank); err == nil {
-					raw = append(raw, scored{id: id, mag: -rank})
+					raw = append(raw, scored{id: id, mag: -rank / terms})
 				}
 			}
 			rows.Close()
@@ -293,7 +297,7 @@ func (s *Store) hydrateHits(hits []UnifiedHit) error {
 			args[i] = id
 		}
 		//nolint:gosec // SQL comes from the internal registry; ids are bound
-		rows, err := s.readDB.Query(spec.selectSQL+" WHERE id IN ("+ph+")", args...)
+		rows, err := s.readDB.Query(spec.selectSQL+" WHERE rowid IN ("+ph+")", args...)
 		if err != nil {
 			continue
 		}

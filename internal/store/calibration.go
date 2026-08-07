@@ -73,6 +73,11 @@ const (
 // was wrong in both directions — see the comment on shrinkageK.
 const calibrationMinSamples = 8
 
+// maxProbeTerms bounds how many words a probe joins. Real agent queries
+// are typically a handful of words; probes cycle 1..maxProbeTerms so the
+// sampled distribution covers the range of shapes rather than one end.
+const maxProbeTerms = 5
+
 // shrinkageK is the sample count at which a corpus's own distribution
 // is believed half as much as the neutral prior: w = n/(n+k).
 //
@@ -123,6 +128,34 @@ const calibrationStaleAfter = 7 * 24 * time.Hour
 // that invalidates a distribution regardless of age. A corpus that has
 // grown 50% has a materially different score profile.
 const calibrationGrowthTolerance = 0.5
+
+// queryTermCount is how many terms a query contributes to a BM25 sum.
+//
+// BM25 sums a contribution per matched term, so a five-word query scores
+// roughly five times a one-word query against equally good documents.
+// Magnitudes are therefore normalised per term before being mapped to a
+// quantile, which puts queries of different widths on one scale.
+//
+// Without this the quantile reflects the QUERY's width rather than the
+// HIT's quality: calibrating on narrow probes made every real
+// (multi-word) hit saturate at 1.0, and calibrating on wide ones made
+// every real hit sink to the floor. Both were observed.
+func queryTermCount(q string) int {
+	n := 0
+	for _, tok := range strings.FieldsFunc(q, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		switch strings.ToUpper(tok) {
+		case "OR", "AND", "NOT", "NEAR":
+			continue
+		}
+		n++
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
+}
 
 // Calibration is one corpus's stored score distribution.
 type Calibration struct {
@@ -282,22 +315,48 @@ func (s *Store) CalibrateCorpus(ctx context.Context, spec corpusSpec, now time.T
 		return nil, fmt.Errorf("corpus %s yielded no probe terms", spec.kind)
 	}
 
+	// Probes must match the SHAPE of real queries, not just their
+	// vocabulary. Agent queries arrive as several words and go through
+	// relaxQuery, which ORs them; a multi-term OR scores far higher than
+	// any single term because BM25 sums per-term contributions.
+	//
+	// Calibrating on single terms made the whole feature INERT in
+	// production: on the live index single-term probes produced
+	// magnitudes 10.9–11.4 while a real five-word query produced
+	// 19.6–43.4. Every real hit therefore landed above the entire
+	// sampled distribution, clamped to quantile 1.0, and every result
+	// scored an identical 0.95. Ranking silently fell back to the
+	// within-corpus tiebreak. Forty tests passed because they queried
+	// single terms too.
+	//
+	// So probes are built at 1..maxProbeTerms words and run through the
+	// same relaxQuery the search path uses, spanning the range of query
+	// shapes rather than one end of it.
 	var magnitudes []float64
-	for _, term := range terms {
+	for i, term := range terms {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		probe := term
+		if width := 1 + i%maxProbeTerms; width > 1 {
+			end := i + width
+			if end > len(terms) {
+				end = len(terms)
+			}
+			probe = strings.Join(terms[i:end], " ")
 		}
 		//nolint:gosec // table name comes from the internal corpus registry
 		rows, err := s.readDB.Query(
 			`SELECT rank FROM `+spec.fts+` WHERE `+spec.fts+` MATCH ? ORDER BY rank LIMIT ?`,
-			term, calibrationTopK)
+			relaxQuery(probe), calibrationTopK)
 		if err != nil {
 			continue // a probe term that FTS rejects is not a failure
 		}
+		width := float64(queryTermCount(probe))
 		for rows.Next() {
 			var rank float64
 			if err := rows.Scan(&rank); err == nil {
-				magnitudes = append(magnitudes, -rank)
+				magnitudes = append(magnitudes, -rank/width)
 			}
 		}
 		rows.Close()

@@ -274,3 +274,60 @@ func TestStaleCalibrationDropsToNeutral(t *testing.T) {
 		t.Errorf("staleness must be reported with its reason, got %v", res.Degraded)
 	}
 }
+
+// TestCalibrationCoversRealQueryShapes is the regression guard for the
+// defect that made this feature INERT in production while forty tests
+// passed.
+//
+// Probes were single terms; real agent queries are several words that
+// relaxQuery ORs together, and BM25 sums per-term contributions. On the
+// live index single-term probes spanned magnitudes 10.9–11.4 while a
+// five-word query spanned 19.6–43.4 — so every real hit landed above
+// the entire sampled distribution, clamped to quantile 1.0, and every
+// result scored an identical 0.95. Ranking silently fell back to the
+// within-corpus tiebreak.
+//
+// The tests missed it because they queried single terms too. This one
+// calibrates, then asserts a MULTI-TERM query produces a spread of
+// quantiles rather than a wall of 1.0.
+func TestCalibrationCoversRealQueryShapes(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	seedCalibratableCorpus(t, s, 400)
+
+	now := time.Now()
+	spec, _ := corpusByKind("message")
+	cal, err := s.CalibrateCorpus(context.Background(), spec, now)
+	if err != nil {
+		t.Fatalf("CalibrateCorpus: %v", err)
+	}
+
+	// A realistic multi-word query, the shape agents actually send.
+	res, err := s.UnifiedSearch("watcher descriptor compaction segment throttle",
+		[]string{"message"}, 20, now)
+	if err != nil {
+		t.Fatalf("UnifiedSearch: %v", err)
+	}
+	if len(res.Hits) < 5 {
+		t.Fatalf("expected several hits, got %d", len(res.Hits))
+	}
+
+	saturated := 0
+	distinct := map[float64]bool{}
+	for _, h := range res.Hits {
+		// Round away the rank tiebreak so only real quantile differences count.
+		distinct[float64(int(h.Score*100))/100] = true
+		if h.Score >= 0.949 {
+			saturated++
+		}
+	}
+	if saturated == len(res.Hits) {
+		t.Errorf("every one of %d hits saturated at the top of the distribution "+
+			"(top boundary %.2f) — the probe distribution does not cover real "+
+			"query shapes, so calibration orders nothing",
+			len(res.Hits), cal.Quantiles[len(cal.Quantiles)-1])
+	}
+	if len(distinct) < 2 {
+		t.Errorf("all hits scored identically (%v); calibration is inert for this "+
+			"query shape", distinct)
+	}
+}
