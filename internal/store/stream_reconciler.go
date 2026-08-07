@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -40,7 +41,55 @@ func (s *Store) StreamReconcilers() []StreamReconciler {
 		sourceStateReconcilerStream{s},
 		patternsReconcilerStream{s},
 		clusterReconcilerStream{s},
+		calibrationReconcilerStream{s},
 	}
+}
+
+// calibrationReconcilerStream refreshes the per-corpus score
+// distributions that cross-corpus ranking depends on (🎯T144).
+//
+// It runs on the same divergence-driven shape as the other streams: a
+// corpus is recalibrated only when its stored distribution has aged out
+// or its document count has moved enough to change its score profile.
+// That second condition is the one that matters — corpora here grow
+// continuously, and a distribution sampled when a corpus was a fraction
+// of its current size mis-maps every score computed against it while
+// producing an ordering that looks entirely reasonable.
+type calibrationReconcilerStream struct{ s *Store }
+
+func (c calibrationReconcilerStream) Name() string { return "search_calibration" }
+
+// Interval is the tick cadence, not the recalibration cadence: each
+// pass recalibrates only the corpora that have actually diverged.
+func (c calibrationReconcilerStream) Interval() time.Duration { return time.Hour }
+
+func (c calibrationReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
+	cals, err := c.s.LoadCalibrations()
+	if err != nil {
+		return 0, err
+	}
+	changed := 0
+	for _, spec := range searchCorpora() {
+		if err := ctx.Err(); err != nil {
+			return changed, err
+		}
+		docs := 0
+		//nolint:gosec // table name comes from the internal corpus registry
+		if err := c.s.readDB.QueryRow(`SELECT COUNT(*) FROM ` + spec.source).Scan(&docs); err != nil || docs == 0 {
+			continue
+		}
+		if stale, _ := cals[spec.kind].Stale(now, docs); !stale {
+			continue
+		}
+		if _, err := c.s.CalibrateCorpus(ctx, spec, now); err != nil {
+			// A corpus too small or too sparse to calibrate is a normal
+			// state, not a fault: search degrades to fusion for it.
+			slog.Debug("calibration skipped", "corpus", spec.kind, "err", err)
+			continue
+		}
+		changed++
+	}
+	return changed, nil
 }
 
 // clusterReconcilerStream runs document-level themes clustering on a
