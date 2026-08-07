@@ -328,29 +328,6 @@ Tables:
   github_issues (id, repo, issue_number, title, body, state, author, created_at, updated_at, url)
   github_prs_fts / github_issues_fts — FTS5 on title, body
 
-Worked examples for the searches that used to be their own tools
-(removed 2026-08-07 — each was a saved query, and this is the query):
-
-  Docs:      SELECT repo, file_path, title FROM docs d JOIN docs_fts f
-               ON f.rowid = d.id WHERE docs_fts MATCH 'watcher'
-               ORDER BY rank LIMIT 20
-  Targets:   SELECT repo, target_id, name, status FROM targets t
-               JOIN targets_fts f ON f.rowid = t.id
-               WHERE targets_fts MATCH 'windows' ORDER BY rank LIMIT 20
-  Memories:  SELECT project, name, description FROM memories m
-               JOIN memories_fts f ON f.rowid = m.id
-               WHERE memories_fts MATCH 'sqlite' ORDER BY rank LIMIT 20
-  Commits:   SELECT repo, commit_hash, subject FROM git_commits c
-               JOIN git_commits_fts f ON f.rowid = c.id
-               WHERE git_commits_fts MATCH 'cancel' ORDER BY rank LIMIT 20
-  PRs:       SELECT repo, pr_number, title, state FROM github_prs p
-               JOIN github_prs_fts f ON f.rowid = p.id
-               WHERE github_prs_fts MATCH 'vault' ORDER BY rank LIMIT 20
-  Who ran a command:
-             SELECT session_id, tool_command, timestamp FROM messages
-               WHERE tool_name = 'Bash' AND tool_command LIKE '%brew%'
-               ORDER BY timestamp DESC LIMIT 20
-
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
 

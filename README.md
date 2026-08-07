@@ -53,10 +53,7 @@ browser dashboard is served on the same port at `http://localhost:19419`
   tool usage patterns
 - **Raw SQL access** — read-only queries against the full database,
   including sqldeep nested syntax for hierarchical JSON output. This is
-  the entry point for the indexes above that no longer have a dedicated
-  tool (docs, targets, plans, memories, skills, configs, commits, PRs,
-  audit logs); `mnemo_query`'s description carries the schema and
-  worked examples for each.
+  the entry point for the indexes above that have no dedicated tool.
 
 ## Dashboard
 
