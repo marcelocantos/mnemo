@@ -312,6 +312,44 @@ Tables:
     — pattern_type: direct_jsonl_read, transcript_grep, repeated_query, repeated_search
     — repos / sessions / representative_excerpts are JSON arrays; use json_each()
   patterns_fts — FTS5 on pattern_type, signature, representative_excerpts
+  docs (id, repo, file_path, kind, title, content, updated_at)
+    — README / CHANGELOG / design notes / PDFs across tracked repos
+    — kind: md, txt, pdf. Synthesis docs carry a taxonomy tag.
+  docs_fts — FTS5 on title, content, repo
+  targets (id, repo, file_path, target_id, name, status, weight, description, raw_text)
+    — convergence targets from docs/targets.md. NOTE: bullseye.yaml is
+      NOT indexed here, so mnemo's own targets are absent.
+  targets_fts — FTS5 on name, description, raw_text
+  plans (id, repo, file_path, phase, content, updated_at)
+  plans_fts — FTS5 on content
+  git_commits (id, repo, commit_hash, author_name, author_email, commit_date, subject, body)
+  git_commits_fts — FTS5 on subject, body
+  github_prs (id, repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url)
+  github_issues (id, repo, issue_number, title, body, state, author, created_at, updated_at, url)
+  github_prs_fts / github_issues_fts — FTS5 on title, body
+
+Worked examples for the searches that used to be their own tools
+(removed 2026-08-07 — each was a saved query, and this is the query):
+
+  Docs:      SELECT repo, file_path, title FROM docs d JOIN docs_fts f
+               ON f.rowid = d.id WHERE docs_fts MATCH 'watcher'
+               ORDER BY rank LIMIT 20
+  Targets:   SELECT repo, target_id, name, status FROM targets t
+               JOIN targets_fts f ON f.rowid = t.id
+               WHERE targets_fts MATCH 'windows' ORDER BY rank LIMIT 20
+  Memories:  SELECT project, name, description FROM memories m
+               JOIN memories_fts f ON f.rowid = m.id
+               WHERE memories_fts MATCH 'sqlite' ORDER BY rank LIMIT 20
+  Commits:   SELECT repo, commit_hash, subject FROM git_commits c
+               JOIN git_commits_fts f ON f.rowid = c.id
+               WHERE git_commits_fts MATCH 'cancel' ORDER BY rank LIMIT 20
+  PRs:       SELECT repo, pr_number, title, state FROM github_prs p
+               JOIN github_prs_fts f ON f.rowid = p.id
+               WHERE github_prs_fts MATCH 'vault' ORDER BY rank LIMIT 20
+  Who ran a command:
+             SELECT session_id, tool_command, timestamp FROM messages
+               WHERE tool_name = 'Bash' AND tool_command LIKE '%brew%'
+               ORDER BY timestamp DESC LIMIT 20
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
@@ -363,17 +401,6 @@ Use this when you need context about recent work, OR to check whether fresh tran
 			mcp.WithNumber("max_sessions", mcp.Description("Max sessions per repo (default 3)")),
 			mcp.WithNumber("max_excerpts", mcp.Description("Max message excerpts per session (default 20, most recent kept)")),
 			mcp.WithNumber("truncate_len", mcp.Description("Truncate assistant messages to this length (default 200)")),
-		),
-		mcp.NewTool("mnemo_memories",
-			mcp.WithDescription(`Search across Claude Code auto-memory files from all projects. Memories are structured notes with frontmatter (name, description, type) that agents save across sessions.
-
-Memory types: "user" (role/preferences), "feedback" (corrections/confirmations), "project" (ongoing work context), "reference" (pointers to external systems).
-
-Use this to find decisions, preferences, and context captured in any project — even when working in a different repo. Also queryable via mnemo_query against the memories table.`),
-			mcp.WithString("query", mcp.Description("Search query (uses same fuzzy OR matching as mnemo_search). Omit to list all.")),
-			mcp.WithString("type", mcp.Description(`Filter by memory type: "user", "feedback", "project", "reference"`)),
-			mcp.WithString("project", mcp.Description("Filter by project name substring")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
 		mcp.NewTool("mnemo_usage",
 			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
@@ -429,56 +456,6 @@ CLAUDE ONLY, deliberately. The parentage fields come from Claude Code's record s
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment.")),
 			mcp.WithNumber("limit", mcp.Description("Max trees to return (default 20).")),
 		),
-		mcp.NewTool("mnemo_skills",
-			mcp.WithDescription(`Search across Claude Code skill files (~/.claude/skills/). Skills define reusable workflows — release processes, audit procedures, documentation generation, etc. Use this to discover relevant skills or understand what workflows are available.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_configs",
-			mcp.WithDescription(`Search across CLAUDE.md project instruction files from all repos. These files contain build instructions, conventions, delivery definitions, and project-specific agent guidance. Use this to understand how other projects are configured or to find cross-project patterns.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_audit",
-			mcp.WithDescription(`Search across audit logs (docs/audit-log.md) from all repos. Audit logs record maintenance activities: releases, audits, documentation runs. Use this to check when a project was last released, find maintenance patterns across repos, or review past audit findings.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name")),
-			mcp.WithString("skill", mcp.Description("Filter by skill name (e.g. 'release', 'audit')")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_targets",
-			mcp.WithDescription(`Search across convergence targets (docs/targets.md) from all repos. Targets track desired states — features to build, bugs to fix, quality gaps to close. Use this to find targets across projects, check what's active/achieved, or discover cross-project priorities.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list all.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name")),
-			mcp.WithString("status", mcp.Description("Filter by status: identified, converging, achieved")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_docs",
-			mcp.WithDescription(`Search across project documentation files (markdown, plain-text, PDF) indexed from all tracked repos. Covers README, CHANGELOG, design notes, and any files under docs/, design/, notes/, papers/ directories. Deduplicates .md/.pdf pairs with same stem — always prefers .md. Use this to find project documentation, design decisions, and release notes across repos.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithString("kind", mcp.Description("Filter by file kind: md, txt, pdf")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_synthesis",
-			mcp.WithDescription(`Search across synthesis documents — analysis, research, design, and planning artifacts that follow the four-dir taxonomy (docs/{papers,design,analysis,plans}) plus docs/audit-log.md and docs/convergence-report.md. Indexed from workspace repos and additional synthesis roots (e.g. ~/think).
-
-Use this instead of mnemo_docs when you want a global view of the user's thinking: cross-repo research themes, recurring design decisions, target retros, external-material summaries. Results include the inferred taxonomy, inline metadata (Date, Status, Target, Source) when present, and the full document content.
-
-Taxonomy values: paper | design | analysis | plans | audit-log | convergence-report.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching). Omit to list recent.")),
-			mcp.WithString("taxonomy", mcp.Description("Filter by taxonomy: paper, design, analysis, plans, audit-log, convergence-report")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_who_ran",
-			mcp.WithDescription(`Find sessions that ran a specific shell command. Searches Bash tool_use entries by command pattern, returning session ID, repo, matched command, and timestamp. Useful for tracing when and where a command was last executed across all sessions.`),
-			mcp.WithString("pattern", mcp.Required(), mcp.Description("Command substring to match (LIKE match, case-insensitive)")),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
 		mcp.NewTool("mnemo_permissions",
 			mcp.WithDescription(`Analyze tool usage patterns across sessions to suggest allowedTools rules for settings.json.
 
@@ -488,26 +465,6 @@ Use this to understand which tools agents use most and to tighten permissions wi
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
 			mcp.WithString("repo", mcp.Description("Filter by repo name or path fragment")),
 			mcp.WithNumber("limit", mcp.Description("Max results per category (default 20)")),
-		),
-		mcp.NewTool("mnemo_prs",
-			mcp.WithDescription(`Search GitHub PRs and issues across all indexed repos. Uses FTS5 for keyword search on titles and bodies. Data is polled from GitHub repos that appear in session history and backfilled at startup.
-
-Supports filtering by state, author, and recency. Results include both PRs and issues unless filtered by type.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching on title/body). Omit to list recent.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
-			mcp.WithString("state", mcp.Description("Filter by state: open, closed, merged (PRs only), all (default)")),
-			mcp.WithString("author", mcp.Description("Filter by author username")),
-			mcp.WithString("type", mcp.Description("Filter by type: pr, issue, all (default)")),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
-		),
-		mcp.NewTool("mnemo_commits",
-			mcp.WithDescription(`Search git commits across all indexed repos. Uses FTS5 for keyword search on commit messages. Commits are indexed automatically from repos that appear in session history. Supports cross-repo queries with date range filtering.`),
-			mcp.WithString("query", mcp.Description("Search query (fuzzy OR matching on subject/body). Omit to list recent.")),
-			mcp.WithString("repo", mcp.Description("Filter by repo (e.g. 'mnemo', 'marcelocantos/mnemo')")),
-			mcp.WithString("author", mcp.Description("Filter by author name or email substring")),
-			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30)")),
-			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		),
 		mcp.NewTool("mnemo_decisions",
 			mcp.WithDescription(`Search past decisions across all sessions. Decisions are automatically detected from proposal + confirmation patterns in conversations (e.g., assistant proposes an approach, user confirms with "yes", "go ahead", "lgtm"). Use this to recall what was decided and why.`),
@@ -699,34 +656,14 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.status(args)
 	case "mnemo_stats":
 		return ch.stats()
-	case "mnemo_memories":
-		return ch.memories(args)
-	case "mnemo_skills":
-		return ch.skills(args)
 	case "mnemo_usage":
 		return ch.usage(args)
 	case "mnemo_budget":
 		return ch.budget()
 	case "mnemo_agent_trees":
 		return ch.agentTrees(args)
-	case "mnemo_configs":
-		return ch.configs(args)
-	case "mnemo_audit":
-		return ch.auditLogs(args)
-	case "mnemo_targets":
-		return ch.targets(args)
-	case "mnemo_docs":
-		return ch.docs(args)
-	case "mnemo_synthesis":
-		return ch.synthesis(args)
-	case "mnemo_who_ran":
-		return ch.whoRan(args)
 	case "mnemo_permissions":
 		return ch.permissions(args)
-	case "mnemo_prs":
-		return ch.prs(args)
-	case "mnemo_commits":
-		return ch.commits(args)
 	case "mnemo_decisions":
 		return ch.decisions(args)
 	case "mnemo_chain":
@@ -1135,84 +1072,6 @@ func (h *callHandler) recentActivity(args map[string]any) (string, bool, error) 
 	return string(out), false, nil
 }
 
-func (h *callHandler) memories(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	memType, _ := args["type"].(string)
-	project, _ := args["project"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchMemories(query, memType, project, limit)
-	if err != nil {
-		return fmt.Sprintf("memory search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No memories found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, m := range results {
-		proj := m.Project
-		if len(proj) > 30 {
-			// Trim project path prefix for readability.
-			parts := strings.Split(proj, "-")
-			if len(parts) > 1 {
-				proj = parts[len(parts)-1]
-			}
-		}
-		fmt.Fprintf(&b, "## %s [%s] (%s)\n%s\n\n%s\n\n",
-			m.Name, m.MemoryType, proj, m.Description, m.Content)
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) skills(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchSkills(query, limit)
-	if err != nil {
-		return fmt.Sprintf("skill search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No skills found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, sk := range results {
-		fmt.Fprintf(&b, "## %s\n%s\n\n%s\n\n", sk.Name, sk.Description, sk.Content)
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) configs(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repoFilter, _ := args["repo"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchClaudeConfigs(query, repoFilter, limit)
-	if err != nil {
-		return fmt.Sprintf("config search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No CLAUDE.md configs found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, c := range results {
-		fmt.Fprintf(&b, "## %s\n**Path:** %s\n\n%s\n\n---\n\n", c.Repo, c.FilePath, c.Content)
-	}
-	return b.String(), false, nil
-}
-
 func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	p := store.UsageParams{}
 	if d, ok := args["days"].(float64); ok && d > 0 {
@@ -1286,148 +1145,6 @@ func (h *callHandler) agentTrees(args map[string]any) (string, bool, error) {
 	return string(out), false, nil
 }
 
-func (h *callHandler) auditLogs(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	skill, _ := args["skill"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchAuditLogs(query, repo, skill, limit)
-	if err != nil {
-		return fmt.Sprintf("audit log search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No audit log entries found.", false, nil
-	}
-
-	out, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) targets(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	status, _ := args["status"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchTargets(query, repo, status, limit)
-	if err != nil {
-		return fmt.Sprintf("targets search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No targets found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, t := range results {
-		statusStr := t.Status
-		if statusStr == "" {
-			statusStr = "unknown"
-		}
-		weightStr := ""
-		if t.Weight != 0 {
-			weightStr = fmt.Sprintf(" weight=%.1f", t.Weight)
-		}
-		fmt.Fprintf(&b, "## %s %s [%s%s] (%s)\n", t.TargetID, t.Name, statusStr, weightStr, t.Repo)
-		if t.Description != "" {
-			fmt.Fprintf(&b, "%s\n", t.Description)
-		}
-		b.WriteByte('\n')
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) docs(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repoFilter, _ := args["repo"].(string)
-	kind, _ := args["kind"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchDocs(query, repoFilter, kind, limit)
-	if err != nil {
-		return fmt.Sprintf("doc search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No docs found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, d := range results {
-		title := d.Title
-		if title == "" {
-			title = filepath.Base(d.FilePath)
-		}
-		fmt.Fprintf(&b, "## %s [%s] (%s)\n", title, d.Kind, d.Repo)
-		fmt.Fprintf(&b, "**Path**: %s\n\n", d.FilePath)
-		// Truncate very long content for display.
-		content := d.Content
-		if len(content) > 2000 {
-			content = content[:2000] + "\n…(truncated)"
-		}
-		fmt.Fprintf(&b, "%s\n\n", content)
-	}
-	return b.String(), false, nil
-}
-
-func (h *callHandler) synthesis(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	taxonomy, _ := args["taxonomy"].(string)
-	repoFilter, _ := args["repo"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-
-	results, err := h.mem.SearchSynthesis(query, taxonomy, repoFilter, limit)
-	if err != nil {
-		return fmt.Sprintf("synthesis search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No synthesis docs found.", false, nil
-	}
-
-	var b strings.Builder
-	for _, d := range results {
-		title := d.Title
-		if title == "" {
-			title = filepath.Base(d.FilePath)
-		}
-		fmt.Fprintf(&b, "## %s [%s] (%s)\n", title, d.Taxonomy, d.Repo)
-		fmt.Fprintf(&b, "**Path**: %s\n", d.FilePath)
-		if d.DocDate != "" {
-			fmt.Fprintf(&b, "**Date**: %s  ", d.DocDate)
-		}
-		if d.DocStatus != "" {
-			fmt.Fprintf(&b, "**Status**: %s  ", d.DocStatus)
-		}
-		if d.DocTarget != "" {
-			fmt.Fprintf(&b, "**Target**: %s  ", d.DocTarget)
-		}
-		if d.DocSource != "" {
-			fmt.Fprintf(&b, "**Source**: %s", d.DocSource)
-		}
-		fmt.Fprintf(&b, "\n\n")
-		content := d.Content
-		if len(content) > 2000 {
-			content = content[:2000] + "\n…(truncated)"
-		}
-		fmt.Fprintf(&b, "%s\n\n", content)
-	}
-	return b.String(), false, nil
-}
-
 func (h *callHandler) permissions(args map[string]any) (string, bool, error) {
 	days := 30
 	if d, ok := args["days"].(float64); ok && d > 0 {
@@ -1448,60 +1165,6 @@ func (h *callHandler) permissions(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) prs(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	state, _ := args["state"].(string)
-	author, _ := args["author"].(string)
-	activityType, _ := args["type"].(string)
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	results, err := h.mem.SearchGitHubActivity(query, repo, state, author, activityType, days, limit)
-	if err != nil {
-		return fmt.Sprintf("GitHub activity search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No PRs or issues found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) commits(args map[string]any) (string, bool, error) {
-	query, _ := args["query"].(string)
-	repo, _ := args["repo"].(string)
-	author, _ := args["author"].(string)
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	results, err := h.mem.SearchCommits(query, repo, author, days, limit)
-	if err != nil {
-		return fmt.Sprintf("commits search failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No commits found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
@@ -1616,34 +1279,6 @@ func (h *callHandler) noteList(args map[string]any) (string, bool, error) {
 		return "No notes.", false, nil
 	}
 	out, err := json.MarshalIndent(notes, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("marshal failed: %v", err), true, nil
-	}
-	return string(out), false, nil
-}
-
-func (h *callHandler) whoRan(args map[string]any) (string, bool, error) {
-	pattern, _ := args["pattern"].(string)
-	if pattern == "" {
-		return "pattern is required", true, nil
-	}
-	days := 30
-	if d, ok := args["days"].(float64); ok && d > 0 {
-		days = int(d)
-	}
-	repoFilter, _ := args["repo"].(string)
-	limit := 20
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	results, err := h.mem.WhoRan(pattern, days, repoFilter, limit)
-	if err != nil {
-		return fmt.Sprintf("who_ran query failed: %v", err), true, nil
-	}
-	if len(results) == 0 {
-		return "No matching commands found.", false, nil
-	}
-	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}

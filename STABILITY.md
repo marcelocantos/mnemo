@@ -359,19 +359,6 @@ with `[LIVE pid=NNNNN]` in the output.
 
 **Added in v0.8.0.** Returns hierarchical JSON (repos → sessions → excerpts). **Stability**: Needs review — defaults and output shape may evolve.
 
-#### mnemo_memories
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `type` | string | no | Filter: user, feedback, project, reference | Needs review |
-| `project` | string | no | Project name substring filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.11.0.** Searches across auto-memory files from all projects.
-Returns name, description, type, project, content. **Stability**: Needs
-review — first release, output format and filters may evolve.
-
 #### mnemo_usage
 
 | Parameter | Type | Required | Description | Stability |
@@ -399,58 +386,6 @@ uses); added the `source` and `freshness` fields. **Stability**:
 Needs review — first cut at the real-time-consumer surface
 (🎯T46 verify pending); `group_by` block/session boundaries are
 intended to remain stable.
-
-#### mnemo_skills
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `~/.claude/skills/*.md`. **Stability**: Needs review.
-
-#### mnemo_configs
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches CLAUDE.md files from all repos. **Stability**: Needs review.
-
-#### mnemo_audit
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `skill` | string | no | Skill name filter (e.g. "release") | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `docs/audit-log.md` from all repos. **Stability**: Needs review.
-
-#### mnemo_targets
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `status` | string | no | Status filter: identified, converging, achieved | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `docs/targets.md` from all repos. **Stability**: Needs review.
-
-#### mnemo_who_ran
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `pattern` | string | yes | Command substring to match (LIKE) | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Stable |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.13.0.** Searches Bash tool_use entries by command pattern. **Stability**: Needs review.
 
 #### mnemo_permissions
 
@@ -525,39 +460,6 @@ new `postmortem` parameter reports directories that had recent claude
 activity even when no live processes are detected. **Stability**:
 Fluid — metric set, output shape, and parameter set may evolve.
 
-#### mnemo_commits
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (FTS on subject/body) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `author` | string | no | Author name/email substring | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.17.0.** Indexes git commits from all known repos (session_meta
-+ workspace walker union) into `git_commits` with FTS5 on subject, body,
-repo, and author. Incremental — only fetches new commits per repo since
-last ingest. Backfill limited to last 365 days. **Stability**: Needs review.
-
-#### mnemo_prs
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (FTS on title/body) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `state` | string | no | open, closed, merged, all (default all) | Needs review |
-| `author` | string | no | GitHub username filter | Needs review |
-| `type` | string | no | pr, issue, all (default all) | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.17.0.** GitHub PR/issue activity via `gh` CLI across all
-repos that appear in session history. Stores in `github_prs` and
-`github_issues` with FTS5. Backfill runs in a goroutine at startup (non-
-blocking). **Stability**: Needs review — output fields and filter
-semantics may evolve.
-
 #### mnemo_discover_patterns
 
 | Parameter | Type | Required | Description | Stability |
@@ -593,25 +495,6 @@ restoration. Output is pre-formatted (span headers, targets, files,
 decisions, open threads) with a trailing Budget footer showing the
 compaction-to-session token ratio against the 10% invariant.
 **Stability**: Needs review — first release, output shape may evolve.
-
-#### mnemo_docs
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (FTS on title and content) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `kind` | string | no | Filter: md, txt, pdf | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.18.0 (🎯T21).** Indexes markdown, plain-text, and PDF
-files found across tracked repos. Discovery sweeps common locations —
-repo root README/CHANGELOG/notes, `docs/`, `design/`, `notes/`,
-`papers/` — and respects `.gitignore`. PDF extraction via `pdftotext`
-(poppler) with `mutool` fallback; when neither is available, PDFs are
-skipped with a startup warning. `.md` / `.pdf` pairs sharing a stem in
-the same directory dedup with `.md` preferred. Incremental via
-SHA-256 content hash. **Stability**: Needs review — discovery
-heuristics, exclusion list, and output fields may evolve.
 
 #### mnemo_chain
 
@@ -926,7 +809,7 @@ local-only deployments.
 `server_error`, `malformed_response`, `connect_failed`,
 `unknown_instance`, `unknown`. Peers are sorted by instance name for
 deterministic ordering. Tools that bypass federation:
-`mnemo_ops`, `mnemo_whatsup`, `mnemo_docs`, `mnemo_synthesis`,
+`mnemo_ops`, `mnemo_whatsup`,
 `mnemo_permissions`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
 `mnemo_chain`, `mnemo_vault`, `mnemo_thread`, `mnemo_note`. **Stability**: Fluid — envelope shape may evolve
 (per-record attribution vs envelope wrapping; rank normalisation

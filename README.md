@@ -5,7 +5,8 @@ persistent MCP server — available in every agent session.
 
 mnemo indexes Claude Code (`~/.claude/projects/`), Codex CLI
 (`~/.codex/sessions/`), and Grok CLI (`~/.grok/sessions/`) transcripts
-into a realtime SQLite FTS5 index, and exposes 30+ tools via MCP.
+into a realtime SQLite FTS5 index, and exposes a deliberately small
+set of MCP tools — 27, sized to what agents actually use (🎯T143).
 New transcripts are picked up automatically via filesystem watching. A
 browser dashboard is served on the same port at `http://localhost:19419`
 — no separate process or build step required.
@@ -46,13 +47,16 @@ browser dashboard is served on the same port at `http://localhost:19419`
   across `/clear` boundaries; `mnemo_ops` (op=restore) retrieves it
 - **Token usage analytics** — aggregated input/output/cache tokens with
   cost estimates, grouped by day, model, or repo
-- **Query templates** — save and reuse parameterised SQL queries
 - **Pattern discovery** — analyses transcript history to find workaround
   patterns suggesting missing features
 - **Permission analysis** — suggests `allowedTools` rules from actual
   tool usage patterns
 - **Raw SQL access** — read-only queries against the full database,
-  including sqldeep nested syntax for hierarchical JSON output
+  including sqldeep nested syntax for hierarchical JSON output. This is
+  the entry point for the indexes above that no longer have a dedicated
+  tool (docs, targets, plans, memories, skills, configs, commits, PRs,
+  audit logs); `mnemo_query`'s description carries the schema and
+  worked examples for each.
 
 ## Dashboard
 
@@ -349,12 +353,6 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 
 | Tool | Description |
 |---|---|
-| `mnemo_memories` | Search auto-memory files from all projects |
-| `mnemo_skills` | Search skill files from `~/.claude/skills/` |
-| `mnemo_configs` | Search CLAUDE.md project instructions from all repos |
-| `mnemo_targets` | Search convergence targets from all repos |
-| `mnemo_audit` | Search audit logs from all repos |
-| `mnemo_docs` | Search markdown, text, and PDF documentation from all repos |
 | `mnemo_todos` | Query TODO items indexed from TODO.md / todos.md files (Obsidian Tasks dialect) — filter by status, tag, priority, section, due date (overdue/due-soon/no-date), and full text |
 | `mnemo_todo_set` | Edit an existing TODO item in place (status / due / priority) — line-precise, atomic, stale-guarded write-back to the source file |
 | `mnemo_todo_add` | Append a new TODO item to a tracked TODO file, optionally under a heading |
@@ -395,8 +393,6 @@ primitive lives in the harness, not the daemon.
 
 | Tool | Description |
 |---|---|
-| `mnemo_commits` | Search git commits across all tracked repos |
-| `mnemo_prs` | Search GitHub PRs and issues across all repos |
 
 ### Analytics and observability
 
@@ -529,8 +525,7 @@ Slow or offline peers drop into `warnings[]` with a typed
 `server_error`, `malformed_response`, `connect_failed`); the local
 response returns regardless. Per-peer timeout default 5s.
 
-Write- and control-shaped tools (`mnemo_ops`, `mnemo_whatsup`,
-`mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
+Write- and control-shaped tools (`mnemo_ops`, `mnemo_whatsup`, `mnemo_permissions`, `mnemo_query`,
 `mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
 `mnemo_thread`, `mnemo_note`) bypass federation entirely.
 

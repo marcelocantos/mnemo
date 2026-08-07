@@ -339,18 +339,6 @@ The optional `filter` parameter supports:
 Index statistics — total sessions and messages broken down by session
 type, with noise vs substantive counts.
 
-### mnemo_memories
-
-Search across Claude Code auto-memory files from all projects. Memories
-are structured notes with frontmatter (name, description, type) that
-agents save across sessions.
-
-Parameters:
-- `query` — search query (fuzzy OR matching). Omit to list all.
-- `type` — filter: "user", "feedback", "project", "reference"
-- `project` — project name substring filter
-- `limit` — max results (default 20)
-
 ### mnemo_usage
 
 Token usage analytics across sessions. Aggregates input, output, cache
@@ -457,59 +445,6 @@ Once a soft limit is breached, mnemo throttles the agents it invokes
 itself — compactor, segmenter, reviewer, image description — and nothing
 else. Throttling is soft (a delay between runs, never a refusal) and
 loud (`mnemo_ops` (op=doctor) reports the level, reason, and what would lift it).
-
-### mnemo_skills
-
-Search across Claude Code skill files (`~/.claude/skills/`). Discover
-available workflows and reusable procedures.
-
-Parameters:
-- `query` — search query (fuzzy OR matching). Omit to list all.
-- `limit` — max results (default 20)
-
-### mnemo_configs
-
-Search across CLAUDE.md project instruction files from all repos. Find
-build instructions, conventions, and delivery definitions.
-
-Parameters:
-- `query` — search query (fuzzy OR matching). Omit to list all.
-- `repo` — repo filter
-- `limit` — max results (default 20)
-
-### mnemo_audit
-
-Search across audit logs (docs/audit-log.md) from all repos. Find
-when projects were last released or review maintenance patterns.
-
-Parameters:
-- `query` — search query (fuzzy OR matching). Omit to list all.
-- `repo` — repo filter
-- `skill` — skill name filter (e.g. "release", "audit")
-- `limit` — max results (default 20)
-
-### mnemo_targets
-
-Search across convergence targets (docs/targets.md) from all repos.
-Find targets across projects, check active/achieved status.
-
-Parameters:
-- `query` — search query (fuzzy OR matching). Omit to list all.
-- `repo` — repo filter
-- `status` — filter: identified, converging, achieved
-- `limit` — max results (default 20)
-
-### mnemo_who_ran
-
-Find sessions that ran a specific shell command. Searches Bash tool_use
-entries by command pattern, returning session ID, repo, matched command,
-and timestamp.
-
-Parameters:
-- `pattern` (required) — command substring to match (LIKE)
-- `days` — recency window (default 30)
-- `repo` — repo filter
-- `limit` — max results (default 20)
 
 ### mnemo_permissions
 
@@ -768,7 +703,7 @@ Per-peer timeout default 5s.
 When `linked_instances` is empty or absent, all tools return their
 original local-only response shape unchanged. Write- and
 control-shaped tools (`mnemo_ops`, `mnemo_whatsup`,
-`mnemo_docs`, `mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`,
+`mnemo_permissions`, `mnemo_query`,
 `mnemo_stats`, `mnemo_status`, `mnemo_chain`, `mnemo_vault`,
 `mnemo_thread`, `mnemo_note`) bypass federation entirely.
 

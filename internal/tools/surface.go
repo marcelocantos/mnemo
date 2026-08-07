@@ -57,16 +57,7 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_locate_uuid":       consumerAgent, // 1 / 1
 
 	// Cross-repo indexes.
-	"mnemo_repos":     consumerAgent, // 14 / 12
-	"mnemo_docs":      consumerAgent, // 8 / 4
-	"mnemo_configs":   consumerAgent, // 6 / 2
-	"mnemo_memories":  consumerAgent, // 4 / 2
-	"mnemo_skills":    consumerAgent, // 2 / 2
-	"mnemo_targets":   consumerAgent, // 7 / 7
-	"mnemo_audit":     consumerAgent, // 1 / 1
-	"mnemo_synthesis": consumerAgent, // 10 / 6
-	"mnemo_commits":   consumerAgent, // 4 / 3
-	"mnemo_prs":       consumerAgent, // 2 / 2
+	"mnemo_repos": consumerAgent, // 14 / 12
 
 	// Status and diagnostics kept OUT of mnemo_ops on purpose: these
 	// carry traffic, and an op is a worse name than a name.
@@ -104,7 +95,6 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_session_go":        consumerAgent, // new with 🎯T125
 	"mnemo_config":            consumerAgent, // 12 / 4
 	"mnemo_whatsup":           consumerAgent, // 2 / 2
-	"mnemo_who_ran":           consumerAgent, // 2 / 1
 	"mnemo_permissions":       consumerAgent, // 1 / 1
 	"mnemo_discover_patterns": consumerAgent, // 1 / 1
 	"mnemo_rework_history":    consumerSkill, // bullseye_rework feeds on it
