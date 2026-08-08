@@ -158,3 +158,60 @@ func TestCandidateScanCorrectnessUnchanged(t *testing.T) {
 	}
 	t.Logf("selected %d candidates, backlog %d", len(got), backlog)
 }
+
+// TestIncrementalScanIsDrivenByChangedSessions is the oracle for the
+// defect that hid in plain sight: the incremental path had a bound in
+// the SQL that did nothing.
+//
+// Appending the changed-session join after `session_summary ss` let
+// SQLite drive from session_summary, evaluating every per-session
+// aggregate for all 35,306 sessions before discarding the 35,295 that
+// had not changed. The "incremental" scan measured 657ms against 630ms
+// for a full one — indistinguishable, and nothing failed.
+//
+// The plan is the only place this is visible: results are identical
+// either way. So the plan is what gets asserted.
+func TestIncrementalScanIsDrivenByChangedSessions(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+
+	const q = `EXPLAIN QUERY PLAN
+	  SELECT ss.session_id
+	  FROM (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > 0) chg
+	  CROSS JOIN session_summary ss ON ss.session_id = chg.session_id
+	  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
+
+	rows, err := s.readDB.Query(q)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err == nil {
+			lines = append(lines, detail)
+		}
+	}
+	if len(lines) == 0 {
+		t.Fatal("empty plan")
+	}
+	// The property that matters: chg is the OUTER loop, and
+	// session_summary is SEARCHed by session id rather than SCANned.
+	// (The first plan line is "CO-ROUTINE chg" — the probe's own
+	// sub-plan — so the check is on the shape, not on line 0.)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "SCAN chg") {
+		t.Errorf("the changed-session set does not drive the join.\nPlan:\n%s\n"+
+			"When session_summary drives instead, the bound is present in the SQL "+
+			"and has no effect: every per-session aggregate is computed and then "+
+			"thrown away (measured 657ms for 11 changed sessions vs 3ms).", joined)
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "SCAN ss") {
+			t.Errorf("plan scans session_summary as the outer loop: %q\nPlan:\n%s\n"+
+				"The incremental path must SEARCH it by the changed session ids.",
+				l, joined)
+		}
+	}
+}

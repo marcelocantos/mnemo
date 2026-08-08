@@ -307,12 +307,32 @@ func (s *Store) SelectCompactionCandidatesSince(
 	// rowid path turns it into a range seek over just the entries
 	// appended since the last scan — the difference between O(index) and
 	// O(new rows) every minute.
-	changedJoin := ""
+	// The FROM clause differs by mode, and WHICH TABLE DRIVES THE JOIN is
+	// the whole point of the incremental path (🎯T146).
+	//
+	// Appending the changed-session join after `session_summary ss` let
+	// SQLite drive from session_summary: it evaluated every per-session
+	// aggregate in the CTE for all 35,306 sessions and then discarded the
+	// 35,295 that had not changed. Measured, the "incremental" scan cost
+	// 657ms against 630ms for a full one — the bound existed in the SQL
+	// and did nothing.
+	//
+	// Putting the changed set first and joining with CROSS JOIN pins the
+	// order (SQLite treats CROSS JOIN as a join-order constraint rather
+	// than a hint), so the aggregates run only for sessions that gained
+	// an entry: 3ms for 11 changed sessions, a 220x reduction on the path
+	// that runs almost every tick.
+	//
+	// NOT INDEXED on the probe is also load-bearing and stays: it forces
+	// a rowid range scan over the new entries (1ms) instead of an index
+	// choice that measured 110ms.
+	fromClause := `FROM session_summary ss
+		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 	var args []any
 	if sinceEntryID >= 0 {
-		changedJoin = `
-		  JOIN (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > ?) chg
-		    ON chg.session_id = ss.session_id`
+		fromClause = `FROM (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > ?) chg
+		  CROSS JOIN session_summary ss ON ss.session_id = chg.session_id
+		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 		args = append(args, sinceEntryID)
 	}
 	args = append(args, maxBudgetRatio, budgetTokens, quarantineThreshold, quarantineSinceStr, limit)
@@ -366,8 +386,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 		      SELECT COUNT(*) FROM messages
 		      WHERE session_id = ss.session_id AND is_noise = 0
 		    ), 0)                                                                                   AS sess_msgs
-		  FROM session_summary ss%[1]s
-		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
+		  %[1]s
 		)
 		SELECT s.session_id, s.connection_id, COUNT(*) OVER () AS backlog
 		FROM session_state s
@@ -430,7 +449,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, changedJoin, FallbackTokensPerMessage), args...)
+	`, fromClause, FallbackTokensPerMessage), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}
