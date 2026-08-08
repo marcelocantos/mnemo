@@ -486,15 +486,17 @@ clustering, bigram labels. Two independent opt-ins open egress
 
 Tools:
 
-- `mnemo_vault_recluster` — run a clustering pass now. Params:
-  `engine` (optional override: `heuristic` | `embeddings`),
-  `force_reembed` (bool, default false). Returns a `cluster_runs` row.
-- `mnemo_vault_themes_inspect` — full members, centroid, pin/archive
-  state, and `label_path` / `label_gate` for a theme id or slug.
-- `mnemo_vault_themes_pin` — pin/unpin so `retire_after` (default 180d)
-  does not auto-archive. Params: `theme`, `unpin`, `reason`.
-- `mnemo_vault_themes_split` / `mnemo_vault_themes_merge` — **stubs**:
-  record a `theme_overrides` directive only; live apply is a follow-up.
+All of these are ops on the consolidated `mnemo_vault` tool (🎯T143.3):
+
+- `op=recluster` — run a clustering pass now. Params: `engine`
+  (optional override: `heuristic` | `embeddings`), `force_reembed`
+  (bool, default false). Returns a `cluster_runs` row.
+- `op=themes_inspect` — full members, centroid, pin/archive state, and
+  `label_path` / `label_gate` for a theme id or slug.
+- `op=themes_pin` — pin/unpin so `retire_after` (default 180d) does not
+  auto-archive. Params: `theme`, `unpin`, `reason`.
+- `op=themes_split` / `op=themes_merge` — **stubs**: record a
+  `theme_overrides` directive only; live apply is a follow-up.
 
 Vault pages land at `_mnemo/themes/<slug>.md` (archived under
 `_mnemo/themes/_archive/`). A 24h reconciler also runs when the daemon
@@ -566,8 +568,7 @@ and which require a restart.
 If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
 tools (`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
 
-`mnemo_who_ran`, `mnemo_audit`, `mnemo_targets`,
-`mnemo_skills`, `mnemo_configs`) wrap their result in a `FanoutEnvelope`
+`mnemo_repos`, `mnemo_read_session`) wrap their result in a `FanoutEnvelope`
 attributing per-instance results:
 
 ```json

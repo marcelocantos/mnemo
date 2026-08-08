@@ -396,11 +396,10 @@ Targets live in `bullseye.yaml` at the repo root, managed by the
 bullseye MCP server (`bullseye_list`, `bullseye_put`,
 `bullseye_retire`, etc.). This matches the global convention.
 
-The `mnemo_targets` MCP tool — which reads `docs/targets.md` across
-all repos — does **not** index `bullseye.yaml` today, so mnemo's own
-targets are invisible to it. If you want a cross-project target
-search that includes mnemo, use `bullseye_list(cwd)` directly until
-the indexer is taught to read `bullseye.yaml`.
+Targets are indexed from `docs/targets.md` across all repos and are
+searchable via `mnemo_search(kinds: "target")`. That index does **not**
+read `bullseye.yaml`, so mnemo's own targets are invisible to it — use
+`bullseye_list(cwd)` directly until the indexer is taught to read it.
 
 ## Gates
 

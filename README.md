@@ -347,9 +347,6 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 
 | Tool | Description |
 |---|---|
-| `mnemo_todos` | Query TODO items indexed from TODO.md / todos.md files (Obsidian Tasks dialect) — filter by status, tag, priority, section, due date (overdue/due-soon/no-date), and full text |
-| `mnemo_todo_set` | Edit an existing TODO item in place (status / due / priority) — line-precise, atomic, stale-guarded write-back to the source file |
-| `mnemo_todo_add` | Append a new TODO item to a tracked TODO file, optionally under a heading |
 
 ### Cross-session messaging
 
@@ -360,9 +357,6 @@ repo root): the producer posts, the consumer pulls.
 
 | Tool | Description |
 |---|---|
-| `mnemo_note_post` | Post a note to an inbox directory (absolute, or relative to your session's initial cwd). `from_session`/`from_repo` are stamped from the MCP connection identity |
-| `mnemo_note_recv` | Receive notes for an inbox; by default returns only unread notes and marks them read (idempotent) |
-| `mnemo_note_list` | Browse notes without consuming them; omit `inbox` to list every inbox with recent traffic |
 
 The inbox is a canonicalized absolute path — a leading `~` is rejected
 (shell home-expansion is ambiguous), relative paths resolve against the
@@ -373,7 +367,7 @@ collapsed, so every spelling of one directory addresses one inbox.
 **Producer (session A, e.g. mid-`/release` in mnemo):**
 
 ```
-mnemo_note_post(inbox: "../ytt", body: "mnemo v0.42 published, brew formula updated")
+mnemo_note(op: "post", inbox: "../ytt", body: "mnemo v0.42 published, brew formula updated")
 ```
 
 **Consumer (session B, in the downstream repo):** type `/inbox` to pull
@@ -421,15 +415,6 @@ patterns, and user notes via local TF-IDF by default; set
 
 | Tool | Description |
 |---|---|
-| `mnemo_vault_sync` | Trigger an immediate vault sync (writes all changed notes to `vault_path`) |
-| `mnemo_vault_status` | Vault path, layout/profile, indexing scope, note counts, bridges |
-| `mnemo_vault_migration_doc` | Preview or write `_mnemo/MIGRATION.md` (v1→v2) |
-| `mnemo_vault_bridge_list` | Configured collection→anchor bridges and last-sync errors |
-| `mnemo_vault_gc` | Inspect (and optionally clean) vault GC orphans |
-| `mnemo_vault_recluster` | Run document-level themes clustering now (`engine`, `force_reembed`) |
-| `mnemo_vault_themes_inspect` | Members, centroid, pin/archive, labelling path/gate for a theme |
-| `mnemo_vault_themes_pin` | Pin/unpin a theme against auto-archive |
-| `mnemo_vault_themes_split` / `_merge` | Stubs — record overrides only; live apply is a follow-up |
 
 ### Runtime configuration
 
@@ -538,9 +523,9 @@ on top of them:
   track
 - **Cross-repo knowledge lookups** — search memories, configs, targets,
   and plans from any project without leaving your current session
-- **Session forensics** — trace a multi-session work span with
-  replay decisions with `mnemo_search(kinds: "decision")`, or audit
-  what commands were run with `mnemo_who_ran`
+- **Session forensics** — replay decisions with
+  `mnemo_search(kinds: "decision")`, or audit what commands were run
+  with `mnemo_query` over `messages.tool_command`
 - **Custom dashboards** — use `mnemo_query` with SQL or sqldeep syntax
   to build project-specific analytics (message volume, tool usage
   patterns, active repos)
