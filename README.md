@@ -5,7 +5,8 @@ persistent MCP server — available in every agent session.
 
 mnemo indexes Claude Code (`~/.claude/projects/`), Codex CLI
 (`~/.codex/sessions/`), and Grok CLI (`~/.grok/sessions/`) transcripts
-into a realtime SQLite FTS5 index, and exposes 30+ tools via MCP.
+into a realtime SQLite FTS5 index, and exposes a deliberately small
+set of MCP tools — 27, sized to what agents actually use (🎯T143).
 New transcripts are picked up automatically via filesystem watching. A
 browser dashboard is served on the same port at `http://localhost:19419`
 — no separate process or build step required.
@@ -46,13 +47,13 @@ browser dashboard is served on the same port at `http://localhost:19419`
   across `/clear` boundaries; `mnemo_ops` (op=restore) retrieves it
 - **Token usage analytics** — aggregated input/output/cache tokens with
   cost estimates, grouped by day, model, or repo
-- **Query templates** — save and reuse parameterised SQL queries
 - **Pattern discovery** — analyses transcript history to find workaround
   patterns suggesting missing features
 - **Permission analysis** — suggests `allowedTools` rules from actual
   tool usage patterns
 - **Raw SQL access** — read-only queries against the full database,
-  including sqldeep nested syntax for hierarchical JSON output
+  including sqldeep nested syntax for hierarchical JSON output. This is
+  the entry point for the indexes above that have no dedicated tool.
 
 ## Dashboard
 
@@ -140,7 +141,7 @@ PATH — Go cgo does not use MSVC. The simplest setup is
 [MSYS2](https://www.msys2.org/) with the `mingw-w64-x86_64-toolchain`
 package. Release binaries from the GitHub release page are statically
 linked and have no external runtime requirements. Live-session
-discovery (`mnemo_whatsup`, `lsof`-based liveness) degrades gracefully
+discovery (`/api/whatsup`, `lsof`-based liveness) degrades gracefully
 on Windows; transcript indexing and all query tools work identically.
 
 ## Running
@@ -198,7 +199,7 @@ that has since been deleted is reported rather than silently substituted.
 Claude Code and Grok CLI sessions resume. Codex/ChatGPT sessions are
 indexed but refused by name — they have no verified terminal resume.
 
-Agents can do the same through the `mnemo_session_go` MCP tool, which is
+The same resolution is available over HTTP at `POST /api/session/go`, which is
 usually the better route: ask mnemo to find the conversation, then ask it
 to open the one you meant.
 
@@ -339,26 +340,13 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
 | `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
-| `mnemo_chain` | Retrieve the full `/clear`-bounded session chain for any session |
-| `mnemo_self` | Discover the calling session's ID via two-phase nonce protocol |
-| `mnemo_decisions` | Search past decisions (proposal + confirmation pairs) across sessions |
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
-| `mnemo_session_go` | Reopen a past conversation: resolve a loose reference (id/prefix, repo fragment, `latest`, `latest:<scope>`) and resume it in an iTerm2 tab in the directory that session ran in. Claude Code and Grok CLI; Codex/ChatGPT refused by name |
 
 ### Cross-project knowledge
 
 | Tool | Description |
 |---|---|
-| `mnemo_memories` | Search auto-memory files from all projects |
-| `mnemo_skills` | Search skill files from `~/.claude/skills/` |
-| `mnemo_configs` | Search CLAUDE.md project instructions from all repos |
-| `mnemo_targets` | Search convergence targets from all repos |
-| `mnemo_audit` | Search audit logs from all repos |
-| `mnemo_docs` | Search markdown, text, and PDF documentation from all repos |
-| `mnemo_todos` | Query TODO items indexed from TODO.md / todos.md files (Obsidian Tasks dialect) — filter by status, tag, priority, section, due date (overdue/due-soon/no-date), and full text |
-| `mnemo_todo_set` | Edit an existing TODO item in place (status / due / priority) — line-precise, atomic, stale-guarded write-back to the source file |
-| `mnemo_todo_add` | Append a new TODO item to a tracked TODO file, optionally under a heading |
 
 ### Cross-session messaging
 
@@ -369,9 +357,6 @@ repo root): the producer posts, the consumer pulls.
 
 | Tool | Description |
 |---|---|
-| `mnemo_note_post` | Post a note to an inbox directory (absolute, or relative to your session's initial cwd). `from_session`/`from_repo` are stamped from the MCP connection identity |
-| `mnemo_note_recv` | Receive notes for an inbox; by default returns only unread notes and marks them read (idempotent) |
-| `mnemo_note_list` | Browse notes without consuming them; omit `inbox` to list every inbox with recent traffic |
 
 The inbox is a canonicalized absolute path — a leading `~` is rejected
 (shell home-expansion is ambiguous), relative paths resolve against the
@@ -382,7 +367,7 @@ collapsed, so every spelling of one directory addresses one inbox.
 **Producer (session A, e.g. mid-`/release` in mnemo):**
 
 ```
-mnemo_note_post(inbox: "../ytt", body: "mnemo v0.42 published, brew formula updated")
+mnemo_note(op: "post", inbox: "../ytt", body: "mnemo v0.42 published, brew formula updated")
 ```
 
 **Consumer (session B, in the downstream repo):** type `/inbox` to pull
@@ -396,19 +381,12 @@ primitive lives in the harness, not the daemon.
 
 | Tool | Description |
 |---|---|
-| `mnemo_commits` | Search git commits across all tracked repos |
-| `mnemo_prs` | Search GitHub PRs and issues across all repos |
 
 ### Analytics and observability
 
 | Tool | Description |
 |---|---|
 | `mnemo_usage` | Token usage analytics with costs, grouped by day/model/repo/session/block. Reports what it excludes: unpriced models and undeduplicable sources |
-| `mnemo_budget` | Spend against a resetting monthly budget, alerting on the **projection** rather than a threshold already crossed, and naming the sessions burning it |
-| `mnemo_agent_trees` | Sub-agent fan-outs costed as a whole — for the case where forty individually modest agents collectively blow the budget |
-| `mnemo_whatsup` | Live session resource monitor: CPU%, RSS, memory pressure |
-| `mnemo_permissions` | Analyse tool usage patterns to suggest `allowedTools` rules |
-| `mnemo_discover_patterns` | Workaround patterns suggesting missing features, persisted and refreshed hourly. Reports occurrences and distinct sessions separately, and needs ≥ 3 of the former across ≥ 2 of the latter — one session's habit is not a pattern |
 
 ### Database and templates
 
@@ -437,15 +415,6 @@ patterns, and user notes via local TF-IDF by default; set
 
 | Tool | Description |
 |---|---|
-| `mnemo_vault_sync` | Trigger an immediate vault sync (writes all changed notes to `vault_path`) |
-| `mnemo_vault_status` | Vault path, layout/profile, indexing scope, note counts, bridges |
-| `mnemo_vault_migration_doc` | Preview or write `_mnemo/MIGRATION.md` (v1→v2) |
-| `mnemo_vault_bridge_list` | Configured collection→anchor bridges and last-sync errors |
-| `mnemo_vault_gc` | Inspect (and optionally clean) vault GC orphans |
-| `mnemo_vault_recluster` | Run document-level themes clustering now (`engine`, `force_reembed`) |
-| `mnemo_vault_themes_inspect` | Members, centroid, pin/archive, labelling path/gate for a theme |
-| `mnemo_vault_themes_pin` | Pin/unpin a theme against auto-archive |
-| `mnemo_vault_themes_split` / `_merge` | Stubs — record overrides only; live apply is a follow-up |
 
 ### Runtime configuration
 
@@ -530,10 +499,9 @@ Slow or offline peers drop into `warnings[]` with a typed
 `server_error`, `malformed_response`, `connect_failed`); the local
 response returns regardless. Per-peer timeout default 5s.
 
-Write- and control-shaped tools (`mnemo_self`, template
-`mnemo_ops` (op=restore), `mnemo_whatsup`, `mnemo_docs`,
-`mnemo_synthesis`, `mnemo_permissions`, `mnemo_query`, `mnemo_stats`,
-`mnemo_status`, `mnemo_chain`) bypass federation entirely.
+Write- and control-shaped tools (`mnemo_ops`, `mnemo_query`,
+`mnemo_stats`, `mnemo_status`, `mnemo_vault`,
+`mnemo_thread`, `mnemo_note`) bypass federation entirely.
 
 When `linked_instances` is empty or absent, federation is disabled and
 all tools return their original local-only response shape unchanged
@@ -555,9 +523,9 @@ on top of them:
   track
 - **Cross-repo knowledge lookups** — search memories, configs, targets,
   and plans from any project without leaving your current session
-- **Session forensics** — trace a multi-session work span with
-  `mnemo_chain`, replay decisions with `mnemo_decisions`, or audit
-  what commands were run with `mnemo_who_ran`
+- **Session forensics** — replay decisions with
+  `mnemo_search(kinds: "decision")`, or audit what commands were run
+  with `mnemo_query` over `messages.tool_command`
 - **Custom dashboards** — use `mnemo_query` with SQL or sqldeep syntax
   to build project-specific analytics (message volume, tool usage
   patterns, active repos)

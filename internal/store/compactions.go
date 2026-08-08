@@ -307,12 +307,32 @@ func (s *Store) SelectCompactionCandidatesSince(
 	// rowid path turns it into a range seek over just the entries
 	// appended since the last scan — the difference between O(index) and
 	// O(new rows) every minute.
-	changedJoin := ""
+	// The FROM clause differs by mode, and WHICH TABLE DRIVES THE JOIN is
+	// the whole point of the incremental path (🎯T146).
+	//
+	// Appending the changed-session join after `session_summary ss` let
+	// SQLite drive from session_summary: it evaluated every per-session
+	// aggregate in the CTE for all 35,306 sessions and then discarded the
+	// 35,295 that had not changed. Measured, the "incremental" scan cost
+	// 657ms against 630ms for a full one — the bound existed in the SQL
+	// and did nothing.
+	//
+	// Putting the changed set first and joining with CROSS JOIN pins the
+	// order (SQLite treats CROSS JOIN as a join-order constraint rather
+	// than a hint), so the aggregates run only for sessions that gained
+	// an entry: 3ms for 11 changed sessions, a 220x reduction on the path
+	// that runs almost every tick.
+	//
+	// NOT INDEXED on the probe is also load-bearing and stays: it forces
+	// a rowid range scan over the new entries (1ms) instead of an index
+	// choice that measured 110ms.
+	fromClause := `FROM session_summary ss
+		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 	var args []any
 	if sinceEntryID >= 0 {
-		changedJoin = `
-		  JOIN (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > ?) chg
-		    ON chg.session_id = ss.session_id`
+		fromClause = `FROM (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > ?) chg
+		  CROSS JOIN session_summary ss ON ss.session_id = chg.session_id
+		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 		args = append(args, sinceEntryID)
 	}
 	args = append(args, maxBudgetRatio, budgetTokens, quarantineThreshold, quarantineSinceStr, limit)
@@ -336,16 +356,37 @@ func (s *Store) SelectCompactionCandidatesSince(
 		      SELECT SUM(prompt_tokens + output_tokens) FROM compactions
 		      WHERE session_id = ss.session_id
 		    ), 0)                                                                                   AS comp_tokens,
+		    -- INDEXED BY is load-bearing, not a micro-optimisation
+		    -- (🎯T146). entries.input_tokens and friends are VIRTUAL
+		    -- generated columns extracting from raw JSONB, so an index
+		    -- that does not carry them forces a row fetch and a JSON
+		    -- re-parse per row. idx_entries_assistant_tokens covers
+		    -- (session_id, input_tokens, output_tokens); the planner
+		    -- instead chose idx_entries_addenda, which carries
+		    -- output/cache_creation but NOT input_tokens, and is
+		    -- therefore not covering here.
+		    --
+		    -- Measured on a 35k-session / 2.2M-assistant-entry index:
+		    -- 1458ms planner's choice vs 131ms forced, identical result.
+		    -- Whole scan 5066ms -> 676ms. ANALYZE stats were present and
+		    -- current, so this is a cost-model miss rather than missing
+		    -- statistics: SQLite appears not to credit an index as
+		    -- covering when the columns are VIRTUAL generated.
+		    --
+		    -- The hint is safe to pin: the index is declared in
+		    -- schema.sql and the append-only schema policy forbids
+		    -- dropping it. If it ever did go, this fails loudly at query
+		    -- time rather than silently reverting to a 5-second scan.
 		    COALESCE((
 		      SELECT SUM(input_tokens + output_tokens) FROM entries
+		      INDEXED BY idx_entries_assistant_tokens
 		      WHERE session_id = ss.session_id AND type = 'assistant'
 		    ), 0)                                                                                   AS sess_tokens,
 		    COALESCE((
 		      SELECT COUNT(*) FROM messages
 		      WHERE session_id = ss.session_id AND is_noise = 0
 		    ), 0)                                                                                   AS sess_msgs
-		  FROM session_summary ss%[1]s
-		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id
+		  %[1]s
 		)
 		SELECT s.session_id, s.connection_id, COUNT(*) OVER () AS backlog
 		FROM session_state s
@@ -408,7 +449,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
-	`, changedJoin, FallbackTokensPerMessage), args...)
+	`, fromClause, FallbackTokensPerMessage), args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select compaction candidates: %w", err)
 	}

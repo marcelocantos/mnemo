@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -39,8 +40,83 @@ func (s *Store) StreamReconcilers() []StreamReconciler {
 		mirrorReconcilerStream{s},
 		sourceStateReconcilerStream{s},
 		patternsReconcilerStream{s},
+		// Calibration goes BEFORE clustering, and the order is load-bearing.
+		//
+		// The worker drives these sequentially, so a reconciler that runs
+		// long starves everything after it. Clustering is a 24h-cadence
+		// pass over the whole corpus and, on this machine, was observed
+		// never to finish: four cluster_runs rows with ended_at NULL,
+		// the oldest from a prior daemon. Registered after it, calibration
+		// never executed once in ten minutes of live running — search
+		// stayed on the degraded fusion path indefinitely while every
+		// unit test passed, because the tests call Reconcile directly and
+		// never through the shared worker.
+		//
+		// Ordering is a workaround, not the fix. The real defect is that
+		// one slow stream can starve the rest; that is 🎯T145.
+		calibrationReconcilerStream{s},
 		clusterReconcilerStream{s},
 	}
+}
+
+// calibrationReconcilerStream refreshes the per-corpus score
+// distributions that cross-corpus ranking depends on (🎯T144).
+//
+// It runs on the same divergence-driven shape as the other streams: a
+// corpus is recalibrated only when its stored distribution has aged out
+// or its document count has moved enough to change its score profile.
+// That second condition is the one that matters — corpora here grow
+// continuously, and a distribution sampled when a corpus was a fraction
+// of its current size mis-maps every score computed against it while
+// producing an ordering that looks entirely reasonable.
+type calibrationReconcilerStream struct{ s *Store }
+
+func (c calibrationReconcilerStream) Name() string { return "search_calibration" }
+
+// Interval is the tick cadence, not the recalibration cadence: each
+// pass recalibrates only the corpora that have actually diverged.
+func (c calibrationReconcilerStream) Interval() time.Duration { return time.Hour }
+
+func (c calibrationReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
+	cals, err := c.s.LoadCalibrations()
+	if err != nil {
+		return 0, err
+	}
+	changed := 0
+	for _, spec := range searchCorpora() {
+		if err := ctx.Err(); err != nil {
+			return changed, err
+		}
+		docs := 0
+		//nolint:gosec // table name comes from the internal corpus registry
+		if err := c.s.readDB.QueryRow(`SELECT COUNT(*) FROM ` + spec.source).Scan(&docs); err != nil || docs == 0 {
+			continue
+		}
+		if stale, _ := cals[spec.kind].Stale(now, docs); !stale {
+			continue
+		}
+		if _, err := c.s.CalibrateCorpus(ctx, spec, now); err != nil {
+			// A corpus too small to yield a distribution is a normal
+			// state, not a fault: search degrades to fusion for it, and
+			// saying so every minute would be noise.
+			//
+			// A corpus with ample documents that still fails to calibrate
+			// is the opposite — something is wrong and the consequence
+			// (ranking silently stuck on the degraded path) is invisible
+			// from the outside. That one is worth a line.
+			if docs > calibrationMinSamples {
+				slog.Warn("calibration failed for a corpus large enough to calibrate; "+
+					"its hits will rank by fusion until this clears",
+					"corpus", spec.kind, "docs", docs, "err", err)
+			} else {
+				slog.Debug("calibration skipped: corpus too small",
+					"corpus", spec.kind, "docs", docs, "err", err)
+			}
+			continue
+		}
+		changed++
+	}
+	return changed, nil
 }
 
 // clusterReconcilerStream runs document-level themes clustering on a

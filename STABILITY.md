@@ -10,16 +10,38 @@ new product. The pre-1.0 period exists to get these surfaces right.
 ## Interaction surface catalogue
 
 Snapshot as of v0.33.0, amended for the 🎯T143 tool-surface reduction
-(see the v0.84.0 note below).
+(see the v0.84.0 and v0.85.0 notes below).
 
-**v0.84.0 note — MCP tool surface reduced from 70 tools to 38 (🎯T143).**
-This is the largest breaking change to the tool surface before 1.0, and
-it is deliberately made now: this document's own commitment is that
-backwards compatibility binds at 1.0 and "the pre-1.0 period exists to
-get these surfaces right". An audit on 2026-08-07 found that of 70
-registered tools, only 40 had ever been called by an agent and 15 in the
-previous 30 days, with `mnemo_search` alone accounting for 55% of all
-calls.
+**v0.84.0 / v0.85.0 note — MCP tool surface reduced from 70 tools to 18
+(🎯T143, 🎯T144).** This is the largest breaking change to the tool
+surface before 1.0, and it is deliberately made now: this document's own
+commitment is that backwards compatibility binds at 1.0 and "the pre-1.0
+period exists to get these surfaces right". An audit on 2026-08-07 found
+that of 70 registered tools, only 40 had ever been called by an agent and
+15 in the previous 30 days, with `mnemo_search` alone accounting for 55%
+of all calls.
+
+The reduction landed in two waves. v0.84.0 took 70 → 38 by deleting
+dead tools and consolidating families behind an `op` parameter. v0.85.0
+took 38 → 18 by deleting a further eighteen tools whose whole function
+was to wrap a query shape that `mnemo_query` already expresses, and by
+folding two search pathways into `mnemo_search` itself (🎯T144).
+
+*Removed in v0.85.0 as query wrappers with no replacement*:
+`mnemo_memories`, `mnemo_skills`, `mnemo_configs`, `mnemo_audit`,
+`mnemo_targets`, `mnemo_who_ran`, `mnemo_commits`, `mnemo_prs`,
+`mnemo_docs`, `mnemo_synthesis`, `mnemo_chain`, `mnemo_budget`,
+`mnemo_agent_trees`, `mnemo_session_go`, `mnemo_whatsup`,
+`mnemo_permissions`, `mnemo_discover_patterns`, `mnemo_self`. Every
+underlying index is retained and reachable through `mnemo_query`; only
+`mnemo_self` lost its mechanism outright, its session-nonce binding
+having never worked reliably.
+
+*Folded into `mnemo_search` (🎯T144)*: `mnemo_segments` and
+`mnemo_decisions`. Segmentation and decision detection were never
+separate domains — they are additional signal about the same
+transcripts — so they are now corpora within the one search rather than
+parallel entry points. See the `mnemo_search` `kinds` parameter.
 
 *Removed* (no consumer in four months): `mnemo_plans`, `mnemo_ci`,
 `mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
@@ -146,11 +168,9 @@ URLs + per-peer pinned certs. New CLI subcommands: `print-endpoint`
 (emit URL peers paste into their config), `ping-peer <name>`
 (invoke `mnemo_stats` on a configured peer). New flag
 `--federated-addr` (default `:19420`; empty disables). When
-`linked_instances` is non-empty, 16 read-shaped tools (mnemo_search,
-mnemo_sessions, mnemo_recent_activity, mnemo_decisions, mnemo_commits,
-mnemo_prs, mnemo_memories, mnemo_who_ran, mnemo_audit, mnemo_targets,
-mnemo_plans, mnemo_skills, mnemo_configs, mnemo_ci, mnemo_images,
-mnemo_discover_patterns) wrap their response in a `FanoutEnvelope`
+`linked_instances` is non-empty, the read-shaped tools (mnemo_search,
+mnemo_sessions, mnemo_recent_activity, mnemo_read_session, mnemo_repos,
+mnemo_query, mnemo_stats, mnemo_status, mnemo_usage) wrap their response in a `FanoutEnvelope`
 (`{local, peers[], warnings[]}`) attributing results per instance;
 write- and control-shaped tools bypass federation. Slow or offline
 peers are dropped with a typed warning rather than blocking the
@@ -312,6 +332,30 @@ helpful error pointing at brew services / systemd instead.
 | `context_before` | number | no | Messages before each hit (default 3) | Stable |
 | `context_after` | number | no | Messages after each hit (default 3) | Stable |
 | `context_filter` | string | no | "substantive" (default) or "all" | Needs review |
+| `kinds` | string | no | Comma-separated corpora to search (🎯T144). Omitted = the default eight: message, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit | Needs review |
+| `expand` | string | no | "none" (default), "segment", or "segment:coarse" — expand each hit to its enclosing topic span | Needs review |
+
+**Notes**: as of v0.85.0 `mnemo_search` spans the whole index rather
+than messages alone (🎯T144). Each hit is typed with the corpus it came
+from, and results are ranked across corpora by quantile calibration with
+shrinkage toward neutral, so a corpus with few samples cannot dominate on
+the strength of a thin empirical distribution. Message hits keep their
+full existing shape — context windows, session and repo filters — so the
+message-only contract above is unchanged for callers that ignore `kinds`.
+Cost scales with corpora in scope: one FTS query each, eight by default.
+`expand` stays default-off pending the boundary-quality gate in 🎯T138.
+
+When any corpus in scope has too little sampled evidence to place on the
+quantile axis, the **whole** merge drops to reciprocal rank fusion rather
+than mixing two scales, and the result reports `ranking: "rank_fusion"`
+instead of `"calibrated"`. Fusion is quality-blind — a corpus's top hit
+counts as a top hit however poor it is — so it is the fallback and never
+the default. The alternative, ranking an unmeasured corpus at a flat
+median, reads as a safe default and is not one: it loses deterministically
+to any corpus holding a full result window above its own median, which
+removes the corpus from the results entirely.
+Both parameters are **Needs review**: the corpus vocabulary and the
+ranking may still change before 1.0.
 
 #### mnemo_sessions
 
@@ -359,19 +403,6 @@ with `[LIVE pid=NNNNN]` in the output.
 
 **Added in v0.8.0.** Returns hierarchical JSON (repos → sessions → excerpts). **Stability**: Needs review — defaults and output shape may evolve.
 
-#### mnemo_memories
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `type` | string | no | Filter: user, feedback, project, reference | Needs review |
-| `project` | string | no | Project name substring filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.11.0.** Searches across auto-memory files from all projects.
-Returns name, description, type, project, content. **Stability**: Needs
-review — first release, output format and filters may evolve.
-
 #### mnemo_usage
 
 | Parameter | Type | Required | Description | Stability |
@@ -400,68 +431,6 @@ Needs review — first cut at the real-time-consumer surface
 (🎯T46 verify pending); `group_by` block/session boundaries are
 intended to remain stable.
 
-#### mnemo_skills
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `~/.claude/skills/*.md`. **Stability**: Needs review.
-
-#### mnemo_configs
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches CLAUDE.md files from all repos. **Stability**: Needs review.
-
-#### mnemo_audit
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `skill` | string | no | Skill name filter (e.g. "release") | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `docs/audit-log.md` from all repos. **Stability**: Needs review.
-
-#### mnemo_targets
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `status` | string | no | Status filter: identified, converging, achieved | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.12.0.** Searches `docs/targets.md` from all repos. **Stability**: Needs review.
-
-#### mnemo_who_ran
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `pattern` | string | yes | Command substring to match (LIKE) | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Stable |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.13.0.** Searches Bash tool_use entries by command pattern. **Stability**: Needs review.
-
-#### mnemo_permissions
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `days` | number | no | Recency window in days (default 30) | Stable |
-| `repo` | string | no | Repo filter | Needs review |
-| `limit` | number | no | Max results per category (default 20) | Stable |
-
-**Added in v0.13.0.** Analyzes tool_use patterns to suggest allowedTools rules. **Stability**: Needs review.
-
 #### mnemo_query
 
 | Parameter | Type | Required | Description | Stability |
@@ -486,107 +455,11 @@ activity. Filter matching uses SQL LIKE with `*` mapped to `%`.
 No parameters. Returns session/message counts by type, including a Streams
 table showing per-stream ingest state (added in v0.16.0). **Stability**: Stable.
 
-#### mnemo_chain
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `session_id` | string | yes | Any session ID in the chain (or a prefix) | Needs review |
-
-**Added in v0.16.0.** Resolves the full /clear-bounded session chain for a given session. Returns an ordered list of ChainLinks (oldest → newest) with per-session summaries and gap/confidence for each link. Single-element result if no chain is found. **Stability**: Needs review — first release, output format may evolve.
-
-#### mnemo_self
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `nonce` | string | no | Nonce from previous call. Omit to generate. | Needs review |
-
-**Notes**: Two-phase nonce protocol. Nonces detected during ingest and
-stored in indexed `session_nonces` table. The mechanism may evolve.
-
-#### mnemo_decisions
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (fuzzy OR matching) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.17.0.** Surfaces past decisions across all sessions.
-Detects proposal+confirmation patterns (assistant proposes, user
-confirms with "yes"/"lgtm"/etc) at ingest time and stores them in
-`decisions` FTS5 table. Retroactive backfill runs at startup. **Stability**:
-Fluid — detection heuristic is first-cut and tuning is expected.
-
-#### mnemo_whatsup
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `postmortem` | bool | no | Also list directories with recent claude activity even when no live processes are detected (default false) | Fluid |
-
-**Added in v0.17.0.** Live session resource monitor: per-session CPU%,
-RSS, CPU time for active Claude Code processes, plus system memory
-pressure (macOS). Cross-references PIDs via `lsof` with session metadata
-(repo, topic, work type). **v0.18.0 (🎯T24):** each live session is
-enriched with the process's `cwd` (via `ps -E PWD`) and the newest-mtime
-transcript resolved from `~/.claude/projects/<encoded-cwd>/*.jsonl`; a
-new `postmortem` parameter reports directories that had recent claude
-activity even when no live processes are detected. **Stability**:
-Fluid — metric set, output shape, and parameter set may evolve.
-
-#### mnemo_commits
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (FTS on subject/body) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `author` | string | no | Author name/email substring | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.17.0.** Indexes git commits from all known repos (session_meta
-+ workspace walker union) into `git_commits` with FTS5 on subject, body,
-repo, and author. Incremental — only fetches new commits per repo since
-last ingest. Backfill limited to last 365 days. **Stability**: Needs review.
-
-#### mnemo_prs
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (FTS on title/body) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `state` | string | no | open, closed, merged, all (default all) | Needs review |
-| `author` | string | no | GitHub username filter | Needs review |
-| `type` | string | no | pr, issue, all (default all) | Needs review |
-| `days` | number | no | Recency window in days (default 30) | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.17.0.** GitHub PR/issue activity via `gh` CLI across all
-repos that appear in session history. Stores in `github_prs` and
-`github_issues` with FTS5. Backfill runs in a goroutine at startup (non-
-blocking). **Stability**: Needs review — output fields and filter
-semantics may evolve.
-
-#### mnemo_discover_patterns
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `days` | number | no | Recency window in days (default 90) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `min_occurrences` | number | no | Minimum pattern occurrences to report (default 3) | Needs review |
-
-**Added in v0.17.0.** Query-time analysis over the indexed transcript corpus
-to find workaround patterns that suggest missing mnemo features. Detects
-direct JSONL reads, transcript-directory grep, repeated mnemo_query
-shapes (normalised), and recurring mnemo_search queries. Feeds the
-"self-improving tool discovery" feedback loop. **Stability**: Fluid —
-detection heuristics are first-cut.
-
 #### mnemo_ops (op=restore)
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `session_id` | string | yes | The session for which to restore prior compacted context. Typically the current session (obtain via `mnemo_self`). | Needs review |
+| `session_id` | string | yes | The session for which to restore prior compacted context. Typically the most recent interactive session for the repo (obtain via `mnemo_sessions`). | Needs review |
 
 **Added in v0.18.0 (🎯T10).** Returns the compacted context accumulated
 on the MCP session that owns this Claude Code session — every span
@@ -602,52 +475,6 @@ restoration. Output is pre-formatted (span headers, targets, files,
 decisions, open threads) with a trailing Budget footer showing the
 compaction-to-session token ratio against the 10% invariant.
 **Stability**: Needs review — first release, output shape may evolve.
-
-#### mnemo_docs
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `query` | string | no | Search query (FTS on title and content) | Needs review |
-| `repo` | string | no | Repo filter | Needs review |
-| `kind` | string | no | Filter: md, txt, pdf | Needs review |
-| `limit` | number | no | Max results (default 20) | Stable |
-
-**Added in v0.18.0 (🎯T21).** Indexes markdown, plain-text, and PDF
-files found across tracked repos. Discovery sweeps common locations —
-repo root README/CHANGELOG/notes, `docs/`, `design/`, `notes/`,
-`papers/` — and respects `.gitignore`. PDF extraction via `pdftotext`
-(poppler) with `mutool` fallback; when neither is available, PDFs are
-skipped with a startup warning. `.md` / `.pdf` pairs sharing a stem in
-the same directory dedup with `.md` preferred. Incremental via
-SHA-256 content hash. **Stability**: Needs review — discovery
-heuristics, exclusion list, and output fields may evolve.
-
-#### mnemo_chain
-
-**v0.18.0 update (🎯T25.3)**: gains a `mode` parameter.
-
-| Parameter | Type | Required | Description | Stability |
-|---|---|---|---|---|
-| `session_id` | string | yes | Any session ID in the chain (or a prefix) | Stable |
-| `mode` | string | no | `auto` (default) / `strict` / `candidates` | Needs review |
-
-Chain detection has two layers. **Definitive** rows are written by the
-daemon when an MCP session observes transitions between Claude Code
-sessions (rows carry `mechanism='mcp_connection'`, `confidence='definitive'`).
-**Heuristic** candidates are computed on demand at query time via
-`InferChainHeuristic` using the cwd-most-recent rule, for sessions the
-daemon never saw live.
-
-- `auto`: definitive chain, falling through to heuristic candidates only
-  when the query session has no definitive predecessor.
-- `strict`: definitive only.
-- `candidates`: always returns both definitive and heuristic, attributed
-  by mechanism so ambiguity is visible.
-
-The ingest-time heuristic (detectChainForSession / backfillSessionChains)
-has been removed entirely in v0.18.0. Under v0.17 and earlier, chain
-rows were written at ingest time with `mechanism='time_heuristic'` /
-`'cwd_most_recent'`. Those values no longer appear on fresh indexes.
 
 #### mnemo_session_structure
 
@@ -768,7 +595,7 @@ dependency and cache TTL are implementation details and may change.
 | `ci_runs` | id, repo, run_id (unique), workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url | Needs review |
 | `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion | Needs review |
 | `session_chains` | successor_id (PK), predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at — /clear-bounded chain links | Fluid |
-| `session_nonces` | nonce → session_id mapping for mnemo_self | Fluid |
+| `session_nonces` | nonce → session_id mapping; **no longer written or read** since mnemo_self was removed in v0.85.0. Retained per the append-only schema policy. | Fluid |
 | `ingest_state` | path, offset | Fluid |
 | `ingest_status` | stream, last_backfill, files_indexed, files_on_disk — per-stream backfill state | Fluid |
 | `decisions` | id, session_id, proposal_msg_id, confirmation_msg_id, proposal_text, confirmation_text, repo, timestamp — proposal+confirmation pairs | Fluid |
@@ -934,10 +761,15 @@ local-only deployments.
 `error_kind` values: `timeout`, `connection_refused`, `tls_handshake`,
 `server_error`, `malformed_response`, `connect_failed`,
 `unknown_instance`, `unknown`. Peers are sorted by instance name for
-deterministic ordering. Tools that bypass federation: `mnemo_self`,
-`mnemo_ops`, `mnemo_whatsup`, `mnemo_docs`, `mnemo_synthesis`,
-`mnemo_permissions`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
-`mnemo_chain`, `mnemo_vault`, `mnemo_thread`, `mnemo_note`. **Stability**: Fluid — envelope shape may evolve
+deterministic ordering. Only four tools fan out: `mnemo_search`,
+`mnemo_sessions`, `mnemo_recent_activity`, `mnemo_rework_history`. The
+remaining fourteen bypass federation — `mnemo_compacted_session`,
+`mnemo_config`, `mnemo_locate_uuid`, `mnemo_note`, `mnemo_ops`,
+`mnemo_query`, `mnemo_read_session`, `mnemo_repos`,
+`mnemo_session_structure`, `mnemo_stats`, `mnemo_status`,
+`mnemo_thread`, `mnemo_usage`, `mnemo_vault` — because they are either
+write-shaped, local-state-shaped, or return a bespoke format that does
+not merge across peers. **Stability**: Fluid — envelope shape may evolve
 (per-record attribution vs envelope wrapping; rank normalisation
 across instances) before 1.0.
 

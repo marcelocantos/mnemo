@@ -26,23 +26,13 @@ import (
 // control-shaped tools (covered by exclusion from
 // tools.FederatedToolNames at the server side) and read-shaped tools
 // whose result formats don't lend themselves to bucketed merging
-// (mnemo_stats, mnemo_status, mnemo_chain, mnemo_query — bespoke
-// shapes that callers expect verbatim).
+// (mnemo_stats, mnemo_status, mnemo_query — bespoke shapes that
+// callers expect verbatim).
 var FanoutToolNames = map[string]struct{}{
-	"mnemo_search":            {},
-	"mnemo_sessions":          {},
-	"mnemo_recent_activity":   {},
-	"mnemo_decisions":         {},
-	"mnemo_commits":           {},
-	"mnemo_prs":               {},
-	"mnemo_memories":          {},
-	"mnemo_who_ran":           {},
-	"mnemo_audit":             {},
-	"mnemo_targets":           {},
-	"mnemo_skills":            {},
-	"mnemo_configs":           {},
-	"mnemo_discover_patterns": {},
-	"mnemo_rework_history":    {},
+	"mnemo_search":          {},
+	"mnemo_sessions":        {},
+	"mnemo_recent_activity": {},
+	"mnemo_rework_history":  {},
 }
 
 // PeerResult holds the raw text response from one peer's instance of

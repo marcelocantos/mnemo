@@ -465,54 +465,94 @@ func singleLinkThemes(ctx context.Context, docs []clusterDoc, threshold float64,
 	if n == 0 {
 		return nil, nil
 	}
+
+	// Single-link clustering with a HARD THRESHOLD CUT is exactly the
+	// connected components of the graph whose edges join pairs with
+	// similarity >= threshold. Agglomerative merging computes the same
+	// partition the long way round.
+	//
+	// The previous implementation did it the long way: repeatedly scan
+	// every pair of active clusters, and score each pair by comparing
+	// every member of one against every member of the other. That is
+	// O(n^3) cosine operations at best. At the default 5000-document cap
+	// it did not finish — a run observed on 2026-08-07 burned a full core
+	// for 5h43m without completing, pegged the daemon at 100% CPU, grew
+	// RSS from 417MB to 819MB, and (because the stream worker is
+	// sequential) froze every other reconciler behind it. It also had no
+	// ctx check anywhere in the loop, so cancellation could not reach it
+	// and shutdown had to abandon the worker.
+	//
+	// Union-find over the same threshold graph is O(n^2) cosines with
+	// near-constant unions, and produces the IDENTICAL partition —
+	// TestSingleLinkMatchesNaiveReference pins that equivalence against
+	// the old algorithm as a reference implementation.
 	type agg struct {
 		members []int
 	}
-	all := make([]agg, n)
-	for i := range all {
-		all[i] = agg{members: []int{i}}
+
+	parent := make([]int, n)
+	rank := make([]int, n)
+	for i := range parent {
+		parent[i] = i
 	}
-	active := make([]int, n)
-	for i := range active {
-		active[i] = i
+	var find func(int) int
+	find = func(x int) int {
+		for parent[x] != x {
+			parent[x] = parent[parent[x]] // path halving
+			x = parent[x]
+		}
+		return x
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra == rb {
+			return
+		}
+		if rank[ra] < rank[rb] {
+			ra, rb = rb, ra
+		}
+		parent[rb] = ra
+		if rank[ra] == rank[rb] {
+			rank[ra]++
+		}
 	}
 
-	pairSim := func(a, b agg) float64 {
-		best := 0.0
-		for _, i := range a.members {
-			for _, j := range b.members {
-				if s := cosine(docs[i].vec, docs[j].vec); s > best {
-					best = s
-				}
+	for i := 0; i < n; i++ {
+		// Cancellation must reach this loop: it is the longest-running
+		// computation in the daemon, and without a check here shutdown
+		// can only abandon it.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for j := i + 1; j < n; j++ {
+			// Already joined — the edge cannot change the partition, and
+			// skipping it avoids the cosine entirely.
+			if find(i) == find(j) {
+				continue
+			}
+			if cosine(docs[i].vec, docs[j].vec) >= threshold {
+				union(i, j)
 			}
 		}
-		return best
 	}
-	// Phase 1 only — hard cut. No merge-to-root (cost lesson from T64.11).
-	for len(active) >= 2 {
-		bi, bj, sim := -1, -1, -1.0
-		for i := 0; i < len(active); i++ {
-			for j := i + 1; j < len(active); j++ {
-				s := pairSim(all[active[i]], all[active[j]])
-				if s > sim {
-					sim = s
-					bi, bj = i, j
-				}
-			}
-		}
-		if bi < 0 || sim < threshold {
-			break
-		}
-		if bj < bi {
-			bi, bj = bj, bi
-		}
-		ai, aj := active[bi], active[bj]
-		merged := append(append([]int{}, all[ai].members...), all[aj].members...)
-		sort.Ints(merged)
-		newIdx := len(all)
-		all = append(all, agg{members: merged})
-		active[bi] = newIdx
-		active = append(active[:bj], active[bj+1:]...)
+
+	// Gather components, preserving the ascending member order the
+	// downstream theme id and centroid code relies on.
+	groups := map[int][]int{}
+	for i := 0; i < n; i++ {
+		r := find(i)
+		groups[r] = append(groups[r], i)
+	}
+	roots := make([]int, 0, len(groups))
+	for r := range groups {
+		roots = append(roots, r)
+	}
+	sort.Ints(roots) // deterministic output order
+	all := make([]agg, 0, len(roots))
+	active := make([]int, 0, len(roots))
+	for idx, r := range roots {
+		all = append(all, agg{members: groups[r]})
+		active = append(active, idx)
 	}
 
 	out := make([]docTheme, 0, len(active))

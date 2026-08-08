@@ -13,35 +13,24 @@ import (
 
 // FederatedToolNames is the curated set of read-only tools exposed on
 // the mTLS federated endpoint (🎯T15.3). Write- or control-shaped
-// tools (mnemo_self session binding, mnemo_ops op=restore,
-// mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions) are
-// deliberately absent — federated peers are a different identity
-// domain and must not influence local state.
+// tools (mnemo_ops op=restore, mnemo_config op=write, mnemo_vault
+// op=sync, mnemo_note op=post, mnemo_thread op=new) are deliberately
+// absent — federated peers are a different identity domain and must
+// not influence local state.
 //
 // The set is closed by enumeration rather than computed by category,
 // so adding a new tool is a deliberate decision: a new mnemo_X tool
 // does NOT appear on the federated endpoint until it is added here.
 var FederatedToolNames = map[string]struct{}{
-	"mnemo_search":            {},
-	"mnemo_sessions":          {},
-	"mnemo_read_session":      {},
-	"mnemo_query":             {},
-	"mnemo_repos":             {},
-	"mnemo_stats":             {},
-	"mnemo_recent_activity":   {},
-	"mnemo_status":            {},
-	"mnemo_memories":          {},
-	"mnemo_usage":             {},
-	"mnemo_skills":            {},
-	"mnemo_configs":           {},
-	"mnemo_audit":             {},
-	"mnemo_targets":           {},
-	"mnemo_who_ran":           {},
-	"mnemo_prs":               {},
-	"mnemo_commits":           {},
-	"mnemo_decisions":         {},
-	"mnemo_chain":             {},
-	"mnemo_discover_patterns": {},
+	"mnemo_search":          {},
+	"mnemo_sessions":        {},
+	"mnemo_read_session":    {},
+	"mnemo_query":           {},
+	"mnemo_repos":           {},
+	"mnemo_stats":           {},
+	"mnemo_recent_activity": {},
+	"mnemo_status":          {},
+	"mnemo_usage":           {},
 }
 
 // RegisterFederatedTools attaches only the read-only subset of tools

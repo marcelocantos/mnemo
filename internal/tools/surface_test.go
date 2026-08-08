@@ -68,7 +68,7 @@ func TestToolSurfaceRatchet(t *testing.T) {
 // than accumulated.
 func TestToolSurfaceSize(t *testing.T) {
 	// Baseline set by 🎯T143 on 2026-08-07, down from 70 pre-audit.
-	const baseline = 38
+	const baseline = 18
 	if got := len(registeredToolNames(t)); got != baseline {
 		t.Errorf("registered tool count is %d, ledger baseline is %d.\n"+
 			"If this change is intended, move the baseline in the same commit "+
@@ -159,12 +159,17 @@ func TestConsolidationPreservesCapabilities(t *testing.T) {
 func TestRemovedToolsStayRemoved(t *testing.T) {
 	registered := registeredToolNames(t)
 	for _, name := range []string{
-		"mnemo_plans", "mnemo_ci", "mnemo_define", "mnemo_evaluate",
+		"mnemo_plans", "mnemo_ci", "mnemo_define", "mnemo_evaluate", "mnemo_self",
 		"mnemo_list_templates", "mnemo_images", "mnemo_get_memory",
 		"mnemo_tool_result", "mnemo_source_drift",
 		"mnemo_todos", "mnemo_todo_add", "mnemo_todo_set",
 		// Folded into consolidated entry points.
 		"mnemo_vault_status", "mnemo_vault_sync", "mnemo_vault_gc",
+		"mnemo_docs", "mnemo_configs", "mnemo_skills", "mnemo_audit", "mnemo_targets",
+		"mnemo_memories", "mnemo_commits", "mnemo_prs", "mnemo_who_ran", "mnemo_synthesis",
+		"mnemo_chain", "mnemo_budget", "mnemo_agent_trees", "mnemo_session_go",
+		"mnemo_whatsup", "mnemo_permissions", "mnemo_discover_patterns",
+		"mnemo_segments", "mnemo_decisions",
 		"mnemo_thread_list", "mnemo_thread_go",
 		"mnemo_note_post", "mnemo_note_recv", "mnemo_note_list",
 		"mnemo_doctor", "mnemo_compactor_status", "mnemo_divergence",

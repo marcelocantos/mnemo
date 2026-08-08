@@ -334,6 +334,33 @@ CREATE TABLE ingest_status (
 -- that repo's stream last reconciled, so the mirror reconciler can be
 -- divergence-driven (reconcile a repo whose row is missing or stale)
 -- rather than boot-once or fixed-poll. Additive, append-only.
+-- 🎯T144 cross-corpus ranking calibration.
+--
+-- BM25 scores are NOT comparable across FTS indexes: the length
+-- normalisation term is b·|D|/avgdl and avgdl is per-index, so a
+-- 10-word commit subject and a 500-word message are scored against
+-- different baselines. Comparing the raw numbers lets short-document
+-- corpora monopolise a merged result set.
+--
+-- This table stores, per corpus, the score distribution observed when
+-- probing that corpus with terms drawn from its own content. A live
+-- score maps to its quantile within its own corpus ("97th percentile
+-- for commits"), and quantiles are what compete across corpora.
+--
+-- quantiles is a JSON array of score MAGNITUDES (-rank, so larger is a
+-- better match) in ascending order, evenly spaced from p0 to p100.
+-- sample_size is how many scores went into it, and computed_at ages it:
+-- a distribution sampled when a corpus was a tenth of its current size
+-- mis-maps every score, and nothing about the resulting ordering would
+-- look wrong, so staleness has to be legible rather than inferred.
+CREATE TABLE search_calibration (
+			corpus TEXT PRIMARY KEY,
+			quantiles TEXT NOT NULL,
+			sample_size INTEGER NOT NULL,
+			doc_count INTEGER NOT NULL,
+			computed_at TEXT NOT NULL
+		);
+
 CREATE TABLE mirror_status (
 			repo TEXT NOT NULL,
 			stream TEXT NOT NULL,
