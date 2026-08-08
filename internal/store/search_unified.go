@@ -61,6 +61,34 @@ type UnifiedSearchResult struct {
 	// calibrated, which is coarser — reporting it beats a merged list
 	// that silently mixes two ranking methods.
 	Degraded map[string]string `json:"degraded,omitempty"`
+	// Ranking names the scale the hits were ordered on: "calibrated" when
+	// every contributing corpus had a usable distribution, "rank_fusion"
+	// when at least one did not and the whole merge dropped to RRF. It is
+	// a property of the result rather than of a hit because the two scales
+	// cannot be mixed within one ordering.
+	Ranking string `json:"ranking,omitempty"`
+}
+
+// rrfK is the reciprocal-rank-fusion damping constant. 60 is the value
+// from Cormack et al., and the reason it is not tuned here is that its
+// effect is almost entirely on how sharply the head decays; the property
+// this fallback needs — every corpus's rank-N hit scoring equally — holds
+// for any k.
+const rrfK = 60.0
+
+// fusionEvidenceFloor is the shrinkage weight below which a corpus's
+// quantiles are treated as unusable for cross-corpus comparison, sending
+// the whole merge to rank fusion. It is deliberately the same 0.5 that
+// rankingLabel already calls the boundary between "weak" and
+// "calibrated": a hit the product describes to the user as weakly
+// evidenced should not be silently ranked as though it were not.
+const fusionEvidenceFloor = 0.5
+
+// rrfScore maps a zero-based within-corpus rank to its fusion score.
+// Identical across corpora by construction: that is what lets an
+// unmeasured corpus compete at all.
+func rrfScore(rank int) float64 {
+	return 1.0 / (rrfK + float64(rank) + 1.0)
 }
 
 // unifiedFetchPerCorpus is how deep each corpus is probed before
@@ -138,6 +166,19 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 	out := &UnifiedSearchResult{Degraded: map[string]string{}}
 	var all []UnifiedHit
 
+	// Scoring happens in a second pass because the choice of scale is a
+	// property of the whole query, not of one corpus: see the fuse
+	// decision below.
+	type corpusHits struct {
+		kind     string
+		ids      []int64
+		msgs     []*SearchResult
+		mags     []float64
+		cal      *Calibration
+		evidence float64
+	}
+	var collected []corpusHits
+
 	for _, spec := range specs {
 		out.Corpora = append(out.Corpora, spec.kind)
 
@@ -213,24 +254,88 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 		if stale {
 			effective = nil
 		}
-		evidence := effective.Evidence()
-		for i, r := range raw {
-			h := UnifiedHit{
-				Kind:     spec.kind,
-				ID:       r.id,
-				Message:  r.msg,
-				Score:    effective.Score(r.mag, i),
-				Evidence: evidence,
-				Ranking:  rankingLabel(evidence),
+		ch := corpusHits{
+			kind:     spec.kind,
+			cal:      effective,
+			evidence: effective.Evidence(),
+		}
+		for _, r := range raw {
+			ch.ids = append(ch.ids, r.id)
+			ch.msgs = append(ch.msgs, r.msg)
+			ch.mags = append(ch.mags, r.mag)
+		}
+		collected = append(collected, ch)
+	}
+
+	// THE SCALE IS A PROPERTY OF THE QUERY, NOT OF A CORPUS.
+	//
+	// A calibrated quantile answers "how good is this hit relative to
+	// typical hits in its own corpus". A corpus with no distribution
+	// cannot answer that, and the previous code gave it the neutral prior
+	// instead — which reads as a sensible default and is not one. A flat
+	// 0.5 is not a weak claim, it is a claim of exact medianness, and it
+	// loses deterministically to any corpus holding `limit` hits above its
+	// own median. Measured on the oracle fixture: five matching documents
+	// all at 0.500 against two hundred messages at 0.82-0.85, so the
+	// uncalibrated corpus was not ranked low, it was truncated out of
+	// existence. That is the exile the shrinkage was meant to prevent.
+	//
+	// So when any contributing corpus lacks a usable distribution, the
+	// whole merge drops to reciprocal rank fusion. Fusing needs no
+	// calibration and puts every corpus on one scale, which is the point:
+	// mixing a quantile with an RRF score would be the same category error
+	// as comparing raw BM25 across indexes, the thing 🎯T144 exists to
+	// avoid. The cost is that a fused ranking is quality-blind — a
+	// corpus's #1 counts as a #1 however poor it is — which is exactly why
+	// it is the fallback and not the default.
+	// The trigger is thin evidence, not absent evidence. A corpus scoring
+	// at evidence 0.33 is not meaningfully better placed on the quantile
+	// axis than one at 0: two thirds of every score it reports is the
+	// prior rather than measurement, and shrinkage caps it well below a
+	// rich corpus's range. Measured on the oracle fixture, a ten-document
+	// corpus tops out at 0.667 while the three-hundred-document corpus's
+	// twenty-fifth hit still scores 0.742 — so it is not ranked low, it is
+	// unreachable, which is the same exile in a politer form.
+	//
+	// The floor reuses rankingLabel's existing "weak" boundary rather than
+	// introducing a second, differently-drawn line for the same judgement.
+	fuse := false
+	for _, ch := range collected {
+		if ch.evidence < fusionEvidenceFloor {
+			fuse = true
+			break
+		}
+	}
+	out.Ranking = "calibrated"
+	if fuse {
+		out.Ranking = "rank_fusion"
+	}
+
+	for _, ch := range collected {
+		for i := range ch.ids {
+			score := ch.cal.Score(ch.mags[i], i)
+			if fuse {
+				score = rrfScore(i)
 			}
-			all = append(all, h)
+			all = append(all, UnifiedHit{
+				Kind:     ch.kind,
+				ID:       ch.ids[i],
+				Message:  ch.msgs[i],
+				Score:    score,
+				Evidence: ch.evidence,
+				// Ranking stays a statement about THIS corpus's evidence,
+				// not about the merge method — a reader still needs to know
+				// that a fused hit came from an unmeasured corpus. The
+				// merge method is reported once, on the result.
+				Ranking: rankingLabel(ch.evidence),
+			})
 		}
 	}
 
-	// One scale. Shrinkage put every hit on the same [0,1] axis, so
-	// there is no second tier to sort separately — an unmeasured corpus
-	// sits at the neutral prior and interleaves, rather than being
-	// exiled beneath corpora that merely happen to have been sampled.
+	// Ties are broken by corpus order rather than arbitrarily: under
+	// fusion every corpus's rank-N hit scores identically, and a stable
+	// sort keeps the registry's ordering, so the merge is deterministic
+	// across runs and platforms.
 	sort.SliceStable(all, func(i, j int) bool {
 		return all[i].Score > all[j].Score
 	})

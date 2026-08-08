@@ -5,6 +5,7 @@ package tools
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,16 +54,31 @@ func (h *callHandler) unifiedSearch(query, kindsArg string, limit int,
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d hits across %s\n", len(res.Hits), strings.Join(res.Corpora, ", "))
-	if len(res.Degraded) > 0 {
-		// Naming the degraded corpora is not decoration. Fused hits are
-		// ranked quality-blind, so a reader comparing them against
-		// calibrated ones is comparing two different claims.
+	// Naming the ranking scale is not decoration. Fused hits are ranked
+	// quality-blind — a corpus's #1 counts as a #1 however poor it is — so
+	// a reader comparing them against calibrated ones is comparing two
+	// different claims.
+	//
+	// This reports res.Ranking rather than inferring the scale from
+	// Degraded being non-empty: fusion also triggers on evidence that is
+	// fresh but too thin to compare across corpora, and that case leaves
+	// Degraded empty. Inferring it silently mislabelled those results as
+	// calibrated.
+	if res.Ranking == "rank_fusion" {
 		var parts []string
 		for corpus, why := range res.Degraded {
 			parts = append(parts, fmt.Sprintf("%s (%s)", corpus, why))
 		}
-		fmt.Fprintf(&b, "Ranked by fusion rather than calibration: %s\n",
-			strings.Join(parts, "; "))
+		// Sorted so repeated identical searches render identically; map
+		// iteration order would otherwise reshuffle this line per call.
+		sort.Strings(parts)
+		if len(parts) > 0 {
+			fmt.Fprintf(&b, "Ranked by fusion rather than calibration: %s\n",
+				strings.Join(parts, "; "))
+		} else {
+			fmt.Fprintln(&b, "Ranked by fusion rather than calibration: "+
+				"a corpus in scope has too little sampled evidence to compare.")
+		}
 	}
 	b.WriteString("\n")
 
