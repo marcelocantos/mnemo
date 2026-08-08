@@ -272,6 +272,27 @@ type Config struct {
 	// launchd, newest_artifact, last_commit), a path/label, an expected
 	// cadence, and a grace multiple. Evaluated by the diag surface.
 	SignalSources []SignalSource `json:"signal_sources,omitempty"`
+
+	// JevonsProvider makes mnemo a live Jevons provider (Jevons 🎯T27.8):
+	// when Enabled, the daemon dials HubURL (/ws/provider) and streams a
+	// health feed plus a ViewNode status surface, declaring MCP at
+	// mcp_endpoint (default this daemon's /mcp). Absent / enabled:false
+	// → no dial. Zero mnemo-specific code is required on the jevonsd side.
+	JevonsProvider JevonsProviderConfig `json:"jevons_provider,omitempty"`
+}
+
+// JevonsProviderConfig is the mnemo→Jevons provider peer (Jevons 🎯T27.8).
+type JevonsProviderConfig struct {
+	// Enabled starts the peer when true.
+	Enabled bool `json:"enabled"`
+	// HubURL is the jevonsd provider feed WebSocket, e.g.
+	// ws://127.0.0.1:13705/ws/provider.
+	HubURL string `json:"hub_url"`
+	// MCPEndpoint overrides the declared MCP URL. Empty →
+	// http://localhost:<listen-port>/mcp derived at boot.
+	MCPEndpoint string `json:"mcp_endpoint,omitempty"`
+	// HealthPoll is a Go duration for health feed ticks (default 30s).
+	HealthPoll string `json:"health_poll,omitempty"`
 }
 
 // SignalSource kinds (🎯T102.8).
