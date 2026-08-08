@@ -344,6 +344,16 @@ full existing shape — context windows, session and repo filters — so the
 message-only contract above is unchanged for callers that ignore `kinds`.
 Cost scales with corpora in scope: one FTS query each, eight by default.
 `expand` stays default-off pending the boundary-quality gate in 🎯T138.
+
+When any corpus in scope has too little sampled evidence to place on the
+quantile axis, the **whole** merge drops to reciprocal rank fusion rather
+than mixing two scales, and the result reports `ranking: "rank_fusion"`
+instead of `"calibrated"`. Fusion is quality-blind — a corpus's top hit
+counts as a top hit however poor it is — so it is the fallback and never
+the default. The alternative, ranking an unmeasured corpus at a flat
+median, reads as a safe default and is not one: it loses deterministically
+to any corpus holding a full result window above its own median, which
+removes the corpus from the results entirely.
 Both parameters are **Needs review**: the corpus vocabulary and the
 ranking may still change before 1.0.
 
