@@ -13,10 +13,10 @@ import (
 
 // FederatedToolNames is the curated set of read-only tools exposed on
 // the mTLS federated endpoint (🎯T15.3). Write- or control-shaped
-// tools (mnemo_self session binding, mnemo_ops op=restore,
-// mnemo_whatsup, mnemo_docs, mnemo_synthesis, mnemo_permissions) are
-// deliberately absent — federated peers are a different identity
-// domain and must not influence local state.
+// tools (mnemo_ops op=restore, mnemo_config op=write, mnemo_vault
+// op=sync, mnemo_note op=post, mnemo_thread op=new) are deliberately
+// absent — federated peers are a different identity domain and must
+// not influence local state.
 //
 // The set is closed by enumeration rather than computed by category,
 // so adding a new tool is a deliberate decision: a new mnemo_X tool

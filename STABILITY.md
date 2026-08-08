@@ -10,16 +10,38 @@ new product. The pre-1.0 period exists to get these surfaces right.
 ## Interaction surface catalogue
 
 Snapshot as of v0.33.0, amended for the 🎯T143 tool-surface reduction
-(see the v0.84.0 note below).
+(see the v0.84.0 and v0.85.0 notes below).
 
-**v0.84.0 note — MCP tool surface reduced from 70 tools to 38 (🎯T143).**
-This is the largest breaking change to the tool surface before 1.0, and
-it is deliberately made now: this document's own commitment is that
-backwards compatibility binds at 1.0 and "the pre-1.0 period exists to
-get these surfaces right". An audit on 2026-08-07 found that of 70
-registered tools, only 40 had ever been called by an agent and 15 in the
-previous 30 days, with `mnemo_search` alone accounting for 55% of all
-calls.
+**v0.84.0 / v0.85.0 note — MCP tool surface reduced from 70 tools to 18
+(🎯T143, 🎯T144).** This is the largest breaking change to the tool
+surface before 1.0, and it is deliberately made now: this document's own
+commitment is that backwards compatibility binds at 1.0 and "the pre-1.0
+period exists to get these surfaces right". An audit on 2026-08-07 found
+that of 70 registered tools, only 40 had ever been called by an agent and
+15 in the previous 30 days, with `mnemo_search` alone accounting for 55%
+of all calls.
+
+The reduction landed in two waves. v0.84.0 took 70 → 38 by deleting
+dead tools and consolidating families behind an `op` parameter. v0.85.0
+took 38 → 18 by deleting a further eighteen tools whose whole function
+was to wrap a query shape that `mnemo_query` already expresses, and by
+folding two search pathways into `mnemo_search` itself (🎯T144).
+
+*Removed in v0.85.0 as query wrappers with no replacement*:
+`mnemo_memories`, `mnemo_skills`, `mnemo_configs`, `mnemo_audit`,
+`mnemo_targets`, `mnemo_who_ran`, `mnemo_commits`, `mnemo_prs`,
+`mnemo_docs`, `mnemo_synthesis`, `mnemo_chain`, `mnemo_budget`,
+`mnemo_agent_trees`, `mnemo_session_go`, `mnemo_whatsup`,
+`mnemo_permissions`, `mnemo_discover_patterns`, `mnemo_self`. Every
+underlying index is retained and reachable through `mnemo_query`; only
+`mnemo_self` lost its mechanism outright, its session-nonce binding
+having never worked reliably.
+
+*Folded into `mnemo_search` (🎯T144)*: `mnemo_segments` and
+`mnemo_decisions`. Segmentation and decision detection were never
+separate domains — they are additional signal about the same
+transcripts — so they are now corpora within the one search rather than
+parallel entry points. See the `mnemo_search` `kinds` parameter.
 
 *Removed* (no consumer in four months): `mnemo_plans`, `mnemo_ci`,
 `mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
@@ -310,6 +332,20 @@ helpful error pointing at brew services / systemd instead.
 | `context_before` | number | no | Messages before each hit (default 3) | Stable |
 | `context_after` | number | no | Messages after each hit (default 3) | Stable |
 | `context_filter` | string | no | "substantive" (default) or "all" | Needs review |
+| `kinds` | string | no | Comma-separated corpora to search (🎯T144). Omitted = the default eight: message, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit | Needs review |
+| `expand` | string | no | "none" (default), "segment", or "segment:coarse" — expand each hit to its enclosing topic span | Needs review |
+
+**Notes**: as of v0.85.0 `mnemo_search` spans the whole index rather
+than messages alone (🎯T144). Each hit is typed with the corpus it came
+from, and results are ranked across corpora by quantile calibration with
+shrinkage toward neutral, so a corpus with few samples cannot dominate on
+the strength of a thin empirical distribution. Message hits keep their
+full existing shape — context windows, session and repo filters — so the
+message-only contract above is unchanged for callers that ignore `kinds`.
+Cost scales with corpora in scope: one FTS query each, eight by default.
+`expand` stays default-off pending the boundary-quality gate in 🎯T138.
+Both parameters are **Needs review**: the corpus vocabulary and the
+ranking may still change before 1.0.
 
 #### mnemo_sessions
 
@@ -715,10 +751,15 @@ local-only deployments.
 `error_kind` values: `timeout`, `connection_refused`, `tls_handshake`,
 `server_error`, `malformed_response`, `connect_failed`,
 `unknown_instance`, `unknown`. Peers are sorted by instance name for
-deterministic ordering. Tools that bypass federation:
-`mnemo_ops`, `mnemo_whatsup`,
-`mnemo_permissions`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
-`mnemo_chain`, `mnemo_vault`, `mnemo_thread`, `mnemo_note`. **Stability**: Fluid — envelope shape may evolve
+deterministic ordering. Only four tools fan out: `mnemo_search`,
+`mnemo_sessions`, `mnemo_recent_activity`, `mnemo_rework_history`. The
+remaining fourteen bypass federation — `mnemo_compacted_session`,
+`mnemo_config`, `mnemo_locate_uuid`, `mnemo_note`, `mnemo_ops`,
+`mnemo_query`, `mnemo_read_session`, `mnemo_repos`,
+`mnemo_session_structure`, `mnemo_stats`, `mnemo_status`,
+`mnemo_thread`, `mnemo_usage`, `mnemo_vault` — because they are either
+write-shaped, local-state-shaped, or return a bespoke format that does
+not merge across peers. **Stability**: Fluid — envelope shape may evolve
 (per-record attribution vs envelope wrapping; rank normalisation
 across instances) before 1.0.
 
