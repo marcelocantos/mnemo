@@ -7,7 +7,7 @@
 //
 // mnemo runs as a single HTTP MCP daemon:
 //
-//	mnemo                       # run the HTTP MCP daemon (default :19419)
+//	mnemo                       # run the HTTP MCP daemon (default 127.0.0.1:19419)
 //	mnemo --addr :8080          # custom listen address
 //	mnemo register-mcp          # add mnemo to ~/.claude.json
 //	mnemo unregister-mcp        # remove mnemo from ~/.claude.json
@@ -80,7 +80,7 @@ var dashboardHTML []byte
 
 const (
 	version              = "0.85.0"
-	defaultAddr          = ":19419"
+	defaultAddr          = "127.0.0.1:19419"
 	defaultFederatedAddr = ":19420"
 
 	// drainIntakeGrace bounds the *courtesy* half of shutdown: letting
@@ -570,7 +570,7 @@ func (s *stringList) Set(v string) error {
 func cmdEdge(args []string) {
 	fs := flag.NewFlagSet("edge", flag.ExitOnError)
 	listen := fs.String("listen", defaultAddr,
-		"public listen address (edge owns client TCP connections)")
+		"listen address (default loopback; use :19419 only for deliberate network exposure)")
 	primary := fs.Int("primary", 0,
 		"index of the backend that receives new initialize requests")
 	routeFile := fs.String("route-file", "",
@@ -728,6 +728,19 @@ func portInUse(addr string) bool {
 	}
 	_ = l.Close()
 	return false
+}
+
+// localHTTPBaseURL renders the daemon's local HTTP endpoint from the listen
+// address. The default listener is loopback-only, but explicit broad binds
+// like ":19419" are still supported for users who deliberately expose mnemo.
+func localHTTPBaseURL(addr string) string {
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return strings.TrimRight(addr, "/")
+	}
+	if strings.HasPrefix(addr, ":") {
+		return "http://127.0.0.1" + addr
+	}
+	return "http://" + addr
 }
 
 // registerFanoutTools installs the federation fan-out wrapper for
@@ -1088,12 +1101,8 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// (startup.ready) during pre-migration backup.
 	daemonStart := time.Now()
 	diagReg := reg.BuildDiagRegistry(defaultUser, daemonStart)
-	dashHost := addr
-	if strings.HasPrefix(addr, ":") {
-		dashHost = "localhost" + addr
-	}
 	// /health content-negotiates HTML for browsers (notification clicks).
-	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/health")
+	notifyCfg := diag.DefaultNotifierConfig(localHTTPBaseURL(addr) + "/health")
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}
@@ -1364,7 +1373,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		slog.Info("pprof enabled (MNEMO_PPROF=1)", "url", "http://localhost"+addr+"/debug/pprof/")
+		slog.Info("pprof enabled (MNEMO_PPROF=1)", "url", localHTTPBaseURL(addr)+"/debug/pprof/")
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

@@ -60,7 +60,7 @@ func threadGo(m *threads.Manager, ref string, noResume bool) {
 }
 
 // daemonBaseURL returns the base URL of the local daemon. $MNEMO_ADDR
-// overrides the default listen address (:19419); a bare ":port" or
+// overrides the default listen address (127.0.0.1:19419); a bare ":port" or
 // "host:port" is normalised to a localhost http URL.
 func daemonBaseURL() string {
 	addr := os.Getenv("MNEMO_ADDR")

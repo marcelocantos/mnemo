@@ -10,6 +10,25 @@ import (
 	"testing"
 )
 
+func TestDefaultAddrIsLoopback(t *testing.T) {
+	if defaultAddr != "127.0.0.1:19419" {
+		t.Fatalf("defaultAddr = %q, want loopback-only 127.0.0.1:19419", defaultAddr)
+	}
+}
+
+func TestLocalHTTPBaseURL(t *testing.T) {
+	tests := map[string]string{
+		"127.0.0.1:19419":       "http://127.0.0.1:19419",
+		":19419":                "http://127.0.0.1:19419",
+		"http://localhost:8080": "http://localhost:8080",
+	}
+	for in, want := range tests {
+		if got := localHTTPBaseURL(in); got != want {
+			t.Errorf("localHTTPBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestSummariserWorkDir verifies the compactor/reviewer working
 // directory (🎯T82) is a dedicated, created directory under the OS temp
 // root — not a repo checkout — with no CLAUDE.md to leak project context

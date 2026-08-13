@@ -255,7 +255,7 @@ func pathExists(p string) bool {
 
 func checkEndpoint(addr string) checkResult {
 	r := checkResult{title: "HTTP MCP endpoint"}
-	url := "http://localhost" + addr + "/mcp"
+	url := localHTTPBaseURL(addr) + "/mcp"
 
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mnemo-diagnose","version":"1"}}}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

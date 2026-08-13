@@ -39,8 +39,8 @@ go build -tags "sqlite_fts5" -o bin/mnemo .
 brew services start mnemo
 ```
 
-This starts mnemo on `:19419` via launchd and keeps it running across
-reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
+This starts mnemo on `127.0.0.1:19419` via launchd and keeps it running
+across reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
 
 The Homebrew formula's service block sets `PATH` to
 `$(brew --prefix)/bin:~/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin`
@@ -78,8 +78,9 @@ Then: `systemctl --user enable --now mnemo`
 **Manual** (any platform):
 
 ```bash
-mnemo                # listen on :19419 (default)
-mnemo --addr :8080   # custom port
+mnemo                         # listen on 127.0.0.1:19419 (default)
+mnemo --addr 127.0.0.1:8080   # custom local port
+mnemo --addr :19419           # deliberate network exposure
 ```
 
 ### 3. Register as an MCP server
