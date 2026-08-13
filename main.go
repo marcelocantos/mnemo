@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -734,13 +735,30 @@ func portInUse(addr string) bool {
 // address. The default listener is loopback-only, but explicit broad binds
 // like ":19419" are still supported for users who deliberately expose mnemo.
 func localHTTPBaseURL(addr string) string {
+	addr = strings.TrimRight(addr, "/")
 	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
-		return strings.TrimRight(addr, "/")
+		u, err := url.Parse(addr)
+		if err != nil {
+			return addr
+		}
+		u.Host = localHostPort(u.Host)
+		return u.String()
 	}
-	if strings.HasPrefix(addr, ":") {
-		return "http://127.0.0.1" + addr
+	return "http://" + localHostPort(addr)
+}
+
+func localHostPort(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			return "127.0.0.1" + addr
+		}
+		return addr
 	}
-	return "http://" + addr
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // registerFanoutTools installs the federation fan-out wrapper for
@@ -1631,18 +1649,7 @@ func signalSelfSIGTERM() error {
 // backendSelfURL is the loopback base URL peers/edge use for this
 // process when it listens on addr (e.g. ":19421" → "http://127.0.0.1:19421").
 func backendSelfURL(addr string) string {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// addr may be ":19421"
-		if strings.HasPrefix(addr, ":") {
-			return "http://127.0.0.1" + addr
-		}
-		return "http://" + addr
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
+	return localHTTPBaseURL(addr)
 }
 
 // spawnLoopbackBackend starts a sibling mnemo daemon on a free loopback

@@ -18,13 +18,55 @@ func TestDefaultAddrIsLoopback(t *testing.T) {
 
 func TestLocalHTTPBaseURL(t *testing.T) {
 	tests := map[string]string{
-		"127.0.0.1:19419":       "http://127.0.0.1:19419",
-		":19419":                "http://127.0.0.1:19419",
-		"http://localhost:8080": "http://localhost:8080",
+		"127.0.0.1:19419":            "http://127.0.0.1:19419",
+		":19419":                     "http://127.0.0.1:19419",
+		"0.0.0.0:19419":              "http://127.0.0.1:19419",
+		"[::]:19419":                 "http://127.0.0.1:19419",
+		"[::1]:19419":                "http://[::1]:19419",
+		"http://localhost:8080":      "http://localhost:8080",
+		"http://0.0.0.0:19419":       "http://127.0.0.1:19419",
+		"http://[::]:19419/debug///": "http://127.0.0.1:19419/debug",
 	}
 	for in, want := range tests {
 		if got := localHTTPBaseURL(in); got != want {
 			t.Errorf("localHTTPBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDaemonBaseURLNormalizesEnvOverride(t *testing.T) {
+	t.Setenv("MNEMO_ADDR", "0.0.0.0:19419")
+	if got, want := daemonBaseURL(), "http://127.0.0.1:19419"; got != want {
+		t.Fatalf("daemonBaseURL() = %q, want %q", got, want)
+	}
+}
+
+func TestListenPort(t *testing.T) {
+	tests := map[string]string{
+		"127.0.0.1:19419":        "19419",
+		":19419":                 "19419",
+		"[::]:19419":             "19419",
+		"http://[::1]:19419":     "19419",
+		"https://host:19419/mcp": "19419",
+	}
+	for in, want := range tests {
+		if got := listenPort(in); got != want {
+			t.Errorf("listenPort(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIsWildcardListenAddr(t *testing.T) {
+	tests := map[string]bool{
+		"*:19419":         true,
+		"0.0.0.0:19419":   true,
+		"[::]:19419":      true,
+		"127.0.0.1:19419": false,
+		"[::1]:19419":     false,
+	}
+	for in, want := range tests {
+		if got := isWildcardListenAddr(in); got != want {
+			t.Errorf("isWildcardListenAddr(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
