@@ -123,9 +123,9 @@ is not optional — tools registered mid-session are not picked up.
 lsof -iTCP:19419 -sTCP:LISTEN
 ```
 
-This should show the mnemo process holding the port. If nothing is
-shown, the server isn't running — check `brew services list` and
-`$(brew --prefix)/var/log/mnemo.log`.
+This should show the mnemo process listening on `127.0.0.1:19419` or
+`localhost:19419`, not `*:19419`. If nothing is shown, the server isn't
+running — check `brew services list` and `$(brew --prefix)/var/log/mnemo.log`.
 
 Do **not** use `curl` to probe `/mcp` — MCP endpoints only respond to
 POST requests with a JSON-RPC body. A plain GET or empty POST returns

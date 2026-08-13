@@ -67,11 +67,5 @@ func daemonBaseURL() string {
 	if addr == "" {
 		addr = defaultAddr
 	}
-	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
-		return strings.TrimRight(addr, "/")
-	}
-	if strings.HasPrefix(addr, ":") {
-		addr = "127.0.0.1" + addr
-	}
-	return "http://" + addr
+	return localHTTPBaseURL(addr)
 }

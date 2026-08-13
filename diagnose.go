@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -146,17 +147,25 @@ func printResult(r checkResult) {
 // ---------------------------------------------------------------------------
 
 func checkDaemon(addr string) checkResult {
-	r := checkResult{title: "Daemon process"}
-	pid := findListenerPID(addr)
-	if pid == 0 {
+	r := checkResult{status: statusOK, title: "Daemon process"}
+	listener := findListener(addr)
+	if listener.pid == 0 {
 		r.status = statusFail
 		r.add(fmt.Sprintf("nothing listening on %s — daemon is not running", addr))
 		r.add("start with `brew services start mnemo` (macOS/Linux) or check the Windows Service")
 		return r
 	}
-	r.add(fmt.Sprintf("PID %d listening on %s", pid, addr))
+	r.add(fmt.Sprintf("PID %d listening on %s", listener.pid, addr))
+	for _, localAddr := range listener.localAddrs {
+		if isWildcardListenAddr(localAddr) && addr == defaultAddr {
+			r.status = statusWarn
+			r.add(fmt.Sprintf("listener is bound to %s, not loopback-only", localAddr))
+			r.add("restart mnemo without `--addr :19419`; use `--addr :19419` only for deliberate LAN exposure")
+			break
+		}
+	}
 
-	if path := readProcessEnv(pid, "PATH"); path != "" {
+	if path := readProcessEnv(listener.pid, "PATH"); path != "" {
 		r.add("inherited PATH:")
 		for _, p := range splitPath(path) {
 			marker := "  "
@@ -168,22 +177,23 @@ func checkDaemon(addr string) checkResult {
 	} else {
 		r.add("could not read process environment (skipping PATH inspection)")
 	}
-	r.status = statusOK
 	return r
 }
 
-// findListenerPID returns the PID listening on the given TCP port,
-// or 0 if none / not detectable. Uses lsof (macOS/Linux); on
-// Windows a future check could parse `netstat -ano` output.
-func findListenerPID(addr string) int {
-	port := strings.TrimPrefix(addr, ":")
-	if i := strings.LastIndex(port, ":"); i >= 0 {
-		port = port[i+1:]
-	}
+type listenerInfo struct {
+	pid        int
+	localAddrs []string
+}
+
+// findListener returns the first PID listening on the given TCP port,
+// plus local addresses when detectable. Uses lsof (macOS/Linux) and
+// netstat on Windows.
+func findListener(addr string) listenerInfo {
+	port := listenPort(addr)
 	if runtime.GOOS == "windows" {
 		out, err := exec.Command("netstat", "-ano", "-p", "TCP").Output()
 		if err != nil {
-			return 0
+			return listenerInfo{}
 		}
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.Contains(line, ":"+port+" ") || !strings.Contains(line, "LISTENING") {
@@ -193,18 +203,59 @@ func findListenerPID(addr string) int {
 			if len(fields) >= 5 {
 				var pid int
 				fmt.Sscanf(fields[len(fields)-1], "%d", &pid)
-				return pid
+				return listenerInfo{pid: pid, localAddrs: []string{fields[1]}}
 			}
 		}
-		return 0
+		return listenerInfo{}
 	}
-	out, err := exec.Command("lsof", "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t").Output()
+	out, err := exec.Command("lsof", "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-F", "pn").Output()
 	if err != nil {
-		return 0
+		return listenerInfo{}
 	}
-	var pid int
-	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &pid)
-	return pid
+	var info listenerInfo
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			if info.pid == 0 {
+				fmt.Sscanf(strings.TrimPrefix(line, "p"), "%d", &info.pid)
+			}
+		case 'n':
+			info.localAddrs = append(info.localAddrs, strings.TrimPrefix(line, "n"))
+		}
+	}
+	return info
+}
+
+func listenPort(addr string) string {
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		if u, err := url.Parse(addr); err == nil {
+			addr = u.Host
+		}
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err == nil {
+		return port
+	}
+	port = strings.TrimPrefix(addr, ":")
+	if i := strings.LastIndex(port, ":"); i >= 0 {
+		port = port[i+1:]
+	}
+	return strings.Trim(port, "[]")
+}
+
+func isWildcardListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		return host == "" || host == "*" || host == "0.0.0.0" || host == "::" || host == "[::]"
+	}
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		host = strings.Trim(addr[:i], "[]")
+		return host == "" || host == "*" || host == "0.0.0.0" || host == "::"
+	}
+	return false
 }
 
 // readProcessEnv extracts a single env var from a running process.
