@@ -16,7 +16,6 @@ require gopkg.in/yaml.v3 v3.0.1
 require github.com/marcelocantos/sqlift/go/sqlift v0.17.0
 
 require (
-	github.com/coder/websocket v1.8.14
 	github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9
 	github.com/fsnotify/fsevents v0.2.0
 	github.com/yuin/goldmark v1.8.2

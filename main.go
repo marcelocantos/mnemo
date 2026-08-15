@@ -52,7 +52,6 @@ import (
 	"github.com/marcelocantos/mnemo/internal/edgeproxy"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
-	"github.com/marcelocantos/mnemo/internal/jevonsprovider"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/registry"
@@ -791,67 +790,6 @@ func registerFanoutTools(s *server.MCPServer, h *tools.Handler, fed *federation.
 // instances (🎯T15.3). An empty federatedAddr disables federation
 // entirely; the daemon makes no outbound peer calls and accepts no
 // inbound mTLS connections.
-// startJevonsProvider launches the Jevons provider peer when configured
-// (Jevons 🎯T27.8). Best-effort: a missing hub is logged and retried by
-// the client; config errors only skip start.
-func startJevonsProvider(ctx context.Context, jc store.JevonsProviderConfig, addr, ver string) {
-	if !jc.Enabled {
-		return
-	}
-	hub := strings.TrimSpace(jc.HubURL)
-	if hub == "" {
-		slog.Warn("jevons_provider enabled but hub_url empty — peer not started")
-		return
-	}
-	mcpEP := strings.TrimSpace(jc.MCPEndpoint)
-	if mcpEP == "" {
-		mcpEP = localMCPEndpoint(addr)
-	}
-	healthURL := localHealthURL(addr)
-	poll := 30 * time.Second
-	if s := strings.TrimSpace(jc.HealthPoll); s != "" {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
-			poll = d
-		} else {
-			slog.Warn("jevons_provider.health_poll invalid; using default", "value", s, "default", poll)
-		}
-	}
-	client := jevonsprovider.NewClient(jevonsprovider.ClientArgs{
-		HubURL:      hub,
-		Version:     ver,
-		MCPEndpoint: mcpEP,
-		HealthURL:   healthURL,
-		HealthPoll:  poll,
-	})
-	go func() {
-		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
-			slog.Warn("jevons provider peer exited", "err", err)
-		}
-	}()
-	slog.Info("jevons provider peer started", "hub", hub, "mcp", mcpEP, "health", healthURL)
-}
-
-// localHTTPBase turns a listen addr (":19419" or "127.0.0.1:19419") into
-// an http://localhost… base for same-process health/MCP URLs.
-func localHTTPBase(addr string) string {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// bare ":19419" sometimes fails Split if malformed; fall back.
-		if strings.HasPrefix(addr, ":") {
-			return "http://127.0.0.1" + addr
-		}
-		return "http://127.0.0.1:19419"
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
-}
-
-func localMCPEndpoint(addr string) string { return localHTTPBase(addr) + "/mcp" }
-
-func localHealthURL(addr string) string { return localHTTPBase(addr) + "/health" }
-
 func runServe(ctx context.Context, addr, federatedAddr string) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -1451,10 +1389,6 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
 	boot.Set(boot.PhaseListening, "HTTP listener up on "+addr+"; opening default-user store")
-
-	// Jevons provider peer (Jevons 🎯T27.8): dial hub /ws/provider when
-	// configured. Starts after Listen so HealthURL / MCP endpoint are up.
-	startJevonsProvider(ctx, cfg.JevonsProvider, addr, version)
 
 	// Always supervise the multi-purpose shim when Mnemo.app is present.
 	// Menu-bar visibility is chrome toggled via the retained "ui" event,
