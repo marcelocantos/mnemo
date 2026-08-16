@@ -56,6 +56,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/throttle"
 	"github.com/marcelocantos/mnemo/internal/tools"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
 )
@@ -217,6 +218,9 @@ func main() {
 			return
 		case "resume":
 			cmdResume(os.Args[2:])
+			return
+		case "budget":
+			cmdBudget(os.Args[2:])
 			return
 		case "edge":
 			cmdEdge(os.Args[2:])
@@ -1255,6 +1259,14 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// same registry that backs the /health endpoint and the scheduler.
 	handler.SetDiagRunner(diagReg)
 
+	// 🎯T140: mnemo_ops op=budget / agent_trees (MCP home for spend after
+	// mnemo_budget was removed). Humans use dashboard + `mnemo budget`.
+	handler.SetBudgetWiring(cfg.Budget, func() (level, detail, remediation string) {
+		st := reg.Governor().State()
+		detail, remediation = reg.Governor().Describe()
+		return st.Level.String(), detail, remediation
+	})
+
 	// 🎯T97.6: one-time upgrade notice on tool results (allowlisted sessions).
 	handler.SetUpgradeNotices(upgradeNotices)
 
@@ -1342,6 +1354,38 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
+	// 🎯T140: budget/throttle/agent-trees for dashboard, CLI, menubar.
+	apiHandler.SetBudgetProvider(func() (*api.BudgetSnapshot, error) {
+		mem, err := resolve("")
+		if err != nil {
+			return nil, err
+		}
+		b, err := mem.BudgetStatusNow(cfg.Budget, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		st := reg.Governor().State()
+		detail, rem := reg.Governor().Describe()
+		snap := &api.BudgetSnapshot{
+			Budget: b,
+			Throttle: api.ThrottleSnapshot{
+				Level:       st.Level.String(),
+				Throttling:  st.Level != throttle.Full,
+				Reason:      st.Reason,
+				Lifts:       st.Lifts,
+				Detail:      detail,
+				Remediation: rem,
+			},
+		}
+		if !st.Since.IsZero() {
+			snap.Throttle.Since = st.Since.UTC().Format(time.RFC3339)
+		}
+		trees, terr := mem.AgentTrees(store.AgentTreeParams{Days: 7, Limit: 10})
+		if terr == nil {
+			snap.Trees = trees
+		}
+		return snap, nil
+	})
 	// 🎯T102.9: data-driven plugin UI list for the menu-bar popup.
 	if pm := reg.PluginManager(); pm != nil {
 		apiHandler.SetPluginUILister(pm)

@@ -126,7 +126,10 @@ type Handler struct {
 	resolveCompactor func(username string) CompactorHealthReporter // nil when compactor health not wired
 	diagRunner       DiagRunner                                    // nil when diagnostics not wired
 	cfgCtl           ConfigController                              // nil when mnemo_config disabled
-	seen             sync.Map
+	// budgetCfg + throttleReport feed mnemo_ops op=budget (🎯T140).
+	budgetCfg      store.BudgetConfig
+	throttleReport func() (level, detail, remediation string)
+	seen           sync.Map
 	// upgradeNotices injects a one-time "mnemo upgraded vN -> vN+1"
 	// banner into tool results after a backend swap (🎯T97.6).
 	upgradeNotices UpgradeNoticeSource
@@ -171,6 +174,15 @@ func (h *Handler) SetDiagRunner(r DiagRunner) {
 // reports that runtime reconfiguration is not available.
 func (h *Handler) SetConfigController(c ConfigController) {
 	h.cfgCtl = c
+}
+
+// SetBudgetWiring configures spend + throttle reporting for mnemo_ops
+// op=budget / op=agent_trees (🎯T140). throttleReport may be nil (budget
+// still reports; throttle section says "unavailable").
+func (h *Handler) SetBudgetWiring(cfg store.BudgetConfig, throttleReport func() (level, detail, remediation string)) {
+	h.budgetCfg = cfg
+	h.throttleReport = throttleReport
+	setOpsBudgetWiring(cfg, throttleReport)
 }
 
 // SetUpgradeNotices wires one-time upgrade banners (🎯T97.6).
