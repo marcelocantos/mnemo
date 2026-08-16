@@ -230,6 +230,28 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			}
 		}},
 
+		// 🎯T145: stream reconciler overdue / hung pass visibility.
+		diag.Check{Name: "streams.overdue", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return storeNotReadyResult("streams.overdue")
+			}
+			reports := s.StreamHealthReports(s.StreamReconcilers(), time.Now())
+			var overdue []string
+			for _, r := range reports {
+				if r.Overdue {
+					overdue = append(overdue, r.Name+": "+r.OverdueDetail)
+				}
+			}
+			if len(overdue) == 0 {
+				return diag.Healthy("all registered streams completed within " +
+					"3× their interval (or daemon uptime is still within budget)")
+			}
+			return diag.Warning(
+				"overdue stream pass(es): "+strings.Join(overdue, "; "),
+				"inspect logs for reconcile failed / pass timeout; a hung stream no longer blocks others but needs attention")
+		}},
+
 		diag.Check{Name: "compactor.breaker", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			_, w := state()
 			if w == nil {

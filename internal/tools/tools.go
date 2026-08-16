@@ -734,6 +734,11 @@ func (h *callHandler) query(args map[string]any) (string, bool, error) {
 
 	rows, err := h.mem.Query(query)
 	if err != nil {
+		// 🎯T74: timeout is distinct from SQL errors so agents refine
+		// rather than retry the same unbounded statement.
+		if store.IsQueryTimeout(err) {
+			return fmt.Sprintf("query timed out: %v", err), true, nil
+		}
 		return fmt.Sprintf("query failed: %v", err), true, nil
 	}
 	if len(rows) == 0 {
