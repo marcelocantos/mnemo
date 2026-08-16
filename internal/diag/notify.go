@@ -120,6 +120,50 @@ func (n *Notifier) OnAlert(fn func(Alert)) {
 	n.onAlert = fn
 }
 
+// ThrottleCheckName is the health-check / alert name for budget throttling
+// (🎯T136 / 🎯T140). Shared so engage/lift push and the steady warn row agree.
+const ThrottleCheckName = "budget.throttle"
+
+// PushAlert emits an alert immediately, bypassing the severity threshold.
+//
+// Used for budget-throttle level transitions (🎯T140): the steady health row
+// stays warn-only (so it does not reframe intentional control as "daemon
+// unhealthy"), but engage/lift must still interrupt via the same OnAlert →
+// SSE → Mnemo.app path as Fail transitions. Projection stays on Observe and
+// remains quiet under the default Fail threshold.
+//
+// Caller owns when to fire (level edge only). Dedup/cooldown for threshold-
+// based checks do not apply here — each transition is intentional.
+func (n *Notifier) PushAlert(a Alert) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if !n.enabled {
+		return
+	}
+	if a.DashboardURL == "" {
+		a.DashboardURL = n.dashboardURL
+	}
+	if a.Name == "" {
+		a.Name = ThrottleCheckName
+	}
+	// Track severity so a later Observe recovery path stays coherent if
+	// something elevates budget.throttle to fail in a report.
+	if a.Kind == "recovery" {
+		n.lastSeverity[a.Name] = OK
+		delete(n.lastNotified, a.Name)
+	} else {
+		n.lastSeverity[a.Name] = parseSeverity(a.Severity)
+		if n.lastSeverity[a.Name] < Warn {
+			n.lastSeverity[a.Name] = Warn
+		}
+		n.lastNotified[a.Name] = time.Now()
+	}
+	n.emit(a)
+}
+
 // Observe folds a report into the notifier, emitting notifications for
 // checks that newly cross the threshold (or re-cross after the cooldown)
 // and a recovery notification when a previously-failing check returns to

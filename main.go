@@ -1125,6 +1125,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			}()
 		}
 	})
+	// 🎯T140: throttle engage/lift must push even though the steady health
+	// row is warn-only (Fail threshold would silence Observe).
+	reg.SetThrottleNotifier(notifier)
 	diagScheduler := diag.NewScheduler(diagReg, notifier, 0, 0)
 	// Re-evaluate the budget throttle on the full pass (🎯T136), so the
 	// check that reports throttle state reads a value from this pass

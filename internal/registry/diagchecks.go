@@ -126,10 +126,11 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			}
 		}},
 
-		// Throttle state (🎯T136). Throttling is LOUD by requirement: a
-		// silent throttle is indistinguishable from a hang, and the first
-		// thing anyone does about an apparent hang is restart the daemon
-		// — which is precisely why the state is durable.
+		// Throttle state (🎯T136). Steady severity is warn (intentional
+		// control, not "daemon dying"). Interruptive loudness on engage/
+		// lift is PushAlert from EvaluateThrottle (🎯T140) — not Observe —
+		// so the default Fail notify threshold does not silence transitions
+		// and does not drag budget.projection into banners.
 		diag.Check{Name: "budget.throttle", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			detail, remediation := r.governor.Describe()
 			if r.governor.State().Level == throttle.Full {

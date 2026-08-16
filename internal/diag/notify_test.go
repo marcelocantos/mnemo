@@ -52,6 +52,65 @@ func TestNotifierTransitionsAndCooldown(t *testing.T) {
 	}
 }
 
+// TestPushAlertThrottleTransition: engage/lift fire even under Fail threshold
+// while a warn-only Observe for budget.projection stays silent (🎯T140).
+func TestPushAlertThrottleTransition(t *testing.T) {
+	n := NewNotifier(DefaultNotifierConfig("http://x/#health"))
+	var alerts []Alert
+	n.OnAlert(func(a Alert) { alerts = append(alerts, a) })
+	n.SetSender(func(string, string) { t.Fatal("OS fallback must not run with OnAlert set") })
+
+	// Projection warn must not notify (Fail threshold).
+	n.Observe(rep(Result{
+		Name: "budget.projection", Severity: "warn",
+		Detail: "at $47/day, month exceeds cap",
+	}), time.Now())
+	if len(alerts) != 0 {
+		t.Fatalf("projection warn notified: %+v", alerts)
+	}
+
+	// Throttle engage via PushAlert (level edge).
+	n.PushAlert(Alert{
+		Name:        ThrottleCheckName,
+		Kind:        "fail",
+		Severity:    "fail",
+		Detail:      "background agents throttled to reduced",
+		Remediation: "lifts when projection falls",
+	})
+	if len(alerts) != 1 {
+		t.Fatalf("engage: got %d alerts", len(alerts))
+	}
+	a := alerts[0]
+	if a.Name != ThrottleCheckName || a.Kind != "fail" || a.DashboardURL != "http://x/#health" {
+		t.Fatalf("engage payload: %+v", a)
+	}
+	if a.Detail == "" || a.Remediation == "" {
+		t.Fatalf("engage missing detail/remediation: %+v", a)
+	}
+
+	// Lift.
+	n.PushAlert(Alert{
+		Name:     ThrottleCheckName,
+		Kind:     "recovery",
+		Severity: "ok",
+		Detail:   "background agents returned to full rate",
+	})
+	if len(alerts) != 2 {
+		t.Fatalf("lift: got %d alerts", len(alerts))
+	}
+	if alerts[1].Kind != "recovery" {
+		t.Fatalf("lift kind=%q", alerts[1].Kind)
+	}
+
+	// Steady throttle warn via Observe still silent.
+	n.Observe(rep(Result{
+		Name: ThrottleCheckName, Severity: "warn", Detail: "still throttled",
+	}), time.Now())
+	if len(alerts) != 2 {
+		t.Fatalf("steady throttle warn should not re-push: %d", len(alerts))
+	}
+}
+
 // When OnAlert is wired, every decided alert goes there — never the OS
 // fallback. There is no subscriber/presence gate. (🎯T86)
 func TestNotifierRoutesToOnAlert(t *testing.T) {

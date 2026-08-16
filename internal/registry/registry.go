@@ -28,6 +28,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -103,6 +104,9 @@ type Registry struct {
 	// yields a governor that permits everything, so callers need no
 	// nil check on a hot path.
 	governor *throttle.Governor
+	// throttleNotifier receives engage/lift alerts (🎯T140). nil in tests
+	// that only exercise Evaluate without a diag Notifier.
+	throttleNotifier *diag.Notifier
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -167,18 +171,33 @@ func mnemoDir() string {
 // evaluation from the scheduler.
 func (r *Registry) Governor() *throttle.Governor { return r.governor }
 
+// SetThrottleNotifier wires push delivery for throttle level transitions
+// (🎯T140). Call from main after constructing the diag Notifier that feeds
+// the SSE hub → Mnemo.app. nil disables push (tests).
+func (r *Registry) SetThrottleNotifier(n *diag.Notifier) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.throttleNotifier = n
+}
+
 // EvaluateThrottle re-reads the budget and updates the throttle level
 // (🎯T136). Called on the diag scheduler's full pass: a budget does not
 // change on a three-minute timescale, and re-running several usage
 // aggregations more often than that would itself be a cost.
+//
+// On a level change, pushes an alert through the notifier so engage/lift
+// cannot be silent (🎯T140). Steady health still reports budget.throttle as
+// warn — only the transition interrupts.
 func (r *Registry) EvaluateThrottle(defaultUser string) {
 	r.mu.Lock()
 	e, ok := r.stores[defaultUser]
 	cfg := r.cfg
+	notifier := r.throttleNotifier
 	r.mu.Unlock()
 	if !ok || e.store == nil {
 		return
 	}
+	prev := r.governor.State().Level
 	b, err := e.store.BudgetStatusNow(cfg.Budget, time.Now())
 	if err != nil {
 		return
@@ -189,6 +208,37 @@ func (r *Registry) EvaluateThrottle(defaultUser string) {
 		SpentPct:     b.SpentPct,
 		ProjectedPct: b.ProjectedPct,
 		WarnPct:      cfg.Budget.EffectiveWarnPct(),
+	})
+	next := r.governor.State().Level
+	r.notifyThrottleLevelChange(prev, next, notifier)
+}
+
+// notifyThrottleLevelChange pushes engage/lift alerts on a governor level
+// edge (🎯T140). Extracted so tests can drive the shipped notify path
+// without a full BudgetStatusNow fixture.
+func (r *Registry) notifyThrottleLevelChange(prev, next throttle.Level, notifier *diag.Notifier) {
+	if prev == next || notifier == nil {
+		return
+	}
+	detail, rem := r.governor.Describe()
+	if next == throttle.Full {
+		notifier.PushAlert(diag.Alert{
+			Name:     diag.ThrottleCheckName,
+			Kind:     "recovery",
+			Severity: "ok",
+			Detail:   "background agents returned to full rate",
+		})
+		return
+	}
+	// Kind "fail" so the shim treats this as a non-recovery banner
+	// (interrupt). Health check severity stays warn — Severity here is
+	// for the notification title only.
+	notifier.PushAlert(diag.Alert{
+		Name:        diag.ThrottleCheckName,
+		Kind:        "fail",
+		Severity:    "fail",
+		Detail:      detail,
+		Remediation: rem,
 	})
 }
 
