@@ -52,25 +52,32 @@ type claudiaSummariser struct {
 	costUSD  float64
 }
 
-// NewClaudiaSummariser returns a summariser that runs one claude task per
-// drip in workDir. An empty model uses claudia's default.
+// NewClaudiaSummariser returns a summariser that runs one provider Task
+// per drip in workDir. Default provider is Grok (claudia ProviderGrok).
+// An empty model uses compact.DefaultSummariserModel.
 func NewClaudiaSummariser(workDir, model string) Summariser {
+	if model == "" {
+		model = DefaultStreamsegModel
+	}
 	return &claudiaSummariser{
 		workDir: workDir, model: model,
 		ceiling: DefaultSessionTokenCeiling,
 	}
 }
 
+// DefaultStreamsegModel matches the compactor default (Grok).
+const DefaultStreamsegModel = "grok-4"
+
 // taskConfig is the configuration every drip runs under. Extracted so a
-// test can assert on what is actually passed (🎯T139): the Session-mode
-// binding this replaced DID restrict tools, and the Task-mode rewrite
-// dropped that silently — because Task mode ignored the concept entirely
-// until claudia v0.20.0, so nothing failed and nothing warned.
+// test can assert on what is actually passed (🎯T139).
+//
+// ProviderGrok cannot carry DisallowTools yet (claudia v0.22 refuses);
+// streamseg relies on framing + ErrSpendCeiling. See compact.ClaudiaCaller.
 func (c *claudiaSummariser) taskConfig() claudia.TaskConfig {
 	return claudia.TaskConfig{
-		WorkDir:       c.workDir,
-		Model:         c.model,
-		DisallowTools: store.SummariserDisallowedTools,
+		Provider: claudia.ProviderGrok,
+		WorkDir:  c.workDir,
+		Model:    c.model,
 	}
 }
 

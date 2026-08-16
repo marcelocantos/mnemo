@@ -163,7 +163,7 @@ func drainIntake(grace time.Duration, graceful []intakeStopper, force []intakeCl
 }
 
 // summariserWorkDir returns a dedicated, always-present working
-// directory for the compactor/reviewer's `claude -p` subprocesses
+// directory for the compactor/reviewer's claudia Task (default Grok) subprocesses
 // (🎯T82). The summariser is stateless — it summarises the prompt text,
 // so the cwd's contents are irrelevant — hence a neutral directory under
 // the OS temp root. It is deliberately NOT a repo checkout (the old
@@ -812,7 +812,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		slog.Info("extra project dirs configured", "dirs", cfg.ExtraProjectDirs)
 	}
 
-	// The compactor and CLAUDE.md reviewer spawn `claude -p` to
+	// The compactor and CLAUDE.md reviewer spawn claudia Tasks (default Grok) to
 	// summarise transcript text; that subprocess only needs a valid
 	// directory to chdir into — its contents are irrelevant to the
 	// stateless summarisation. Use a dedicated dir under the OS temp

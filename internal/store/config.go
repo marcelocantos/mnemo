@@ -1796,14 +1796,8 @@ type StreamingSegmentationConfig struct {
 	// Enabled must be set explicitly. With it false, LiveSessions is
 	// never polled and no summariser process exists.
 	Enabled bool `json:"enabled"`
-	// Model overrides the summariser model. Empty uses claudia's
-	// default; "sonnet" is the measured choice (🎯T132.4).
-	//
-	// The prior here was that a small model would suffice, since this is
-	// extraction rather than hard thinking. The sweep falsified it:
-	// haiku scores worse than sonnet at every drip size, and at drip 24
-	// produces nothing at all — it opens spans but rarely seals them,
-	// and only sealed spans persist.
+	// Model overrides the summariser model. Empty uses Grok default
+	// (grok-4 via claudia ProviderGrok).
 	Model string `json:"model,omitempty"`
 	// DripSize is how many substantive messages accumulate before the
 	// summariser is asked. Smaller means fresher spans and more calls.

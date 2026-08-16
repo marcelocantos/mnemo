@@ -135,9 +135,9 @@ type userEntry struct {
 
 // NewRegistry builds an empty Registry. The baseCtx is cancelled on
 // Close and is the parent of every per-user worker context.
-// summariserWorkDir is the cwd for the compactor/reviewer `claude -p`
-// subprocesses (the same for every user — a neutral scratch dir, not a
-// per-user path). Empty disables summarisation (🎯T82).
+// summariserWorkDir is the cwd for the compactor/reviewer claudia Task
+// subprocesses (default ProviderGrok; the same for every user — a neutral
+// scratch dir, not a per-user path). Empty disables summarisation (🎯T82).
 func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir string) *Registry {
 	ctx, cancel := context.WithCancel(parent)
 	return &Registry{
@@ -147,8 +147,9 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 		creating:          map[string]chan struct{}{},
 		cfg:               cfg,
 		summariserWorkDir: summariserWorkDir,
-		compactorModel:    "sonnet",
-		governor:          throttle.New(mnemoDir()),
+		// Default Grok model for claudia ProviderGrok Task mode.
+		compactorModel: "grok-4",
+		governor:       throttle.New(mnemoDir()),
 	}
 }
 
@@ -635,11 +636,12 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	r.startVaultWorkers(username, e)
 
 	// Summariser-backed workers (compactor, CLAUDE.md reviewer) only
-	// start when there is a usable working directory for the `claude -p`
-	// subprocess. An empty summariserWorkDir means even the temp dir
-	// couldn't be created at startup (🎯T82); rather than spawn into a
-	// missing cwd and fail every tick, we skip these workers entirely
-	// and log once. Ingest and the other workers below run regardless.
+	// start when there is a usable working directory for the claudia
+	// Task (default ProviderGrok). An empty summariserWorkDir means even
+	// the temp dir couldn't be created at startup (🎯T82); rather than
+	// spawn into a missing cwd and fail every tick, we skip these workers
+	// entirely and log once. Ingest and the other workers below run
+	// regardless.
 	if r.summariserWorkDir == "" {
 		logger.Warn("compaction and CLAUDE.md review disabled: no usable summariser workdir")
 	} else {
