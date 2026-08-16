@@ -88,7 +88,8 @@ type Registry struct {
 	creating          map[string]chan struct{}
 	cfg               store.Config
 	summariserWorkDir string
-	compactorModel    string
+	compactorModel     string
+	summariserProvider string // "grok" | "claude" from Config.Summariser
 	// upgradeDetector and lease are optional 🎯T97 wiring; set from main
 	// after construction. nil means the corresponding diag checks report
 	// "not configured" and background workers always start.
@@ -140,16 +141,36 @@ type userEntry struct {
 // scratch dir, not a per-user path). Empty disables summarisation (🎯T82).
 func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir string) *Registry {
 	ctx, cancel := context.WithCancel(parent)
-	return &Registry{
+	r := &Registry{
 		baseCtx:           ctx,
 		cancel:            cancel,
 		stores:            map[string]*userEntry{},
 		creating:          map[string]chan struct{}{},
 		cfg:               cfg,
 		summariserWorkDir: summariserWorkDir,
-		// Default Grok model for claudia ProviderGrok Task mode.
-		compactorModel: "grok-4",
-		governor:       throttle.New(mnemoDir()),
+		// Defaults match store.SummariserConfig empty → grok / grok-4.
+		compactorModel:     "grok-4",
+		summariserProvider: "grok",
+		governor:           throttle.New(mnemoDir()),
+	}
+	r.ApplySummariserConfig(cfg.Summariser)
+	return r
+}
+
+// ApplySummariserConfig updates the provider/model used by newly started
+// summariser workers (compactor, reviewer, streamseg). Does not restart
+// already-running workers; those pick up the next process restart or
+// streamseg re-create path.
+func (r *Registry) ApplySummariserConfig(s store.SummariserConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.summariserProvider = s.EffectiveProvider()
+	if m := strings.TrimSpace(s.Model); m != "" {
+		r.compactorModel = m
+	} else if r.summariserProvider == "claude" {
+		r.compactorModel = "sonnet"
+	} else {
+		r.compactorModel = "grok-4"
 	}
 }
 
@@ -649,7 +670,12 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
+			r.mu.Lock()
+			sumModel, sumProv := r.compactorModel, r.summariserProvider
+			r.mu.Unlock()
+			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
+				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
+			})
 			compactor := compact.New(e.store, caller, compact.Config{})
 			watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{})
 			// Budget throttle (🎯T136).
@@ -657,7 +683,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				return r.governor.Allow(throttle.Compaction)
 			}
 			e.compactWatcher = watcher
-			logger.Info("compact: watcher starting")
+			logger.Info("compact: watcher starting", "provider", sumProv, "model", sumModel)
 			watcher.Run(r.baseCtx)
 		}()
 
@@ -667,7 +693,12 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
+			r.mu.Lock()
+			sumModel, sumProv := r.compactorModel, r.summariserProvider
+			r.mu.Unlock()
+			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
+				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
+			})
 			rev := reviewer.New(e.store, llmAdapter{caller})
 			reviewer.Run(r.baseCtx, rev)
 		}()
@@ -970,21 +1001,30 @@ func (r *Registry) startStreamSegWatcher(e *userEntry) {
 		slog.Warn("streaming segmentation not started: no working directory", "err", mkErr)
 		return
 	}
+	r.mu.Lock()
+	sumProv, sumModel := r.summariserProvider, r.compactorModel
+	r.mu.Unlock()
+	segModel := strings.TrimSpace(cfg.Model)
+	if segModel == "" {
+		segModel = sumModel
+	}
 	w := &streamseg.Watcher{
 		Live:          e.store,
 		Store:         e.store,
 		WorkDir:       workDir,
 		DripSize:      cfg.DripSize,
 		MaxConcurrent: cfg.MaxConcurrent,
-		Model:         cfg.Model,
+		Model:         segModel,
 		NewSummariser: func(string) streamseg.Summariser {
-			return streamseg.NewClaudiaSummariser(workDir, cfg.Model)
+			return streamseg.NewClaudiaSummariser(streamseg.ClaudiaSummariserOpts{
+				WorkDir: workDir, Model: segModel, Provider: sumProv,
+			})
 		},
 		// Budget throttle (🎯T136): this tier pauses rather than slows.
 		Paused: func() bool { return r.governor.Paused(throttle.Segmenter) },
 	}
 	slog.Info("streaming segmentation enabled",
-		"model", cfg.Model, "drip_size", cfg.DripSize, "max_concurrent", cfg.MaxConcurrent)
+		"provider", sumProv, "model", segModel, "drip_size", cfg.DripSize, "max_concurrent", cfg.MaxConcurrent)
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
@@ -1186,6 +1226,11 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 		entries[u] = e
 	}
 	r.mu.Unlock()
+
+	// Summariser provider/model for newly started workers (🎯 config).
+	if old.Summariser != newCfg.Summariser {
+		r.ApplySummariserConfig(newCfg.Summariser)
+	}
 
 	report := ReloadReport{}
 

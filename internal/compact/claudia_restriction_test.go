@@ -9,29 +9,36 @@ import (
 	"github.com/marcelocantos/claudia"
 )
 
-// TestCompactorUsesGrokProvider: mnemo's default summariser backend is
-// Grok via claudia ProviderGrok (not Claude Code).
-func TestCompactorUsesGrokProvider(t *testing.T) {
-	cfg := NewClaudiaCaller("/tmp/x", "").taskConfig()
+func TestGrokConfigFromOpts(t *testing.T) {
+	cfg := NewClaudiaCaller(ClaudiaCallerOpts{
+		WorkDir: "/tmp/x", Provider: "grok",
+	}).taskConfig()
 	if cfg.Provider != claudia.ProviderGrok {
-		t.Fatalf("provider=%q want %q", cfg.Provider, claudia.ProviderGrok)
+		t.Fatalf("provider=%q", cfg.Provider)
 	}
-	if cfg.Model != DefaultSummariserModel {
-		t.Fatalf("model=%q want %q", cfg.Model, DefaultSummariserModel)
+	if cfg.Model != DefaultGrokModel {
+		t.Fatalf("model=%q", cfg.Model)
 	}
-	// Grok Task refuses DisallowTools in claudia v0.22 — must stay empty
-	// so Run does not fail closed before spawn.
 	if len(cfg.DisallowTools) != 0 {
-		t.Fatalf("Grok task must not set DisallowTools (claudia refuses); got %v", cfg.DisallowTools)
+		t.Fatalf("Grok must not set DisallowTools: %v", cfg.DisallowTools)
 	}
 }
 
-// TestClaudePathStillStripsTools: if someone forces ProviderClaude, the
-// historical tool strip must remain for the 🎯T139 incident class.
-func TestClaudePathStillStripsTools(t *testing.T) {
-	c := &ClaudiaCaller{workDir: "/tmp/x", model: "sonnet", provider: claudia.ProviderClaude}
-	cfg := c.taskConfig()
+func TestClaudeConfigStripsTools(t *testing.T) {
+	cfg := NewClaudiaCaller(ClaudiaCallerOpts{
+		WorkDir: "/tmp/x", Provider: "claude", Model: "sonnet",
+	}).taskConfig()
+	if cfg.Provider != claudia.ProviderClaude {
+		t.Fatalf("provider=%q", cfg.Provider)
+	}
 	if len(cfg.DisallowTools) == 0 {
-		t.Fatal("Claude summariser path must still DisallowTools")
+		t.Fatal("Claude path must DisallowTools")
+	}
+}
+
+func TestEmptyProviderDefaultsToGrok(t *testing.T) {
+	cfg := NewClaudiaCaller(ClaudiaCallerOpts{WorkDir: "/tmp/x"}).taskConfig()
+	if cfg.Provider != claudia.ProviderGrok {
+		t.Fatalf("default provider=%q", cfg.Provider)
 	}
 }

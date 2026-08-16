@@ -39,8 +39,9 @@ import (
 // and it makes the linear-cost property trivially true rather than argued:
 // nothing accumulates anywhere.
 type claudiaSummariser struct {
-	workDir string
-	model   string
+	workDir  string
+	model    string
+	provider claudia.Provider
 
 	// ceiling bounds total tokens for this session; 0 disables.
 	ceiling int
@@ -52,33 +53,62 @@ type claudiaSummariser struct {
 	costUSD  float64
 }
 
+// ClaudiaSummariserOpts configures the streaming segmenter Task.
+type ClaudiaSummariserOpts struct {
+	WorkDir  string
+	Model    string // empty → provider default
+	Provider string // "grok" | "claude" | empty → grok
+}
+
 // NewClaudiaSummariser returns a summariser that runs one provider Task
-// per drip in workDir. Default provider is Grok (claudia ProviderGrok).
-// An empty model uses compact.DefaultSummariserModel.
-func NewClaudiaSummariser(workDir, model string) Summariser {
+// per drip. Provider/model come from Config.Summariser (and optional
+// streaming_segmentation.model override for the model only).
+func NewClaudiaSummariser(opts ClaudiaSummariserOpts) Summariser {
+	p := parseStreamProvider(opts.Provider)
+	model := strings.TrimSpace(opts.Model)
 	if model == "" {
-		model = DefaultStreamsegModel
+		model = defaultModel(p)
 	}
 	return &claudiaSummariser{
-		workDir: workDir, model: model,
+		workDir: opts.WorkDir, model: model, provider: p,
 		ceiling: DefaultSessionTokenCeiling,
 	}
 }
 
-// DefaultStreamsegModel matches the compactor default (Grok).
-const DefaultStreamsegModel = "grok-4"
+func parseStreamProvider(s string) claudia.Provider {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "claude", "anthropic":
+		return claudia.ProviderClaude
+	default:
+		return claudia.ProviderGrok
+	}
+}
 
-// taskConfig is the configuration every drip runs under. Extracted so a
-// test can assert on what is actually passed (🎯T139).
+func defaultModel(p claudia.Provider) string {
+	if p == claudia.ProviderClaude {
+		return "sonnet"
+	}
+	return "grok-4"
+}
+
+// taskConfig is the configuration every drip runs under.
 //
-// ProviderGrok cannot carry DisallowTools yet (claudia v0.22 refuses);
-// streamseg relies on framing + ErrSpendCeiling. See compact.ClaudiaCaller.
+// Grok: no DisallowTools (claudia v0.22 refuses). Claude: strip tools.
+// Spend ceiling remains on for both (🎯T139).
 func (c *claudiaSummariser) taskConfig() claudia.TaskConfig {
-	return claudia.TaskConfig{
-		Provider: claudia.ProviderGrok,
+	p := c.provider
+	if p == "" {
+		p = claudia.ProviderGrok
+	}
+	cfg := claudia.TaskConfig{
+		Provider: p,
 		WorkDir:  c.workDir,
 		Model:    c.model,
 	}
+	if p == claudia.ProviderClaude {
+		cfg.DisallowTools = store.SummariserDisallowedTools
+	}
+	return cfg
 }
 
 // ErrSpendCeiling stops a session whose summarisation has cost more than

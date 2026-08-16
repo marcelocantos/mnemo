@@ -12,15 +12,14 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
-// DefaultSummariserProvider is the CLI runtime for mnemo-spawned LLM
-// tasks (compactor, reviewer, streaming segmenter). Grok Build via
-// claudia v0.22+ ProviderGrok.
+// DefaultSummariserProvider is used when config omits summariser.provider.
 const DefaultSummariserProvider = claudia.ProviderGrok
 
-// DefaultSummariserModel is used when config leaves model empty.
-// Empty string would also work (claudia/grok default); pin an explicit
-// id so spend and logs are comparable across restarts.
-const DefaultSummariserModel = "grok-4"
+// DefaultGrokModel is used when provider is Grok and model is empty.
+const DefaultGrokModel = "grok-4"
+
+// DefaultClaudeModel is used when provider is Claude and model is empty.
+const DefaultClaudeModel = "sonnet"
 
 // sanitizePrompt strips characters that make the combined prompt an
 // invalid process argument or pollute the summariser input. The
@@ -47,8 +46,8 @@ func sanitizePrompt(s string) string {
 }
 
 // ClaudiaCaller implements LLMCaller via claudia.Task (headless provider
-// CLI). Despite the historical name, the default provider is Grok
-// (ProviderGrok), not Claude Code.
+// CLI). Provider and model come from Config.Summariser (via the registry),
+// not compile-time hardcoding of a single backend.
 //
 // Each call spawns a fresh Task; sessions are not reused across calls so
 // the summariser stays stateless and trivially terminable.
@@ -58,30 +57,61 @@ type ClaudiaCaller struct {
 	provider claudia.Provider
 }
 
-// NewClaudiaCaller returns a caller that runs the default summariser
-// provider in workDir with the given model (e.g. "grok-4"). An empty
-// model uses DefaultSummariserModel.
-func NewClaudiaCaller(workDir, model string) *ClaudiaCaller {
+// ClaudiaCallerOpts configures a summariser Task caller.
+type ClaudiaCallerOpts struct {
+	WorkDir  string
+	// Model is the provider model id; empty uses the provider default.
+	Model string
+	// Provider is "grok", "claude", or empty (→ Grok default).
+	// Prefer store.SummariserConfig.EffectiveProvider().
+	Provider string
+}
+
+// NewClaudiaCaller returns a caller for the configured provider/model.
+// Empty provider → Grok; empty model → provider default.
+func NewClaudiaCaller(opts ClaudiaCallerOpts) *ClaudiaCaller {
+	p := ParseProvider(opts.Provider)
+	model := strings.TrimSpace(opts.Model)
 	if model == "" {
-		model = DefaultSummariserModel
+		model = DefaultModelFor(p)
 	}
 	return &ClaudiaCaller{
-		workDir:  workDir,
+		workDir:  opts.WorkDir,
 		model:    model,
-		provider: DefaultSummariserProvider,
+		provider: p,
 	}
+}
+
+// ParseProvider maps config strings to claudia.Provider.
+// Unknown names fall back to Grok after LoadConfig validation should
+// have rejected them; still safe for tests.
+func ParseProvider(s string) claudia.Provider {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "grok", "xai":
+		return claudia.ProviderGrok
+	case "claude", "anthropic":
+		return claudia.ProviderClaude
+	default:
+		return DefaultSummariserProvider
+	}
+}
+
+// DefaultModelFor returns the empty-config model for a provider.
+func DefaultModelFor(p claudia.Provider) string {
+	if p == claudia.ProviderClaude {
+		return DefaultClaudeModel
+	}
+	return DefaultGrokModel
 }
 
 // taskConfig is the configuration every summarisation task runs under.
 // Extracted so a test can assert on what is actually handed to claudia
 // rather than on what this file appears to intend.
 //
-// Grok note (claudia v0.22): DisallowTools is Claude-only. Setting it on
-// ProviderGrok makes Task.Run refuse before spawn (grokTaskPrecheck).
-// Tool stripping for Grok is not yet oraclable in claudia, so we omit
-// DisallowTools and rely on CompactorMarker framing, system prompts,
-// and the streamseg spend ceiling (🎯T139). When claudia wires Grok
-// --disallowed-tools, restore store.SummariserDisallowedTools here.
+// Grok: DisallowTools must stay empty — claudia v0.22 refuses Grok tasks
+// with tool restrictions (CapabilityToolRestrictions unsupported). Rely
+// on CompactorMarker framing, system prompts, and streamseg spend ceiling.
+// Claude: applies store.SummariserDisallowedTools (🎯T139).
 func (c *ClaudiaCaller) taskConfig() claudia.TaskConfig {
 	p := c.provider
 	if p == "" {
@@ -92,8 +122,7 @@ func (c *ClaudiaCaller) taskConfig() claudia.TaskConfig {
 		WorkDir:  c.workDir,
 		Model:    c.model,
 	}
-	// Claude path retains tool stripping if someone forces ProviderClaude.
-	if p == claudia.ProviderClaude || p == "" {
+	if p == claudia.ProviderClaude {
 		cfg.DisallowTools = store.SummariserDisallowedTools
 	}
 	return cfg
@@ -104,11 +133,7 @@ func (c *ClaudiaCaller) taskConfig() claudia.TaskConfig {
 // (headless CLIs typically lack a native system-prompt flag, so we bake it in).
 func (c *ClaudiaCaller) Call(ctx context.Context, systemPrompt, userPrompt string) (LLMResult, error) {
 	// Prefix the recursion marker so the spawned session's transcript is
-	// recognisable at ingest (🎯T72) — its first user message starts with
-	// store.CompactorMarker, which sets session_meta.compactor_internal = 1
-	// and keeps the summariser session out of the compaction candidate set.
-	// Then sanitize: a NUL byte anywhere in the prompt makes the exec call
-	// fail with EINVAL.
+	// recognisable at ingest (🎯T72). Then sanitize NULs for exec argv.
 	combined := store.CompactorMarker + "\n\n" + systemPrompt + "\n\n" + userPrompt
 	combined = sanitizePrompt(combined)
 
@@ -147,7 +172,7 @@ func (c *ClaudiaCaller) Call(ctx context.Context, systemPrompt, userPrompt strin
 		model = c.model
 	}
 	if model == "" {
-		model = DefaultSummariserModel
+		model = DefaultModelFor(c.provider)
 	}
 
 	return LLMResult{

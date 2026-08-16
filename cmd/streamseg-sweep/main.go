@@ -94,7 +94,9 @@ func main() {
 		if *dryRun {
 			return newFakeSummariser(p)
 		}
-		return streamseg.NewClaudiaSummariser(wd, p.Model)
+		return streamseg.NewClaudiaSummariser(streamseg.ClaudiaSummariserOpts{
+			WorkDir: wd, Model: p.Model, Provider: "grok",
+		})
 	}
 
 	var results []streamseg.SweepResult

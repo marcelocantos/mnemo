@@ -81,14 +81,17 @@ type Config struct {
 	// See CLAUDE.md § External API egress.
 	ImageEmbeddings ImageEmbeddingsConfig `json:"image_embeddings,omitempty"`
 
+	// Summariser selects the claudia Task provider + model for mnemo-
+	// spawned LLM workers: compactor, CLAUDE.md reviewer, and streaming
+	// segmenter. Image description stays on Claude Code (separate path).
+	// Empty provider → "grok"; empty model → provider default.
+	Summariser SummariserConfig `json:"summariser,omitempty"`
+
 	// StreamingSegmentation gates the live topic-span watcher (🎯T132).
-	// Disabled by default, and the reason is stronger than for the other
-	// gated features: enabling it runs a PERSISTENT Claude Code agent
-	// per live session, summarising the conversation as it happens. That
-	// is continuous subscription spend proportional to how much you are
-	// working, and it attaches a second agent to sessions you did not
-	// ask it to watch. Same posture as CostReconciliation and
+	// Disabled by default: enabling it spends continuously on live
+	// sessions. Same opt-in posture as CostReconciliation /
 	// ImageEmbeddings — an ambient capability is not consent.
+	// Model, when empty, inherits Summariser.Model / provider defaults.
 	StreamingSegmentation StreamingSegmentationConfig `json:"streaming_segmentation,omitempty"`
 
 	// TodoGlobs are extra repo-relative globs (filepath.Match semantics)
@@ -1005,6 +1008,9 @@ func LoadConfig() (Config, error) {
 	if err := cfg.validatePlugins(home); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.validateSummariser(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -1068,8 +1074,24 @@ func WriteConfig(cfg Config) error {
 	if err := cfg.validateVaultProfile(); err != nil {
 		return err
 	}
+	if err := cfg.validateSummariser(); err != nil {
+		return err
+	}
 	path := filepath.Join(home, ".mnemo", "config.json")
 	return writeConfigTo(path, cfg)
+}
+
+// validateSummariser rejects unknown summariser.provider values so a typo
+// does not silently fall back at Task spawn time.
+func (c Config) validateSummariser() error {
+	p := c.Summariser.EffectiveProvider()
+	switch p {
+	case "grok", "claude":
+		return nil
+	default:
+		return fmt.Errorf("summariser.provider %q is invalid; must be %q or %q",
+			c.Summariser.Provider, "grok", "claude")
+	}
 }
 
 // validateVaultProfile rejects unknown vault_profile values so a typo
@@ -1789,6 +1811,39 @@ func (c Config) ResolvedSynthesisRoots() []string {
 	return out
 }
 
+// SummariserConfig selects the claudia Task backend for mnemo-spawned
+// summarisation (compactor, CLAUDE.md reviewer, streaming segmenter).
+//
+// Example (~/.mnemo/config.json):
+//
+//	"summariser": {
+//	  "provider": "grok",
+//	  "model": "grok-4"
+//	}
+//
+// provider: "grok" (default) | "claude"
+// model: empty → provider default (grok-4 / sonnet)
+type SummariserConfig struct {
+	// Provider is "grok" or "claude". Empty means "grok".
+	Provider string `json:"provider,omitempty"`
+	// Model is the provider model id. Empty uses the provider default.
+	Model string `json:"model,omitempty"`
+}
+
+// EffectiveProvider returns a normalised summariser provider name
+// ("grok" or "claude"). Unknown non-empty values are returned as-is so
+// LoadConfig validation can reject them.
+func (c SummariserConfig) EffectiveProvider() string {
+	p := strings.ToLower(strings.TrimSpace(c.Provider))
+	if p == "" || p == "xai" {
+		return "grok"
+	}
+	if p == "anthropic" {
+		return "claude"
+	}
+	return p
+}
+
 // StreamingSegmentationConfig gates and tunes the live topic-span
 // watcher (🎯T132). A zero value — the section omitted entirely — means
 // no watcher runs and no agent is ever spawned.
@@ -1796,13 +1851,13 @@ type StreamingSegmentationConfig struct {
 	// Enabled must be set explicitly. With it false, LiveSessions is
 	// never polled and no summariser process exists.
 	Enabled bool `json:"enabled"`
-	// Model overrides the summariser model. Empty uses Grok default
-	// (grok-4 via claudia ProviderGrok).
+	// Model overrides the summariser model for this stream only. Empty
+	// inherits Config.Summariser (provider default / summariser.model).
 	Model string `json:"model,omitempty"`
 	// DripSize is how many substantive messages accumulate before the
 	// summariser is asked. Smaller means fresher spans and more calls.
 	DripSize int `json:"drip_size,omitempty"`
-	// MaxConcurrent bounds how many live sessions are watched at once,
-	// because each one is a Claude process. Zero uses the default.
+	// MaxConcurrent bounds how many live sessions are watched at once.
+	// Zero uses the default.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 }
