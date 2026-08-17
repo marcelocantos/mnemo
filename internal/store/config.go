@@ -1084,12 +1084,15 @@ func WriteConfig(cfg Config) error {
 // validateSummariser rejects unknown summariser.provider values so a typo
 // does not silently fall back at Task spawn time.
 func (c Config) validateSummariser() error {
-	p := c.Summariser.EffectiveProvider()
+	p := normalizeSummariserProvider(c.Summariser.Provider)
+	if p == "" {
+		return nil // auto
+	}
 	switch p {
 	case "grok", "claude":
 		return nil
 	default:
-		return fmt.Errorf("summariser.provider %q is invalid; must be %q or %q",
+		return fmt.Errorf("summariser.provider %q is invalid; must be %q, %q, or omit/auto",
 			c.Summariser.Provider, "grok", "claude")
 	}
 }
@@ -1821,27 +1824,17 @@ func (c Config) ResolvedSynthesisRoots() []string {
 //	  "model": "grok-4"
 //	}
 //
-// provider: "grok" (default) | "claude"
+// provider: "grok" | "claude" | "auto" | omit
+//
+//	omit/auto → at process start, pick Grok if the binary is available,
+//	else Claude (see ResolveSummariserProvider).
+//
 // model: empty → provider default (grok-4 / sonnet)
 type SummariserConfig struct {
-	// Provider is "grok" or "claude". Empty means "grok".
+	// Provider is "grok", "claude", "auto", or empty (auto).
 	Provider string `json:"provider,omitempty"`
 	// Model is the provider model id. Empty uses the provider default.
 	Model string `json:"model,omitempty"`
-}
-
-// EffectiveProvider returns a normalised summariser provider name
-// ("grok" or "claude"). Unknown non-empty values are returned as-is so
-// LoadConfig validation can reject them.
-func (c SummariserConfig) EffectiveProvider() string {
-	p := strings.ToLower(strings.TrimSpace(c.Provider))
-	if p == "" || p == "xai" {
-		return "grok"
-	}
-	if p == "anthropic" {
-		return "claude"
-	}
-	return p
 }
 
 // StreamingSegmentationConfig gates and tunes the live topic-span

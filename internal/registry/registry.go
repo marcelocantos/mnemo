@@ -161,17 +161,23 @@ func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir str
 // summariser workers (compactor, reviewer, streamseg). Does not restart
 // already-running workers; those pick up the next process restart or
 // streamseg re-create path.
+//
+// When provider is omitted/auto, chooses once here: Grok if the binary
+// is available, else Claude (store.ResolveSummariserProvider).
 func (r *Registry) ApplySummariserConfig(s store.SummariserConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.summariserProvider = s.EffectiveProvider()
+	prov, src := store.ResolveSummariserProvider(s.Provider)
+	r.summariserProvider = prov
 	if m := strings.TrimSpace(s.Model); m != "" {
 		r.compactorModel = m
-	} else if r.summariserProvider == "claude" {
+	} else if prov == "claude" {
 		r.compactorModel = "sonnet"
 	} else {
 		r.compactorModel = "grok-4"
 	}
+	slog.Info("summariser provider selected",
+		"provider", prov, "model", r.compactorModel, "source", src)
 }
 
 // mnemoDir resolves ~/.mnemo for durable throttle state, falling back to
