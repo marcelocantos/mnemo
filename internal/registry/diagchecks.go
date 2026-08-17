@@ -126,10 +126,11 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			}
 		}},
 
-		// Throttle state (🎯T136). Throttling is LOUD by requirement: a
-		// silent throttle is indistinguishable from a hang, and the first
-		// thing anyone does about an apparent hang is restart the daemon
-		// — which is precisely why the state is durable.
+		// Throttle state (🎯T136). Steady severity is warn (intentional
+		// control, not "daemon dying"). Interruptive loudness on engage/
+		// lift is PushAlert from EvaluateThrottle (🎯T140) — not Observe —
+		// so the default Fail notify threshold does not silence transitions
+		// and does not drag budget.projection into banners.
 		diag.Check{Name: "budget.throttle", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			detail, remediation := r.governor.Describe()
 			if r.governor.State().Level == throttle.Full {
@@ -228,6 +229,28 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			default:
 				return diag.Healthy(detail)
 			}
+		}},
+
+		// 🎯T145: stream reconciler overdue / hung pass visibility.
+		diag.Check{Name: "streams.overdue", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return storeNotReadyResult("streams.overdue")
+			}
+			reports := s.StreamHealthReports(s.StreamReconcilers(), time.Now())
+			var overdue []string
+			for _, r := range reports {
+				if r.Overdue {
+					overdue = append(overdue, r.Name+": "+r.OverdueDetail)
+				}
+			}
+			if len(overdue) == 0 {
+				return diag.Healthy("all registered streams completed within " +
+					"3× their interval (or daemon uptime is still within budget)")
+			}
+			return diag.Warning(
+				"overdue stream pass(es): "+strings.Join(overdue, "; "),
+				"inspect logs for reconcile failed / pass timeout; a hung stream no longer blocks others but needs attention")
 		}},
 
 		diag.Check{Name: "compactor.breaker", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {

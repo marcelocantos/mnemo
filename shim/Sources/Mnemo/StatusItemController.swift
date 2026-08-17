@@ -214,6 +214,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func showMenu() {
         let menu = NSMenu()
+        // 🎯T140: spend/throttle from /api/budget (not only health glyph colour).
+        let budgetItem = NSMenuItem(title: "Budget: …", action: nil, keyEquivalent: "")
+        budgetItem.isEnabled = false
+        menu.addItem(budgetItem)
+        DaemonClient.shared.budget { snap in
+            MainThread.soon {
+                if let snap = snap {
+                    let title = snap.menuSummary
+                    budgetItem.title = (snap.throttle?.throttling == true) ? "⚠ \(title)" : title
+                } else {
+                    budgetItem.title = "Budget: (unavailable)"
+                }
+            }
+        }
+        menu.addItem(.separator())
         let dashboard = NSMenuItem(title: "Dashboard…", action: #selector(showDashboard), keyEquivalent: "")
         dashboard.target = self
         menu.addItem(dashboard)

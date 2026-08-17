@@ -1141,6 +1141,23 @@ func (s *Store) ListThemes(includeArchived bool) ([]ThemeSummary, error) {
 	return out, rows.Err()
 }
 
+// ResolveOrphanClusterRuns marks cluster_runs left with empty ended_at by a
+// killed daemon as interrupted, so the interval guard can tell "still
+// running" from "died mid-run" (🎯T145). Returns the number of rows closed.
+func (s *Store) ResolveOrphanClusterRuns(now time.Time) (int, error) {
+	ended := now.UTC().Format(time.RFC3339)
+	res, err := s.writeDB.Exec(`
+		UPDATE cluster_runs
+		SET ended_at = ?, failure_mode = 'interrupted_shutdown'
+		WHERE ended_at IS NULL OR ended_at = ''
+	`, ended)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // LatestClusterRun returns the most recent cluster_runs row, or nil.
 func (s *Store) LatestClusterRun() (*ClusterRunResult, error) {
 	var r ClusterRunResult

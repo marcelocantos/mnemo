@@ -4,7 +4,13 @@
 package tools
 
 import (
+	"fmt"
+	"strings"
+	"time"
+
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/marcelocantos/mnemo/internal/store"
 )
 
 // --- Threads (🎯T143.4) ---
@@ -165,19 +171,28 @@ var opsOps = opTable{
 			desc:   "DESTRUCTIVE — restore a session's context. Requires session_id",
 			params: []string{"session_id"},
 		},
+		// 🎯T140: spend/throttle after mnemo_budget was removed. Primary
+		// human surfaces remain dashboard + `mnemo budget` CLI; this is
+		// the agent/MCP home.
+		{name: "budget", desc: "Monthly budget, projection, throttle state, and top agent trees"},
+		{name: "agent_trees", desc: "Costliest agent trees (T137), ranked by aggregate tree cost", params: []string{"days", "limit", "repo"}},
 	},
 }
 
 func opsTool() mcp.Tool {
 	return mcp.NewTool("mnemo_ops",
-		mcp.WithDescription(`Operational surface — health, compaction, divergence and backup. For index freshness and content questions use mnemo_status and mnemo_stats, which are deliberately NOT folded in here.
+		mcp.WithDescription(`Operational surface — health, compaction, divergence, backup, and budget/throttle (🎯T140). For index freshness and content questions use mnemo_status and mnemo_stats, which are deliberately NOT folded in here.
 
 op=restore is destructive and requires an explicit session_id.
+op=budget / op=agent_trees replace the removed mnemo_budget and mnemo_agent_trees tools; humans may prefer GET /api/budget or CLI "mnemo budget".
 
 Ops:`+opsOps.describe()),
 		mcp.WithString("op", mcp.Required(), mcp.Description("Operation to perform — see the list above")),
 		mcp.WithBoolean("force", mcp.Description("op=backup_now: snapshot even if a recent backup exists")),
 		mcp.WithString("session_id", mcp.Description("op=restore: the session to restore (required)")),
+		mcp.WithNumber("days", mcp.Description("op=agent_trees: lookback days (default 7)")),
+		mcp.WithNumber("limit", mcp.Description("op=agent_trees: max trees (default 20)")),
+		mcp.WithString("repo", mcp.Description("op=agent_trees: repo filter")),
 	)
 }
 
@@ -199,6 +214,88 @@ func (h *callHandler) opsDispatch(args map[string]any, resolveCompactor func(str
 		return h.backupNow(args)
 	case "restore":
 		return h.restore(args)
+	case "budget":
+		return h.opsBudget()
+	case "agent_trees":
+		return h.opsAgentTrees(args)
 	}
 	return "mnemo_ops: op " + op + " has no handler", true, nil
+}
+
+// opsBudget reports spend + throttle for agents (🎯T140 MCP home after
+// mnemo_budget was removed). Humans should prefer `mnemo budget` or the
+// dashboard /api/budget card.
+func (h *callHandler) opsBudget() (string, bool, error) {
+	// Parent Handler is not on callHandler — budget uses Backend + tooling
+	// config injected via process-global is wrong. Use store methods only
+	// and read throttle via a package-level optional set by tools.Handler.
+	return formatOpsBudget(h.mem, opsBudgetCfg, opsThrottleReport)
+}
+
+func (h *callHandler) opsAgentTrees(args map[string]any) (string, bool, error) {
+	days := 7
+	if v, ok := args["days"].(float64); ok && v > 0 {
+		days = int(v)
+	}
+	limit := store.DefaultAgentTreeLimit
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	repo, _ := args["repo"].(string)
+	trees, err := h.mem.AgentTrees(store.AgentTreeParams{Days: days, Limit: limit, RepoFilter: repo})
+	if err != nil {
+		return fmt.Sprintf("agent_trees failed: %v", err), true, nil
+	}
+	if len(trees) == 0 {
+		return "No agent trees in window.", false, nil
+	}
+	var b strings.Builder
+	for _, tr := range trees {
+		fmt.Fprintf(&b, "$%.2f tree  agents=%d depth=%d  skill=%s  repo=%s  live=%v\n  %s\n",
+			tr.TreeCostUSD, tr.Agents, tr.MaxDepth, tr.Skill, tr.Repo, tr.Live, tr.Action)
+	}
+	return b.String(), false, nil
+}
+
+// Package-level wiring for ops budget (set from tools.Handler.SetBudgetWiring
+// via setOpsBudgetWiring). Avoids expanding callHandler for every tool call.
+var (
+	opsBudgetCfg       store.BudgetConfig
+	opsThrottleReport  func() (level, detail, remediation string)
+)
+
+func setOpsBudgetWiring(cfg store.BudgetConfig, thr func() (string, string, string)) {
+	opsBudgetCfg = cfg
+	opsThrottleReport = thr
+}
+
+func formatOpsBudget(mem store.Backend, cfg store.BudgetConfig, thr func() (string, string, string)) (string, bool, error) {
+	b, err := mem.BudgetStatusNow(cfg, time.Now())
+	if err != nil {
+		return fmt.Sprintf("budget failed: %v", err), true, nil
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "%s\n", b.Headline)
+	fmt.Fprintf(&out, "cap=$%.2f spent=$%.2f (%.0f%%) projected=$%.2f (%.0f%%) elapsed=%.0f%% governed=$%.2f (%.0f%%) priced=%v\n",
+		b.CapUSD, b.SpentUSD, b.SpentPct, b.ProjectedUSD, b.ProjectedPct, b.ElapsedPct, b.GovernedUSD, b.GovernedPct, b.Priced)
+	if b.ExhaustionDate != "" {
+		fmt.Fprintf(&out, "exhaustion_date=%s\n", b.ExhaustionDate)
+	}
+	if thr != nil {
+		level, detail, rem := thr()
+		fmt.Fprintf(&out, "throttle=%s\n  %s\n", level, detail)
+		if rem != "" {
+			fmt.Fprintf(&out, "  lifts: %s\n", rem)
+		}
+	} else {
+		out.WriteString("throttle=unknown (not wired)\n")
+	}
+	trees, terr := mem.AgentTrees(store.AgentTreeParams{Days: 7, Limit: 5})
+	if terr == nil && len(trees) > 0 {
+		out.WriteString("top agent trees:\n")
+		for _, tr := range trees {
+			fmt.Fprintf(&out, "  $%.2f  n=%d  %s  %s\n", tr.TreeCostUSD, tr.Agents, tr.Skill, tr.Repo)
+		}
+	}
+	return out.String(), false, nil
 }

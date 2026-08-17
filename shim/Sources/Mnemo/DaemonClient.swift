@@ -143,6 +143,19 @@ final class DaemonClient {
         }
     }
 
+    // budget pulls GET /api/budget (🎯T140) for menubar spend/throttle display
+    // without requiring the health panel.
+    func budget(_ done: @escaping (BudgetSnapshot?) -> Void) {
+        get("/api/budget?trees=0") { result in
+            switch result {
+            case .success(let data):
+                done(try? JSONDecoder().decode(BudgetSnapshot.self, from: data))
+            case .failure:
+                done(nil)
+            }
+        }
+    }
+
     // MARK: - transport
 
     private func get(_ path: String, _ done: @escaping (Result<Data, Error>) -> Void) {

@@ -121,6 +121,10 @@ func TestConsolidationPreservesCapabilities(t *testing.T) {
 			"backup_status": "mnemo_backup_status",
 			"backup_now":    "mnemo_backup_now",
 			"restore":       "mnemo_restore",
+			// 🎯T140: deliberate new MCP home after tools were removed
+			// (not a silent re-add of mnemo_budget / mnemo_agent_trees names).
+			"budget":      "mnemo_budget",
+			"agent_trees": "mnemo_agent_trees",
 		}},
 	}
 

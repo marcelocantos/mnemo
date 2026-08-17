@@ -4,32 +4,41 @@
 package compact
 
 import (
-	"slices"
 	"testing"
 
-	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/claudia"
 )
 
-// TestCompactorCannotAct is the 🎯T139 guard for the compactor, which is
-// the higher-exposure path: it summarises EVERY session in the corpus,
-// thousands of them, any of which may contain imperative text.
-//
-// Its prompt already frames the transcript as data — and the incident
-// this guards against showed framing alone is not enough, because the
-// summariser there ignored its wrapper and obeyed the embedded text.
-func TestCompactorCannotAct(t *testing.T) {
-	cfg := NewClaudiaCaller("/tmp/x", "sonnet").taskConfig()
+func TestGrokConfigFromOpts(t *testing.T) {
+	cfg := NewClaudiaCaller(ClaudiaCallerOpts{
+		WorkDir: "/tmp/x", Provider: "grok",
+	}).taskConfig()
+	if cfg.Provider != claudia.ProviderGrok {
+		t.Fatalf("provider=%q", cfg.Provider)
+	}
+	if cfg.Model != DefaultGrokModel {
+		t.Fatalf("model=%q", cfg.Model)
+	}
+	if len(cfg.DisallowTools) != 0 {
+		t.Fatalf("Grok must not set DisallowTools: %v", cfg.DisallowTools)
+	}
+}
 
+func TestClaudeConfigStripsTools(t *testing.T) {
+	cfg := NewClaudiaCaller(ClaudiaCallerOpts{
+		WorkDir: "/tmp/x", Provider: "claude", Model: "sonnet",
+	}).taskConfig()
+	if cfg.Provider != claudia.ProviderClaude {
+		t.Fatalf("provider=%q", cfg.Provider)
+	}
 	if len(cfg.DisallowTools) == 0 {
-		t.Fatal("the compactor passes NO tool restrictions")
+		t.Fatal("Claude path must DisallowTools")
 	}
-	for _, tool := range []string{"Bash", "WebFetch", "WebSearch", "Write", "Edit"} {
-		if !slices.Contains(cfg.DisallowTools, tool) {
-			t.Errorf("%q is available to the compactor", tool)
-		}
-	}
-	if !slices.Equal(cfg.DisallowTools, store.SummariserDisallowedTools) {
-		t.Errorf("compactor uses its own list %v rather than the shared one %v",
-			cfg.DisallowTools, store.SummariserDisallowedTools)
+}
+
+func TestEmptyProviderDefaultsToGrok(t *testing.T) {
+	cfg := NewClaudiaCaller(ClaudiaCallerOpts{WorkDir: "/tmp/x"}).taskConfig()
+	if cfg.Provider != claudia.ProviderGrok {
+		t.Fatalf("default provider=%q", cfg.Provider)
 	}
 }

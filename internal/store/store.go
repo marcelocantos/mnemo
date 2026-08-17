@@ -100,6 +100,14 @@ type Store struct {
 	// Own mutex; not guarded by mu.
 	watchTel watchTelemetryState
 
+	// queryTimeoutOverride, when > 0, replaces DefaultQueryTimeout for
+	// Store.Query (tests inject a short budget). Zero means default (🎯T74).
+	queryTimeoutOverride time.Duration
+
+	// reconTracker records per-stream pass completion for doctor overdue
+	// checks (🎯T145). Own mutex.
+	reconTracker reconcilerTracker
+
 	// vaultPath is the configured vault root, mirrored from
 	// registry/config (🎯T68.6) so the vault divergence gatherer and
 	// the vault GC can find it without re-reading config. "" when the
@@ -197,6 +205,12 @@ type Store struct {
 	// the check can report growth rather than raw size. Atomic: read from
 	// the diagnostic scheduler, not under any lock.
 	lastWALSize atomic.Int64
+}
+
+// ReconcilerTracker returns the store's stream-pass tracker for the
+// registry worker and doctor (🎯T145).
+func (s *Store) ReconcilerTracker() *reconcilerTracker {
+	return &s.reconTracker
 }
 
 // NoteActivity records that a write happened just now. The backup worker
@@ -758,6 +772,11 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 		"PRAGMA synchronous = NORMAL",
 		"PRAGMA cache_size = -64000",
 		"PRAGMA mmap_size = 268435456",
+		// busy_timeout bounds LOCK ACQUISITION waits only (how long a
+		// connection waits for another writer/reader to release a lock).
+		// It does NOT cap statement execution time. Agent-reachable
+		// ad-hoc reads (Store.Query / mnemo_query) use a separate
+		// context deadline — DefaultQueryTimeout — for that (🎯T74).
 		"PRAGMA busy_timeout = 5000",
 		// Trim the -wal back to this bound whenever a checkpoint resets
 		// it. Without a limit SQLite reuses the WAL from offset zero but
@@ -1092,6 +1111,13 @@ func New(dbPath, projectDir string) (*Store, error) {
 		imageSem:    make(chan struct{}, n),
 		exclusions:  &exclusionRegistry{},
 		upgradeDone: done,
+	}
+	// 🎯T145: close cluster_runs left open by a killed daemon so the
+	// in-flight guard cannot confuse "still running" with "dead".
+	if nOrphans, err := s.ResolveOrphanClusterRuns(time.Now()); err != nil {
+		slog.Warn("resolve orphan cluster_runs failed", "err", err)
+	} else if nOrphans > 0 {
+		slog.Info("closed orphan cluster_runs from prior daemon", "count", nOrphans)
 	}
 
 	rows, err := readDB.Query("SELECT path, offset FROM ingest_state")
@@ -5941,16 +5967,24 @@ func parseLsofOutput(data []byte) map[string]int {
 // enforcement is delegated to SQLite via PRAGMA query_only on the
 // dedicated connection used for the query; write statements are rejected
 // by SQLite itself, not by a string-prefix sniff in Go.
+//
+// Execution is bounded by DefaultQueryTimeout (or a test override): the
+// context cancels via the driver's interrupt path so a pathological
+// mnemo_query cannot wedge the shared read pool indefinitely (🎯T74).
+// This is distinct from PRAGMA busy_timeout (lock waits only).
 func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 	execSQL, err := sqldeep.Transpile(strings.TrimSpace(query))
 	if err != nil {
 		return nil, fmt.Errorf("sqldeep transpile: %w", err)
 	}
 
-	ctx := context.Background()
+	timeout := s.effectiveQueryTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	conn, err := s.readDB.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, mapQueryTimeout(err, ctx, timeout)
 	}
 	defer conn.Close()
 	// query_only=1 is the write boundary; the read pool's authorizer
@@ -5958,18 +5992,21 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 	// ATTACH, so there is deliberately no reset to query_only=0 on
 	// release — every read-pool connection stays read-only for its life.
 	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = 1"); err != nil {
-		return nil, fmt.Errorf("set query_only: %w", err)
+		return nil, mapQueryTimeout(fmt.Errorf("set query_only: %w", err), ctx, timeout)
 	}
 
 	rows, err := conn.QueryContext(ctx, execSQL, args...)
 	if err != nil {
-		return nil, err
+		return nil, mapQueryTimeout(err, ctx, timeout)
 	}
 	defer rows.Close()
 
 	cols, _ := rows.Columns()
 	var results []map[string]any
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, mapQueryTimeout(err, ctx, timeout)
+		}
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range vals {
@@ -5992,7 +6029,7 @@ func (s *Store) Query(query string, args ...any) ([]map[string]any, error) {
 	// so write statements (DELETE/DROP/INSERT/UPDATE) reach this check
 	// without an earlier prepare-time error.
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, mapQueryTimeout(err, ctx, timeout)
 	}
 	return results, nil
 }

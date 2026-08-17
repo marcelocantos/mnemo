@@ -38,6 +38,7 @@ type Handler struct {
 	analytics *respCache     // 🎯T92: TTL cache for heavy read-only endpoints
 	events    *EventHub      // optional; nil until wired by SetEventHub (🎯T86)
 	plugins   PluginUILister // optional; nil until wired by SetPluginUILister (🎯T102.9)
+	budgetProvider BudgetProvider // optional; nil until SetBudgetProvider (🎯T140)
 }
 
 // analyticsCacheTTL is how long a heavy analytics response is reused. The
@@ -74,6 +75,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	cache := h.analytics.wrap
 	mux.HandleFunc("/api/stats", getOnly(cache(h.stats)))
 	mux.HandleFunc("/api/usage", getOnly(cache(h.usage)))
+	mux.HandleFunc("/api/budget", getOnly(cache(h.budget)))                 // 🎯T140
+	mux.HandleFunc("/api/agent_trees", getOnly(cache(h.agentTrees)))       // 🎯T140 / T137
 	mux.HandleFunc("/api/sessions", getOnly(h.sessions))
 	mux.HandleFunc("/api/activity", getOnly(cache(h.activity)))
 	mux.HandleFunc("/api/whatsup", getOnly(h.whatsup))

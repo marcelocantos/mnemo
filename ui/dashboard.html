@@ -341,6 +341,12 @@
       <div id="rateContent"><div class="loading">loading…</div></div>
     </div>
 
+    <!-- BUDGET + THROTTLE (🎯T140) — dedicated surface, not only health row -->
+    <div class="card" id="cardBudget">
+      <div class="card-title">Budget &amp; Throttle</div>
+      <div id="budgetContent"><div class="loading">loading…</div></div>
+    </div>
+
     <!-- SUBAGENT SESSIONS -->
     <div class="card" id="cardSubagent">
       <div class="card-title">Subagent Sessions</div>
@@ -574,6 +580,44 @@ async function loadRate() {
     `;
   } catch(e) {
     document.getElementById('rateContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Budget & Throttle (🎯T140) — dedicated card; no health panel needed ─
+async function loadBudget() {
+  try {
+    const data = await apiFetch('/api/budget');
+    const el = document.getElementById('budgetContent');
+    const b = data.budget || {};
+    const th = data.throttle || {};
+    const thrClass = th.throttling ? 'warn' : 'ok';
+    const sevClass = b.severity === 'over' ? 'fail' : (b.severity === 'warn' ? 'warn' : 'ok');
+    const trees = (data.agent_trees || []).slice(0, 3);
+    let treesHtml = '';
+    if (trees.length) {
+      treesHtml = '<div class="section-label" style="margin-top:8px">Top agent trees</div><div class="type-list">' +
+        trees.map(t => `<div class="rate-row"><span class="rate-label">${esc(t.skill||t.repo||t.session_id||'?')} ×${t.agents||0}</span><span class="rate-value cost">${fmtCost(t.tree_cost_usd||0)}</span></div>`).join('') +
+        '</div>';
+    }
+    el.innerHTML = `
+      <div class="health-summary" style="margin-bottom:8px">
+        <span class="health-badge ${sevClass}"><span class="badge-dot"></span>${esc(b.severity||'ok')}</span>
+        <span class="health-badge ${thrClass}" title="${esc(th.detail||'')}"><span class="badge-dot"></span>throttle: ${esc(th.level||'full')}${th.throttling?' ACTIVE':''}</span>
+      </div>
+      <div class="type-list">
+        <div class="rate-row"><span class="rate-label">Cap</span><span class="rate-value">${fmtCost(b.cap_usd||0)}</span></div>
+        <div class="rate-row"><span class="rate-label">Spent (${(b.spent_pct||0).toFixed(0)}%)</span><span class="rate-value cost">${fmtCost(b.spent_usd||0)}</span></div>
+        <div class="rate-row"><span class="rate-label">Projected (${(b.projected_pct||0).toFixed(0)}%)</span><span class="rate-value">${fmtCost(b.projected_usd||0)}</span></div>
+        <div class="rate-row"><span class="rate-label">Elapsed period</span><span class="rate-value">${(b.elapsed_pct||0).toFixed(0)}%</span></div>
+        <div class="rate-row"><span class="rate-label">Governed (mnemo agents)</span><span class="rate-value">${fmtCost(b.governed_usd||0)} (${(b.governed_pct||0).toFixed(0)}%)</span></div>
+        ${b.exhaustion_date ? `<div class="rate-row"><span class="rate-label">Exhaustion</span><span class="rate-value" style="color:var(--red)">${esc(b.exhaustion_date)}</span></div>` : ''}
+      </div>
+      <div class="health-result-detail" style="margin-top:8px">${esc(b.headline||'')}</div>
+      ${th.throttling && th.detail ? `<div class="health-result-remediation">${esc(th.detail)}</div>` : ''}
+      ${treesHtml}
+    `;
+  } catch(e) {
+    document.getElementById('budgetContent').innerHTML = `<div class="error">Error: ${esc(e.message)}</div>`;
   }
 }
 
@@ -1206,6 +1250,7 @@ async function refreshAll() {
     await Promise.all([
       loadStats(),
       loadRate(),
+      loadBudget(),
       loadSubagent(),
       loadDBStats(),
       loadConversations(),

@@ -28,7 +28,7 @@ func TestRealDripRoundTrip(t *testing.T) {
 		t.Skip("live: costs model calls")
 	}
 	wd := t.TempDir()
-	s := NewClaudiaSummariser(wd, "sonnet")
+	s := NewClaudiaSummariser(ClaudiaSummariserOpts{WorkDir: wd, Provider: "claude", Model: "sonnet"})
 	defer s.Close()
 
 	a := New("proof", Config{SealLookahead: 2}, nil)

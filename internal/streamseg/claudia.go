@@ -39,8 +39,9 @@ import (
 // and it makes the linear-cost property trivially true rather than argued:
 // nothing accumulates anywhere.
 type claudiaSummariser struct {
-	workDir string
-	model   string
+	workDir  string
+	model    string
+	provider claudia.Provider
 
 	// ceiling bounds total tokens for this session; 0 disables.
 	ceiling int
@@ -52,26 +53,62 @@ type claudiaSummariser struct {
 	costUSD  float64
 }
 
-// NewClaudiaSummariser returns a summariser that runs one claude task per
-// drip in workDir. An empty model uses claudia's default.
-func NewClaudiaSummariser(workDir, model string) Summariser {
+// ClaudiaSummariserOpts configures the streaming segmenter Task.
+type ClaudiaSummariserOpts struct {
+	WorkDir  string
+	Model    string // empty → provider default
+	Provider string // "grok" | "claude" | empty → grok
+}
+
+// NewClaudiaSummariser returns a summariser that runs one provider Task
+// per drip. Provider/model come from Config.Summariser (and optional
+// streaming_segmentation.model override for the model only).
+func NewClaudiaSummariser(opts ClaudiaSummariserOpts) Summariser {
+	p := parseStreamProvider(opts.Provider)
+	model := strings.TrimSpace(opts.Model)
+	if model == "" {
+		model = defaultModel(p)
+	}
 	return &claudiaSummariser{
-		workDir: workDir, model: model,
+		workDir: opts.WorkDir, model: model, provider: p,
 		ceiling: DefaultSessionTokenCeiling,
 	}
 }
 
-// taskConfig is the configuration every drip runs under. Extracted so a
-// test can assert on what is actually passed (🎯T139): the Session-mode
-// binding this replaced DID restrict tools, and the Task-mode rewrite
-// dropped that silently — because Task mode ignored the concept entirely
-// until claudia v0.20.0, so nothing failed and nothing warned.
-func (c *claudiaSummariser) taskConfig() claudia.TaskConfig {
-	return claudia.TaskConfig{
-		WorkDir:       c.workDir,
-		Model:         c.model,
-		DisallowTools: store.SummariserDisallowedTools,
+func parseStreamProvider(s string) claudia.Provider {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "claude", "anthropic":
+		return claudia.ProviderClaude
+	default:
+		return claudia.ProviderGrok
 	}
+}
+
+func defaultModel(p claudia.Provider) string {
+	if p == claudia.ProviderClaude {
+		return "sonnet"
+	}
+	return "grok-4"
+}
+
+// taskConfig is the configuration every drip runs under.
+//
+// Grok: no DisallowTools (claudia v0.22 refuses). Claude: strip tools.
+// Spend ceiling remains on for both (🎯T139).
+func (c *claudiaSummariser) taskConfig() claudia.TaskConfig {
+	p := c.provider
+	if p == "" {
+		p = claudia.ProviderGrok
+	}
+	cfg := claudia.TaskConfig{
+		Provider: p,
+		WorkDir:  c.workDir,
+		Model:    c.model,
+	}
+	if p == claudia.ProviderClaude {
+		cfg.DisallowTools = store.SummariserDisallowedTools
+	}
+	return cfg
 }
 
 // ErrSpendCeiling stops a session whose summarisation has cost more than
