@@ -666,13 +666,15 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	if r.summariserWorkDir == "" {
 		logger.Warn("compaction and CLAUDE.md review disabled: no usable summariser workdir")
 	} else {
+		// Capture under the caller's lock (ForUser/EnsureBackgroundWorkers
+		// hold r.mu). Do NOT re-lock inside the goroutine — that deadlocks
+		// if startWorkers is still on the stack holding r.mu.
+		sumModel, sumProv := r.compactorModel, r.summariserProvider
+
 		// Compaction watcher.
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			r.mu.Lock()
-			sumModel, sumProv := r.compactorModel, r.summariserProvider
-			r.mu.Unlock()
 			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
 				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
 			})
@@ -693,9 +695,6 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			r.mu.Lock()
-			sumModel, sumProv := r.compactorModel, r.summariserProvider
-			r.mu.Unlock()
 			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
 				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
 			})
@@ -1001,9 +1000,8 @@ func (r *Registry) startStreamSegWatcher(e *userEntry) {
 		slog.Warn("streaming segmentation not started: no working directory", "err", mkErr)
 		return
 	}
-	r.mu.Lock()
+	// Caller may already hold r.mu (startWorkers from ForUser).
 	sumProv, sumModel := r.summariserProvider, r.compactorModel
-	r.mu.Unlock()
 	segModel := strings.TrimSpace(cfg.Model)
 	if segModel == "" {
 		segModel = sumModel
