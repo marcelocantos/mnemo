@@ -6,6 +6,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -24,25 +25,36 @@ func TestResolveSummariserProviderExplicit(t *testing.T) {
 	}
 }
 
-func isolateProviderEnv(t *testing.T, pathDir string) {
+// isolateProviderEnv points HOME/USERPROFILE and PATH at dir so LookPath
+// and known-install candidates cannot see host binaries.
+func isolateProviderEnv(t *testing.T, dir string) {
 	t.Helper()
-	// Empty HOME so known install dirs under ~/.grok and ~/.local do not
-	// find real host binaries.
-	t.Setenv("HOME", pathDir)
-	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("HOMEDRIVE", filepath.VolumeName(dir))
+	t.Setenv("HOMEPATH", dir)
+	t.Setenv("PATH", dir)
 	t.Setenv("GROK_BIN", "")
 	t.Setenv("CLAUDE_BIN", "")
-	// Unset via empty may leave LookPath finding brew if PATH is wrong —
-	// pathDir-only PATH is the isolation.
+}
+
+func writeFakeCLI(t *testing.T, dir, name string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		name = name + ".exe"
+	}
+	p := filepath.Join(dir, name)
+	// Minimal content; resolve only Stats / LookPath, does not exec.
+	if err := os.WriteFile(p, []byte("fake"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestResolveSummariserProviderAutoPrefersGrokWhenPresent(t *testing.T) {
 	dir := t.TempDir()
 	isolateProviderEnv(t, dir)
-	grok := filepath.Join(dir, "grok")
-	if err := os.WriteFile(grok, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeCLI(t, dir, "grok")
 
 	p, src := ResolveSummariserProvider("")
 	if p != "grok" || src != "auto:grok" {
@@ -53,10 +65,7 @@ func TestResolveSummariserProviderAutoPrefersGrokWhenPresent(t *testing.T) {
 func TestResolveSummariserProviderAutoFallsBackToClaude(t *testing.T) {
 	dir := t.TempDir()
 	isolateProviderEnv(t, dir)
-	claude := filepath.Join(dir, "claude")
-	if err := os.WriteFile(claude, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeCLI(t, dir, "claude")
 
 	p, src := ResolveSummariserProvider("auto")
 	if p != "claude" || src != "auto:claude" {
