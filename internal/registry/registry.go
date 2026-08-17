@@ -28,6 +28,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/breaker"
 	"github.com/marcelocantos/mnemo/internal/compact"
+	"github.com/marcelocantos/mnemo/internal/diag"
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/reviewer"
 	"github.com/marcelocantos/mnemo/internal/store"
@@ -87,7 +88,8 @@ type Registry struct {
 	creating          map[string]chan struct{}
 	cfg               store.Config
 	summariserWorkDir string
-	compactorModel    string
+	compactorModel     string
+	summariserProvider string // "grok" | "claude" from Config.Summariser
 	// upgradeDetector and lease are optional 🎯T97 wiring; set from main
 	// after construction. nil means the corresponding diag checks report
 	// "not configured" and background workers always start.
@@ -103,6 +105,9 @@ type Registry struct {
 	// yields a governor that permits everything, so callers need no
 	// nil check on a hot path.
 	governor *throttle.Governor
+	// throttleNotifier receives engage/lift alerts (🎯T140). nil in tests
+	// that only exercise Evaluate without a diag Notifier.
+	throttleNotifier *diag.Notifier
 }
 
 // userEntry tracks one user's Store, optional vault Exporter, and
@@ -131,21 +136,48 @@ type userEntry struct {
 
 // NewRegistry builds an empty Registry. The baseCtx is cancelled on
 // Close and is the parent of every per-user worker context.
-// summariserWorkDir is the cwd for the compactor/reviewer `claude -p`
-// subprocesses (the same for every user — a neutral scratch dir, not a
-// per-user path). Empty disables summarisation (🎯T82).
+// summariserWorkDir is the cwd for the compactor/reviewer claudia Task
+// subprocesses (default ProviderGrok; the same for every user — a neutral
+// scratch dir, not a per-user path). Empty disables summarisation (🎯T82).
 func NewRegistry(parent context.Context, cfg store.Config, summariserWorkDir string) *Registry {
 	ctx, cancel := context.WithCancel(parent)
-	return &Registry{
+	r := &Registry{
 		baseCtx:           ctx,
 		cancel:            cancel,
 		stores:            map[string]*userEntry{},
 		creating:          map[string]chan struct{}{},
 		cfg:               cfg,
 		summariserWorkDir: summariserWorkDir,
-		compactorModel:    "sonnet",
-		governor:          throttle.New(mnemoDir()),
+		// Defaults match store.SummariserConfig empty → grok / grok-4.
+		compactorModel:     "grok-4",
+		summariserProvider: "grok",
+		governor:           throttle.New(mnemoDir()),
 	}
+	r.ApplySummariserConfig(cfg.Summariser)
+	return r
+}
+
+// ApplySummariserConfig updates the provider/model used by newly started
+// summariser workers (compactor, reviewer, streamseg). Does not restart
+// already-running workers; those pick up the next process restart or
+// streamseg re-create path.
+//
+// When provider is omitted/auto, chooses once here: Grok if the binary
+// is available, else Claude (store.ResolveSummariserProvider).
+func (r *Registry) ApplySummariserConfig(s store.SummariserConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prov, src := store.ResolveSummariserProvider(s.Provider)
+	r.summariserProvider = prov
+	if m := strings.TrimSpace(s.Model); m != "" {
+		r.compactorModel = m
+	} else if prov == "claude" {
+		r.compactorModel = "sonnet"
+	} else {
+		r.compactorModel = "grok-4"
+	}
+	slog.Info("summariser provider selected",
+		"provider", prov, "model", r.compactorModel, "source", src)
 }
 
 // mnemoDir resolves ~/.mnemo for durable throttle state, falling back to
@@ -167,18 +199,33 @@ func mnemoDir() string {
 // evaluation from the scheduler.
 func (r *Registry) Governor() *throttle.Governor { return r.governor }
 
+// SetThrottleNotifier wires push delivery for throttle level transitions
+// (🎯T140). Call from main after constructing the diag Notifier that feeds
+// the SSE hub → Mnemo.app. nil disables push (tests).
+func (r *Registry) SetThrottleNotifier(n *diag.Notifier) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.throttleNotifier = n
+}
+
 // EvaluateThrottle re-reads the budget and updates the throttle level
 // (🎯T136). Called on the diag scheduler's full pass: a budget does not
 // change on a three-minute timescale, and re-running several usage
 // aggregations more often than that would itself be a cost.
+//
+// On a level change, pushes an alert through the notifier so engage/lift
+// cannot be silent (🎯T140). Steady health still reports budget.throttle as
+// warn — only the transition interrupts.
 func (r *Registry) EvaluateThrottle(defaultUser string) {
 	r.mu.Lock()
 	e, ok := r.stores[defaultUser]
 	cfg := r.cfg
+	notifier := r.throttleNotifier
 	r.mu.Unlock()
 	if !ok || e.store == nil {
 		return
 	}
+	prev := r.governor.State().Level
 	b, err := e.store.BudgetStatusNow(cfg.Budget, time.Now())
 	if err != nil {
 		return
@@ -189,6 +236,37 @@ func (r *Registry) EvaluateThrottle(defaultUser string) {
 		SpentPct:     b.SpentPct,
 		ProjectedPct: b.ProjectedPct,
 		WarnPct:      cfg.Budget.EffectiveWarnPct(),
+	})
+	next := r.governor.State().Level
+	r.notifyThrottleLevelChange(prev, next, notifier)
+}
+
+// notifyThrottleLevelChange pushes engage/lift alerts on a governor level
+// edge (🎯T140). Extracted so tests can drive the shipped notify path
+// without a full BudgetStatusNow fixture.
+func (r *Registry) notifyThrottleLevelChange(prev, next throttle.Level, notifier *diag.Notifier) {
+	if prev == next || notifier == nil {
+		return
+	}
+	detail, rem := r.governor.Describe()
+	if next == throttle.Full {
+		notifier.PushAlert(diag.Alert{
+			Name:     diag.ThrottleCheckName,
+			Kind:     "recovery",
+			Severity: "ok",
+			Detail:   "background agents returned to full rate",
+		})
+		return
+	}
+	// Kind "fail" so the shim treats this as a non-recovery banner
+	// (interrupt). Health check severity stays warn — Severity here is
+	// for the notification title only.
+	notifier.PushAlert(diag.Alert{
+		Name:        diag.ThrottleCheckName,
+		Kind:        "fail",
+		Severity:    "fail",
+		Detail:      detail,
+		Remediation: rem,
 	})
 }
 
@@ -585,19 +663,27 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	r.startVaultWorkers(username, e)
 
 	// Summariser-backed workers (compactor, CLAUDE.md reviewer) only
-	// start when there is a usable working directory for the `claude -p`
-	// subprocess. An empty summariserWorkDir means even the temp dir
-	// couldn't be created at startup (🎯T82); rather than spawn into a
-	// missing cwd and fail every tick, we skip these workers entirely
-	// and log once. Ingest and the other workers below run regardless.
+	// start when there is a usable working directory for the claudia
+	// Task (default ProviderGrok). An empty summariserWorkDir means even
+	// the temp dir couldn't be created at startup (🎯T82); rather than
+	// spawn into a missing cwd and fail every tick, we skip these workers
+	// entirely and log once. Ingest and the other workers below run
+	// regardless.
 	if r.summariserWorkDir == "" {
 		logger.Warn("compaction and CLAUDE.md review disabled: no usable summariser workdir")
 	} else {
+		// Capture under the caller's lock (ForUser/EnsureBackgroundWorkers
+		// hold r.mu). Do NOT re-lock inside the goroutine — that deadlocks
+		// if startWorkers is still on the stack holding r.mu.
+		sumModel, sumProv := r.compactorModel, r.summariserProvider
+
 		// Compaction watcher.
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
+			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
+				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
+			})
 			compactor := compact.New(e.store, caller, compact.Config{})
 			watcher := compact.NewWatcher(e.store, compactor, compact.WatcherConfig{})
 			// Budget throttle (🎯T136).
@@ -605,7 +691,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				return r.governor.Allow(throttle.Compaction)
 			}
 			e.compactWatcher = watcher
-			logger.Info("compact: watcher starting")
+			logger.Info("compact: watcher starting", "provider", sumProv, "model", sumModel)
 			watcher.Run(r.baseCtx)
 		}()
 
@@ -615,7 +701,9 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			caller := compact.NewClaudiaCaller(r.summariserWorkDir, r.compactorModel)
+			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
+				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
+			})
 			rev := reviewer.New(e.store, llmAdapter{caller})
 			reviewer.Run(r.baseCtx, rev)
 		}()
@@ -674,6 +762,10 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			if pm := r.PluginManager(); pm != nil {
 				reconcilers = append(reconcilers, pm.StreamReconcilers()...)
 			}
+			// Circuit breakers still gate which streams enter this tick;
+			// DriveStreamReconcilers isolates passes so one blocked stream
+			// cannot starve the rest (🎯T145).
+			var allowed []store.StreamReconciler
 			for _, sr := range reconcilers {
 				b := breakers[sr.Name()]
 				if b == nil {
@@ -683,17 +775,9 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				if !b.Allow(now) {
 					continue
 				}
-				n, err := sr.Reconcile(r.baseCtx, now)
-				if err != nil {
-					b.Record(time.Now(), false, err.Error())
-					logger.Warn("reconcile failed", "stream", sr.Name(), "err", err)
-				} else {
-					b.Record(time.Now(), true, "")
-					if n > 0 {
-						logger.Info("reconciled", "stream", sr.Name(), "count", n)
-					}
-				}
+				allowed = append(allowed, wrapBreakerRecord(sr, b))
 			}
+			store.DriveStreamReconcilers(r.baseCtx, allowed, now, e.store.ReconcilerTracker())
 			select {
 			case <-r.baseCtx.Done():
 				return
@@ -922,21 +1006,29 @@ func (r *Registry) startStreamSegWatcher(e *userEntry) {
 		slog.Warn("streaming segmentation not started: no working directory", "err", mkErr)
 		return
 	}
+	// Caller may already hold r.mu (startWorkers from ForUser).
+	sumProv, sumModel := r.summariserProvider, r.compactorModel
+	segModel := strings.TrimSpace(cfg.Model)
+	if segModel == "" {
+		segModel = sumModel
+	}
 	w := &streamseg.Watcher{
 		Live:          e.store,
 		Store:         e.store,
 		WorkDir:       workDir,
 		DripSize:      cfg.DripSize,
 		MaxConcurrent: cfg.MaxConcurrent,
-		Model:         cfg.Model,
+		Model:         segModel,
 		NewSummariser: func(string) streamseg.Summariser {
-			return streamseg.NewClaudiaSummariser(workDir, cfg.Model)
+			return streamseg.NewClaudiaSummariser(streamseg.ClaudiaSummariserOpts{
+				WorkDir: workDir, Model: segModel, Provider: sumProv,
+			})
 		},
 		// Budget throttle (🎯T136): this tier pauses rather than slows.
 		Paused: func() bool { return r.governor.Paused(throttle.Segmenter) },
 	}
 	slog.Info("streaming segmentation enabled",
-		"model", cfg.Model, "drip_size", cfg.DripSize, "max_concurrent", cfg.MaxConcurrent)
+		"provider", sumProv, "model", segModel, "drip_size", cfg.DripSize, "max_concurrent", cfg.MaxConcurrent)
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
@@ -1138,6 +1230,11 @@ func (r *Registry) Reload(newCfg store.Config) ReloadReport {
 		entries[u] = e
 	}
 	r.mu.Unlock()
+
+	// Summariser provider/model for newly started workers (🎯 config).
+	if old.Summariser != newCfg.Summariser {
+		r.ApplySummariserConfig(newCfg.Summariser)
+	}
 
 	report := ReloadReport{}
 

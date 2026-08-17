@@ -83,6 +83,11 @@ func hasPendingImageWork(db *sql.DB, derivedTable string) bool {
 // describerDisallowedTools removes everything this describer does not
 // need (🎯T139).
 //
+// Image description deliberately stays on Claude Code (direct `claude`
+// exec), not Grok: it requires Read-with-restrictions, which claudia
+// ProviderGrok cannot yet assert (DisallowTools refused). Compactor /
+// segmenter / reviewer use Grok via claudia; this path does not.
+//
 // It keeps Read, and only Read, because reading the image files IS the
 // job — which is what makes it different from the compactor and the
 // streaming segmenter, where the whole toolset can go.

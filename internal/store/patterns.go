@@ -769,6 +769,9 @@ type patternsReconcilerStream struct{ s *Store }
 
 func (p patternsReconcilerStream) Name() string            { return "patterns" }
 func (p patternsReconcilerStream) Interval() time.Duration { return patternsRefreshInterval }
+func (p patternsReconcilerStream) PassTimeout() time.Duration {
+	return 5 * time.Minute
+}
 
 func (p patternsReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
 	if ctx.Err() != nil {

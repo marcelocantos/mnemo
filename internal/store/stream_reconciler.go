@@ -36,24 +36,13 @@ type StreamReconciler interface {
 // should drive on each tick (🎯T68.7). Adding a new periodic stream is
 // one entry in this slice; the registry worker stays the same.
 func (s *Store) StreamReconcilers() []StreamReconciler {
+	// Order is not load-bearing: DriveStreamReconcilers runs each pass
+	// with its own deadline in parallel so one slow stream cannot starve
+	// the rest (🎯T145). Keep a stable, readable order for logs/doctor.
 	return []StreamReconciler{
 		mirrorReconcilerStream{s},
 		sourceStateReconcilerStream{s},
 		patternsReconcilerStream{s},
-		// Calibration goes BEFORE clustering, and the order is load-bearing.
-		//
-		// The worker drives these sequentially, so a reconciler that runs
-		// long starves everything after it. Clustering is a 24h-cadence
-		// pass over the whole corpus and, on this machine, was observed
-		// never to finish: four cluster_runs rows with ended_at NULL,
-		// the oldest from a prior daemon. Registered after it, calibration
-		// never executed once in ten minutes of live running — search
-		// stayed on the degraded fusion path indefinitely while every
-		// unit test passed, because the tests call Reconcile directly and
-		// never through the shared worker.
-		//
-		// Ordering is a workaround, not the fix. The real defect is that
-		// one slow stream can starve the rest; that is 🎯T145.
 		calibrationReconcilerStream{s},
 		clusterReconcilerStream{s},
 	}
@@ -76,6 +65,9 @@ func (c calibrationReconcilerStream) Name() string { return "search_calibration"
 // Interval is the tick cadence, not the recalibration cadence: each
 // pass recalibrates only the corpora that have actually diverged.
 func (c calibrationReconcilerStream) Interval() time.Duration { return time.Hour }
+
+// PassTimeout bounds one calibration tick (🎯T145); corpora loop checks ctx.
+func (c calibrationReconcilerStream) PassTimeout() time.Duration { return 10 * time.Minute }
 
 func (c calibrationReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
 	cals, err := c.s.LoadCalibrations()
@@ -130,6 +122,10 @@ func (c clusterReconcilerStream) Interval() time.Duration {
 	return 24 * time.Hour
 }
 
+// PassTimeout bounds one clustering pass (🎯T145). Clustering is 24h cadence
+// but must not hold a worker without a wall-clock bound.
+func (c clusterReconcilerStream) PassTimeout() time.Duration { return 30 * time.Minute }
+
 func (c clusterReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
@@ -138,7 +134,13 @@ func (c clusterReconcilerStream) Reconcile(ctx context.Context, now time.Time) (
 	if err != nil {
 		return 0, err
 	}
-	if last != nil && last.EndedAt != "" && last.FailureMode == "" {
+	// Skip while a prior run is unfinished (ended_at empty). Orphan rows
+	// from dead daemons are closed at startup by ResolveOrphanClusterRuns
+	// so this is not permanent starvation (🎯T145).
+	if last != nil && last.EndedAt == "" {
+		return 0, nil
+	}
+	if last != nil && last.FailureMode == "" {
 		if t, perr := time.Parse(time.RFC3339, last.EndedAt); perr == nil {
 			if now.Sub(t) < c.Interval() {
 				return 0, nil
@@ -159,6 +161,9 @@ type mirrorReconcilerStream struct{ s *Store }
 
 func (m mirrorReconcilerStream) Name() string            { return "mirror" }
 func (m mirrorReconcilerStream) Interval() time.Duration { return time.Minute }
+func (m mirrorReconcilerStream) PassTimeout() time.Duration {
+	return 45 * time.Second
+}
 func (m mirrorReconcilerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
 	return m.s.ReconcileStaleMirrors(ctx, now)
 }
@@ -167,6 +172,9 @@ type sourceStateReconcilerStream struct{ s *Store }
 
 func (s sourceStateReconcilerStream) Name() string            { return "source_state" }
 func (s sourceStateReconcilerStream) Interval() time.Duration { return time.Minute }
+func (s sourceStateReconcilerStream) PassTimeout() time.Duration {
+	return 45 * time.Second
+}
 func (s sourceStateReconcilerStream) Reconcile(_ context.Context, now time.Time) (int, error) {
 	return s.s.ReconcileSourceState(now)
 }

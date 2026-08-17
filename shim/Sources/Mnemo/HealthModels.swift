@@ -48,6 +48,49 @@ struct HealthReport: Decodable {
     var worst: Severity { results.map(\.sev).max(by: { $0.rawValue < $1.rawValue }) ?? .ok }
 }
 
+// BudgetSnapshot is GET /api/budget (🎯T140) — spend + throttle without health list.
+struct BudgetSnapshot: Decodable {
+    let budget: BudgetFields?
+    let throttle: ThrottleFields?
+
+    struct BudgetFields: Decodable {
+        let capUsd: Double?
+        let spentUsd: Double?
+        let spentPct: Double?
+        let projectedPct: Double?
+        let severity: String?
+        let headline: String?
+        let exhaustionDate: String?
+
+        enum CodingKeys: String, CodingKey {
+            case capUsd = "cap_usd"
+            case spentUsd = "spent_usd"
+            case spentPct = "spent_pct"
+            case projectedPct = "projected_pct"
+            case severity, headline
+            case exhaustionDate = "exhaustion_date"
+        }
+    }
+
+    struct ThrottleFields: Decodable {
+        let level: String?
+        let throttling: Bool?
+        let detail: String?
+        let remediation: String?
+    }
+
+    /// One-line menubar/tooltip summary.
+    var menuSummary: String {
+        let thr = throttle?.throttling == true
+        let lvl = throttle?.level ?? "full"
+        let spent = budget?.spentPct.map { String(format: "%.0f%% spent" , $0) } ?? "budget"
+        if thr {
+            return "THROTTLE \(lvl) · \(spent)"
+        }
+        return "\(spent) · throttle \(lvl)"
+    }
+}
+
 // HealthAlert is a transition the daemon decided is worth a notification (its
 // dedup + cooldown already applied). kind is "fail" or "recovery".
 struct HealthAlert: Decodable {
