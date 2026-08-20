@@ -59,7 +59,7 @@ const serviceName = "mnemo"
 // dispatcher (which calls serviceMain and ultimately runServe). If
 // not, it returns (false, nil) so the caller can continue with its
 // interactive/foreground path.
-func runAsServiceIfUnderSCM(addr, federatedAddr string) (bool, error) {
+func runAsServiceIfUnderSCM(addr string, addrExplicit bool, federatedAddr string) (bool, error) {
 	underSCM, err := svc.IsWindowsService()
 	if err != nil {
 		return false, fmt.Errorf("detect windows service: %w", err)
@@ -73,12 +73,17 @@ func runAsServiceIfUnderSCM(addr, federatedAddr string) (bool, error) {
 	if logFile, err := openServiceLogFile(); err == nil {
 		os.Stderr = logFile
 	}
-	return true, svc.Run(serviceName, &mnemoService{addr: addr, federatedAddr: federatedAddr})
+	return true, svc.Run(serviceName, &mnemoService{
+		addr:            addr,
+		implicitDefault: !addrExplicit,
+		federatedAddr:   federatedAddr,
+	})
 }
 
 type mnemoService struct {
-	addr          string
-	federatedAddr string
+	addr            string
+	implicitDefault bool
+	federatedAddr   string
 }
 
 func (m *mnemoService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
@@ -95,7 +100,7 @@ func (m *mnemoService) Execute(args []string, r <-chan svc.ChangeRequest, change
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- runServe(ctx, m.addr, m.federatedAddr) }()
+	go func() { done <- runServe(ctx, m.addr, m.implicitDefault, m.federatedAddr) }()
 
 	changes <- svc.Status{State: svc.Running, Accepts: accepts}
 

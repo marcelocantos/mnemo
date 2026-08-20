@@ -4,21 +4,24 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestDefaultAddrIsLoopback(t *testing.T) {
-	if defaultAddr != "127.0.0.1:19419" {
-		t.Fatalf("defaultAddr = %q, want loopback-only 127.0.0.1:19419", defaultAddr)
+	if defaultAddr != "localhost:19419" {
+		t.Fatalf("defaultAddr = %q, want localhost:19419 sentinel", defaultAddr)
 	}
 }
 
 func TestLocalHTTPBaseURL(t *testing.T) {
 	tests := map[string]string{
 		"127.0.0.1:19419":            "http://127.0.0.1:19419",
+		"localhost:19419":            "http://localhost:19419",
 		":19419":                     "http://127.0.0.1:19419",
 		"0.0.0.0:19419":              "http://127.0.0.1:19419",
 		"[::]:19419":                 "http://127.0.0.1:19419",
@@ -38,6 +41,76 @@ func TestDaemonBaseURLNormalizesEnvOverride(t *testing.T) {
 	t.Setenv("MNEMO_ADDR", "0.0.0.0:19419")
 	if got, want := daemonBaseURL(), "http://127.0.0.1:19419"; got != want {
 		t.Fatalf("daemonBaseURL() = %q, want %q", got, want)
+	}
+}
+
+func TestDaemonBaseURLDefaultUsesLocalhost(t *testing.T) {
+	t.Setenv("MNEMO_ADDR", "")
+	if got, want := daemonBaseURL(), "http://localhost:19419"; got != want {
+		t.Fatalf("daemonBaseURL() = %q, want %q", got, want)
+	}
+}
+
+func TestOpenLocalListenersRejectsExplicitLocalhost(t *testing.T) {
+	if _, err := openLocalListeners("localhost:19419", false); err == nil {
+		t.Fatal("openLocalListeners accepted explicit localhost")
+	}
+}
+
+func TestOpenLocalListenersExplicitIPv4(t *testing.T) {
+	set, err := openLocalListeners("127.0.0.1:0", false)
+	if err != nil {
+		t.Fatalf("openLocalListeners explicit IPv4: %v", err)
+	}
+	defer set.close()
+	if got := len(set.listeners); got != 1 {
+		t.Fatalf("listener count = %d, want 1", got)
+	}
+	if got, want := set.listeners[0].network, "tcp"; got != want {
+		t.Fatalf("listener network = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(set.baseURL, "http://127.0.0.1:") {
+		t.Fatalf("baseURL = %q, want IPv4 loopback", set.baseURL)
+	}
+}
+
+func TestOpenLocalListenersImplicitDefaultExpandsLoopback(t *testing.T) {
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("IPv4 loopback unavailable: %v", err)
+	}
+	port := strconv.Itoa(probe.Addr().(*net.TCPAddr).Port)
+	_ = probe.Close()
+
+	set, err := openLocalListeners("localhost:"+port, true)
+	if err != nil {
+		t.Fatalf("openLocalListeners implicit default: %v", err)
+	}
+	defer set.close()
+	if len(set.listeners) == 0 {
+		t.Fatal("no listeners opened")
+	}
+	for _, l := range set.listeners {
+		if l.network != "tcp4" && l.network != "tcp6" {
+			t.Fatalf("listener network = %q, want tcp4 or tcp6", l.network)
+		}
+		if strings.Contains(l.addr, "localhost") {
+			t.Fatalf("listener passed localhost through to net.Listen: %q", l.addr)
+		}
+	}
+}
+
+func TestOpenLocalListenersImplicitDefaultFailsOnBusyFamily(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("IPv4 loopback unavailable: %v", err)
+	}
+	defer ln.Close()
+
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	if set, err := openLocalListeners("localhost:"+port, true); err == nil {
+		set.close()
+		t.Fatal("openLocalListeners succeeded with IPv4 loopback port already in use")
 	}
 }
 

@@ -11,8 +11,9 @@ package main
 
 import "fmt"
 
-func runAsServiceIfUnderSCM(addr, federatedAddr string) (bool, error) {
+func runAsServiceIfUnderSCM(addr string, addrExplicit bool, federatedAddr string) (bool, error) {
 	_ = addr
+	_ = addrExplicit
 	_ = federatedAddr
 	return false, nil
 }
