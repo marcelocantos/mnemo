@@ -39,8 +39,8 @@ go build -tags "sqlite_fts5" -o bin/mnemo .
 brew services start mnemo
 ```
 
-This starts mnemo on `127.0.0.1:19419` via launchd and keeps it running
-across reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
+This starts mnemo on `localhost:19419` via IPv4 and IPv6 loopback listeners
+and keeps it running across reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
 
 The Homebrew formula's service block sets `PATH` to
 `$(brew --prefix)/bin:~/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin`
@@ -78,7 +78,7 @@ Then: `systemctl --user enable --now mnemo`
 **Manual** (any platform):
 
 ```bash
-mnemo                         # listen on 127.0.0.1:19419 (default)
+mnemo                         # listen on localhost:19419 (IPv4 + IPv6 loopback)
 mnemo --addr 127.0.0.1:8080   # custom local port
 mnemo --addr :19419           # deliberate network exposure
 ```
@@ -123,9 +123,9 @@ is not optional — tools registered mid-session are not picked up.
 lsof -iTCP:19419 -sTCP:LISTEN
 ```
 
-This should show the mnemo process listening on `127.0.0.1:19419` or
-`localhost:19419`, not `*:19419`. If nothing is shown, the server isn't
-running — check `brew services list` and `$(brew --prefix)/var/log/mnemo.log`.
+This should show the mnemo process listening on `127.0.0.1:19419` and/or
+`[::1]:19419`, not `*:19419`. If nothing is shown, the server isn't running —
+check `brew services list` and `$(brew --prefix)/var/log/mnemo.log`.
 
 Do **not** use `curl` to probe `/mcp` — MCP endpoints only respond to
 POST requests with a JSON-RPC body. A plain GET or empty POST returns

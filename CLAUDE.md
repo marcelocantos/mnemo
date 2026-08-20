@@ -26,7 +26,7 @@ transformed into the same content model, tagged
 
 ```bash
 go build -tags "sqlite_fts5" -o bin/mnemo .
-bin/mnemo                         # HTTP MCP daemon (default 127.0.0.1:19419)
+bin/mnemo                         # HTTP MCP daemon (default localhost:19419)
 bin/mnemo --addr 127.0.0.1:8080   # custom local listen address
 bin/mnemo --addr :19419           # deliberate network exposure
 ```
