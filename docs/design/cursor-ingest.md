@@ -43,7 +43,13 @@ idempotent resumable ingest — is reused.
 `CURSOR_HOME` overrides `~/.cursor` (for tests and relocated installs).
 
 The project-directory encoding maps both `/` and `.` to `-`, so it is
-lossy and is **not** used as cwd. Cwd comes from `worker.log`:
+lossy. Cwd is resolved in order:
+
+1. `worker.log` `workspacePath=` — present on a minority of sessions.
+2. Invert the slug (`-` → `/`, then `/github/com/` → `/github.com/`)
+   **only if that path exists as a directory**. Hyphenated path
+   components (`squz-multimaze2`) cannot be reconstructed and stay
+   empty rather than inventing `squz/multimaze2`.
 
 ```
 [info] Getting tree structure for workspacePath=/Users/…/repo

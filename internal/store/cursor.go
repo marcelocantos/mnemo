@@ -65,8 +65,21 @@ func cursorProject(cwd string) string {
 	return "cursor"
 }
 
+// cursorCwd prefers worker.log's workspacePath=, then a conservative
+// decode of the project-directory slug if that path exists on disk.
+// The slug encoding maps both "/" and "." to "-", so it is lossy —
+// a hyphenated repo name cannot be reconstructed, and we never guess
+// a path that is not a directory.
+func cursorCwd(projectDir string) string {
+	if cwd := cursorCwdFromWorkerLog(projectDir); cwd != "" {
+		return cwd
+	}
+	return cursorCwdFromSlug(filepath.Base(projectDir))
+}
+
 // cursorCwdFromWorkerLog reads workspacePath= from the project's worker.log.
-// Cursor JSONL has no cwd of its own; the sibling log is the durable source.
+// Cursor JSONL has no cwd of its own; the sibling log is the durable source
+// when Cursor wrote it (observed on a minority of sessions).
 func cursorCwdFromWorkerLog(projectDir string) string {
 	raw, err := os.ReadFile(filepath.Join(projectDir, "worker.log"))
 	if err != nil {
@@ -83,6 +96,21 @@ func cursorCwdFromWorkerLog(projectDir string) string {
 				return rest
 			}
 		}
+	}
+	return ""
+}
+
+func cursorCwdFromSlug(slug string) string {
+	if slug == "" {
+		return ""
+	}
+	// Cursor drops Claude's leading "-" (encoded "/"). Remaining "-"
+	// collapsed from both separators; github.com is the one we can
+	// invert because /github/com/ is not a plausible path.
+	candidate := "/" + strings.ReplaceAll(slug, "-", "/")
+	candidate = strings.ReplaceAll(candidate, "/github/com/", "/github.com/")
+	if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+		return candidate
 	}
 	return ""
 }
@@ -136,7 +164,7 @@ func parseCursorFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	sessionID := cursorSessionID(path)
-	cwd := cursorCwdFromWorkerLog(cursorProjectDir(path))
+	cwd := cursorCwd(cursorProjectDir(path))
 	pf := parsedFile{
 		path:      path,
 		sessionID: sessionID,
@@ -398,6 +426,7 @@ func isCursorInjectedContext(text string) bool {
 		"<system-reminder",
 		"<manually_attached_skills",
 		"<timestamp",
+		"<mcp_meta_tools",
 	} {
 		if strings.HasPrefix(t, p) {
 			return true

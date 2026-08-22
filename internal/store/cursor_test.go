@@ -244,3 +244,126 @@ func TestCursorIngestEndToEnd(t *testing.T) {
 		t.Errorf("phantom claude rows for Cursor session: %d", claudeN)
 	}
 }
+
+func TestCursorCwdFromSlugWhenWorkerLogHasNoWorkspace(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "work", "github.com", "acme", "webapp")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(strings.TrimPrefix(real, "/"))
+	home := t.TempDir()
+	proj := filepath.Join(home, "projects", slug)
+	dir := filepath.Join(proj, "agent-transcripts", cursorSessUUID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, cursorSessUUID+".jsonl")
+	if err := os.WriteFile(path, cursorFixtureLines(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// worker.log present but no workspacePath= — the live majority shape.
+	if err := os.WriteFile(filepath.Join(proj, "worker.log"), []byte("Skipping codebase telemetry sync\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pf, err := parseCursorFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.cwd != real {
+		t.Errorf("cwd = %q, want reconstructed %q", pf.cwd, real)
+	}
+}
+
+func TestCursorCwdSlugDoesNotInventHyphenatedRepo(t *testing.T) {
+	// squz-multimaze2 encodes the same as squz/multimaze2. Stat-if-exists
+	// must not return a path that is not a directory.
+	got := cursorCwdFromSlug("Users-nobody-work-github-com-squz-multimaze2")
+	if got != "" {
+		t.Errorf("lossy slug must not invent cwd, got %q", got)
+	}
+}
+
+// TestCursorLiveCorpus parses every agent-transcript JSONL under a real
+// Cursor projects tree. Skipped in CI; the live oracle is
+// MNEMO_CURSOR_CORPUS=$HOME/.cursor/projects.
+func TestCursorLiveCorpus(t *testing.T) {
+	root := os.Getenv("MNEMO_CURSOR_CORPUS")
+	if root == "" {
+		t.Skip("set MNEMO_CURSOR_CORPUS to a Cursor projects dir (e.g. ~/.cursor/projects)")
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("MNEMO_CURSOR_CORPUS=%q is not a directory: %v", root, err)
+	}
+
+	s := newTestStore(t, t.TempDir())
+	s.SetCursorRoots([]string{root})
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	var files []string
+	filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() && isCursorTranscript(path) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if len(files) == 0 {
+		t.Fatalf("no agent-transcripts JSONL under %s", root)
+	}
+
+	var nSess, nCursor, nCwd, nUser int
+	rows, err := s.readDB.Query(`
+		SELECT sm.session_id, sm.source, sm.cwd,
+		       (SELECT count(*) FROM messages m
+		         WHERE m.session_id = sm.session_id AND m.role = 'user' AND m.content_type = 'text')
+		FROM session_meta sm WHERE sm.source = 'cursor'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, source, cwd string
+		var users int
+		if err := rows.Scan(&id, &source, &cwd, &users); err != nil {
+			t.Fatal(err)
+		}
+		nSess++
+		if source == "cursor" {
+			nCursor++
+		}
+		if cwd != "" {
+			nCwd++
+		}
+		if users > 0 {
+			nUser++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("corpus %s: jsonl=%d sessions=%d cursor=%d with_cwd=%d with_user_text=%d",
+		root, len(files), nSess, nCursor, nCwd, nUser)
+	if nSess != len(files) {
+		t.Errorf("sessions = %d, jsonl files = %d", nSess, len(files))
+	}
+	if nCursor != nSess {
+		t.Errorf("source=cursor on %d of %d sessions", nCursor, nSess)
+	}
+	if nUser == 0 {
+		t.Error("no user text indexed; user_query unwrap likely failed on live files")
+	}
+	if nCwd == 0 {
+		t.Error("no session got a cwd; worker.log and slug fallback both empty")
+	}
+
+	var claudeN int
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM session_meta WHERE source = 'claude'`).Scan(&claudeN); err != nil {
+		t.Fatal(err)
+	}
+	if claudeN != 0 {
+		t.Errorf("phantom claude rows from Cursor corpus: %d", claudeN)
+	}
+}
