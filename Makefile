@@ -1,5 +1,11 @@
 .PHONY: bullseye build test test-scale snapshot vet fmt-check
 
+# Parent ~/work/github.com/marcelocantos/go.work only lists claudia and
+# jevons. Go walks up to it, then `./...` in this module fails with
+# "directory prefix . does not contain modules listed in go.work".
+# Standing invariants must be hermetic to that workspace.
+export GOWORK := off
+
 BUILD_TAGS := sqlite_fts5
 # 🎯T73 Tier 3 also requires the `scale` tag so the snapshot-gated
 # tests (`//go:build scale`) compile and run.

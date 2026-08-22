@@ -260,8 +260,8 @@ func (h *callHandler) opsAgentTrees(args map[string]any) (string, bool, error) {
 // Package-level wiring for ops budget (set from tools.Handler.SetBudgetWiring
 // via setOpsBudgetWiring). Avoids expanding callHandler for every tool call.
 var (
-	opsBudgetCfg       store.BudgetConfig
-	opsThrottleReport  func() (level, detail, remediation string)
+	opsBudgetCfg      store.BudgetConfig
+	opsThrottleReport func() (level, detail, remediation string)
 )
 
 func setOpsBudgetWiring(cfg store.BudgetConfig, thr func() (string, string, string)) {

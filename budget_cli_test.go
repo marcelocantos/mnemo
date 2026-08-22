@@ -25,7 +25,7 @@ func TestPrintBudgetHuman(t *testing.T) {
 		},
 		Throttle: api.ThrottleSnapshot{
 			Level: "reduced", Throttling: true,
-			Detail: "background agents throttled to reduced",
+			Detail:      "background agents throttled to reduced",
 			Remediation: "lifts when projection falls",
 		},
 		Trees: []store.AgentTree{{TreeCostUSD: 3.5, Agents: 2, Skill: "cv", Repo: "mnemo"}},

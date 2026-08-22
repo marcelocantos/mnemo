@@ -214,12 +214,12 @@ func (s *Store) StreamHealthReports(streams []StreamReconciler, now time.Time) [
 		pt := StreamPassTimeout(sr)
 		rec := s.reconTracker.records[sr.Name()]
 		st := StreamPassStatus{
-			Name:        sr.Name(),
-			Interval:    iv.String(),
-			PassTimeout: pt.String(),
-			LastStarted: rec.lastStarted,
+			Name:          sr.Name(),
+			Interval:      iv.String(),
+			PassTimeout:   pt.String(),
+			LastStarted:   rec.lastStarted,
 			LastCompleted: rec.lastCompleted,
-			LastError:   rec.lastErr,
+			LastError:     rec.lastErr,
 		}
 		// Overdue: no completed pass within multiple × interval after the
 		// daemon has been up long enough for that budget.
