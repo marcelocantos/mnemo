@@ -132,3 +132,4 @@ and of Grok `updates.jsonl`.
 - Grok resume-session reader (`session_reader.py` cursor path)
 - Implementation: `internal/store/cursor.go`
 - Mirrors: `internal/store/grok.go` (🎯T110), `internal/store/codex.go` (🎯T99)
+- Live oracle: `MNEMO_CURSOR_CORPUS=$HOME/.cursor/projects go test -tags sqlite_fts5 -run TestCursorLiveCorpus ./internal/store/`

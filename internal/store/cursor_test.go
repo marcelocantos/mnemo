@@ -359,6 +359,75 @@ func TestCursorLiveCorpus(t *testing.T) {
 		t.Error("no session got a cwd; worker.log and slug fallback both empty")
 	}
 
+	wantIDs := map[string]bool{}
+	for _, p := range files {
+		wantIDs[cursorSessionID(p)] = true
+	}
+	var missing []string
+	for id := range wantIDs {
+		var n int
+		_ = s.readDB.QueryRow(`SELECT count(*) FROM session_meta WHERE session_id = ? AND source = 'cursor'`, id).Scan(&n)
+		if n != 1 {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("session ids not indexed 1:1: %v", missing)
+	}
+
+	var nTool, nPath, nEnded, nRedacted int
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE content_type = 'tool_use' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nTool); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE tool_file_path != '' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE text LIKE '%turn_ended%' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nEnded); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE text = '[REDACTED]' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nRedacted); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("live messages tool_use=%d tool_file_path=%d turn_ended=%d redacted=%d", nTool, nPath, nEnded, nRedacted)
+	if nTool == 0 {
+		t.Error("live corpus has hundreds of tool_use; none indexed")
+	}
+	if nPath == 0 {
+		t.Error("Read/Grep/Write path aliases did not populate tool_file_path")
+	}
+	if nEnded != 0 {
+		t.Errorf("turn_ended trailers indexed as messages: %d", nEnded)
+	}
+	if nRedacted != 0 {
+		t.Errorf("[REDACTED] placeholders indexed: %d", nRedacted)
+	}
+
+	var sample string
+	if err := s.readDB.QueryRow(`
+		SELECT text FROM messages
+		WHERE role = 'user' AND content_type = 'text' AND length(text) >= 24
+		  AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')
+		ORDER BY length(text) DESC
+		LIMIT 1`).Scan(&sample); err != nil {
+		t.Fatalf("no user text to search: %v", err)
+	}
+	q := ""
+	for _, w := range strings.Fields(sample) {
+		w = strings.Trim(w, ".,;:!?\"'")
+		if len(w) >= 6 && !strings.ContainsAny(w, "<>/\\") {
+			q = w
+			break
+		}
+	}
+	if q == "" {
+		t.Logf("no FTS-safe token in %q", sample)
+	} else {
+		hits, err := s.Search(q, 5, "all", "", 0, 0, false)
+		if err != nil || len(hits) == 0 {
+			t.Errorf("search %q from live user text: %v hits=%d", q, err, len(hits))
+		}
+	}
+
 	var claudeN int
 	if err := s.readDB.QueryRow(`SELECT count(*) FROM session_meta WHERE source = 'claude'`).Scan(&claudeN); err != nil {
 		t.Fatal(err)
