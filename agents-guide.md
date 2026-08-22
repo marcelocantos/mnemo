@@ -28,7 +28,7 @@ brew install marcelocantos/tap/mnemo
 Or build from source (requires Go and CGo for SQLite):
 
 ```bash
-go build -tags "sqlite_fts5" -o bin/mnemo .
+GOWORK=off go build -tags "sqlite_fts5" -o bin/mnemo .
 ```
 
 ### 2. Start the server as a background service

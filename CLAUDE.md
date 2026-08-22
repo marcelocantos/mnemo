@@ -25,7 +25,7 @@ transformed into the same content model, tagged
 ## Build & Run
 
 ```bash
-go build -tags "sqlite_fts5" -o bin/mnemo .
+GOWORK=off go build -tags "sqlite_fts5" -o bin/mnemo .
 bin/mnemo                # HTTP MCP daemon (default :19419)
 bin/mnemo --addr :8080   # custom listen address
 ```
@@ -111,7 +111,7 @@ mnemo/
 ## Testing
 
 ```bash
-go test -tags "sqlite_fts5" ./...
+GOWORK=off go test -tags "sqlite_fts5" ./...
 ```
 
 ## Schema policy

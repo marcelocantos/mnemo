@@ -16,7 +16,7 @@ aspires: 3
 floors:            # per-dimension held-tier ratchet; below floor => DRIFT
   correctness: 2   # CI go test (ubuntu+windows) + e2e nightly + local scale/win-validate
   security: 2      # go.sum pin + Apple Developer ID codesign step; no scanners
-  quality: 1       # make vet exists; gofmt not CI-gated and currently dirty
+  quality: 1       # make vet exists; gofmt locally clean via make bullseye, not CI-gated
   deps: 2          # go.sum committed; no Dependabot
   release: 2       # CI-built multi-arch + Homebrew + Windows installer; no CHANGELOG
   governance: 2    # Apache-2.0 + NOTICE + squash-only; no SECURITY.md / branch protection
@@ -236,7 +236,7 @@ items:
     tier: 2
     reason: >-
       Makefile has fmt-check and make bullseye runs gofmt -l, but CI has no
-      Format step. Entropy audit 2026-08-22 found 7 files failing gofmt -l.
+      Format step. Sources are gofmt-clean locally; the gap is CI enforcement.
     evidence: {absent: {ci_step: {workflow: ci.yml, name: Format}}}
 
   - id: quality.golangci
