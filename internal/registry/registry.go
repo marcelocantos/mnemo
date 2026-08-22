@@ -85,9 +85,9 @@ type Registry struct {
 	// store.New (schema + pre-migration backup) can take minutes on a
 	// large DB; we must not hold mu across that window or /health and
 	// other registry methods block for the whole backup.
-	creating          map[string]chan struct{}
-	cfg               store.Config
-	summariserWorkDir string
+	creating           map[string]chan struct{}
+	cfg                store.Config
+	summariserWorkDir  string
 	compactorModel     string
 	summariserProvider string // "grok" | "claude" from Config.Summariser
 	// upgradeDetector and lease are optional 🎯T97 wiring; set from main

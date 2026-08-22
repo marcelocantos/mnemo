@@ -22,9 +22,9 @@ type breakerStream struct {
 	b     *breaker.Breaker
 }
 
-func (w breakerStream) Name() string                 { return w.inner.Name() }
-func (w breakerStream) Interval() time.Duration      { return w.inner.Interval() }
-func (w breakerStream) PassTimeout() time.Duration   { return store.StreamPassTimeout(w.inner) }
+func (w breakerStream) Name() string               { return w.inner.Name() }
+func (w breakerStream) Interval() time.Duration    { return w.inner.Interval() }
+func (w breakerStream) PassTimeout() time.Duration { return store.StreamPassTimeout(w.inner) }
 func (w breakerStream) Reconcile(ctx context.Context, now time.Time) (int, error) {
 	n, err := w.inner.Reconcile(ctx, now)
 	if w.b != nil {

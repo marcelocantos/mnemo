@@ -59,7 +59,7 @@ type ClaudiaCaller struct {
 
 // ClaudiaCallerOpts configures a summariser Task caller.
 type ClaudiaCallerOpts struct {
-	WorkDir  string
+	WorkDir string
 	// Model is the provider model id; empty uses the provider default.
 	Model string
 	// Provider is "grok", "claude", or empty (→ Grok default).
