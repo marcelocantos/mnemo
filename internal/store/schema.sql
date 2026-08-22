@@ -548,7 +548,9 @@ CREATE TABLE session_meta (
 			-- 🎯T99 multi-agent provenance: which coding agent produced
 			-- this session's transcript. 'claude' for ~/.claude/projects
 			-- rollouts (the default, so existing rows read correctly),
-			-- 'codex' for ~/.codex/sessions rollouts. Additive, defaulted.
+			-- 'codex' for ~/.codex/sessions, 'grok' for ~/.grok/sessions,
+			-- 'cursor' for ~/.cursor/projects agent-transcripts (🎯T149).
+			-- Additive, defaulted.
 			source TEXT NOT NULL DEFAULT 'claude'
 		);
 

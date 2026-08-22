@@ -14,9 +14,9 @@ import (
 //
 // The producing agent is knowable from the file's location — the roots are
 // disjoint (~/.claude/projects, ~/.codex/{sessions,archived_sessions},
-// ~/.grok/sessions) — and mnemo already records that location in
-// ingest_state. So a session's source never has to be guessed; it can be
-// recomputed from evidence at any time.
+// ~/.grok/sessions, ~/.cursor/projects) — and mnemo already records that
+// location in ingest_state. So a session's source never has to be guessed;
+// it can be recomputed from evidence at any time.
 //
 // It needs recomputing because two historical facts combine badly:
 //
@@ -44,6 +44,8 @@ func sourceFromPath(path string) (source, sessionID string, ok bool) {
 		return "codex", codexSessionID(path), true
 	case strings.Contains(slashed, "/.grok/"), isGrokUpdates(path):
 		return "grok", grokSessionID(path), true
+	case strings.Contains(slashed, "/.cursor/"), isCursorTranscript(path):
+		return "cursor", cursorSessionID(path), true
 	case strings.Contains(slashed, "/.claude/projects/"):
 		return "claude", strings.TrimSuffix(filepath.Base(path), ".jsonl"), true
 	}
@@ -68,7 +70,8 @@ func sessionIDFromPath(path string) (string, bool) {
 	// transcripts outside ~/.claude/projects, e.g. a Windows VM's
 	// directory over SMB, and silently skipping those would stop drift
 	// tagging for them. Codex and Grok are recognised by filename shape
-	// as well as by root, so they never reach here.
+	// as well as by root, so they never reach here. Cursor is recognised
+	// by agent-transcripts/<id>/<id>.jsonl the same way.
 	base := filepath.Base(path)
 	stem := strings.TrimSuffix(base, ".jsonl")
 	if stem == "" || stem == base {

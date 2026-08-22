@@ -147,6 +147,13 @@ type Store struct {
 	// is checked lazily in grokDirs.
 	grokRoots []string
 
+	// cursorRoots are the candidate Cursor project roots (~/.cursor/projects)
+	// ingested alongside Claude/Codex/Grok (🎯T149). Only
+	// agent-transcripts/<id>/<id>.jsonl under these roots is indexed.
+	// Mutated only via SetCursorRoots; existence is checked lazily in
+	// cursorDirs.
+	cursorRoots []string
+
 	// todoGlobs are extra repo-relative globs that IngestTodos matches
 	// when discovering TODO files, beyond the default TODO.md / todos.md
 	// names (🎯T78). Mutated only via SetTodoGlobs, read under
@@ -318,6 +325,35 @@ func (s *Store) SetGrokRoots(roots []string) {
 func (s *Store) grokDirs() []string {
 	s.rootsMu.RLock()
 	roots := append([]string(nil), s.grokRoots...)
+	s.rootsMu.RUnlock()
+	var out []string
+	for _, d := range roots {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// SetCursorRoots configures the Cursor project roots ingested alongside
+// the Claude/Codex/Grok dirs (🎯T149). Pass the candidate directories
+// (CursorRootsFor); existence is checked lazily by cursorDirs so roots
+// created after startup are still picked up. Call once after Store.New.
+func (s *Store) SetCursorRoots(roots []string) {
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	if len(roots) == 0 {
+		s.cursorRoots = nil
+		return
+	}
+	s.cursorRoots = append(s.cursorRoots[:0:0], roots...)
+}
+
+// cursorDirs returns the configured Cursor project roots that currently
+// exist on disk. Empty when not configured or ~/.cursor isn't present.
+func (s *Store) cursorDirs() []string {
+	s.rootsMu.RLock()
+	roots := append([]string(nil), s.cursorRoots...)
 	s.rootsMu.RUnlock()
 	var out []string
 	for _, d := range roots {
@@ -3192,7 +3228,7 @@ type parsedFile struct {
 	branch    string
 	topic     string
 	newOffset int64
-	// source is the producing agent ('claude', 'codex', or 'grok').
+	// source is the producing agent ('claude', 'codex', 'grok', or 'cursor').
 	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
 	// parentSessionID + chainMechanism, when set, cause writeParsedFile
@@ -3282,6 +3318,35 @@ func (s *Store) IngestAll() error {
 			return nil
 		})
 	}
+	// Cursor project roots (🎯T149): only agent-transcripts/<id>/<id>.jsonl.
+	for _, dir := range s.cursorDirs() {
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				slog.Warn("cursor dir unavailable, skipping", "dir", dir)
+			} else {
+				slog.Warn("cursor dir stat failed, skipping", "dir", dir, "err", err)
+			}
+			continue
+		}
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !isCursorTranscript(path) {
+				return nil
+			}
+			s.mu.Lock()
+			offset := s.offsets[path]
+			s.mu.Unlock()
+			if offset >= info.Size() {
+				return nil
+			}
+			files = append(files, fileEntry{
+				path:   path,
+				mtime:  info.ModTime(),
+				size:   info.Size(),
+				offset: offset,
+			})
+			return nil
+		})
+	}
 
 	if len(files) == 0 {
 		return nil
@@ -3311,6 +3376,8 @@ func (s *Store) IngestAll() error {
 					parse = parseCodexFile
 				case isGrokUpdates(fe.path):
 					parse = parseGrokFile
+				case isCursorTranscript(fe.path):
+					parse = parseCursorFile
 				}
 				if pf, err := parse(fe.path, fe.offset); err == nil {
 					parsedCh <- pf
@@ -3775,6 +3842,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	}
 	roots = append(roots, s.codexDirs()...)
 	roots = append(roots, s.grokDirs()...)
+	roots = append(roots, s.cursorDirs()...)
 	if sdir, err := skillsDir(); err == nil {
 		roots = append(roots, sdir)
 	}
@@ -3852,6 +3920,12 @@ func (s *Store) Watch(ctx context.Context) error {
 				if isGrokUpdates(name) {
 					if err := s.ingestGrokFile(name); err != nil {
 						slog.Error("ingest grok failed", "file", name, "err", err)
+					}
+					return
+				}
+				if isCursorTranscript(name) {
+					if err := s.ingestCursorFile(name); err != nil {
+						slog.Error("ingest cursor failed", "file", name, "err", err)
 					}
 					return
 				}
@@ -4026,6 +4100,12 @@ func (s *Store) ingestJSONLPath(path string) {
 	if isGrokUpdates(path) {
 		if err := s.ingestGrokFile(path); err != nil {
 			slog.Error("ingest grok failed", "file", path, "err", err)
+		}
+		return
+	}
+	if isCursorTranscript(path) {
+		if err := s.ingestCursorFile(path); err != nil {
+			slog.Error("ingest cursor failed", "file", path, "err", err)
 		}
 		return
 	}
@@ -6397,6 +6477,9 @@ func (s *Store) ingestFile(path string) error {
 	}
 	if isGrokUpdates(path) {
 		return s.ingestGrokFile(path)
+	}
+	if isCursorTranscript(path) {
+		return s.ingestCursorFile(path)
 	}
 
 	s.mu.Lock()

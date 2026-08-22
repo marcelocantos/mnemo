@@ -1,0 +1,246 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const cursorSessUUID = "32cc2bac-0bc4-4f7b-8de7-164d6b9f46c6"
+
+func TestIsCursorTranscript(t *testing.T) {
+	ok := "/Users/a/.cursor/projects/Users-a-work/agent-transcripts/" + cursorSessUUID + "/" + cursorSessUUID + ".jsonl"
+	if !isCursorTranscript(ok) {
+		t.Error("expected agent-transcripts/<id>/<id>.jsonl to match")
+	}
+	if isCursorTranscript("/Users/a/.cursor/projects/Users-a-work/worker.log") {
+		t.Error("worker.log must not match")
+	}
+	if isCursorTranscript("/Users/a/.claude/projects/-Users-a-work/" + cursorSessUUID + ".jsonl") {
+		t.Error("Claude JSONL must not match")
+	}
+	if isCursorTranscript("/x/agent-transcripts/other/" + cursorSessUUID + ".jsonl") {
+		t.Error("mismatched parent dir must not match")
+	}
+}
+
+func cursorFixtureLines(t *testing.T) []byte {
+	t.Helper()
+	records := []map[string]any{
+		{
+			"role": "user",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "text",
+					"text": "<timestamp>Friday, Jul 10, 2026, 8:25 PM (UTC+10)</timestamp>\n<user_query>\nHow do I fix the authentication bug?\n</user_query>",
+				}},
+			},
+		},
+		{
+			"role": "user",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "text",
+					"text": "<environment_context>\nWorkspace: /tmp/ignore\n</environment_context>",
+				}},
+			},
+		},
+		{
+			"role": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{
+					{"type": "text", "text": "Inspecting the login handler."},
+					{"type": "tool_use", "name": "Read", "id": "call-1", "input": map[string]any{"path": "/tmp/auth.go"}},
+				},
+			},
+		},
+		{
+			"role": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{
+					{"type": "tool_result", "tool_use_id": "call-1", "content": "package auth"},
+					{"type": "text", "text": "Fixed the authentication bug in the login handler."},
+				},
+			},
+		},
+		{
+			"type":   "turn_ended",
+			"status": "aborted",
+			"error":  "User aborted/interrupted manually.",
+		},
+		{"not": "json-shaped-enough-wait-this-is-json-but-no-role"},
+	}
+	var b strings.Builder
+	for _, rec := range records {
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	b.WriteString("{not json\n")
+	return []byte(b.String())
+}
+
+func writeCursorSession(t *testing.T, cursorHome, cwd string) string {
+	t.Helper()
+	slug := "Users-dev-work-github-com-acme-webapp"
+	proj := filepath.Join(cursorHome, "projects", slug)
+	dir := filepath.Join(proj, "agent-transcripts", cursorSessUUID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, cursorSessUUID+".jsonl")
+	if err := os.WriteFile(path, cursorFixtureLines(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := "Starting typescript-language-server\n" +
+		"[info] Getting tree structure for workspacePath=" + cwd + "\n"
+	if err := os.WriteFile(filepath.Join(proj, "worker.log"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestParseCursorFile(t *testing.T) {
+	home := t.TempDir()
+	cwd := "/Users/dev/work/github.com/acme/webapp"
+	path := writeCursorSession(t, home, cwd)
+
+	pf, err := parseCursorFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.sessionID != cursorSessUUID {
+		t.Errorf("sessionID = %q", pf.sessionID)
+	}
+	if pf.source != "cursor" {
+		t.Errorf("source = %q", pf.source)
+	}
+	if pf.cwd != cwd {
+		t.Errorf("cwd = %q, want %q", pf.cwd, cwd)
+	}
+	if pf.project != "acme/webapp" {
+		t.Errorf("project = %q, want acme/webapp", pf.project)
+	}
+
+	var sawUser, sawAssist, sawTool, sawResult, sawEnv, sawEnded bool
+	for _, m := range pf.messages {
+		switch {
+		case m.contentType == "text" && strings.Contains(m.text, "authentication bug") && m.role == "user":
+			sawUser = true
+			if strings.Contains(m.text, "<user_query>") || strings.Contains(m.text, "<timestamp>") {
+				t.Errorf("user text still wrapped: %q", m.text)
+			}
+		case m.contentType == "text" && strings.Contains(m.text, "environment_context"):
+			sawEnv = true
+		case m.contentType == "text" && strings.Contains(m.text, "Inspecting"):
+			sawAssist = true
+		case m.contentType == "tool_use" && m.toolName == "Read":
+			sawTool = true
+			var in map[string]any
+			if json.Unmarshal(m.toolInput, &in) != nil || in["file_path"] != "/tmp/auth.go" {
+				t.Errorf("tool input not normalised: %s", m.toolInput)
+			}
+		case m.contentType == "tool_result" && strings.Contains(m.text, "package auth"):
+			sawResult = true
+		case strings.Contains(m.text, "turn_ended") || strings.Contains(m.text, "aborted"):
+			sawEnded = true
+		}
+	}
+	if !sawUser || !sawAssist || !sawTool || !sawResult {
+		t.Errorf("missing core messages user=%v assist=%v tool=%v result=%v", sawUser, sawAssist, sawTool, sawResult)
+	}
+	if sawEnv {
+		t.Error("environment_context wrapper was indexed")
+	}
+	if sawEnded {
+		t.Error("turn_ended trailer was indexed")
+	}
+	if pf.topic == "" || !strings.Contains(pf.topic, "authentication") {
+		t.Errorf("topic = %q, want the user query", pf.topic)
+	}
+}
+
+func TestCursorIngestEndToEnd(t *testing.T) {
+	home := t.TempDir()
+	cwd := "/Users/dev/work/github.com/acme/webapp"
+	path := writeCursorSession(t, home, cwd)
+
+	s := newTestStore(t, t.TempDir())
+	s.SetCursorRoots([]string{filepath.Join(home, "projects")})
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := s.Search("authentication", 10, "all", "", 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 || results[0].SessionID != cursorSessUUID {
+		t.Fatalf("search did not surface the Cursor session: %+v", results)
+	}
+
+	var source, repo, cwdGot string
+	if err := s.readDB.QueryRow(
+		`SELECT source, repo, cwd FROM session_meta WHERE session_id = ?`, cursorSessUUID,
+	).Scan(&source, &repo, &cwdGot); err != nil {
+		t.Fatalf("session_meta: %v", err)
+	}
+	if source != "cursor" {
+		t.Errorf("source = %q, want cursor", source)
+	}
+	if repo != "acme/webapp" {
+		t.Errorf("repo = %q, want acme/webapp", repo)
+	}
+	if cwdGot != cwd {
+		t.Errorf("cwd = %q, want %q", cwdGot, cwd)
+	}
+
+	var nPath int
+	if err := s.readDB.QueryRow(
+		`SELECT count(*) FROM messages WHERE session_id = ? AND tool_file_path = '/tmp/auth.go'`,
+		cursorSessUUID,
+	).Scan(&nPath); err != nil || nPath < 1 {
+		t.Errorf("tool_file_path count = %d err=%v", nPath, err)
+	}
+
+	entryCount := func() int {
+		var n int
+		_ = s.readDB.QueryRow(`SELECT count(*) FROM entries WHERE session_id = ?`, cursorSessUUID).Scan(&n)
+		return n
+	}
+	before := entryCount()
+	s.mu.Lock()
+	for p := range s.offsets {
+		s.offsets[p] = 0
+	}
+	s.mu.Unlock()
+	if err := s.ingestCursorFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := entryCount(); got != before {
+		t.Errorf("entries after re-ingest = %d, want %d", got, before)
+	}
+
+	// ingestFile must route, not mint a phantom claude session.
+	if err := s.ingestFile(path); err != nil {
+		t.Fatal(err)
+	}
+	var claudeN int
+	if err := s.readDB.QueryRow(
+		`SELECT count(*) FROM session_meta WHERE session_id = ? AND source = 'claude'`,
+		cursorSessUUID,
+	).Scan(&claudeN); err != nil {
+		t.Fatal(err)
+	}
+	if claudeN != 0 {
+		t.Errorf("phantom claude rows for Cursor session: %d", claudeN)
+	}
+}

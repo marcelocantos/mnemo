@@ -10,6 +10,9 @@ ingests:
 - **Grok CLI** — `~/.grok/sessions/**/updates.jsonl` plus sibling
   `summary.json` (`source=grok`; honour `GROK_HOME`; see
   `docs/design/grok-ingest.md`)
+- **Cursor Agent** — `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl`
+  (`source=cursor`; honour `CURSOR_HOME`; see
+  `docs/design/cursor-ingest.md`). Resume: `agent --resume <id>`.
 
 Filter or inspect provenance via `session_meta.source` (`mnemo_query`).
 

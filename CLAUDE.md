@@ -22,6 +22,12 @@ Also ingests xAI **Grok CLI** sessions from `~/.grok/sessions/`
 transformed into the same content model, tagged
 `session_meta.source = 'grok'`. See `docs/design/grok-ingest.md`.
 
+Also ingests **Cursor Agent** transcripts from
+`~/.cursor/projects/**/agent-transcripts/` (honours `CURSOR_HOME`) —
+JSONL role/message streams transformed into the same content model,
+tagged `session_meta.source = 'cursor'`. Resume is `agent --resume <id>`.
+See `docs/design/cursor-ingest.md`.
+
 ## Build & Run
 
 ```bash

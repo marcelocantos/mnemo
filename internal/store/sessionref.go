@@ -21,7 +21,7 @@ type SessionRef struct {
 	SessionID string `json:"session_id"`
 	Repo      string `json:"repo,omitempty"`
 	CWD       string `json:"cwd,omitempty"`
-	// Source is the agent that produced the session: claude, codex, grok.
+	// Source is the agent that produced the session: claude, codex, grok, cursor.
 	// Resume invocations differ per source, so callers must branch on it.
 	Source  string `json:"source,omitempty"`
 	LastMsg string `json:"last_msg,omitempty"`
@@ -196,7 +196,7 @@ func (s *Store) newestSession(scope string) (SessionRef, error) {
 // ResumeCommand returns the shell command that reopens this session in its
 // own agent, or an error naming the source when there is no known way.
 //
-// mnemo indexes three agents and they do not share a CLI, so this must not
+// mnemo indexes several agents and they do not share a CLI, so this must not
 // guess: opening a bare shell for a Codex session would look like success
 // while silently doing something else.
 func (r SessionRef) ResumeCommand() (string, error) {
@@ -216,6 +216,13 @@ func (r SessionRef) ResumeCommand() (string, error) {
 		// running this in the session's own cwd (which the caller already
 		// does) is what makes it find the right conversation.
 		return "grok --resume " + r.SessionID, nil
+	case "cursor":
+		// `agent --resume [chatId]` (🎯T149). Verified against
+		// `agent --help` on this machine: "--resume [chatId]  Select a
+		// session to resume". Cursor Agent CLI is the `agent` binary,
+		// not the `cursor` editor shim. mnemo's Cursor session ids are
+		// the transcript-directory UUIDs, which are the chatIds.
+		return "agent --resume " + r.SessionID, nil
 	default:
 		return "", fmt.Errorf(
 			"no known resume command for %s sessions — mnemo can reopen Claude Code sessions today; "+

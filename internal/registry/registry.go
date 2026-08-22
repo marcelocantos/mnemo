@@ -403,8 +403,9 @@ func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry,
 	}
 	s.SetWorkspaceRoots(cfg.ResolvedWorkspaceRoots())
 	s.SetExtraProjectDirs(cfg.ExtraProjectDirs)
-	s.SetCodexRoots(store.CodexRootsFor(home)) // 🎯T99: index ~/.codex rollouts
-	s.SetGrokRoots(store.GrokRootsFor(home))   // 🎯T110: index ~/.grok sessions
+	s.SetCodexRoots(store.CodexRootsFor(home))   // 🎯T99: index ~/.codex rollouts
+	s.SetGrokRoots(store.GrokRootsFor(home))     // 🎯T110: index ~/.grok sessions
+	s.SetCursorRoots(store.CursorRootsFor(home)) // 🎯T149: index ~/.cursor agent-transcripts
 	s.SetTodoGlobs(cfg.TodoGlobs)
 
 	synthRoots := cfg.ResolvedSynthesisRoots()
