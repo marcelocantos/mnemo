@@ -75,29 +75,100 @@ func TestOpenLocalListenersExplicitIPv4(t *testing.T) {
 }
 
 func TestOpenLocalListenersImplicitDefaultExpandsLoopback(t *testing.T) {
-	probe, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("IPv4 loopback unavailable: %v", err)
+	families := []struct {
+		network string
+		host    string
+	}{
+		{network: "tcp4", host: "127.0.0.1"},
+		{network: "tcp6", host: "::1"},
 	}
-	port := strconv.Itoa(probe.Addr().(*net.TCPAddr).Port)
-	_ = probe.Close()
+	expected := families[:0]
+	for _, family := range families {
+		ln, err := net.Listen(family.network, net.JoinHostPort(family.host, "0"))
+		if err != nil {
+			if !missingAddressFamily(err) {
+				t.Skipf("%s loopback unavailable with non-address-family error: %v", family.network, err)
+			}
+			continue
+		}
+		_ = ln.Close()
+		expected = append(expected, family)
+	}
+	if len(expected) == 0 {
+		t.Skip("loopback unavailable")
+	}
+
+	port := reserveLoopbackPort(t, expected)
 
 	set, err := openLocalListeners("localhost:"+port, true)
 	if err != nil {
 		t.Fatalf("openLocalListeners implicit default: %v", err)
 	}
 	defer set.close()
-	if len(set.listeners) == 0 {
-		t.Fatal("no listeners opened")
+	if got, want := len(set.listeners), len(expected); got != want {
+		t.Fatalf("listener count = %d, want %d", got, want)
+	}
+	wantHosts := make(map[string]string, len(expected))
+	for _, family := range expected {
+		wantHosts[family.network] = family.host
 	}
 	for _, l := range set.listeners {
-		if l.network != "tcp4" && l.network != "tcp6" {
-			t.Fatalf("listener network = %q, want tcp4 or tcp6", l.network)
+		wantHost, ok := wantHosts[l.network]
+		if !ok {
+			t.Fatalf("unexpected listener network %q", l.network)
+		}
+		host, gotPort, err := net.SplitHostPort(l.addr)
+		if err != nil {
+			t.Fatalf("listener address %q is not host:port: %v", l.addr, err)
+		}
+		if host != wantHost {
+			t.Fatalf("%s listener host = %q, want %q", l.network, host, wantHost)
+		}
+		if gotPort != port {
+			t.Fatalf("%s listener port = %q, want %q", l.network, gotPort, port)
 		}
 		if strings.Contains(l.addr, "localhost") {
 			t.Fatalf("listener passed localhost through to net.Listen: %q", l.addr)
 		}
+		delete(wantHosts, l.network)
 	}
+	if len(wantHosts) != 0 {
+		t.Fatalf("missing listener networks: %v", wantHosts)
+	}
+}
+
+func reserveLoopbackPort(t *testing.T, families []struct {
+	network string
+	host    string
+}) string {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		held := make([]net.Listener, 0, len(families))
+		first := families[0]
+		ln, err := net.Listen(first.network, net.JoinHostPort(first.host, "0"))
+		if err != nil {
+			t.Fatalf("reserve %s loopback port: %v", first.network, err)
+		}
+		held = append(held, ln)
+		port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+		ok := true
+		for _, family := range families[1:] {
+			ln, err := net.Listen(family.network, net.JoinHostPort(family.host, port))
+			if err != nil {
+				ok = false
+				break
+			}
+			held = append(held, ln)
+		}
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+		if ok {
+			return port
+		}
+	}
+	t.Fatalf("could not reserve a shared loopback port for %d listener families", len(families))
+	return ""
 }
 
 func TestOpenLocalListenersImplicitDefaultFailsOnBusyFamily(t *testing.T) {

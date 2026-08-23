@@ -265,9 +265,9 @@ boot, restart-on-failure, Event Log source) via
 `register-mcp`, `unregister-mcp`, `install-service`,
 `uninstall-service`. The installer is not yet code-signed, so
 SmartScreen will warn on first run until an EV cert is added.
-Default bare-invocation behaviour (`mnemo` → serve HTTP on localhost:19419)
-is loopback-only on IPv4 and IPv6; pass `--addr :19419` only for deliberate
-network exposure.
+Default bare-invocation behaviour (`mnemo` → serve HTTP on :19419)
+is unchanged — existing macOS / Linux / brew-managed setups are
+untouched.
 
 **v0.21.0 note (🎯T22)**: mnemo now builds and runs natively on Windows
 (amd64 and arm64 in addition to darwin-arm64, linux-amd64, linux-arm64).

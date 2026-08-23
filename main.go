@@ -81,7 +81,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.87.0"
+	version              = "0.86.0"
 	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 
@@ -870,12 +870,6 @@ func openDefaultLoopbackListeners(port string) (*localListenerSet, error) {
 	}
 	set.displayAddr = strings.Join(addrs, ", ")
 	return set, nil
-}
-
-func missingAddressFamily(err error) bool {
-	return errors.Is(err, syscall.EAFNOSUPPORT) ||
-		errors.Is(err, syscall.EADDRNOTAVAIL) ||
-		errors.Is(err, syscall.EPROTONOSUPPORT)
 }
 
 func (s *localListenerSet) serve(handler http.Handler) ([]*http.Server, <-chan error) {
