@@ -12,6 +12,16 @@ new product. The pre-1.0 period exists to get these surfaces right.
 Snapshot as of v0.33.0, amended for the 🎯T143 tool-surface reduction
 (see the v0.84.0 and v0.85.0 notes below).
 
+**v0.88.0 note**: Default local MCP/API bind is dual-stack loopback
+(`tcp4 127.0.0.1:19419` and `tcp6 [::1]:19419`) instead of all
+interfaces. The implicit default uses the `localhost:19419` sentinel
+and expands before listen; a missing address family on one side is
+non-fatal. Explicit `--addr :19419` remains the deliberate LAN-exposure
+bind. Self-check and diagnose URLs target an address that actually
+bound. Matches the documented localhost-only trust model for the
+auth-less local surface. mTLS federation (`--federated-addr`) is
+unchanged.
+
 **v0.84.0 / v0.85.0 note — MCP tool surface reduced from 70 tools to 18
 (🎯T143, 🎯T144).** This is the largest breaking change to the tool
 surface before 1.0, and it is deliberately made now: this document's own
