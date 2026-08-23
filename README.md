@@ -175,8 +175,9 @@ Logs on macOS: `$(brew --prefix)/var/log/mnemo.log`.
 **Manually**:
 
 ```bash
-mnemo               # listen on :19419 (default)
-mnemo --addr :8080  # custom port
+mnemo                         # listen on localhost:19419 (IPv4 + IPv6 loopback)
+mnemo --addr 127.0.0.1:8080   # custom local port
+mnemo --addr :19419           # deliberate network exposure
 ```
 
 ## Reopening a past conversation

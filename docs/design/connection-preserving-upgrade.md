@@ -7,10 +7,11 @@ The blocker is not byte-swapping the binary but that Claude Code caches
 
 ## Architecture
 
-A **thin transparent edge** owns the public listener (`:19419` by default)
-and all client TCP connections. One or more **backends** run the full
-mnemo daemon on loopback HTTP or a Unix domain socket. The edge forwards
-standard MCP-over-HTTP — no custom framing, no protocol extensions.
+A **thin transparent edge** owns the client listener (`localhost:19419` by
+default; use `--listen :19419` only for deliberate LAN exposure) and all client
+TCP connections. One or more **backends** run the full mnemo daemon on loopback
+HTTP or a Unix domain socket. The edge forwards standard MCP-over-HTTP — no
+custom framing, no protocol extensions.
 
 ```
   Claude Code ──TCP──► edge (:19419)
@@ -127,8 +128,8 @@ bin/mnemo --addr unix:/tmp/mnemo-backend.sock
 bin/mnemo edge --backend unix:///tmp/mnemo-backend.sock
 ```
 
-Clients keep registering `http://localhost:19419/mcp` — only the edge
-listens there.
+Clients keep registering `http://localhost:19419/mcp`. By default, only local
+clients can reach that listener.
 
 ## Invariants (carried from 🎯T27)
 

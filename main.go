@@ -7,7 +7,7 @@
 //
 // mnemo runs as a single HTTP MCP daemon:
 //
-//	mnemo                       # run the HTTP MCP daemon (default :19419)
+//	mnemo                       # run the HTTP MCP daemon (default localhost:19419)
 //	mnemo --addr :8080          # custom listen address
 //	mnemo register-mcp          # add mnemo to ~/.claude.json
 //	mnemo unregister-mcp        # remove mnemo from ~/.claude.json
@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -81,7 +82,7 @@ var dashboardHTML []byte
 
 const (
 	version              = "0.87.0"
-	defaultAddr          = ":19419"
+	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 
 	// drainIntakeGrace bounds the *courtesy* half of shutdown: letting
@@ -247,6 +248,12 @@ func main() {
 		"daemon home directory (overrides $MNEMO_HOME; defaults to OS user home). "+
 			"Routes ~/.mnemo and the default-user data tree to this root. (🎯T73)")
 	flag.Parse()
+	addrExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "addr" {
+			addrExplicit = true
+		}
+	})
 
 	// --home wins over MNEMO_HOME; both end up exported as MNEMO_HOME so
 	// every store.EffectiveHome() call sees the same value regardless of
@@ -274,7 +281,7 @@ func main() {
 	// On Windows, if the SCM launched this process (no interactive
 	// session), hand off to the service control dispatcher, which
 	// calls runServe with a cancellable context driven by SCM events.
-	if handled, err := runAsServiceIfUnderSCM(*addr, *federatedAddr); handled {
+	if handled, err := runAsServiceIfUnderSCM(*addr, addrExplicit, *federatedAddr); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "service run failed: %v\n", err)
 			os.Exit(1)
@@ -301,7 +308,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := runServe(ctx, *addr, *federatedAddr); err != nil {
+	if err := runServe(ctx, *addr, !addrExplicit, *federatedAddr); err != nil {
 		os.Exit(1)
 	}
 }
@@ -574,7 +581,7 @@ func (s *stringList) Set(v string) error {
 func cmdEdge(args []string) {
 	fs := flag.NewFlagSet("edge", flag.ExitOnError)
 	listen := fs.String("listen", defaultAddr,
-		"public listen address (edge owns client TCP connections)")
+		"listen address (default loopback; use :19419 only for deliberate network exposure)")
 	primary := fs.Int("primary", 0,
 		"index of the backend that receives new initialize requests")
 	routeFile := fs.String("route-file", "",
@@ -583,6 +590,12 @@ func cmdEdge(args []string) {
 	fs.Var(&backends, "backend",
 		"backend base URL (repeatable). http://host:port or unix:///path")
 	_ = fs.Parse(args)
+	listenExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			listenExplicit = true
+		}
+	})
 
 	// Prefer explicit --backend flags; else load route file.
 	routePath := *routeFile
@@ -619,11 +632,14 @@ func cmdEdge(args []string) {
 	}
 	proxy := edgeproxy.NewProxy(router)
 
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           proxy,
-		ReadHeaderTimeout: 10 * time.Second,
-		// No Read/WriteTimeout — GET/SSE streams are long-lived.
+	edgeListeners, err := openLocalListeners(*listen, !listenExplicit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "edge: listen: %v\n", err)
+		os.Exit(1)
+	}
+	defer edgeListeners.close()
+	for _, warn := range edgeListeners.warnings {
+		slog.Warn("edge default loopback listener unavailable", "err", warn)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -634,25 +650,27 @@ func cmdEdge(args []string) {
 		go watchEdgeRoute(ctx, routePath, router, proxy)
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("edge listening",
-			"listen", *listen,
-			"backends", len(backends),
-			"primary", *primary,
-			"route_file", routePath,
-			"version", version,
-		)
-		errCh <- srv.ListenAndServe()
-	}()
+	edgeServers, errCh := edgeListeners.serveConfigured(proxy, func(srv *http.Server) {
+		srv.ReadHeaderTimeout = 10 * time.Second
+		// No Read/WriteTimeout — GET/SSE streams are long-lived.
+	})
+	slog.Info("edge listening",
+		"listen", edgeListeners.displayAddr,
+		"backends", len(backends),
+		"primary", *primary,
+		"route_file", routePath,
+		"version", version,
+	)
 
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			fmt.Fprintf(os.Stderr, "edge: shutdown: %v\n", err)
-			os.Exit(1)
+		for _, srv := range edgeServers {
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "edge: shutdown: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -723,15 +741,185 @@ func stdinPiped() bool {
 	return (stat.Mode() & os.ModeCharDevice) == 0
 }
 
-// portInUse reports whether the given TCP address is already bound.
-// Any listen error (including "address in use") is treated as busy.
+// portInUse reports whether the given TCP address accepts local connections.
 func portInUse(addr string) bool {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		return true
+	if isLocalhostAddr(addr) {
+		for _, target := range localhostDialTargets(listenPort(addr)) {
+			c, err := net.DialTimeout("tcp", target, 100*time.Millisecond)
+			if err == nil {
+				_ = c.Close()
+				return true
+			}
+		}
+		return false
 	}
-	_ = l.Close()
-	return false
+	target := localHostPort(addr)
+	c, err := net.DialTimeout("tcp", target, 100*time.Millisecond)
+	if err == nil {
+		_ = c.Close()
+	}
+	return err == nil
+}
+
+// localHTTPBaseURL picks a dialable loopback host for wildcard listen addresses.
+func localHTTPBaseURL(addr string) string {
+	addr = strings.TrimRight(addr, "/")
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		u, err := url.Parse(addr)
+		if err != nil {
+			return addr
+		}
+		u.Host = localHostPort(u.Host)
+		return u.String()
+	}
+	return "http://" + localHostPort(addr)
+}
+
+func localHostPort(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			return "127.0.0.1" + addr
+		}
+		return addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+type localListener struct {
+	network string
+	addr    string
+	ln      net.Listener
+}
+
+type localListenerSet struct {
+	listeners   []localListener
+	baseURL     string
+	displayAddr string
+	warnings    []error
+}
+
+func openLocalListeners(addr string, implicitDefault bool) (*localListenerSet, error) {
+	if implicitDefault {
+		return openDefaultLoopbackListeners(listenPort(addr))
+	}
+	if isLocalhostAddr(addr) {
+		return nil, fmt.Errorf("ambiguous listen address %q; use 127.0.0.1 or [::1]", addr)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	display := ln.Addr().String()
+	return &localListenerSet{
+		listeners: []localListener{{
+			network: "tcp",
+			addr:    display,
+			ln:      ln,
+		}},
+		baseURL:     localHTTPBaseURL(display),
+		displayAddr: display,
+	}, nil
+}
+
+func openDefaultLoopbackListeners(port string) (*localListenerSet, error) {
+	if port == "" {
+		return nil, fmt.Errorf("default listen address %q has no port", defaultAddr)
+	}
+	targets := []struct {
+		network string
+		host    string
+	}{
+		{network: "tcp4", host: "127.0.0.1"},
+		{network: "tcp6", host: "::1"},
+	}
+	set := &localListenerSet{}
+	var errs []error
+	for _, target := range targets {
+		addr := net.JoinHostPort(target.host, port)
+		ln, err := net.Listen(target.network, addr)
+		if err != nil {
+			wrapped := fmt.Errorf("%s %s: %w", target.network, addr, err)
+			if !missingAddressFamily(err) {
+				set.close()
+				return nil, fmt.Errorf("listen on default loopback port %s: %w", port, wrapped)
+			}
+			set.warnings = append(set.warnings, wrapped)
+			errs = append(errs, wrapped)
+			continue
+		}
+		listenAddr := ln.Addr().String()
+		set.listeners = append(set.listeners, localListener{
+			network: target.network,
+			addr:    listenAddr,
+			ln:      ln,
+		})
+		if set.baseURL == "" {
+			set.baseURL = localHTTPBaseURL(listenAddr)
+		}
+	}
+	if len(set.listeners) == 0 {
+		return nil, fmt.Errorf("listen on default loopback port %s: %w", port, errors.Join(errs...))
+	}
+	addrs := make([]string, 0, len(set.listeners))
+	for _, l := range set.listeners {
+		addrs = append(addrs, l.addr)
+	}
+	set.displayAddr = strings.Join(addrs, ", ")
+	return set, nil
+}
+
+func (s *localListenerSet) serve(handler http.Handler) ([]*http.Server, <-chan error) {
+	return s.serveConfigured(handler, nil)
+}
+
+func (s *localListenerSet) serveConfigured(handler http.Handler, configure func(*http.Server)) ([]*http.Server, <-chan error) {
+	errCh := make(chan error, len(s.listeners))
+	servers := make([]*http.Server, 0, len(s.listeners))
+	for _, l := range s.listeners {
+		srv := &http.Server{Addr: l.addr, Handler: handler}
+		if configure != nil {
+			configure(srv)
+		}
+		servers = append(servers, srv)
+		go func(l localListener, srv *http.Server) {
+			if err := srv.Serve(l.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s %s: %w", l.network, l.addr, err)
+			}
+		}(l, srv)
+	}
+	return servers, errCh
+}
+
+func (s *localListenerSet) close() {
+	for _, l := range s.listeners {
+		_ = l.ln.Close()
+	}
+}
+
+func isLocalhostAddr(addr string) bool {
+	host := addr
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		if u, err := url.Parse(addr); err == nil {
+			host = u.Hostname()
+		}
+	} else if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	return strings.EqualFold(strings.Trim(host, "[]"), "localhost")
+}
+
+func localhostDialTargets(port string) []string {
+	if port == "" {
+		return nil
+	}
+	return []string{
+		net.JoinHostPort("127.0.0.1", port),
+		net.JoinHostPort("::1", port),
+	}
 }
 
 // registerFanoutTools installs the federation fan-out wrapper for
@@ -794,10 +982,20 @@ func registerFanoutTools(s *server.MCPServer, h *tools.Handler, fed *federation.
 // instances (🎯T15.3). An empty federatedAddr disables federation
 // entirely; the daemon makes no outbound peer calls and accepts no
 // inbound mTLS connections.
-func runServe(ctx context.Context, addr, federatedAddr string) error {
+func runServe(ctx context.Context, addr string, implicitDefault bool, federatedAddr string) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+
+	localListeners, err := openLocalListeners(addr, implicitDefault)
+	if err != nil {
+		return err
+	}
+	defer localListeners.close()
+	for _, warn := range localListeners.warnings {
+		slog.Warn("default loopback listener unavailable", "err", warn)
+	}
+	localBaseURL := localListeners.baseURL
 
 	// Load ~/.mnemo/config.json once; it applies uniformly to every
 	// per-user Store spun up by the Registry. Per-user home paths are
@@ -947,7 +1145,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Never repin_all on this path — that invalidates mcp-go sessions.
 	orchQuiescence, _ := cfg.AutoUpgrade.EffectiveQuiescence()
 	var spawnedBackendURL string
-	selfBackendURL := backendSelfURL(addr)
+	selfBackendURL := localBaseURL
 	homebrewInstall := isHomebrewInstall()
 	autoOrch := upgrade.NewOrchestrator(&upgrade.OrchestratorArgs{
 		Enabled:    cfg.AutoUpgrade.Enabled,
@@ -1092,12 +1290,8 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// (startup.ready) during pre-migration backup.
 	daemonStart := time.Now()
 	diagReg := reg.BuildDiagRegistry(defaultUser, daemonStart)
-	dashHost := addr
-	if strings.HasPrefix(addr, ":") {
-		dashHost = "localhost" + addr
-	}
 	// /health content-negotiates HTML for browsers (notification clicks).
-	notifyCfg := diag.DefaultNotifierConfig("http://" + dashHost + "/health")
+	notifyCfg := diag.DefaultNotifierConfig(localBaseURL + "/health")
 	if cfg.DisableHealthNotifications {
 		notifyCfg.Enabled = false
 	}
@@ -1411,7 +1605,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		slog.Info("pprof enabled (MNEMO_PPROF=1)", "url", "http://localhost"+addr+"/debug/pprof/")
+		slog.Info("pprof enabled (MNEMO_PPROF=1)", "url", localBaseURL+"/debug/pprof/")
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -1422,9 +1616,7 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		_, _ = w.Write(dashboardHTML)
 	})
 
-	httpServer := &http.Server{Addr: addr, Handler: mux}
-
-	slog.Info("mnemo serve starting", "version", version, "addr", addr)
+	slog.Info("mnemo serve starting", "version", version, "addr", localListeners.displayAddr)
 
 	// Run the local HTTP server in a goroutine so we can react to ctx
 	// cancellation (triggered by the Windows Service handler on SCM
@@ -1433,9 +1625,8 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 	// Listen BEFORE eager store open: pre-migration backup can take
 	// minutes on a multi-GB mnemo.db. /health must answer throughout
 	// and report the boot phase (startup.ready).
-	errCh := make(chan error, 1)
-	go func() { errCh <- httpServer.ListenAndServe() }()
-	boot.Set(boot.PhaseListening, "HTTP listener up on "+addr+"; opening default-user store")
+	httpServers, errCh := localListeners.serve(mux)
+	boot.Set(boot.PhaseListening, "HTTP listener up on "+localListeners.displayAddr+"; opening default-user store")
 
 	// Always supervise the multi-purpose shim when Mnemo.app is present.
 	// Menu-bar visibility is chrome toggled via the retained "ui" event,
@@ -1490,7 +1681,9 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 		case err := <-openErrCh:
 			if err != nil {
 				slog.Error("eager startup failed for default user", "user", defaultUser, "err", err)
-				_ = httpServer.Close()
+				for _, srv := range httpServers {
+					_ = srv.Close()
+				}
 				if fedSrv != nil {
 					_ = fedSrv.Close()
 				}
@@ -1527,8 +1720,12 @@ func runServe(ctx context.Context, addr, federatedAddr string) error {
 			// MCP transport keeps one open indefinitely by design, so this
 			// phase timing out is the expected case whenever a client is
 			// attached — not an error worth alarming about.
-			graceful := []intakeStopper{httpSrv, httpServer}
-			force := []intakeCloser{httpServer}
+			graceful := []intakeStopper{httpSrv}
+			force := make([]intakeCloser, 0, len(httpServers)+1)
+			for _, srv := range httpServers {
+				graceful = append(graceful, srv)
+				force = append(force, srv)
+			}
 			if fedSrv != nil {
 				graceful = append(graceful, fedSrv)
 				force = append(force, fedSrv)
@@ -1669,18 +1866,7 @@ func signalSelfSIGTERM() error {
 // backendSelfURL is the loopback base URL peers/edge use for this
 // process when it listens on addr (e.g. ":19421" → "http://127.0.0.1:19421").
 func backendSelfURL(addr string) string {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// addr may be ":19421"
-		if strings.HasPrefix(addr, ":") {
-			return "http://127.0.0.1" + addr
-		}
-		return "http://" + addr
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
+	return localHTTPBaseURL(addr)
 }
 
 // spawnLoopbackBackend starts a sibling mnemo daemon on a free loopback

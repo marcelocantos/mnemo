@@ -288,7 +288,7 @@ instead of failing silently.
 
 | Flag | Type | Default | Stability |
 |---|---|---|---|
-| `--addr` | string | `:19419` | Stable |
+| `--addr` | string | `localhost:19419` | Stable |
 | `--federated-addr` | string | `:19420` | Needs review |
 | `--version` | bool | false | Stable |
 | `--help-agent` | bool | false | Stable |
