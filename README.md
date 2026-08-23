@@ -98,8 +98,10 @@ brew services start mnemo
 claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
 ```
 
-Then restart your Claude Code session. The `mnemo_*` tools will be
-available in every session from that point on.
+Then confirm the server is listening (`lsof -iTCP:19419 -sTCP:LISTEN`)
+and restart your Claude Code session. Do **not** probe `/mcp` with
+`curl` — MCP endpoints only answer POST with a JSON-RPC body. After
+restart, call `mnemo_stats` to confirm the tools are live.
 
 ## Install
 
@@ -133,7 +135,7 @@ No terminal required. Restart your Claude Code session after install.
 Requires Go and CGo for SQLite:
 
 ```bash
-go build -tags "sqlite_fts5" -o bin/mnemo .
+GOWORK=off go build -tags "sqlite_fts5" -o bin/mnemo .
 ```
 
 On Windows, CGo requires a MinGW-w64 or LLVM clang toolchain on the
@@ -299,6 +301,15 @@ grok mcp add --transport http mnemo http://localhost:19419/mcp
 
 Restart your agent session after registration — tools registered
 mid-session are not picked up.
+
+Before restarting, confirm the server is listening:
+
+```bash
+lsof -iTCP:19419 -sTCP:LISTEN
+```
+
+Do **not** use `curl` to probe `/mcp` — MCP endpoints only respond to
+POST requests with a JSON-RPC body. After restart, call `mnemo_stats`.
 
 ## Vault export (optional)
 

@@ -25,10 +25,12 @@ transformed into the same content model, tagged
 ## Build & Run
 
 ```bash
-go build -tags "sqlite_fts5" -o bin/mnemo .
+
+GOWORK=off go build -tags "sqlite_fts5" -o bin/mnemo .
 bin/mnemo                         # HTTP MCP daemon (default localhost:19419)
 bin/mnemo --addr 127.0.0.1:8080   # custom local listen address
 bin/mnemo --addr :19419           # deliberate network exposure
+
 ```
 
 ## Install as MCP server
@@ -112,7 +114,7 @@ mnemo/
 ## Testing
 
 ```bash
-go test -tags "sqlite_fts5" ./...
+GOWORK=off go test -tags "sqlite_fts5" ./...
 ```
 
 ## Schema policy
