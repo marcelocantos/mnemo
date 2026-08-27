@@ -11,10 +11,24 @@ ingests:
   `summary.json` (`source=grok`; honour `GROK_HOME`; see
   `docs/design/grok-ingest.md`)
 - **Cursor Agent** — `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl`
-  (`source=cursor`; honour `CURSOR_HOME`; see
-  `docs/design/cursor-ingest.md`). Resume: `agent --resume <id>`.
+  plus Agent CLI `~/.cursor/chats/**/store.db` for tool_result / cwd /
+  title / model fidelity (🎯T149.1) (`source=cursor`; honour
+  `CURSOR_HOME`; see `docs/design/cursor-ingest.md`). Resume:
+  `agent --resume <id>`.
 
 Filter or inspect provenance via `session_meta.source` (`mnemo_query`).
+
+**Transcript file replay** (🎯T150) reconstructs agent file writes from indexed
+tool_use rows into a quarantine directory:
+
+```bash
+mnemo replay-files --session <id> --dry-run
+mnemo replay-files --session <id>
+mnemo replay-files --since 2026-08-01T00:00:00Z --until 2026-08-26T00:00:00Z --source cursor
+```
+
+Design and edge-case policy: `docs/design/transcript-file-replay.md`. Never
+writes into a live git checkout unless `--allow-live-tree` is set.
 
 ## Full setup (all steps required)
 

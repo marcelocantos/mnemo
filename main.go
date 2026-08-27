@@ -226,6 +226,9 @@ func main() {
 		case "edge":
 			cmdEdge(os.Args[2:])
 			return
+		case "replay-files":
+			cmdReplayFiles(os.Args[2:])
+			return
 		case store.OCRWorkerSubcommand:
 			// Hidden: the daemon re-execs itself to run Apple Vision in a
 			// child, so a framework abort kills only the child (🎯T118).
