@@ -1228,12 +1228,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 				// the writer stored plain rows on the old schema.
 				s.enableCompression()
 				s.autoTrainDictionaries(s.bgCtx)
+				s.materialiseEntriesAtBoot(s.bgCtx)
 			}
 		}()
 	} else {
 		close(done)
 		s.enableCompression()
-		go s.autoTrainDictionaries(s.bgCtx)
+		go func() {
+			s.autoTrainDictionaries(s.bgCtx)
+			s.materialiseEntriesAtBoot(s.bgCtx)
+		}()
 	}
 
 	return s, nil
@@ -3524,7 +3528,36 @@ func (s *Store) IngestAll() error {
 }
 
 const (
+	// entryInsertSQL writes the JSON line as JSONB (plain) or as a zstd
+	// frame (?6, 🎯T152), and materialises the sixteen hot fields from
+	// the bound text so entries_v never depends on the generated columns.
+	// Numbered parameters let the same bound JSON feed every expression.
 	entryInsertSQL = `INSERT OR IGNORE INTO entries
+		(session_id, project, type, timestamp, raw, raw_z,
+		 uuid_m, model_m, stop_reason_m, input_tokens_m, output_tokens_m,
+		 cache_read_tokens_m, cache_creation_tokens_m, agent_id_m, version_m, slug_m,
+		 is_sidechain_m, data_type_m, data_command_m, data_hook_event_m,
+		 top_tool_use_id_m, parent_tool_use_id_m)
+		VALUES (?1, ?2, ?3, ?4, CASE WHEN ?6 IS NULL THEN jsonb(?5) END, ?6,
+		 COALESCE(?5->>'$.uuid', ?5->>'$.messageId'),
+		 ?5->>'$.message.model',
+		 ?5->>'$.message.stop_reason',
+		 json_extract(?5, '$.message.usage.input_tokens'),
+		 json_extract(?5, '$.message.usage.output_tokens'),
+		 json_extract(?5, '$.message.usage.cache_read_input_tokens'),
+		 json_extract(?5, '$.message.usage.cache_creation_input_tokens'),
+		 ?5->>'$.agentId',
+		 ?5->>'$.version',
+		 ?5->>'$.slug',
+		 CASE WHEN json_extract(?5, '$.isSidechain') THEN 1 ELSE 0 END,
+		 ?5->>'$.data.type',
+		 ?5->>'$.data.command',
+		 ?5->>'$.data.hookEvent',
+		 ?5->>'$.toolUseID',
+		 ?5->>'$.parentToolUseID')`
+	// entryInsertLegacySQL is used while a deferred schema upgrade has
+	// not yet added the *_m columns (🎯T114.1 serves on the old schema).
+	entryInsertLegacySQL = `INSERT OR IGNORE INTO entries
 		(session_id, project, type, timestamp, raw)
 		VALUES (?, ?, ?, ?, jsonb(?))`
 	messageInsertSQL = `INSERT INTO messages
@@ -3545,7 +3578,8 @@ type writerState struct {
 	entryStmt *sql.Stmt
 	msgStmt   *sql.Stmt
 	codec     *textCodec
-	packed    bool // msgStmt carries the text_z parameter
+	packed    bool // msgStmt / entryStmt carry the *_z parameters
+	packRaw   bool // entries.raw may be written compressed (fields materialised)
 }
 
 func (s *Store) newWriterState() (*writerState, error) {
@@ -3553,13 +3587,17 @@ func (s *Store) newWriterState() (*writerState, error) {
 	if err != nil {
 		return nil, err
 	}
-	entryStmt, err := tx.Prepare(entryInsertSQL)
+	packed := s.codec.ready.Load()
+	entrySQL := entryInsertSQL
+	if !packed {
+		entrySQL = entryInsertLegacySQL
+	}
+	entryStmt, err := tx.Prepare(entrySQL)
 	if err != nil {
 		tx.Rollback()
 		return nil, err
 	}
 	insertSQL := messageInsertSQL
-	packed := s.codec.ready.Load()
 	if !packed {
 		insertSQL = messageInsertLegacySQL
 	}
@@ -3569,7 +3607,23 @@ func (s *Store) newWriterState() (*writerState, error) {
 		tx.Rollback()
 		return nil, err
 	}
-	return &writerState{tx: tx, entryStmt: entryStmt, msgStmt: msgStmt, codec: s.codec, packed: packed}, nil
+	return &writerState{tx: tx, entryStmt: entryStmt, msgStmt: msgStmt, codec: s.codec, packed: packed,
+		packRaw: packed && s.entriesRawPackable()}, nil
+}
+
+// insertEntry runs entryStmt with the JSON line packed for storage
+// (🎯T152). While the boot-time field materialisation is still running,
+// raw stays JSONB so INSERT OR IGNORE keeps its (session_id, uuid) key
+// against rows that have no uuid_m yet.
+func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any, raw string) (sql.Result, error) {
+	if !ws.packed {
+		return ws.entryStmt.Exec(sessionID, project, typ, timestamp, raw)
+	}
+	var z []byte
+	if ws.packRaw {
+		_, z = ws.codec.pack(FamilyEntriesRaw, raw)
+	}
+	return ws.entryStmt.Exec(sessionID, project, typ, timestamp, raw, z)
 }
 
 // insertMessage runs msgStmt with text packed for storage (🎯T151).
@@ -3669,7 +3723,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 			DELETE FROM messages WHERE session_id = ? AND mnemo_text(text, text_z) LIKE '[grok signals]%'`,
 			pf.sessionID)
 		_, _ = ws.tx.Exec(`
-			DELETE FROM entries WHERE session_id = ? AND raw->>'$.uuid' = ?`,
+			DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
 			pf.sessionID, usageUUID)
 	}
 
@@ -3678,7 +3732,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 	// only record the entry ID when a row was actually inserted.
 	entryIDs := make(map[int]int64, len(pf.entries))
 	for i, e := range pf.entries {
-		result, err := ws.entryStmt.Exec(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
+		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
 		if err != nil {
 			slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
 			continue
@@ -5044,7 +5098,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
 				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
 				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
-			FROM entries e
+			FROM entries_v e
 			%s
 			WHERE %s
 			GROUP BY %s
@@ -5334,7 +5388,7 @@ func (s *Store) usageByBlock(
 				MAX(COALESCE(e.cache_creation_tokens, 0))    AS cache_creation_tokens,
 				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
 				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
-			FROM entries e
+			FROM entries_v e
 			%s
 			WHERE %s
 			GROUP BY %s
@@ -5536,7 +5590,7 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 
 	q := fmt.Sprintf(`
 		SELECT e.session_id, e.timestamp
-		FROM entries e
+		FROM entries_v e
 		%s
 		WHERE %s
 		ORDER BY e.session_id, e.timestamp
@@ -5612,7 +5666,7 @@ func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float6
 
 	q := fmt.Sprintf(`
 		SELECT e.session_id, e.timestamp
-		FROM entries e
+		FROM entries_v e
 		%s
 		WHERE %s
 		ORDER BY e.session_id, e.timestamp
@@ -5696,7 +5750,7 @@ func (s *Store) Permissions(days int, repoFilter string, limit int) (*Permission
 	topQuery := fmt.Sprintf(`
 		SELECT m.tool_name, COUNT(*) AS cnt
 		FROM messages m
-		JOIN entries e ON e.id = m.entry_id
+		JOIN entries_v e ON e.id = m.entry_id
 		%s
 		WHERE m.content_type = 'tool_use'
 		  AND m.tool_name IS NOT NULL
@@ -5744,7 +5798,7 @@ func (s *Store) Permissions(days int, repoFilter string, limit int) (*Permission
 		  END AS cmd_prefix,
 		  COUNT(*) AS cnt
 		FROM messages m
-		JOIN entries e ON e.id = m.entry_id
+		JOIN entries_v e ON e.id = m.entry_id
 		%s
 		WHERE m.content_type = 'tool_use'
 		  AND m.tool_name = 'Bash'
@@ -6667,7 +6721,7 @@ func (s *Store) ingestFile(path string) error {
 		// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 		// only record the entry ID when a row was actually inserted.
 		var entryID int64
-		result, entryErr := ws.entryStmt.Exec(sessionID, project, entry.Type, ts, string(line))
+		result, entryErr := ws.insertEntry(sessionID, project, entry.Type, ts, string(line))
 		if entryErr == nil {
 			if n, _ := result.RowsAffected(); n > 0 {
 				entryID, _ = result.LastInsertId()
@@ -6836,7 +6890,7 @@ func (s *Store) ingestFile(path string) error {
 	go func() {
 		rows, err := s.readDB.Query(`
 			SELECT e.id, e.raw, COALESCE(e.timestamp, datetime('now'))
-			FROM entries e
+			FROM entries_v e
 			WHERE e.session_id = ? AND e.raw LIKE '%"type":"image"%'
 			ORDER BY e.id DESC LIMIT 100`, sessionID)
 		if err != nil {

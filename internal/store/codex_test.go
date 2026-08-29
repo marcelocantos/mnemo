@@ -275,7 +275,7 @@ func TestCodexIngestEndToEnd(t *testing.T) {
 
 	entryCount := func() int {
 		var n int
-		if err := s.readDB.QueryRow(`SELECT count(*) FROM entries WHERE session_id = ?`, codexSessUUID).Scan(&n); err != nil {
+		if err := s.readDB.QueryRow(`SELECT count(*) FROM entries_v WHERE session_id = ?`, codexSessUUID).Scan(&n); err != nil {
 			t.Fatalf("count query: %v", err)
 		}
 		return n
@@ -287,7 +287,7 @@ func TestCodexIngestEndToEnd(t *testing.T) {
 	// Model + usage + parent chain (🎯T112).
 	var model string
 	if err := s.readDB.QueryRow(
-		`SELECT model FROM entries WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL AND model != '' LIMIT 1`,
+		`SELECT model FROM entries_v WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL AND model != '' LIMIT 1`,
 		codexSessUUID,
 	).Scan(&model); err != nil || model != "gpt-5.5" {
 		t.Errorf("model = %q err=%v", model, err)

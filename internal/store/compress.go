@@ -40,10 +40,21 @@ import (
 const (
 	FamilyMessagesText = "messages.text"
 	FamilyDocsContent  = "docs.content"
+	// FamilyEntriesRaw compresses the JSON line behind entries.raw
+	// (🎯T152). Its sentinel is NULL, not '': the sixteen generated
+	// columns evaluate raw, and '' raises "malformed JSON".
+	FamilyEntriesRaw = "entries.raw"
 )
 
-// textSQLFunc is the SQL function name every reader goes through.
-const textSQLFunc = "mnemo_text"
+// allFamilies is the display/backfill order.
+var allFamilies = []string{FamilyMessagesText, FamilyDocsContent, FamilyEntriesRaw}
+
+// textSQLFunc is the SQL function text readers go through; rawSQLFunc is
+// its entries.raw twin, which passes a JSONB blob through untouched.
+const (
+	textSQLFunc = "mnemo_text"
+	rawSQLFunc  = "mnemo_raw"
+)
 
 const (
 	// compressMinBytes: rows shorter than this stay plain — a zstd frame
@@ -88,7 +99,10 @@ func init() {
 // registerTextFunc installs mnemo_text on a connection. Pure: SQLite may
 // cache and reorder calls.
 func registerTextFunc(conn *sqlite3.SQLiteConn) error {
-	return conn.RegisterFunc(textSQLFunc, mnemoText, true)
+	if err := conn.RegisterFunc(textSQLFunc, mnemoText, true); err != nil {
+		return err
+	}
+	return conn.RegisterFunc(rawSQLFunc, mnemoRaw, true)
 }
 
 // mnemoText is the SQL-visible decoder. A NULL/empty z means the row is
@@ -113,6 +127,13 @@ func mnemoText(plain any, z any) (any, error) {
 		return nil, fmt.Errorf("%s: %w", textSQLFunc, err)
 	}
 	return string(out), nil
+}
+
+// mnemoRaw decodes entries.raw: the stored JSONB blob when the row is
+// plain, else the compressed JSON text. Both are valid input to every
+// json_* function, which is all readers do with it.
+func mnemoRaw(plain any, z any) (any, error) {
+	return mnemoText(plain, z)
 }
 
 // dictRegistry is process-wide because mnemo_text is registered per
@@ -218,6 +239,9 @@ func frameDictID(z []byte) uint32 {
 // for the compressed shape, and the active encoder per family.
 type textCodec struct {
 	ready atomic.Bool
+	// entriesPackable latches once the boot-time entries materialisation
+	// has completed (🎯T152); until then entries.raw is written plain.
+	entriesPackable atomic.Bool
 
 	mu     sync.RWMutex
 	enc    map[string]*zstd.Encoder // family → encoder with the active dictionary
@@ -367,18 +391,48 @@ type FamilyStatus struct {
 // constants baked into SQL text below, never caller-supplied.
 type familySpec struct {
 	table, plainCol, zCol string
+	// readExpr yields the bytes to compress from a plain row; sentinel is
+	// what the plain column holds once compressed; decodeFn reads either
+	// shape back; extraSet is appended to the compressing UPDATE
+	// (entries materialises its generated columns in the same statement).
+	readExpr, sentinel, decodeFn, extraSet string
 }
 
+// entriesMaterialiseSet copies each generated column into its
+// materialised twin. RHS values are the pre-update row, so it composes
+// with raw = NULL in the same UPDATE. COALESCE keeps a value already
+// written at ingest.
+const entriesMaterialiseSet = `uuid_m = COALESCE(uuid_m, uuid),
+	model_m = COALESCE(model_m, model),
+	stop_reason_m = COALESCE(stop_reason_m, stop_reason),
+	input_tokens_m = COALESCE(input_tokens_m, input_tokens),
+	output_tokens_m = COALESCE(output_tokens_m, output_tokens),
+	cache_read_tokens_m = COALESCE(cache_read_tokens_m, cache_read_tokens),
+	cache_creation_tokens_m = COALESCE(cache_creation_tokens_m, cache_creation_tokens),
+	agent_id_m = COALESCE(agent_id_m, agent_id),
+	version_m = COALESCE(version_m, version),
+	slug_m = COALESCE(slug_m, slug),
+	is_sidechain_m = COALESCE(is_sidechain_m, is_sidechain),
+	data_type_m = COALESCE(data_type_m, data_type),
+	data_command_m = COALESCE(data_command_m, data_command),
+	data_hook_event_m = COALESCE(data_hook_event_m, data_hook_event),
+	top_tool_use_id_m = COALESCE(top_tool_use_id_m, top_tool_use_id),
+	parent_tool_use_id_m = COALESCE(parent_tool_use_id_m, parent_tool_use_id)`
+
 var familySpecs = map[string]familySpec{
-	FamilyMessagesText: {table: "messages", plainCol: "text", zCol: "text_z"},
-	FamilyDocsContent:  {table: "docs", plainCol: "content", zCol: "content_z"},
+	FamilyMessagesText: {table: "messages", plainCol: "text", zCol: "text_z",
+		readExpr: "text", sentinel: "''", decodeFn: textSQLFunc},
+	FamilyDocsContent: {table: "docs", plainCol: "content", zCol: "content_z",
+		readExpr: "content", sentinel: "''", decodeFn: textSQLFunc},
+	FamilyEntriesRaw: {table: "entries", plainCol: "raw", zCol: "raw_z",
+		readExpr: "json(raw)", sentinel: "NULL", decodeFn: rawSQLFunc, extraSet: entriesMaterialiseSet},
 }
 
 func familyOf(name string) (familySpec, error) {
 	fs, ok := familySpecs[name]
 	if !ok {
-		return familySpec{}, fmt.Errorf("unknown compression family %q (want %s or %s)",
-			name, FamilyMessagesText, FamilyDocsContent)
+		return familySpec{}, fmt.Errorf("unknown compression family %q (want %s, %s or %s)",
+			name, FamilyMessagesText, FamilyDocsContent, FamilyEntriesRaw)
 	}
 	return fs, nil
 }
@@ -409,7 +463,7 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		return st, err
 	}
 
-	for _, family := range []string{FamilyMessagesText, FamilyDocsContent} {
+	for _, family := range allFamilies {
 		fs := familySpecs[family]
 		var f FamilyStatus
 		f.Family = family
@@ -538,8 +592,14 @@ func (s *Store) sampleRows(ctx context.Context, fs familySpec, n int) ([][]byte,
 	if maxID == 0 {
 		return nil, nil
 	}
+	// json() normalises entries.raw to text whether the row holds JSONB
+	// or a decoded frame, so the dictionary is trained on what is stored.
 	sel := fmt.Sprintf(`SELECT %s(%s, %s) FROM %s WHERE id = ?`,
-		textSQLFunc, fs.plainCol, fs.zCol, fs.table)
+		fs.decodeFn, fs.plainCol, fs.zCol, fs.table)
+	if family := fs; family.table == "entries" {
+		sel = fmt.Sprintf(`SELECT json(%s(%s, %s)) FROM %s WHERE id = ?`,
+			fs.decodeFn, fs.plainCol, fs.zCol, fs.table)
+	}
 	stmt, err := s.readDB.PrepareContext(ctx, sel)
 	if err != nil {
 		return nil, err
@@ -632,6 +692,15 @@ func (s *Store) CompressBackfill(ctx context.Context, family string) (BackfillRe
 	if !s.CompressionReady() {
 		return BackfillResult{}, errors.New("compression schema not ready (deferred upgrade still running?)")
 	}
+	if family == FamilyEntriesRaw {
+		ok, err := s.EntriesMaterialised()
+		if err != nil {
+			return BackfillResult{}, err
+		}
+		if !ok {
+			return BackfillResult{}, errors.New("entries.raw: the boot-time field materialisation has not finished; retry later (op=compress_status shows entries.fields)")
+		}
+	}
 	if !s.backfill.start(family) {
 		return BackfillResult{}, fmt.Errorf("%s: backfill already running", family)
 	}
@@ -649,13 +718,17 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 	}
 	// Identifiers come from familySpecs; the values are bound.
 	selectSQL := fmt.Sprintf(`
-		SELECT id, %[2]s
+		SELECT id, COALESCE(%[2]s, '')
 		FROM %[1]s
 		WHERE id >= ? AND %[3]s IS NULL
 		ORDER BY id
-		LIMIT ?`, fs.table, fs.plainCol, fs.zCol)
-	updateSQL := fmt.Sprintf(`UPDATE %[1]s SET %[2]s = '', %[3]s = ? WHERE id = ?`,
-		fs.table, fs.plainCol, fs.zCol)
+		LIMIT ?`, fs.table, fs.readExpr, fs.zCol)
+	extra := ""
+	if fs.extraSet != "" {
+		extra = ", " + fs.extraSet
+	}
+	updateSQL := fmt.Sprintf(`UPDATE %[1]s SET %[2]s = %[4]s, %[3]s = ?%[5]s WHERE id = ?`,
+		fs.table, fs.plainCol, fs.zCol, fs.sentinel, extra)
 	maxSQL := fmt.Sprintf(`SELECT COALESCE(MAX(id), 0) FROM %s`, fs.table)
 	enc := s.codec.encoder(family)
 
@@ -769,7 +842,7 @@ func (s *Store) saveBackfillCursor(family string, next int64, savedDelta int64, 
 // a fresh install writes dictionary-less frames until it crosses the
 // threshold, then retrains nothing — later retrains are an explicit op.
 func (s *Store) autoTrainDictionaries(ctx context.Context) {
-	for _, family := range []string{FamilyMessagesText, FamilyDocsContent} {
+	for _, family := range allFamilies {
 		if ctx.Err() != nil {
 			return
 		}
@@ -791,5 +864,117 @@ func (s *Store) autoTrainDictionaries(ctx context.Context) {
 		if _, err := s.TrainDictionary(ctx, family); err != nil {
 			slog.Warn("compression auto-train failed", "family", family, "err", err)
 		}
+	}
+}
+
+// entriesFieldsFamily is the compression_gc cursor for the boot-time
+// pass that copies entries' generated columns into their *_m twins
+// (🎯T152). It is not a compression family: nothing is encoded, and it
+// runs automatically because readers (entries_v) source these columns
+// exclusively — until it completes, rows it has not reached read NULL
+// there. Compressing entries.raw is refused until it reports done, so
+// INSERT OR IGNORE keeps its unique (session_id, uuid) key on every row
+// throughout.
+const entriesFieldsFamily = "entries.fields"
+
+// entriesRawPackable is the cached answer to EntriesMaterialised for the
+// hot write path; it flips once and never back.
+func (s *Store) entriesRawPackable() bool {
+	if s.codec.entriesPackable.Load() {
+		return true
+	}
+	ok, err := s.EntriesMaterialised()
+	if err == nil && ok {
+		s.codec.entriesPackable.Store(true)
+	}
+	return ok
+}
+
+// EntriesMaterialised reports whether every pre-🎯T152 entries row has
+// its *_m columns populated.
+func (s *Store) EntriesMaterialised() (bool, error) {
+	var done int
+	err := s.readDB.QueryRow(`SELECT done FROM compression_gc WHERE family = ?`, entriesFieldsFamily).Scan(&done)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return done == 1, err
+}
+
+// MaterialiseEntries runs the boot-time pass in id order from the
+// persisted cursor, batch by batch. Idempotent and resumable.
+func (s *Store) MaterialiseEntries(ctx context.Context) (BackfillResult, error) {
+	res := BackfillResult{Family: entriesFieldsFamily}
+	if !s.CompressionReady() {
+		return res, errors.New("compression schema not ready (deferred upgrade still running?)")
+	}
+	if !s.backfill.start(entriesFieldsFamily) {
+		return res, fmt.Errorf("%s: already running", entriesFieldsFamily)
+	}
+	err := s.materialiseEntries(ctx, &res)
+	s.backfill.finish(entriesFieldsFamily, err)
+	return res, err
+}
+
+func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) error {
+	var next int64
+	var done int
+	err := s.readDB.QueryRow(`SELECT next_id, done FROM compression_gc WHERE family = ?`, entriesFieldsFamily).Scan(&next, &done)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if done == 1 {
+		res.Done = true
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var lo, hi sql.NullInt64
+		err := s.readDB.QueryRowContext(ctx, `
+			SELECT MIN(id), MAX(id) FROM (
+				SELECT id FROM entries WHERE id >= ? ORDER BY id LIMIT ?)`,
+			next, backfillBatchRows).Scan(&lo, &hi)
+		if err != nil {
+			return err
+		}
+		if !hi.Valid {
+			res.Done = true
+			return s.saveBackfillCursor(entriesFieldsFamily, next, 0, true)
+		}
+		// Only rows still carrying a plain raw have anything to copy; a
+		// compressed row (raw NULL) was materialised when it was compressed.
+		r, err := s.writeDB.ExecContext(ctx, `
+			UPDATE entries SET `+entriesMaterialiseSet+`
+			WHERE id BETWEEN ? AND ? AND raw IS NOT NULL AND uuid_m IS NULL`, lo.Int64, hi.Int64)
+		if err != nil {
+			return err
+		}
+		n, _ := r.RowsAffected()
+		res.Rows += hi.Int64 - lo.Int64 + 1
+		res.Compressed += n
+		next = hi.Int64 + 1
+		if err := s.saveBackfillCursor(entriesFieldsFamily, next, 0, false); err != nil {
+			return err
+		}
+	}
+}
+
+// materialiseEntriesAtBoot runs MaterialiseEntries once compression is
+// ready, logging the outcome; a cancelled ctx (Close) is silent.
+func (s *Store) materialiseEntriesAtBoot(ctx context.Context) {
+	if ok, err := s.EntriesMaterialised(); err == nil && ok {
+		s.codec.entriesPackable.Store(true)
+		return
+	}
+	res, err := s.MaterialiseEntries(ctx)
+	switch {
+	case err != nil && ctx.Err() != nil:
+	case err != nil:
+		slog.Warn("entries field materialisation stopped", "rows", res.Rows, "err", err)
+	default:
+		s.codec.entriesPackable.Store(true)
+		slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
 	}
 }

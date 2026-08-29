@@ -71,7 +71,7 @@ func (s *Store) LocateUUID(prefix string, contextBefore, contextAfter int) ([]UU
 SELECT e.id, e.session_id, e.project, e.type, e.timestamp,
        'entry_uuid'          AS match_kind,
        json_extract(e.raw, '$.uuid') AS matched_id
-FROM entries e
+FROM entries_v e
 WHERE json_extract(e.raw, '$.uuid') LIKE ?
 
 UNION ALL
@@ -79,7 +79,7 @@ UNION ALL
 SELECT e.id, e.session_id, e.project, e.type, e.timestamp,
        'parent_uuid'         AS match_kind,
        json_extract(e.raw, '$.parentUuid') AS matched_id
-FROM entries e
+FROM entries_v e
 WHERE json_extract(e.raw, '$.parentUuid') LIKE ?
 
 UNION ALL
@@ -87,7 +87,7 @@ UNION ALL
 SELECT e.id, e.session_id, e.project, e.type, e.timestamp,
        'top_tool_use_id'     AS match_kind,
        e.top_tool_use_id     AS matched_id
-FROM entries e
+FROM entries_v e
 WHERE e.top_tool_use_id LIKE ?
 
 UNION ALL
@@ -95,7 +95,7 @@ UNION ALL
 SELECT e.id, e.session_id, e.project, e.type, e.timestamp,
        'parent_tool_use_id'  AS match_kind,
        e.parent_tool_use_id  AS matched_id
-FROM entries e
+FROM entries_v e
 WHERE e.parent_tool_use_id LIKE ?
 
 UNION ALL
@@ -103,7 +103,7 @@ UNION ALL
 SELECT e.id, e.session_id, e.project, e.type, e.timestamp,
        'tool_use_id'         AS match_kind,
        jc.value->>'$.id'     AS matched_id
-FROM (SELECT * FROM entries WHERE json_type(raw, '$.message.content') = 'array') e
+FROM (SELECT * FROM entries_v WHERE json_type(raw, '$.message.content') = 'array') e
 JOIN json_each(e.raw, '$.message.content') jc
 WHERE jc.value->>'$.type' = 'tool_use'
   AND jc.value->>'$.id' LIKE ?
@@ -113,7 +113,7 @@ UNION ALL
 SELECT e.id, e.session_id, e.project, e.type, e.timestamp,
        'tool_result_id'      AS match_kind,
        jc.value->>'$.tool_use_id' AS matched_id
-FROM (SELECT * FROM entries WHERE json_type(raw, '$.message.content') = 'array') e
+FROM (SELECT * FROM entries_v WHERE json_type(raw, '$.message.content') = 'array') e
 JOIN json_each(e.raw, '$.message.content') jc
 WHERE jc.value->>'$.type' = 'tool_result'
   AND jc.value->>'$.tool_use_id' LIKE ?

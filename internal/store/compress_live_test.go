@@ -79,10 +79,26 @@ func TestCompressLiveCorpus(t *testing.T) {
 	}
 	msgBefore := tableBytes(s.readDB, "messages")
 	docsBefore := tableBytes(s.readDB, "docs")
-	t.Logf("dbstat before: messages %.2f GB, docs %.2f GB", float64(msgBefore)/1e9, float64(docsBefore)/1e9)
+	entBefore := tableBytes(s.readDB, "entries")
+	t.Logf("dbstat before: messages %.2f GB, docs %.2f GB, entries %.2f GB",
+		float64(msgBefore)/1e9, float64(docsBefore)/1e9, float64(entBefore)/1e9)
 
 	ctx := context.Background()
-	for _, family := range []string{FamilyMessagesText, FamilyDocsContent} {
+	// 🎯T152: the boot pass copies the generated columns into *_m; the
+	// entries.raw backfill is refused until it reports done.
+	start = time.Now()
+	if mres, err := s.MaterialiseEntries(ctx); err != nil && !strings.Contains(err.Error(), "already running") {
+		t.Fatal(err)
+	} else {
+		t.Logf("entries.fields: visited %d rows, updated %d in %s (done=%v)", mres.Rows, mres.Compressed, time.Since(start).Round(time.Second), mres.Done)
+	}
+	for !s.codec.entriesPackable.Load() {
+		if ok, _ := s.EntriesMaterialised(); ok {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	for _, family := range allFamilies {
 		start = time.Now()
 		id, err := s.TrainDictionary(ctx, family)
 		if err != nil {
@@ -111,6 +127,16 @@ func TestCompressLiveCorpus(t *testing.T) {
 	if bad != 0 {
 		t.Fatalf("%d compressed rows decode to empty text", bad)
 	}
+	var en, ebad int
+	if err := s.readDB.QueryRow(`
+		SELECT COUNT(*), SUM(json_extract(raw, '$.uuid') IS NOT uuid)
+		FROM (SELECT raw, uuid FROM entries_v WHERE type = 'assistant' ORDER BY random() LIMIT 20000)`).Scan(&en, &ebad); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("sampled %d entries, %d where decoded raw disagrees with the materialised uuid", en, ebad)
+	if ebad != 0 {
+		t.Fatalf("%d entries rows disagree between raw and uuid_m", ebad)
+	}
 	st, err := s.CompressionStatus()
 	if err != nil {
 		t.Fatal(err)
@@ -135,14 +161,19 @@ func TestCompressLiveCorpus(t *testing.T) {
 	t.Logf("vacuum: %s", time.Since(start).Round(time.Second))
 	msgAfter := tableBytes(db, "messages")
 	docsAfter := tableBytes(db, "docs")
+	entAfter := tableBytes(db, "entries")
 	db.Close()
 	after := sizeOf("after")
 
-	t.Logf("dbstat after: messages %.2f GB (%.0f%%), docs %.2f GB (%.0f%%)",
+	t.Logf("dbstat after: messages %.2f GB (%.0f%%), docs %.2f GB (%.0f%%), entries %.2f GB (%.0f%%)",
 		float64(msgAfter)/1e9, 100*float64(msgAfter)/float64(msgBefore),
-		float64(docsAfter)/1e9, 100*float64(docsAfter)/float64(docsBefore))
+		float64(docsAfter)/1e9, 100*float64(docsAfter)/float64(docsBefore),
+		float64(entAfter)/1e9, 100*float64(entAfter)/float64(entBefore))
 	t.Logf("file: %.2f GB -> %.2f GB (%.0f%%)", float64(before)/1e9, float64(after)/1e9, 100*float64(after)/float64(before))
 	if ratio := float64(msgAfter+docsAfter) / float64(msgBefore+docsBefore); ratio > 0.45 {
-		t.Errorf("messages+docs at %.0f%% of pre-GC size; acceptance is at most 45%%", 100*ratio)
+		t.Errorf("messages+docs at %.0f%% of pre-GC size; 🎯T151 acceptance is at most 45%%", 100*ratio)
+	}
+	if ratio := float64(entAfter) / float64(entBefore); ratio > 0.50 {
+		t.Errorf("entries at %.0f%% of pre-GC size; 🎯T152 acceptance is at most 50%%", 100*ratio)
 	}
 }

@@ -132,7 +132,12 @@ GOWORK=off go test -tags "sqlite_fts5" ./...
 rows. Read them through `mnemo_text(col, col_z)` or the `messages_v` /
 `docs_v` views — never the bare column, which a ratchet test
 (`compress_readers_test.go`) enforces over every SQL literal in the
-tree. Dictionaries are trained from the corpus and versioned in
+tree. `entries.raw` likewise lives in `raw_z` with `raw NULL` (🎯T152);
+its sixteen generated columns are NULL for those rows and their
+materialised twins (`uuid_m`, `model_m`, …) are the source of truth —
+read entries through the `entries_v` view, which serves the original
+column names and decoded `raw`. A boot-time pass fills the twins for
+historical rows before `compress_gc family=entries` is allowed. Dictionaries are trained from the corpus and versioned in
 `compression_dicts`; each frame names its dictionary, so a retrain never
 invalidates history. Open `mnemo.db` with `store.SQLiteDriverName` (the
 triggers call `mnemo_text`). Ops: `mnemo_ops op=compress_status |

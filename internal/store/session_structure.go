@@ -55,7 +55,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	// --- Entry type counts ---
 	entryRows, err := s.readDB.Query(`
 		SELECT type, COUNT(*) AS cnt
-		FROM entries
+		FROM entries_v
 		WHERE session_id = ?
 		GROUP BY type
 		ORDER BY cnt DESC
@@ -80,7 +80,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	// --- Assistant stop_reason counts ---
 	stopRows, err := s.readDB.Query(`
 		SELECT COALESCE(stop_reason, '(null)') AS sr, COUNT(*) AS cnt
-		FROM entries
+		FROM entries_v
 		WHERE session_id = ? AND type = 'assistant'
 		GROUP BY sr
 		ORDER BY cnt DESC
@@ -105,7 +105,7 @@ func (s *Store) SessionStructure(sessionID string) (*SessionStructure, error) {
 	// subtype is not a virtual column; extract directly from JSONB.
 	subtypeRows, err := s.readDB.Query(`
 		SELECT COALESCE(json_extract(raw, '$.subtype'), '(none)') AS st, COUNT(*) AS cnt
-		FROM entries
+		FROM entries_v
 		WHERE session_id = ? AND type = 'system'
 		GROUP BY st
 		ORDER BY cnt DESC

@@ -197,7 +197,7 @@ func TestCursorStoreIngestEndToEnd(t *testing.T) {
 
 	var model string
 	_ = s.readDB.QueryRow(
-		`SELECT model FROM entries WHERE session_id = ? AND model != '' LIMIT 1`, sess,
+		`SELECT model FROM entries_v WHERE session_id = ? AND model != '' LIMIT 1`, sess,
 	).Scan(&model)
 	if model != "default" {
 		t.Errorf("entries.model = %q, want default from lastUsedModel", model)

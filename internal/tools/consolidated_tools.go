@@ -199,7 +199,7 @@ Ops:`+opsOps.describe()),
 		mcp.WithNumber("days", mcp.Description("op=agent_trees: lookback days (default 7)")),
 		mcp.WithNumber("limit", mcp.Description("op=agent_trees: max trees (default 20)")),
 		mcp.WithString("repo", mcp.Description("op=agent_trees: repo filter")),
-		mcp.WithString("family", mcp.Description("op=compress_train / compress_gc: messages (default) or docs")),
+		mcp.WithString("family", mcp.Description("op=compress_train / compress_gc: messages (default), docs, or entries")),
 		mcp.WithBoolean("wait", mcp.Description("op=compress_gc: run to completion in this call instead of in the background")),
 	)
 }
@@ -321,6 +321,7 @@ func formatOpsBudget(mem store.Backend, cfg store.BudgetConfig, thr func() (stri
 // simply reports the ops as unavailable.
 type textCompressor interface {
 	CompressionStatus() (store.CompressionStatus, error)
+	EntriesMaterialised() (bool, error)
 	TrainDictionary(ctx context.Context, family string) (uint32, error)
 	CompressBackfill(ctx context.Context, family string) (store.BackfillResult, error)
 }
@@ -373,6 +374,9 @@ func (h *callHandler) compressStatus() (string, bool, error) {
 		}
 		b.WriteString("\n")
 	}
+	if mat, err := h.materialisation(); err == nil && mat != "" {
+		b.WriteString("\n" + mat + "\n")
+	}
 	b.WriteString("\nSpace is reclaimed only by VACUUM (needs free disk equal to the DB size); run it after the backfill reports done.\n")
 	return b.String(), false, nil
 }
@@ -384,10 +388,12 @@ func compressFamily(args map[string]any) (string, error) {
 		return store.FamilyMessagesText, nil
 	case "docs":
 		return store.FamilyDocsContent, nil
-	case store.FamilyMessagesText, store.FamilyDocsContent:
+	case "entries":
+		return store.FamilyEntriesRaw, nil
+	case store.FamilyMessagesText, store.FamilyDocsContent, store.FamilyEntriesRaw:
 		return family, nil
 	}
-	return "", fmt.Errorf("unknown family %q (want messages or docs)", family)
+	return "", fmt.Errorf("unknown family %q (want messages, docs or entries)", family)
 }
 
 func (h *callHandler) compressTrain(args map[string]any) (string, bool, error) {
@@ -436,4 +442,21 @@ func (h *callHandler) compressGC(args map[string]any) (string, bool, error) {
 			"rows", res.Rows, "compressed", res.Compressed, "saved", res.Saved, "done", res.Done)
 	}()
 	return fmt.Sprintf("Backfill of %s started in the background; poll op=compress_status. It is resumable: a restart continues from the last committed batch.", family), false, nil
+}
+
+// materialisation reports the 🎯T152 boot-time entries field pass, which
+// gates entries.raw compression.
+func (h *callHandler) materialisation() (string, error) {
+	c, ok := h.compressor()
+	if !ok {
+		return "", nil
+	}
+	done, err := c.EntriesMaterialised()
+	if err != nil {
+		return "", err
+	}
+	if done {
+		return "entries.fields: materialised (entries.raw may be compressed)", nil
+	}
+	return "entries.fields: boot-time materialisation still running; op=compress_gc family=entries is refused until it finishes", nil
 }

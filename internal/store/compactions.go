@@ -330,7 +330,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 	var args []any
 	if sinceEntryID >= 0 {
-		fromClause = `FROM (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > ?) chg
+		fromClause = `FROM (SELECT DISTINCT session_id FROM entries_v NOT INDEXED WHERE id > ?) chg
 		  CROSS JOIN session_summary ss ON ss.session_id = chg.session_id
 		  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 		args = append(args, sinceEntryID)
@@ -357,14 +357,15 @@ func (s *Store) SelectCompactionCandidatesSince(
 		      WHERE session_id = ss.session_id
 		    ), 0)                                                                                   AS comp_tokens,
 		    -- INDEXED BY is load-bearing, not a micro-optimisation
-		    -- (🎯T146). entries.input_tokens and friends are VIRTUAL
-		    -- generated columns extracting from raw JSONB, so an index
-		    -- that does not carry them forces a row fetch and a JSON
-		    -- re-parse per row. idx_entries_assistant_tokens covers
-		    -- (session_id, input_tokens, output_tokens); the planner
-		    -- instead chose idx_entries_addenda, which carries
-		    -- output/cache_creation but NOT input_tokens, and is
-		    -- therefore not covering here.
+		    -- (🎯T146). The token columns were VIRTUAL generated columns
+		    -- extracting from JSONB, so an index that does not carry
+		    -- them forced a row fetch and a JSON re-parse per row. The
+		    -- planner chose idx_entries_addenda, which carries
+		    -- output/cache_creation but NOT the input count, and is
+		    -- therefore not covering here. 🎯T152 materialised the
+		    -- columns (the *_m twins, read here on the base table
+		    -- because a view cannot take INDEXED BY) and the hint now
+		    -- pins their covering index, idx_entries_assistant_tokens_m.
 		    --
 		    -- Measured on a 35k-session / 2.2M-assistant-entry index:
 		    -- 1458ms planner's choice vs 131ms forced, identical result.
@@ -378,8 +379,8 @@ func (s *Store) SelectCompactionCandidatesSince(
 		    -- dropping it. If it ever did go, this fails loudly at query
 		    -- time rather than silently reverting to a 5-second scan.
 		    COALESCE((
-		      SELECT SUM(input_tokens + output_tokens) FROM entries
-		      INDEXED BY idx_entries_assistant_tokens
+		      SELECT SUM(input_tokens_m + output_tokens_m) FROM entries
+		      INDEXED BY idx_entries_assistant_tokens_m
 		      WHERE session_id = ss.session_id AND type = 'assistant'
 		    ), 0)                                                                                   AS sess_tokens,
 		    COALESCE((
@@ -421,7 +422,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  -- every compacted session owed again, forever.
 		  AND (CASE WHEN s.sess_tokens > 0 THEN COALESCE((
 		        SELECT SUM(e.output_tokens + e.cache_creation_tokens)
-		        FROM entries e
+		        FROM entries_v e
 		        WHERE e.session_id = s.session_id
 		          AND e.type = 'assistant'
 		          AND e.id > COALESCE((
@@ -477,7 +478,7 @@ func (s *Store) SelectCompactionCandidatesSince(
 // Returns 0 for an empty index.
 func (s *Store) CompactionScanWatermark() (int64, error) {
 	var maxID int64
-	if err := s.readDB.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM entries`).Scan(&maxID); err != nil {
+	if err := s.readDB.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM entries_v`).Scan(&maxID); err != nil {
 		return 0, fmt.Errorf("compaction scan watermark: %w", err)
 	}
 	return maxID, nil
@@ -589,7 +590,7 @@ func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error
 	var sessTokens int64
 	if err := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
-		FROM entries WHERE session_id = ? AND type = 'assistant'
+		FROM entries_v WHERE session_id = ? AND type = 'assistant'
 	`, sessionID).Scan(&sessTokens); err != nil {
 		return 0, fmt.Errorf("addenda tokens (session volume): %w", err)
 	}
@@ -608,7 +609,7 @@ func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error
 	var tokens int64
 	err := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(e.output_tokens + e.cache_creation_tokens), 0)
-		FROM entries e
+		FROM entries_v e
 		WHERE e.session_id = ?
 		  AND e.type = 'assistant'
 		  AND e.id > COALESCE((SELECT m.entry_id FROM messages m WHERE m.id = ?), 0)
@@ -673,7 +674,7 @@ func (s *Store) CompactedView(sessionID string, addendaLimit int) (*SessionCompa
 func (s *Store) SessionTokens(sessionID string) (input int64, output int64, err error) {
 	row := s.readDB.QueryRow(`
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
-		FROM entries
+		FROM entries_v
 		WHERE session_id = ? AND type = 'assistant'
 	`, sessionID)
 	if err := row.Scan(&input, &output); err != nil {

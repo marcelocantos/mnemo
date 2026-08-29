@@ -161,7 +161,7 @@ func (s *Store) AgentTrees(p AgentTreeParams) ([]AgentTree, error) {
 				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
 				MAX(COALESCE(%s, 0)) AS cw5m,
 				MAX(COALESCE(%s, 0)) AS cw1h
-			FROM entries e
+			FROM entries_v e
 			LEFT JOIN session_meta sm ON sm.session_id = e.session_id
 			WHERE %s
 			GROUP BY %s
@@ -520,7 +520,7 @@ func (s *Store) spawnLinks(since, until string) (spawnIndex, error) {
 		       e.session_id,
 		       COALESCE(e.raw->>'$.message.content[0].tool_use_id', ''),
 		       e.timestamp
-		FROM entries e
+		FROM entries_v e
 		WHERE e.timestamp >= ? AND e.timestamp <= ?
 		  AND e.raw->>'$.toolUseResult.agentId' IS NOT NULL`, from, until)
 	if err != nil {

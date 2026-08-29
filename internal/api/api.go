@@ -267,7 +267,7 @@ func (h *Handler) context(w http.ResponseWriter, r *http.Request) {
 				session_id,
 				model,
 				MAX(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0)) AS peak_input
-			FROM entries
+			FROM entries_v
 			WHERE input_tokens IS NOT NULL
 			GROUP BY session_id
 		) e ON e.session_id = s.session_id
@@ -528,7 +528,7 @@ func (h *Handler) dbstats(w http.ResponseWriter, r *http.Request) {
 			COALESCE(SUM(output_tokens), 0)         AS output_tokens,
 			COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
 			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
-		FROM entries
+		FROM entries_v
 		WHERE input_tokens IS NOT NULL
 		GROUP BY model
 	`)

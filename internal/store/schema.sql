@@ -222,7 +222,33 @@ CREATE TABLE entries (
 			data_command TEXT GENERATED ALWAYS AS (raw->>'$.data.command'),
 			data_hook_event TEXT GENERATED ALWAYS AS (raw->>'$.data.hookEvent'),
 			top_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.toolUseID'),
-			parent_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.parentToolUseID')
+			parent_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.parentToolUseID'),
+			-- 🎯T152: materialised copies of the generated columns above.
+			-- Written at ingest from the bound JSON and backfilled at boot
+			-- from the generated columns; once raw is compressed (raw NULL,
+			-- raw_z set) the generated columns are NULL and these are the
+			-- only source. Read them under their original names through
+			-- entries_v. Appended last so ADD COLUMN reproduces this order.
+			uuid_m TEXT,
+			model_m TEXT,
+			stop_reason_m TEXT,
+			input_tokens_m INTEGER,
+			output_tokens_m INTEGER,
+			cache_read_tokens_m INTEGER,
+			cache_creation_tokens_m INTEGER,
+			agent_id_m TEXT,
+			version_m TEXT,
+			slug_m TEXT,
+			is_sidechain_m INTEGER,
+			data_type_m TEXT,
+			data_command_m TEXT,
+			data_hook_event_m TEXT,
+			top_tool_use_id_m TEXT,
+			parent_tool_use_id_m TEXT,
+			-- 🎯T152: zstd frame of the JSON line when compressed; raw is
+			-- then NULL (an empty string would make the generated columns
+			-- raise "malformed JSON"). Read through mnemo_raw(raw, raw_z).
+			raw_z BLOB
 		);
 
 CREATE TABLE git_commits (
@@ -918,6 +944,22 @@ CREATE INDEX idx_entries_top_tool_use_id ON entries(top_tool_use_id) WHERE top_t
 
 CREATE INDEX idx_entries_type ON entries(type);
 
+-- 🎯T152: the generated-column indexes above go quiet as rows are
+-- compressed (their key becomes NULL); these are their materialised
+-- twins, which entries_v queries flatten onto.
+CREATE INDEX idx_entries_agent_id_m ON entries(agent_id_m) WHERE agent_id_m IS NOT NULL;
+CREATE INDEX idx_entries_assistant_tokens_m ON entries(session_id, input_tokens_m, output_tokens_m) WHERE type = 'assistant';
+CREATE INDEX idx_entries_assistant_usage_m
+			ON entries(timestamp, model_m, input_tokens_m, output_tokens_m, cache_read_tokens_m, cache_creation_tokens_m, session_id)
+			WHERE type = 'assistant';
+CREATE INDEX idx_entries_addenda_m ON entries(session_id, id, output_tokens_m, cache_creation_tokens_m) WHERE type = 'assistant';
+CREATE INDEX idx_entries_data_hook_event_m ON entries(data_hook_event_m) WHERE data_hook_event_m IS NOT NULL;
+CREATE INDEX idx_entries_data_type_m ON entries(data_type_m) WHERE data_type_m IS NOT NULL;
+CREATE INDEX idx_entries_model_m ON entries(model_m) WHERE model_m IS NOT NULL;
+CREATE INDEX idx_entries_parent_tool_use_id_m ON entries(parent_tool_use_id_m) WHERE parent_tool_use_id_m IS NOT NULL;
+CREATE UNIQUE INDEX idx_entries_session_uuid_m ON entries(session_id, uuid_m) WHERE uuid_m IS NOT NULL;
+CREATE INDEX idx_entries_top_tool_use_id_m ON entries(top_tool_use_id_m) WHERE top_tool_use_id_m IS NOT NULL;
+
 CREATE INDEX idx_git_commits_date ON git_commits(commit_date);
 
 CREATE INDEX idx_git_commits_hash ON git_commits(commit_hash);
@@ -1268,12 +1310,39 @@ CREATE TRIGGER docs_au AFTER UPDATE ON docs
 			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
 		END;
 
+-- 🎯T152: any writer that inserts the legacy shape (raw only — a test
+-- seed, an older binary, a hand INSERT) gets its materialised twins
+-- filled from the generated columns, so entries_v reads it correctly.
+-- mnemo's own writer sets uuid_m itself and the WHEN clause skips it.
+CREATE TRIGGER entries_materialise AFTER INSERT ON entries
+		WHEN new.uuid_m IS NULL AND new.model_m IS NULL AND new.raw IS NOT NULL
+		BEGIN
+			UPDATE entries SET
+				uuid_m = uuid,
+				model_m = model,
+				stop_reason_m = stop_reason,
+				input_tokens_m = input_tokens,
+				output_tokens_m = output_tokens,
+				cache_read_tokens_m = cache_read_tokens,
+				cache_creation_tokens_m = cache_creation_tokens,
+				agent_id_m = agent_id,
+				version_m = version,
+				slug_m = slug,
+				is_sidechain_m = is_sidechain,
+				data_type_m = data_type,
+				data_command_m = data_command,
+				data_hook_event_m = data_hook_event,
+				top_tool_use_id_m = top_tool_use_id,
+				parent_tool_use_id_m = parent_tool_use_id
+			WHERE id = new.id;
+		END;
+
 CREATE TRIGGER entries_file_snapshot AFTER INSERT ON entries
 		WHEN new.type = 'file-history-snapshot'
 		BEGIN
 			INSERT INTO snapshot_files (entry_id, session_id, file_path, backup_time)
 			SELECT new.id, new.session_id, f.key, f.value->>'backupTime'
-			FROM json_each(new.raw, '$.snapshot.trackedFileBackups') f
+			FROM json_each(mnemo_raw(new.raw, new.raw_z), '$.snapshot.trackedFileBackups') f
 			WHERE f.key != '';
 
 			INSERT INTO snapshot_files_fts(rowid, file_path)
@@ -1625,3 +1694,27 @@ CREATE VIEW docs_v AS
 			content_hash, size, mtime, indexed_at, taxonomy, doc_date,
 			doc_status, doc_target, doc_source
 		FROM docs;
+
+-- 🎯T152: entries with raw decoded and the sixteen hot fields under
+-- their original names, sourced from the materialised columns. A simple
+-- projection, so SQLite flattens queries onto the *_m indexes.
+CREATE VIEW entries_v AS
+		SELECT id, session_id, project, type, timestamp,
+			mnemo_raw(raw, raw_z) AS raw,
+			uuid_m AS uuid,
+			model_m AS model,
+			stop_reason_m AS stop_reason,
+			input_tokens_m AS input_tokens,
+			output_tokens_m AS output_tokens,
+			cache_read_tokens_m AS cache_read_tokens,
+			cache_creation_tokens_m AS cache_creation_tokens,
+			agent_id_m AS agent_id,
+			version_m AS version,
+			slug_m AS slug,
+			is_sidechain_m AS is_sidechain,
+			data_type_m AS data_type,
+			data_command_m AS data_command,
+			data_hook_event_m AS data_hook_event,
+			top_tool_use_id_m AS top_tool_use_id,
+			parent_tool_use_id_m AS parent_tool_use_id
+		FROM entries;

@@ -5,11 +5,13 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // longText builds a row comfortably over compressMinBytes with enough
@@ -382,5 +384,158 @@ func TestDocsWriterUsesLegacyShapeUntilCodecReady(t *testing.T) {
 	}
 	if plain != content || z != nil {
 		t.Fatalf("legacy shape expected: plain=%d z=%d", len(plain), len(z))
+	}
+}
+
+// entryFixture builds an assistant entry with usage, the shape the hot
+// entries fields are extracted from.
+func entryFixture(uuid, model, text, ts string, in, out int) map[string]any {
+	e := msg("assistant", text, ts)
+	e["uuid"] = uuid
+	e["agentId"] = "agent-1"
+	e["version"] = "2.0.0"
+	e["slug"] = "slug-x"
+	e["isSidechain"] = true
+	m := e["message"].(map[string]any)
+	m["id"] = "msg-" + uuid
+	m["model"] = model
+	m["stop_reason"] = "end_turn"
+	m["usage"] = map[string]any{"input_tokens": in, "output_tokens": out, "cache_read_input_tokens": 7, "cache_creation_input_tokens": 3}
+	return e
+}
+
+func TestEntriesRawCompressedAndFieldsMaterialised(t *testing.T) {
+	projectDir := t.TempDir()
+	writeJSONL(t, projectDir, "proj", "sess-e1", []map[string]any{
+		entryFixture("u-1", "claude-fable-5", longText("e1", 20), "2026-04-01T10:00:00Z", 100, 20),
+		entryFixture("u-2", "claude-fable-5", longText("e2", 20), "2026-04-01T10:01:00Z", 200, 40),
+	})
+	s := newTestStore(t, projectDir)
+	// A fresh store materialises at boot (nothing to do) — wait for it so
+	// the writer packs raw from the first ingest.
+	for i := 0; i < 100 && !s.codec.entriesPackable.Load(); i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !s.codec.entriesPackable.Load() {
+		t.Fatal("entries not packable after boot materialisation")
+	}
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Storage shape: raw NULL, raw_z set, generated columns NULL, *_m set.
+	var nullRaw, packed, genNull, mSet int
+	if err := s.readDB.QueryRow(`
+		SELECT SUM(raw IS NULL), SUM(raw_z IS NOT NULL), SUM(model IS NULL), SUM(model_m IS NOT NULL)
+		FROM entries WHERE session_id = 'sess-e1'`).Scan(&nullRaw, &packed, &genNull, &mSet); err != nil {
+		t.Fatal(err)
+	}
+	if nullRaw != 2 || packed != 2 || genNull != 2 || mSet != 2 {
+		t.Fatalf("shape: raw NULL=%d packed=%d gen NULL=%d m set=%d", nullRaw, packed, genNull, mSet)
+	}
+
+	// The view serves the fields and the decoded JSON.
+	var uuid, model string
+	var in, out, cr, cc, side int
+	var rawUUID string
+	if err := s.readDB.QueryRow(`
+		SELECT uuid, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, is_sidechain,
+		       json_extract(raw, '$.uuid')
+		FROM entries_v WHERE session_id = 'sess-e1' ORDER BY id LIMIT 1`).Scan(&uuid, &model, &in, &out, &cr, &cc, &side, &rawUUID); err != nil {
+		t.Fatal(err)
+	}
+	if uuid != "u-1" || model != "claude-fable-5" || in != 100 || out != 20 || cr != 7 || cc != 3 || side != 1 || rawUUID != "u-1" {
+		t.Fatalf("entries_v: uuid=%s model=%s in=%d out=%d cr=%d cc=%d side=%d rawUUID=%s", uuid, model, in, out, cr, cc, side, rawUUID)
+	}
+
+	// Usage analytics ride on entries_v's materialised columns.
+	usage, err := s.Usage(UsageParams{GroupBy: "model", Since: "2026-01-01T00:00:00Z", Until: "2026-12-31T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Total.InputTokens != 300 {
+		t.Fatalf("usage input tokens %d, want 300 (%+v)", usage.Total.InputTokens, usage.Rows)
+	}
+
+	// INSERT OR IGNORE still deduplicates on (session_id, uuid) after
+	// compression: re-ingesting the same file adds no rows.
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = 'sess-e1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("re-ingest produced %d rows, want 2", n)
+	}
+}
+
+func TestEntriesLegacyRowsMaterialisedThenCompressed(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	// Seed pre-🎯T152 rows: raw JSONB, no *_m, as an older binary wrote them.
+	tx, err := s.writeDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(entryInsertLegacySQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const rows = 2*backfillBatchRows + 7
+	for i := 0; i < rows; i++ {
+		e := entryFixture(fmt.Sprintf("u-%d", i), "claude-opus-5", longText("legacy", 3), "2026-04-01T10:00:00Z", i, 1)
+		line, _ := json.Marshal(e)
+		if _, err := stmt.Exec("sess-legacy", "proj", "assistant", "2026-04-01T10:00:00Z", string(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Reset the boot pass so this store's rows are visible to it.
+	if _, err := s.writeDB.Exec(`DELETE FROM compression_gc WHERE family = ?`, entriesFieldsFamily); err != nil {
+		t.Fatal(err)
+	}
+	s.codec.entriesPackable.Store(false)
+
+	// Compression is refused until the fields are materialised.
+	if _, err := s.CompressBackfill(context.Background(), FamilyEntriesRaw); err == nil {
+		t.Fatal("entries.raw backfill ran before materialisation")
+	}
+	res, err := s.MaterialiseEntries(context.Background())
+	if err != nil || !res.Done {
+		t.Fatalf("materialise: %+v %v", res, err)
+	}
+	var mSet int
+	if err := s.readDB.QueryRow(`SELECT SUM(uuid_m IS NOT NULL AND input_tokens_m IS NOT NULL) FROM entries WHERE session_id = 'sess-legacy'`).Scan(&mSet); err != nil {
+		t.Fatal(err)
+	}
+	if mSet != rows {
+		t.Fatalf("%d of %d rows materialised", mSet, rows)
+	}
+
+	res, err = s.CompressBackfill(context.Background(), FamilyEntriesRaw)
+	if err != nil || !res.Done || res.Compressed != rows {
+		t.Fatalf("compress: %+v %v", res, err)
+	}
+	var sumIn int64
+	var nullRaw, decodedOK int
+	if err := s.readDB.QueryRow(`
+		SELECT SUM(input_tokens), SUM(raw IS NULL), SUM(json_extract(raw, '$.message.model') = 'claude-opus-5')
+		FROM entries_v WHERE session_id = 'sess-legacy'`).Scan(&sumIn, &nullRaw, &decodedOK); err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(rows * (rows - 1) / 2); sumIn != want || decodedOK != rows {
+		t.Fatalf("after compression: sum(input)=%d want %d, decoded=%d/%d", sumIn, want, decodedOK, rows)
+	}
+	// The base table's raw is NULL for every row, so the view — not the
+	// generated columns — is what made the previous query correct.
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = 'sess-legacy' AND raw IS NULL`).Scan(&nullRaw); err != nil {
+		t.Fatal(err)
+	}
+	if nullRaw != rows {
+		t.Fatalf("%d rows still hold plain raw", rows-nullRaw)
 	}
 }

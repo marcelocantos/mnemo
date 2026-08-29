@@ -248,7 +248,7 @@ func backfillImages(s *Store) {
 	// Pass 1: entries with inline image blocks (newest first).
 	rows, err := s.readDB.Query(`
 		SELECT e.id, e.session_id, e.raw, COALESCE(e.timestamp, datetime('now'))
-		FROM entries e
+		FROM entries_v e
 		WHERE e.raw LIKE '%"type":"image"%'
 		ORDER BY e.timestamp DESC, e.id DESC`)
 	if err != nil {

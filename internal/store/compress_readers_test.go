@@ -76,8 +76,13 @@ func TestCompressedColumnsAreReadThroughMnemoText(t *testing.T) {
 var (
 	messagesTableRe = regexp.MustCompile(`(?i)\b(FROM|JOIN|UPDATE|DELETE\s+FROM)\s+messages\b`)
 	docsTableRe     = regexp.MustCompile(`(?i)\b(FROM|JOIN|UPDATE|DELETE\s+FROM)\s+docs\b`)
-	bareTextRe      = regexp.MustCompile(`(?i)(^|[^\w.'])(\w+\.)?text\b`)
-	bareContentRe   = regexp.MustCompile(`(?i)(^|[^\w.'])(\w+\.)?content\b`)
+	// 🎯T152: entries readers must use entries_v — the base table's
+	// generated columns and raw are NULL once a row is compressed.
+	entriesReadRe    = regexp.MustCompile(`(?i)\b(FROM|JOIN)\s+entries\b`)
+	entriesDeleteRe  = regexp.MustCompile(`(?i)\bDELETE\s+FROM\s+entries\b`)
+	entriesHotColsRe = regexp.MustCompile(`(?i)\b(raw|uuid|model|stop_reason|input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|agent_id|version|slug|is_sidechain|data_type|data_command|data_hook_event|top_tool_use_id|parent_tool_use_id)\b`)
+	bareTextRe       = regexp.MustCompile(`(?i)(^|[^\w.'])(\w+\.)?text\b`)
+	bareContentRe    = regexp.MustCompile(`(?i)(^|[^\w.'])(\w+\.)?content\b`)
 )
 
 // bareColumnReads returns the compressed columns that literal s reads
@@ -94,6 +99,15 @@ func bareColumnReads(s string) []string {
 		if bareContentRe.MatchString(stripSafeContent(s)) {
 			out = append(out, "docs.content")
 		}
+	}
+	// A read of entries that touches raw or a generated column must go
+	// through the view; id/session_id/type/timestamp-only reads (the GC
+	// cursor, existence checks) are fine on the base table.
+	// A literal pinning an idx_entries_*_m index is a deliberate base-table
+	// read of the materialised columns (a view cannot take INDEXED BY).
+	if entriesReadRe.MatchString(s) && entriesHotColsRe.MatchString(s) && !entriesDeleteRe.MatchString(s) &&
+		!strings.Contains(s, "INDEXED BY idx_entries_") {
+		out = append(out, "entries (use entries_v)")
 	}
 	return out
 }
@@ -126,6 +140,8 @@ func bareSnippet(s, col string) string {
 	var loc []int
 	if col == "messages.text" {
 		loc = bareTextRe.FindStringIndex(stripSafeText(s))
+	} else if strings.HasPrefix(col, "entries") {
+		loc = entriesReadRe.FindStringIndex(s)
 	} else {
 		loc = bareContentRe.FindStringIndex(stripSafeContent(s))
 	}

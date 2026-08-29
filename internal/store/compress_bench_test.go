@@ -61,3 +61,55 @@ func BenchmarkIngestMessages(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkIngestEntries measures the entries writer: legacy (raw only),
+// materialising (🎯T152 fields extracted from the bound JSON, raw plain),
+// and packed (raw compressed). Lines mimic an assistant record.
+//
+//	go test -tags sqlite_fts5 -run '^$' -bench BenchmarkIngestEntries -benchmem ./internal/store/
+func BenchmarkIngestEntries(b *testing.B) {
+	for _, mode := range []struct {
+		name          string
+		ready, packed bool
+	}{{"legacy", false, false}, {"materialised", true, false}, {"packed", true, true}} {
+		b.Run(mode.name, func(b *testing.B) {
+			s, err := New(filepath.Join(b.TempDir(), "bench.db"), b.TempDir())
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer s.Close()
+			s.codec.ready.Store(mode.ready)
+			s.codec.entriesPackable.Store(mode.packed)
+
+			const perFile = 200
+			entries := make([]parsedRawEntry, perFile)
+			var bytes int
+			for i := range entries {
+				line := fmt.Sprintf(`{"type":"assistant","uuid":"u-%d","timestamp":"2026-04-01T10:00:00Z","version":"2.0.0","agentId":"a1",`+
+					`"message":{"id":"msg-%d","model":"claude-fable-5","stop_reason":"end_turn",`+
+					`"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":900,"cache_creation_input_tokens":100},`+
+					`"content":[{"type":"text","text":"Reading internal/api/handler.go:%d — the handler validates the session token, then falls through to the retry path when the upstream returns 503. I'll add a bounded backoff and a test that asserts the third attempt succeeds."}]}}`, i, i, 120+i)
+				entries[i] = parsedRawEntry{entryType: "assistant", timestamp: "2026-04-01T10:00:00Z", raw: []byte(line)}
+				bytes += len(line)
+			}
+			b.ReportAllocs()
+			b.SetBytes(int64(bytes))
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				ws, err := s.newWriterState()
+				if err != nil {
+					b.Fatal(err)
+				}
+				sid := fmt.Sprintf("sess-%d", n)
+				s.writeParsedFile(ws, parsedFile{
+					path: filepath.Join(b.TempDir(), sid+".jsonl"), sessionID: sid, project: "bench",
+					entries: entries,
+				})
+				ws.Close()
+				if err := ws.tx.Commit(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

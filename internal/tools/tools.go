@@ -270,7 +270,10 @@ sqldeep example — repos with their recent sessions:
   GROUP BY sm.repo
 
 Tables:
-  entries (id, session_id, project, type, timestamp, raw)
+  entries_v — view (id, session_id, project, type, timestamp, raw, uuid, model, stop_reason, input_tokens, ...)
+    — READ ENTRIES HERE. The base table entries stores raw zstd-compressed in raw_z with
+      raw NULL and its generated columns NULL for those rows; entries_v decodes raw and
+      serves the fields from materialised columns.
     — every JSONL line stored as JSONB in 'raw'. Virtual columns:
       model, stop_reason, input_tokens, output_tokens,
       cache_read_tokens, cache_creation_tokens, agent_id, version,
@@ -333,11 +336,11 @@ Tables:
   github_prs_fts / github_issues_fts — FTS5 on title, body
 
 Join pattern — message with its entry metadata:
-  SELECT m.text, e.model, e.input_tokens FROM messages_v m JOIN entries e ON e.id = m.entry_id
+  SELECT m.text, e.model, e.input_tokens FROM messages_v m JOIN entries_v e ON e.id = m.entry_id
 
 Token usage query:
   SELECT date(timestamp) AS day, SUM(input_tokens) AS input, SUM(output_tokens) AS output
-  FROM entries WHERE type = 'assistant' GROUP BY day ORDER BY day DESC
+  FROM entries_v WHERE type = 'assistant' GROUP BY day ORDER BY day DESC
 
 File history — which sessions touched a file:
   SELECT sf.session_id, sf.backup_time, sm.repo

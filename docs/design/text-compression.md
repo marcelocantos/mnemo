@@ -159,3 +159,57 @@ JSONB, plus ~2 GB of indexes on its generated columns) is untouched.
 That is the next lever, and a different job: the generated columns
 would have to be materialised at ingest before `raw` can be compressed
 (🎯T152).
+
+## entries.raw (🎯T152)
+
+`entries.raw` is the JSON line of every transcript record, stored as
+JSONB — 17.6 GB, half the file, and JSONB is 0.98 of the text size, so
+it was never a compression format. Measured on 4,500 random rows:
+per-row zstd 0.395 without a dictionary, **0.321 with**.
+
+The obstacle is not the codec but the sixteen generated columns
+(`uuid`, `model`, token counts, `agent_id`, `slug`, `is_sidechain`, hook
+fields, tool-use ids) that read `raw` with `->>`, and the twelve indexes
+over them. A generated column cannot see through a compressed blob, and
+the append-only policy cannot redefine or drop them. So:
+
+- Sixteen **materialised twins** (`uuid_m`, `model_m`, …) are real
+  columns, written at ingest from the bound JSON text (`?5->>'$.uuid'`
+  — numbered parameters let one bound value feed every expression) and
+  copied from the generated columns for historical rows.
+- Their indexes are duplicated (`idx_entries_*_m`), including the
+  UNIQUE `(session_id, uuid_m)` that `INSERT OR IGNORE` deduplicates on.
+- **`entries_v`** exposes the base columns, `mnemo_raw(raw, raw_z)` as
+  `raw`, and the sixteen fields under their *original* names from the
+  `_m` columns. It is a plain projection, so SQLite flattens queries
+  onto the `_m` indexes. Readers changed one token — `entries` →
+  `entries_v` — and the ratchet flags any `FROM|JOIN entries` literal
+  that touches `raw` or a generated column.
+- The sentinel for a compressed row is **`raw = NULL`**, not `''`: a
+  NULL makes every generated column NULL, whereas `''` makes them raise
+  "malformed JSON" and the insert fails.
+- `mnemo_raw` passes a JSONB blob through and decodes a frame to JSON
+  text; every reader hands the result to a `json_*` function, which
+  accepts either.
+
+### Ordering, and why the boot pass exists
+
+Readers source the fields from `_m` exclusively, so a row without them
+reads NULL — wrong usage totals, a missing model. Historical rows get
+theirs from a **boot-time materialisation pass** (`entries.fields` in
+`compression_gc`): id-ordered batches of `UPDATE … SET uuid_m =
+COALESCE(uuid_m, uuid), …`, resumable, automatic once compression is
+ready. Until it reports done, two things hold back:
+
+- `op=compress_gc family=entries` is refused, and
+- the writer keeps storing `raw` as JSONB even though it also writes
+  `_m`, because `INSERT OR IGNORE` must keep its `(session_id, uuid)`
+  key against rows that have no `uuid_m` yet.
+
+After it, new rows write `raw = NULL, raw_z = frame`, and the GC's
+UPDATE materialises and clears in one statement (RHS values are the
+pre-update row).
+
+`messages.tool_input` (0.38 GB behind fifteen `tool_*` generated
+columns) is deliberately left alone: 1% of the file does not justify
+fifteen more materialised columns.

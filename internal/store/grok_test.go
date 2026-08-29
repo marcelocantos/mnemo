@@ -337,7 +337,7 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	// Model on assistant entries
 	var model string
 	if err := s.readDB.QueryRow(
-		`SELECT model FROM entries WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL AND model != '' LIMIT 1`,
+		`SELECT model FROM entries_v WHERE session_id = ? AND type = 'assistant' AND model IS NOT NULL AND model != '' LIMIT 1`,
 		grokSessUUID,
 	).Scan(&model); err != nil || model != "grok-4.5" {
 		t.Errorf("model = %q err=%v", model, err)
@@ -346,7 +346,7 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	// Usage tokens from signals
 	var inTok int
 	if err := s.readDB.QueryRow(
-		`SELECT input_tokens FROM entries WHERE session_id = ? AND input_tokens > 0 LIMIT 1`,
+		`SELECT input_tokens FROM entries_v WHERE session_id = ? AND input_tokens > 0 LIMIT 1`,
 		grokSessUUID,
 	).Scan(&inTok); err != nil || inTok != 12345 {
 		t.Errorf("input_tokens = %d err=%v, want 12345", inTok, err)
@@ -381,7 +381,7 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	// Idempotency
 	entryCount := func() int {
 		var n int
-		_ = s.readDB.QueryRow(`SELECT count(*) FROM entries WHERE session_id = ?`, grokSessUUID).Scan(&n)
+		_ = s.readDB.QueryRow(`SELECT count(*) FROM entries_v WHERE session_id = ?`, grokSessUUID).Scan(&n)
 		return n
 	}
 	before := entryCount()
