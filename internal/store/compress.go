@@ -932,10 +932,11 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 			return err
 		}
 		var lo, hi sql.NullInt64
+		var count int64
 		err := s.readDB.QueryRowContext(ctx, `
-			SELECT MIN(id), MAX(id) FROM (
+			SELECT MIN(id), MAX(id), COUNT(*) FROM (
 				SELECT id FROM entries WHERE id >= ? ORDER BY id LIMIT ?)`,
-			next, backfillBatchRows).Scan(&lo, &hi)
+			next, backfillBatchRows).Scan(&lo, &hi, &count)
 		if err != nil {
 			return err
 		}
@@ -952,7 +953,7 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 			return err
 		}
 		n, _ := r.RowsAffected()
-		res.Rows += hi.Int64 - lo.Int64 + 1
+		res.Rows += count
 		res.Compressed += n
 		next = hi.Int64 + 1
 		if err := s.saveBackfillCursor(entriesFieldsFamily, next, 0, false); err != nil {
