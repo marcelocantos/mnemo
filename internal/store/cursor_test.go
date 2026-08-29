@@ -206,7 +206,7 @@ func TestCursorIngestEndToEnd(t *testing.T) {
 
 	var nPath int
 	if err := s.readDB.QueryRow(
-		`SELECT count(*) FROM messages WHERE session_id = ? AND tool_file_path = '/tmp/auth.go'`,
+		`SELECT count(*) FROM messages_v WHERE session_id = ? AND tool_file_path = '/tmp/auth.go'`,
 		cursorSessUUID,
 	).Scan(&nPath); err != nil || nPath < 1 {
 		t.Errorf("tool_file_path count = %d err=%v", nPath, err)
@@ -214,7 +214,7 @@ func TestCursorIngestEndToEnd(t *testing.T) {
 
 	entryCount := func() int {
 		var n int
-		_ = s.readDB.QueryRow(`SELECT count(*) FROM entries WHERE session_id = ?`, cursorSessUUID).Scan(&n)
+		_ = s.readDB.QueryRow(`SELECT count(*) FROM entries_v WHERE session_id = ?`, cursorSessUUID).Scan(&n)
 		return n
 	}
 	before := entryCount()
@@ -321,7 +321,7 @@ func TestCursorLiveCorpus(t *testing.T) {
 	var nSess, nCursor, nCwd, nUser int
 	rows, err := s.readDB.Query(`
 		SELECT sm.session_id, sm.source, sm.cwd,
-		       (SELECT count(*) FROM messages m
+		       (SELECT count(*) FROM messages_v m
 		         WHERE m.session_id = sm.session_id AND m.role = 'user' AND m.content_type = 'text')
 		FROM session_meta sm WHERE sm.source = 'cursor'`)
 	if err != nil {
@@ -380,16 +380,16 @@ func TestCursorLiveCorpus(t *testing.T) {
 	}
 
 	var nTool, nPath, nEnded, nRedacted int
-	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE content_type = 'tool_use' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nTool); err != nil {
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages_v WHERE content_type = 'tool_use' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nTool); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE tool_file_path != '' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nPath); err != nil {
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages_v WHERE tool_file_path != '' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE text LIKE '%turn_ended%' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nEnded); err != nil {
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages_v WHERE text LIKE '%turn_ended%' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nEnded); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages WHERE text = '[REDACTED]' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nRedacted); err != nil {
+	if err := s.readDB.QueryRow(`SELECT count(*) FROM messages_v WHERE text = '[REDACTED]' AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')`).Scan(&nRedacted); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("live messages tool_use=%d tool_file_path=%d turn_ended=%d redacted=%d", nTool, nPath, nEnded, nRedacted)
@@ -408,7 +408,7 @@ func TestCursorLiveCorpus(t *testing.T) {
 
 	var sample string
 	if err := s.readDB.QueryRow(`
-		SELECT text FROM messages
+		SELECT text FROM messages_v
 		WHERE role = 'user' AND content_type = 'text' AND length(text) >= 24
 		  AND session_id IN (SELECT session_id FROM session_meta WHERE source = 'cursor')
 		ORDER BY length(text) DESC

@@ -116,6 +116,9 @@ func newTestStore(t *testing.T, projectDir string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Boot-time codec work writes (dictionary auto-train, 🎯T152 entries
+	// materialisation cursor); settle it before the test observes the DB.
+	s.AwaitCodecBoot()
 	t.Cleanup(func() { s.Close() })
 	return s
 }
@@ -487,7 +490,7 @@ func TestQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM messages WHERE session_id = 'sess-query'")
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM messages_v WHERE session_id = 'sess-query'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +520,7 @@ func TestQuery(t *testing.T) {
 	}
 
 	// Writes through Query must not have actually mutated state.
-	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM messages WHERE session_id = 'sess-query'")
+	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM messages_v WHERE session_id = 'sess-query'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +529,7 @@ func TestQuery(t *testing.T) {
 	}
 
 	// WITH (CTE) queries should work.
-	rows, err = s.Query("WITH s AS (SELECT COUNT(*) AS c FROM messages) SELECT c FROM s")
+	rows, err = s.Query("WITH s AS (SELECT COUNT(*) AS c FROM messages_v) SELECT c FROM s")
 	if err != nil {
 		t.Fatalf("expected WITH query to work, got %v", err)
 	}
@@ -827,7 +830,7 @@ func TestToolUseIngest(t *testing.T) {
 	}
 
 	// Query for Edit tool uses via the computed file_path column.
-	rows, err := s.Query("SELECT tool_name, tool_file_path FROM messages WHERE tool_name = 'Edit'")
+	rows, err := s.Query("SELECT tool_name, tool_file_path FROM messages_v WHERE tool_name = 'Edit'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -839,7 +842,7 @@ func TestToolUseIngest(t *testing.T) {
 	}
 
 	// Query for Bash commands via the computed command column.
-	rows, err = s.Query("SELECT tool_command FROM messages WHERE tool_name = 'Bash'")
+	rows, err = s.Query("SELECT tool_command FROM messages_v WHERE tool_name = 'Bash'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +854,7 @@ func TestToolUseIngest(t *testing.T) {
 	}
 
 	// Query for failed tool results.
-	rows, err = s.Query("SELECT text, is_error FROM messages WHERE content_type = 'tool_result' AND is_error = 1")
+	rows, err = s.Query("SELECT text, is_error FROM messages_v WHERE content_type = 'tool_result' AND is_error = 1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +863,7 @@ func TestToolUseIngest(t *testing.T) {
 	}
 
 	// Query for thinking blocks.
-	rows, err = s.Query("SELECT text FROM messages WHERE content_type = 'thinking'")
+	rows, err = s.Query("SELECT text FROM messages_v WHERE content_type = 'thinking'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,8 +877,8 @@ func TestToolUseIngest(t *testing.T) {
 	// Join tool_use to tool_result via tool_use_id.
 	rows, err = s.Query(`
 		SELECT tu.tool_name, tr.text AS result, tr.is_error
-		FROM messages tu
-		JOIN messages tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
+		FROM messages_v tu
+		JOIN messages_v tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
 		WHERE tu.content_type = 'tool_use'
 		ORDER BY tu.id
 	`)
@@ -1065,7 +1068,7 @@ func TestEntriesTable(t *testing.T) {
 	}
 
 	// All 5 JSONL lines should be in entries.
-	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM entries")
+	rows, err := s.Query("SELECT COUNT(*) AS cnt FROM entries_v")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1074,7 +1077,7 @@ func TestEntriesTable(t *testing.T) {
 	}
 
 	// Verify entry types.
-	rows, err = s.Query("SELECT type, COUNT(*) AS cnt FROM entries GROUP BY type ORDER BY type")
+	rows, err = s.Query("SELECT type, COUNT(*) AS cnt FROM entries_v GROUP BY type ORDER BY type")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1092,8 +1095,10 @@ func TestEntriesTable(t *testing.T) {
 		t.Errorf("expected 1 system entry, got %d", typeCounts["system"])
 	}
 
-	// Verify virtual columns on assistant entry.
-	rows, err = s.Query("SELECT model, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, version, slug FROM entries WHERE type = 'assistant'")
+	// Verify the hot entry fields on the assistant entry. Read through
+	// entries_v (🎯T152): the base table's generated columns are NULL once
+	// a row is compressed, and this is the agent-facing SQL path.
+	rows, err = s.Query("SELECT model, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, version, slug FROM entries_v WHERE type = 'assistant'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1127,7 +1132,7 @@ func TestEntriesTable(t *testing.T) {
 	}
 
 	// Verify progress event virtual columns.
-	rows, err = s.Query("SELECT data_type, agent_id, parent_tool_use_id FROM entries WHERE type = 'progress' AND data_type = 'bash_progress'")
+	rows, err = s.Query("SELECT data_type, agent_id, parent_tool_use_id FROM entries_v WHERE type = 'progress' AND data_type = 'bash_progress'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1142,7 +1147,7 @@ func TestEntriesTable(t *testing.T) {
 	}
 
 	// Verify hook progress.
-	rows, err = s.Query("SELECT data_type, data_hook_event, data_command FROM entries WHERE data_type = 'hook_progress'")
+	rows, err = s.Query("SELECT data_type, data_hook_event, data_command FROM entries_v WHERE data_type = 'hook_progress'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1157,7 +1162,7 @@ func TestEntriesTable(t *testing.T) {
 	}
 
 	// Only user/assistant should produce messages (2 entries → content blocks).
-	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM messages")
+	rows, err = s.Query("SELECT COUNT(*) AS cnt FROM messages_v")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1168,8 +1173,8 @@ func TestEntriesTable(t *testing.T) {
 	// Messages should be linked to entries via entry_id.
 	rows, err = s.Query(`
 		SELECT m.text, e.model, e.version
-		FROM messages m
-		JOIN entries e ON e.id = m.entry_id
+		FROM messages_v m
+		JOIN entries_v e ON e.id = m.entry_id
 		WHERE m.role = 'assistant'
 	`)
 	if err != nil {
@@ -1183,7 +1188,7 @@ func TestEntriesTable(t *testing.T) {
 	}
 
 	// Verify raw JSON access via json_extract.
-	rows, err = s.Query("SELECT json_extract(raw, '$.data.output') AS output FROM entries WHERE data_type = 'bash_progress'")
+	rows, err = s.Query("SELECT json_extract(raw, '$.data.output') AS output FROM entries_v WHERE data_type = 'bash_progress'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2213,8 +2218,8 @@ func TestIngestIdempotent(t *testing.T) {
 
 	// Count rows after first ingest.
 	var entriesAfterFirst, messagesAfterFirst int
-	s.writeDB.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterFirst)
-	s.writeDB.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterFirst)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM entries_v WHERE session_id = 'sess-idem'").Scan(&entriesAfterFirst)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM messages_v WHERE session_id = 'sess-idem'").Scan(&messagesAfterFirst)
 
 	if entriesAfterFirst == 0 {
 		t.Fatal("expected entries after first ingest")
@@ -2237,8 +2242,8 @@ func TestIngestIdempotent(t *testing.T) {
 
 	// Row counts must be identical — no duplicates introduced.
 	var entriesAfterSecond, messagesAfterSecond int
-	s.writeDB.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = 'sess-idem'").Scan(&entriesAfterSecond)
-	s.writeDB.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = 'sess-idem'").Scan(&messagesAfterSecond)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM entries_v WHERE session_id = 'sess-idem'").Scan(&entriesAfterSecond)
+	s.writeDB.QueryRow("SELECT COUNT(*) FROM messages_v WHERE session_id = 'sess-idem'").Scan(&messagesAfterSecond)
 
 	if entriesAfterSecond != entriesAfterFirst {
 		t.Errorf("entries duplicated: first=%d second=%d", entriesAfterFirst, entriesAfterSecond)

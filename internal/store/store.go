@@ -101,6 +101,11 @@ type Store struct {
 	backfill backfillState
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
+	// codecBoot closes when boot-time codec work (dictionary auto-train
+	// and the 🎯T152 entries materialisation) has finished or been
+	// cancelled. Both write to the DB, so anything that measures the
+	// database or its WAL must wait on AwaitCodecBoot first.
+	codecBoot chan struct{}
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
@@ -1187,6 +1192,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		codec:       newTextCodec(),
 		bgCtx:       bgCtx,
 		bgCancel:    bgCancel,
+		codecBoot:   make(chan struct{}),
 		imageSem:    make(chan struct{}, n),
 		exclusions:  &exclusionRegistry{},
 		upgradeDone: done,
@@ -1216,6 +1222,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		boot.SetUpgrade("queued: pre-migration backup + schema apply")
 		go func() {
 			defer close(done)
+			defer close(s.codecBoot)
 			if err := upgradeSchema(dbPath); err != nil {
 				// Same degrade posture as a rejected sync apply: keep
 				// serving; new code paths that need missing columns fail
@@ -1235,12 +1242,25 @@ func New(dbPath, projectDir string) (*Store, error) {
 		close(done)
 		s.enableCompression()
 		go func() {
+			defer close(s.codecBoot)
 			s.autoTrainDictionaries(s.bgCtx)
 			s.materialiseEntriesAtBoot(s.bgCtx)
 		}()
 	}
 
 	return s, nil
+}
+
+// AwaitCodecBoot blocks until boot-time codec work has finished: the
+// dictionary auto-train and the 🎯T152 entries field materialisation,
+// both of which write. Tests that measure the database, its WAL, or
+// row counts must call this first, or they race those writes — the
+// symptom is a size assertion that fails only under load or on a
+// slower filesystem.
+func (s *Store) AwaitCodecBoot() {
+	if s.codecBoot != nil {
+		<-s.codecBoot
+	}
 }
 
 // AwaitSchemaUpgrade blocks until any deferred schema upgrade has

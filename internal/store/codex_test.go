@@ -294,7 +294,7 @@ func TestCodexIngestEndToEnd(t *testing.T) {
 	}
 	var usageN int
 	if err := s.readDB.QueryRow(
-		`SELECT count(*) FROM messages WHERE session_id = ? AND text LIKE '%[codex tokens]%'`,
+		`SELECT count(*) FROM messages_v WHERE session_id = ? AND text LIKE '%[codex tokens]%'`,
 		codexSessUUID,
 	).Scan(&usageN); err != nil || usageN < 1 {
 		t.Errorf("usage messages = %d err=%v", usageN, err)
@@ -309,7 +309,7 @@ func TestCodexIngestEndToEnd(t *testing.T) {
 	// cmd → command normalisation surfaces in tool_command.
 	var cmd string
 	if err := s.readDB.QueryRow(
-		`SELECT tool_command FROM messages WHERE session_id = ? AND tool_name = 'exec_command' LIMIT 1`,
+		`SELECT tool_command FROM messages_v WHERE session_id = ? AND tool_name = 'exec_command' LIMIT 1`,
 		codexSessUUID,
 	).Scan(&cmd); err != nil || !strings.Contains(cmd, "go build") {
 		t.Errorf("tool_command = %q err=%v", cmd, err)

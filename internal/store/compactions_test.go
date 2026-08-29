@@ -143,7 +143,7 @@ func TestAddendaTokens(t *testing.T) {
 	// Cursor at the first assistant message: only a2 counts = 230.
 	var firstAsstMsgID int64
 	if err := s.writeDB.QueryRow(
-		`SELECT MIN(id) FROM messages WHERE session_id='sess-at' AND role='assistant'`).Scan(&firstAsstMsgID); err != nil {
+		`SELECT MIN(id) FROM messages_v WHERE session_id='sess-at' AND role='assistant'`).Scan(&firstAsstMsgID); err != nil {
 		t.Fatalf("first asst msg id: %v", err)
 	}
 	if got, err := s.AddendaTokens("sess-at", firstAsstMsgID); err != nil {
@@ -236,11 +236,11 @@ func TestSelectCompactionCandidatesCursor(t *testing.T) {
 	// tokens remain as addenda ≥ budget → still owed.
 	var phaseOneMsgID, maxMsgID int64
 	if err := s.writeDB.QueryRow(
-		`SELECT MIN(id) FROM messages WHERE session_id='sess-cur' AND role='assistant'`).Scan(&phaseOneMsgID); err != nil {
+		`SELECT MIN(id) FROM messages_v WHERE session_id='sess-cur' AND role='assistant'`).Scan(&phaseOneMsgID); err != nil {
 		t.Fatalf("phase-one msg id: %v", err)
 	}
 	if err := s.writeDB.QueryRow(
-		`SELECT MAX(id) FROM messages WHERE session_id='sess-cur'`).Scan(&maxMsgID); err != nil {
+		`SELECT MAX(id) FROM messages_v WHERE session_id='sess-cur'`).Scan(&maxMsgID); err != nil {
 		t.Fatalf("max msg id: %v", err)
 	}
 	if _, err := s.PutCompaction(Compaction{
@@ -341,7 +341,7 @@ func TestSelectCompactionCandidatesBudgetRatioGuard(t *testing.T) {
 	// to sess_tokens (sum of input+output = 4×300 = 1200).
 	var firstMsgID int64
 	if err := s.writeDB.QueryRow(
-		`SELECT MIN(id) FROM messages WHERE session_id='sess-broke'`).Scan(&firstMsgID); err != nil {
+		`SELECT MIN(id) FROM messages_v WHERE session_id='sess-broke'`).Scan(&firstMsgID); err != nil {
 		t.Fatalf("first msg id: %v", err)
 	}
 	if _, err := s.PutCompaction(Compaction{
@@ -381,11 +381,11 @@ func TestSearchWeightsCompactions(t *testing.T) {
 	// Cursor at the second message: messages 1–2 are covered, 3 is addenda.
 	var coverTo, tailID int64
 	if err := s.writeDB.QueryRow(
-		`SELECT id FROM messages WHERE session_id='sess-search' AND text LIKE '%middle%'`).Scan(&coverTo); err != nil {
+		`SELECT id FROM messages_v WHERE session_id='sess-search' AND text LIKE '%middle%'`).Scan(&coverTo); err != nil {
 		t.Fatalf("cover-to id: %v", err)
 	}
 	if err := s.writeDB.QueryRow(
-		`SELECT id FROM messages WHERE session_id='sess-search' AND text LIKE '%tail%'`).Scan(&tailID); err != nil {
+		`SELECT id FROM messages_v WHERE session_id='sess-search' AND text LIKE '%tail%'`).Scan(&tailID); err != nil {
 		t.Fatalf("tail id: %v", err)
 	}
 	if _, err := s.PutCompaction(Compaction{
@@ -463,7 +463,7 @@ func TestCompactedView(t *testing.T) {
 	// Compact the opening (phase-one) span.
 	var p1MsgID int64
 	if err := s.writeDB.QueryRow(
-		`SELECT MIN(id) FROM messages WHERE session_id='sess-cv' AND role='assistant'`).Scan(&p1MsgID); err != nil {
+		`SELECT MIN(id) FROM messages_v WHERE session_id='sess-cv' AND role='assistant'`).Scan(&p1MsgID); err != nil {
 		t.Fatalf("phase-one msg id: %v", err)
 	}
 	if _, err := s.PutCompaction(Compaction{
@@ -727,7 +727,7 @@ func TestSelectCompactionCandidatesTokenlessSession(t *testing.T) {
 	// ever fails the test is passing for the wrong reason.
 	var sessTokens int64
 	if err := s.readDB.QueryRow(
-		`SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM entries
+		`SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM entries_v
 		 WHERE session_id = 'sess-tokenless'`).Scan(&sessTokens); err != nil {
 		t.Fatal(err)
 	}

@@ -122,7 +122,7 @@ func TestCompressLiveCorpus(t *testing.T) {
 	var n, bad int
 	if err := s.readDB.QueryRow(`
 		SELECT COUNT(*), SUM(length(mnemo_text(text, text_z)) = 0)
-		FROM (SELECT text, text_z FROM messages WHERE text_z IS NOT NULL ORDER BY random() LIMIT 20000)`).Scan(&n, &bad); err != nil {
+		FROM (SELECT text, text_z FROM messages_v WHERE text_z IS NOT NULL ORDER BY random() LIMIT 20000)`).Scan(&n, &bad); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("sampled %d compressed rows, %d decode empty", n, bad)

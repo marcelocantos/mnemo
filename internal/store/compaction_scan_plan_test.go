@@ -81,7 +81,7 @@ func TestCandidateScanPlanIsStableWithoutHint(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	const q = `EXPLAIN QUERY PLAN
 		SELECT COALESCE((
-		  SELECT SUM(input_tokens + output_tokens) FROM entries
+		  SELECT SUM(input_tokens + output_tokens) FROM entries_v
 		  WHERE session_id = ss.session_id AND type = 'assistant'
 		), 0) FROM session_summary ss`
 	rows, err := s.readDB.Query(q)
@@ -176,7 +176,7 @@ func TestIncrementalScanIsDrivenByChangedSessions(t *testing.T) {
 
 	const q = `EXPLAIN QUERY PLAN
 	  SELECT ss.session_id
-	  FROM (SELECT DISTINCT session_id FROM entries NOT INDEXED WHERE id > 0) chg
+	  FROM (SELECT DISTINCT session_id FROM entries_v NOT INDEXED WHERE id > 0) chg
 	  CROSS JOIN session_summary ss ON ss.session_id = chg.session_id
 	  LEFT JOIN session_meta sm ON sm.session_id = ss.session_id`
 

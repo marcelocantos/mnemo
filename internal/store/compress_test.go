@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // longText builds a row comfortably over compressMinBytes with enough
@@ -411,11 +410,8 @@ func TestEntriesRawCompressedAndFieldsMaterialised(t *testing.T) {
 		entryFixture("u-2", "claude-fable-5", longText("e2", 20), "2026-04-01T10:01:00Z", 200, 40),
 	})
 	s := newTestStore(t, projectDir)
-	// A fresh store materialises at boot (nothing to do) — wait for it so
-	// the writer packs raw from the first ingest.
-	for i := 0; i < 100 && !s.codec.entriesPackable.Load(); i++ {
-		time.Sleep(20 * time.Millisecond)
-	}
+	// newTestStore waits out the boot pass, so raw packs from the first
+	// ingest.
 	if !s.codec.entriesPackable.Load() {
 		t.Fatal("entries not packable after boot materialisation")
 	}

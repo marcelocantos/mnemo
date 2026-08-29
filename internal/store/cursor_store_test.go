@@ -57,7 +57,7 @@ func TestCursorACPSessionsExcluded(t *testing.T) {
 	}
 	var n int
 	if err := s.readDB.QueryRow(
-		`SELECT count(*) FROM messages WHERE text LIKE '%secret-acp-only-token%'`,
+		`SELECT count(*) FROM messages_v WHERE text LIKE '%secret-acp-only-token%'`,
 	).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestCursorStoreIngestEndToEnd(t *testing.T) {
 
 	var nResult int
 	if err := s.readDB.QueryRow(
-		`SELECT count(*) FROM messages WHERE session_id = ? AND content_type = 'tool_result'`, sess,
+		`SELECT count(*) FROM messages_v WHERE session_id = ? AND content_type = 'tool_result'`, sess,
 	).Scan(&nResult); err != nil || nResult < 1 {
 		t.Fatalf("tool_result count = %d err=%v", nResult, err)
 	}
@@ -216,7 +216,7 @@ func TestCursorStoreIngestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.readDB.QueryRow(
-		`SELECT count(*) FROM messages WHERE session_id = ? AND content_type = 'tool_result'`, sess,
+		`SELECT count(*) FROM messages_v WHERE session_id = ? AND content_type = 'tool_result'`, sess,
 	).Scan(&nResult); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestCursorLiveChatsCorpus(t *testing.T) {
 	}
 	var nResult int
 	if err := s.readDB.QueryRow(
-		`SELECT count(*) FROM messages WHERE content_type = 'tool_result'`,
+		`SELECT count(*) FROM messages_v WHERE content_type = 'tool_result'`,
 	).Scan(&nResult); err != nil {
 		t.Fatal(err)
 	}

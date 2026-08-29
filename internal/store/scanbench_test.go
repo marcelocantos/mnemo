@@ -66,17 +66,17 @@ func TestScanVariants(t *testing.T) {
     COALESCE(sm.compactor_internal,0) AS ci,
     COALESCE((SELECT MAX(entry_id_to) FROM compactions WHERE session_id=ss.session_id),0) AS cur,
     COALESCE((SELECT SUM(prompt_tokens+output_tokens) FROM compactions WHERE session_id=ss.session_id),0) AS ct,
-    COALESCE((SELECT SUM(input_tokens+output_tokens) FROM entries%s WHERE session_id=ss.session_id AND type='assistant'),0) AS st,
-    COALESCE((SELECT COUNT(*) FROM messages WHERE session_id=ss.session_id AND is_noise=0),0) AS sm2
+    COALESCE((SELECT SUM(input_tokens+output_tokens) FROM entries_v%s WHERE session_id=ss.session_id AND type='assistant'),0) AS st,
+    COALESCE((SELECT COUNT(*) FROM messages_v WHERE session_id=ss.session_id AND is_noise=0),0) AS sm2
   FROM session_summary ss LEFT JOIN session_meta sm ON sm.session_id=ss.session_id)
 SELECT COUNT(*) FROM session_state s
 WHERE s.ci=0
  AND (CASE WHEN s.st>0 THEN s.st ELSE s.sm2*4000 END = 0
       OR s.ct*1.0/(CASE WHEN s.st>0 THEN s.st ELSE s.sm2*4000 END) < 0.10)
- AND (CASE WHEN s.st>0 THEN COALESCE((SELECT SUM(e.output_tokens+e.cache_creation_tokens) FROM entries e
+ AND (CASE WHEN s.st>0 THEN COALESCE((SELECT SUM(e.output_tokens+e.cache_creation_tokens) FROM entries_v e
         WHERE e.session_id=s.session_id AND e.type='assistant'
-          AND e.id > COALESCE((SELECT m.entry_id FROM messages m WHERE m.id=s.cur),0)),0)
-      ELSE COALESCE((SELECT COUNT(*) FROM messages m WHERE m.session_id=s.session_id AND m.is_noise=0 AND m.id>s.cur),0)*4000 END) >= 50000`, m, h)
+          AND e.id > COALESCE((SELECT m.entry_id FROM messages_v m WHERE m.id=s.cur),0)),0)
+      ELSE COALESCE((SELECT COUNT(*) FROM messages_v m WHERE m.session_id=s.session_id AND m.is_noise=0 AND m.id>s.cur),0)*4000 END) >= 50000`, m, h)
 	}
 
 	run := func(label, q string) {
@@ -108,7 +108,7 @@ WHERE s.ci=0
   FROM entries INDEXED BY idx_entries_assistant_usage
   WHERE type='assistant' GROUP BY session_id),
 msgs AS (
-  SELECT session_id, COUNT(*) AS sm2 FROM messages WHERE is_noise=0 GROUP BY session_id),
+  SELECT session_id, COUNT(*) AS sm2 FROM messages_v WHERE is_noise=0 GROUP BY session_id),
 comp AS (
   SELECT session_id, MAX(entry_id_to) AS cur, SUM(prompt_tokens+output_tokens) AS ct
   FROM compactions GROUP BY session_id),
@@ -126,9 +126,9 @@ SELECT COUNT(*) FROM session_state s
 WHERE s.ci=0
  AND (CASE WHEN s.st>0 THEN s.st ELSE s.sm2*4000 END = 0
       OR s.ct*1.0/(CASE WHEN s.st>0 THEN s.st ELSE s.sm2*4000 END) < 0.10)
- AND (CASE WHEN s.st>0 THEN COALESCE((SELECT SUM(e.output_tokens+e.cache_creation_tokens) FROM entries e
+ AND (CASE WHEN s.st>0 THEN COALESCE((SELECT SUM(e.output_tokens+e.cache_creation_tokens) FROM entries_v e
         WHERE e.session_id=s.session_id AND e.type='assistant'
-          AND e.id > COALESCE((SELECT m.entry_id FROM messages m WHERE m.id=s.cur),0)),0)
-      ELSE COALESCE((SELECT COUNT(*) FROM messages m WHERE m.session_id=s.session_id AND m.is_noise=0 AND m.id>s.cur),0)*4000 END) >= 50000`
+          AND e.id > COALESCE((SELECT m.entry_id FROM messages_v m WHERE m.id=s.cur),0)),0)
+      ELSE COALESCE((SELECT COUNT(*) FROM messages_v m WHERE m.session_id=s.session_id AND m.is_noise=0 AND m.id>s.cur),0)*4000 END) >= 50000`
 	run("grouped joins (no correlated CTE)", grouped)
 }
