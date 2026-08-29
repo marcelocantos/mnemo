@@ -5,6 +5,7 @@ package store
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -90,9 +91,18 @@ func TestNoteWALSizeReportsGrowth(t *testing.T) {
 }
 
 // TestWALSizeMissingFile: no -wal means nothing to reclaim, not an error.
+//
+// walSize reads only s.dbPath, so the absent-file case is built by
+// pointing a bare Store at a path that was never opened. Deleting the
+// -wal out from under a live store does not work: POSIX unlinks an open
+// file happily, but Windows refuses, so the removal failed silently
+// there and the assertion saw a real WAL (8272 bytes on hms-vm, once
+// boot-time codec writes guaranteed one existed).
 func TestWALSizeMissingFile(t *testing.T) {
-	s := newTestStore(t, t.TempDir())
-	_ = os.Remove(s.dbPath + "-wal")
+	s := &Store{dbPath: filepath.Join(t.TempDir(), "never-opened.db")}
+	if _, err := os.Stat(s.dbPath + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("precondition: -wal should not exist, stat err = %v", err)
+	}
 	n, err := s.walSize()
 	if err != nil {
 		t.Errorf("missing -wal should not error: %v", err)
