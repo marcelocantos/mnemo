@@ -65,12 +65,16 @@ func cursorProject(cwd string) string {
 	return "cursor"
 }
 
-// cursorCwd prefers worker.log's workspacePath=, then a conservative
-// decode of the project-directory slug if that path exists on disk.
-// The slug encoding maps both "/" and "." to "-", so it is lossy —
-// a hyphenated repo name cannot be reconstructed, and we never guess
-// a path that is not a directory.
-func cursorCwd(projectDir string) string {
+// cursorCwd prefers meta.json (Agent CLI chat dir, 🎯T149.1), then
+// worker.log's workspacePath=, then a conservative decode of the
+// project-directory slug if that path exists on disk. The slug
+// encoding maps both "/" and "." to "-", so it is lossy — a
+// hyphenated repo name cannot be reconstructed, and we never guess a
+// path that is not a directory.
+func cursorCwd(projectDir, sessionID string) string {
+	if cwd := cursorReadChatMeta(cursorChatSessionDir(sessionID)).cwd; cwd != "" {
+		return cwd
+	}
 	if cwd := cursorCwdFromWorkerLog(projectDir); cwd != "" {
 		return cwd
 	}
@@ -164,13 +168,21 @@ func parseCursorFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	sessionID := cursorSessionID(path)
-	cwd := cursorCwd(cursorProjectDir(path))
+	chatMeta := cursorReadChatMeta(cursorChatSessionDir(sessionID))
+	cwd := cursorCwd(cursorProjectDir(path), sessionID)
 	pf := parsedFile{
 		path:      path,
 		sessionID: sessionID,
 		source:    "cursor",
 		cwd:       cwd,
 		project:   cursorProject(cwd),
+		model:     chatMeta.model,
+	}
+	if chatMeta.title != "" {
+		pf.topic = chatMeta.title
+		if len(pf.topic) > 200 {
+			pf.topic = pf.topic[:197] + "..."
+		}
 	}
 
 	reader := bufio.NewReader(f)
@@ -187,7 +199,7 @@ func parseCursorFile(path string, offset int64) (parsedFile, error) {
 			lastTS = ts
 		}
 		uuid := fmt.Sprintf("cursor-%s-%d", pf.sessionID, thisStart)
-		raw := injectCodexUUID(line, uuid)
+		raw := enrichGrokRaw(line, uuid, pf.model, 0, 0)
 		entryIdx := len(pf.entries)
 		pf.entries = append(pf.entries, parsedRawEntry{
 			entryType: entryType,
@@ -199,10 +211,13 @@ func parseCursorFile(path string, offset int64) (parsedFile, error) {
 			m.timestamp = ts
 			if entryType == "user" && m.contentType == "text" &&
 				m.isNoise == 0 && len(m.text) >= 10 && !isBoilerplate(m.text) &&
-				!isCursorInjectedContext(m.text) && pf.topic == "" {
-				pf.topic = m.text
-				if len(pf.topic) > 200 {
-					pf.topic = pf.topic[:197] + "..."
+				!isCursorInjectedContext(m.text) {
+				// Prefer a real user_query over the meta.json title once we have one.
+				if pf.topic == "" || pf.topic == chatMeta.title {
+					pf.topic = m.text
+					if len(pf.topic) > 200 {
+						pf.topic = pf.topic[:197] + "..."
+					}
 				}
 			}
 			pf.messages = append(pf.messages, m)
@@ -482,7 +497,7 @@ func (s *Store) ingestCursorFile(path string) error {
 		return err
 	}
 
-	ws, err := newWriterState(s.writeDB)
+	ws, err := s.newWriterState()
 	if err != nil {
 		return err
 	}

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/marcelocantos/mnemo/internal/iterm"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/terminal"
 	"github.com/marcelocantos/mnemo/internal/threads"
 )
 
@@ -143,7 +143,7 @@ func (h *callHandler) threadGo(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("%v", err), true, nil
 	}
-	res, err := iterm.Go(h.ctx, iterm.GoArgs{
+	res, err := terminal.Go(h.ctx, terminal.GoArgs{
 		Path:     path,
 		Name:     filepath.Base(path),
 		NoResume: noResume,

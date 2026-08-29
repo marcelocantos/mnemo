@@ -64,6 +64,10 @@ type Config struct {
 	// retained "ui" SSE event, no daemon restart.
 	MenuBarApp bool `json:"menu_bar_app,omitempty"`
 
+	// Terminal selects which app opens threads and resumes sessions
+	// (🎯T126). Read per Go() — no daemon restart. Empty backend → iterm2.
+	Terminal TerminalConfig `json:"terminal,omitempty"`
+
 	// DisableOCR turns image OCR off entirely (🎯T118). OCR runs in a
 	// child process so a framework abort can no longer take the daemon
 	// down, but on a machine whose Vision/Metal stack is broken every
@@ -607,6 +611,32 @@ func (c BudgetConfig) Location() *time.Location {
 	return loc
 }
 
+// Terminal backend names accepted by TerminalConfig.Backend (🎯T126).
+const (
+	TerminalBackendITerm2 = "iterm2"
+	TerminalBackendCmux   = "cmux"
+)
+
+// TerminalConfig selects the app that opens threads and resumes sessions
+// (🎯T126). A zero value — section omitted — means iTerm2, preserving
+// pre-T126 behaviour. Read per open (no restart); an unsupported name
+// fails validation and Go naming the value rather than falling through
+// to a cryptic osascript error.
+type TerminalConfig struct {
+	// Backend is "iterm2" (default) or "cmux".
+	Backend string `json:"backend,omitempty"`
+}
+
+// EffectiveBackend returns the configured terminal backend, defaulting
+// to iterm2 when unset.
+func (c TerminalConfig) EffectiveBackend() string {
+	b := strings.TrimSpace(c.Backend)
+	if b == "" {
+		return TerminalBackendITerm2
+	}
+	return b
+}
+
 // ImageEmbeddingsConfig gates the CLIP image embedder (🎯T121). A
 // zero-value ImageEmbeddingsConfig — the section omitted from
 // config.json — means disabled, on the same reasoning as
@@ -1011,6 +1041,9 @@ func LoadConfig() (Config, error) {
 	if err := cfg.validateSummariser(); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.validateTerminal(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -1077,8 +1110,29 @@ func WriteConfig(cfg Config) error {
 	if err := cfg.validateSummariser(); err != nil {
 		return err
 	}
+	if err := cfg.validateTerminal(); err != nil {
+		return err
+	}
 	path := filepath.Join(home, ".mnemo", "config.json")
 	return writeConfigTo(path, cfg)
+}
+
+// validateTerminal rejects unknown terminal.backend values so a typo
+// fails at write/load time rather than at the next thread-go with a
+// cryptic osascript error (🎯T126).
+func (c Config) validateTerminal() error {
+	b := strings.TrimSpace(c.Terminal.Backend)
+	if b == "" {
+		return nil
+	}
+	switch b {
+	case TerminalBackendITerm2, TerminalBackendCmux:
+		return nil
+	default:
+		return fmt.Errorf(
+			"terminal.backend %q is not supported (want %q or %q)",
+			b, TerminalBackendITerm2, TerminalBackendCmux)
+	}
 }
 
 // validateSummariser rejects unknown summariser.provider values so a typo

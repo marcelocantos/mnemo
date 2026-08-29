@@ -44,6 +44,8 @@ func sourceFromPath(path string) (source, sessionID string, ok bool) {
 		return "codex", codexSessionID(path), true
 	case strings.Contains(slashed, "/.grok/"), isGrokUpdates(path):
 		return "grok", grokSessionID(path), true
+	case isCursorStore(path):
+		return "cursor", cursorStoreSessionID(path), true
 	case strings.Contains(slashed, "/.cursor/"), isCursorTranscript(path):
 		return "cursor", cursorSessionID(path), true
 	case strings.Contains(slashed, "/.claude/projects/"):
@@ -71,7 +73,7 @@ func sessionIDFromPath(path string) (string, bool) {
 	// directory over SMB, and silently skipping those would stop drift
 	// tagging for them. Codex and Grok are recognised by filename shape
 	// as well as by root, so they never reach here. Cursor is recognised
-	// by agent-transcripts/<id>/<id>.jsonl the same way.
+	// by agent-transcripts/<id>/<id>.jsonl and by chats/<hash>/<id>/store.db.
 	base := filepath.Base(path)
 	stem := strings.TrimSuffix(base, ".jsonl")
 	if stem == "" || stem == base {

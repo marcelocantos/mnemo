@@ -49,6 +49,10 @@ func Interest(path string, mode WatchMode) bool {
 			// Claude session jsonl, Codex rollout-*.jsonl, Grok updates.jsonl, etc.
 			return true
 		}
+		// Cursor Agent CLI store.db (🎯T149.1) — not JSONL; still a transcript source.
+		if base == "store.db" && hasPathComponent(clean, "chats") {
+			return true
+		}
 		if !strings.HasSuffix(strings.ToLower(base), ".md") {
 			return false
 		}

@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/marcelocantos/mnemo/internal/iterm"
 	"github.com/marcelocantos/mnemo/internal/render"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/terminal"
 	"github.com/marcelocantos/mnemo/internal/threads"
 )
 
@@ -233,9 +233,10 @@ func (h *Handler) threadNew(w http.ResponseWriter, r *http.Request) {
 }
 
 // threadGo serves POST /api/thread/go?name=&no_resume= — the daemon-owned
-// iTerm2 entry point (Integration §0.3). It resolves a bare name or path to an
-// absolute thread directory and focuses-or-spawns its tagged tab. The daemon
-// holds the single Automation TCC grant; the CLI and shim POST here.
+// terminal entry point (Integration §0.3, 🎯T126). It resolves a bare name or
+// path to an absolute thread directory and focuses-or-spawns its tagged
+// tab/workspace via the configured terminal backend. The daemon holds the
+// single Automation / socket identity; the CLI and shim POST here.
 func (h *Handler) threadGo(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	ref := q.Get("name")
@@ -258,7 +259,7 @@ func (h *Handler) threadGo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	res, err := iterm.Go(r.Context(), iterm.GoArgs{
+	res, err := terminal.Go(r.Context(), terminal.GoArgs{
 		Path:     path,
 		Name:     filepath.Base(path),
 		NoResume: noResume,

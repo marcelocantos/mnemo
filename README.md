@@ -434,7 +434,7 @@ patterns, and user notes via local TF-IDF by default; set
 
 | Tool | Description |
 |---|---|
-| `mnemo_config` | Read or update `~/.mnemo/config.json` without restarting the daemon. `op=read` returns the current effective config; `op=write` with a JSON `patch` merges, validates, persists, and hot-reloads. `vault_path`, `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, and `plugins` (🎯T102.2) are applied live; `linked_instances` is persisted but requires a restart. |
+| `mnemo_config` | Read or update `~/.mnemo/config.json` without restarting the daemon. `op=read` returns the current effective config; `op=write` with a JSON `patch` merges, validates, persists, and hot-reloads. `vault_path`, `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2), and `terminal.backend` (🎯T126, read per open: `iterm2` or `cmux`) are applied live; `linked_instances` is persisted but requires a restart. |
 
 For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
 or run `mnemo --help-agent`.
