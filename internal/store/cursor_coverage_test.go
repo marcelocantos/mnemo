@@ -273,9 +273,10 @@ func TestCursorIgnoresSiblingJSONL(t *testing.T) {
 }
 
 func TestCursorRootsForHonoursCURSOR_HOME(t *testing.T) {
-	t.Setenv("CURSOR_HOME", "/tmp/cursor-home-t149")
+	base := filepath.Join(t.TempDir(), "cursor-home-t149")
+	t.Setenv("CURSOR_HOME", base)
 	got := CursorRootsFor("/unused")
-	if len(got) != 1 || got[0] != "/tmp/cursor-home-t149/projects" {
+	if len(got) != 1 || got[0] != filepath.Join(base, "projects") {
 		t.Errorf("CursorRootsFor = %v", got)
 	}
 }

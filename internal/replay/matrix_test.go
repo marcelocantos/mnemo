@@ -4,6 +4,7 @@
 package replay
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,12 +21,12 @@ func TestMatrixOracle(t *testing.T) {
 	file := filepath.Join(cwd, "f.txt")
 
 	cases := []struct {
-		name    string
-		pre     []Op
-		op      Op
-		want    Outcome
-		reason  string
-		dryRun  bool
+		name   string
+		pre    []Op
+		op     Op
+		want   Outcome
+		reason string
+		dryRun bool
 	}{
 		{
 			name: "E1 patch_no_base",
@@ -99,13 +100,13 @@ func TestCursorWriteStrReplaceDelete(t *testing.T) {
 
 	writeOps, _ := OpFromToolRow(ToolRow{
 		Timestamp: ts, Source: "cursor", ToolName: "Write",
-		ToolInput: []byte(`{"file_path":"` + path + `","content":"hello"}`),
-		FilePath: path, CWD: cwd, Repo: "u/p", ResultError: &falseVal,
+		ToolInput: []byte(`{"file_path":` + jsonStr(path) + `,"content":"hello"}`),
+		FilePath:  path, CWD: cwd, Repo: "u/p", ResultError: &falseVal,
 	})
 	patchOps, _ := OpFromToolRow(ToolRow{
 		Timestamp: ts.Add(time.Second), Source: "cursor", ToolName: "StrReplace",
-		ToolInput: []byte(`{"file_path":"` + path + `","old_string":"hello","new_string":"world"}`),
-		FilePath: path, CWD: cwd, Repo: "u/p", ResultError: &falseVal,
+		ToolInput: []byte(`{"file_path":` + jsonStr(path) + `,"old_string":"hello","new_string":"world"}`),
+		FilePath:  path, CWD: cwd, Repo: "u/p", ResultError: &falseVal,
 	})
 	delOps, _ := OpFromToolRow(ToolRow{
 		Timestamp: ts.Add(2 * time.Second), Source: "cursor", ToolName: "Delete",
@@ -134,13 +135,13 @@ func TestGrokWriteSearchReplace(t *testing.T) {
 
 	w, _ := OpFromToolRow(ToolRow{
 		Timestamp: ts, Source: "grok", ToolName: "write",
-		ToolInput: []byte(`{"target_file":"` + path + `","content":"one"}`),
-		CWD: cwd, Repo: "g/g", ResultError: &falseVal,
+		ToolInput: []byte(`{"target_file":` + jsonStr(path) + `,"content":"one"}`),
+		CWD:       cwd, Repo: "g/g", ResultError: &falseVal,
 	})
 	p, _ := OpFromToolRow(ToolRow{
 		Timestamp: ts.Add(time.Second), Source: "grok", ToolName: "search_replace",
-		ToolInput: []byte(`{"file_path":"` + path + `","old_string":"one","new_string":"two"}`),
-		CWD: cwd, Repo: "g/g", ResultError: &falseVal,
+		ToolInput: []byte(`{"file_path":` + jsonStr(path) + `,"old_string":"one","new_string":"two"}`),
+		CWD:       cwd, Repo: "g/g", ResultError: &falseVal,
 	})
 	eng := NewEngine(DefaultConfig())
 	report, err := eng.Run(root, append(w, p...))
@@ -189,4 +190,12 @@ func TestCodexApplyPatchFixture(t *testing.T) {
 	if string(body) != "line1\nline2" {
 		t.Fatalf("body=%q", body)
 	}
+}
+
+// jsonStr encodes s as a JSON string literal. Test paths must go through
+// it: a Windows temp path pasted raw between quotes is invalid JSON (its
+// backslashes read as escapes), and OpFromToolRow then yields no op.
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

@@ -770,6 +770,9 @@ func (s *Store) saveBackfillCursor(family string, next int64, savedDelta int64, 
 // threshold, then retrains nothing — later retrains are an explicit op.
 func (s *Store) autoTrainDictionaries(ctx context.Context) {
 	for _, family := range []string{FamilyMessagesText, FamilyDocsContent} {
+		if ctx.Err() != nil {
+			return
+		}
 		if s.codec.ActiveDict(family) != 0 {
 			continue
 		}
@@ -777,8 +780,10 @@ func (s *Store) autoTrainDictionaries(ctx context.Context) {
 		var n int64
 		q := fmt.Sprintf(`SELECT COUNT(*) FROM %s`, fs.table)
 		if err := s.readDB.QueryRowContext(ctx, q).Scan(&n); err != nil {
-			slog.Warn("compression auto-train count failed", "family", family, "err", err)
-			continue
+			if ctx.Err() == nil {
+				slog.Warn("compression auto-train count failed", "family", family, "err", err)
+			}
+			return
 		}
 		if n < dictAutoTrainMinRow {
 			continue

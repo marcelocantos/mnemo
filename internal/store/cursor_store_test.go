@@ -234,9 +234,10 @@ func TestCursorStoreIngestEndToEnd(t *testing.T) {
 }
 
 func TestCursorChatRootsForHonoursCURSOR_HOME(t *testing.T) {
-	t.Setenv("CURSOR_HOME", "/tmp/cursor-home-t149-1")
+	base := filepath.Join(t.TempDir(), "cursor-home-t149-1")
+	t.Setenv("CURSOR_HOME", base)
 	got := CursorChatRootsFor("/unused")
-	if len(got) != 1 || got[0] != "/tmp/cursor-home-t149-1/chats" {
+	if len(got) != 1 || got[0] != filepath.Join(base, "chats") {
 		t.Errorf("CursorChatRootsFor = %v", got)
 	}
 }

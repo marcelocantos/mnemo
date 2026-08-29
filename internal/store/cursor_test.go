@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -246,6 +247,9 @@ func TestCursorIngestEndToEnd(t *testing.T) {
 }
 
 func TestCursorCwdFromSlugWhenWorkerLogHasNoWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cursorCwdFromSlug decodes POSIX slugs only; a Windows temp path has no slug form")
+	}
 	real := filepath.Join(t.TempDir(), "work", "github.com", "acme", "webapp")
 	if err := os.MkdirAll(real, 0o755); err != nil {
 		t.Fatal(err)

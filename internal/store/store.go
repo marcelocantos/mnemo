@@ -94,9 +94,13 @@ type Store struct {
 	projectDir string
 
 	// codec packs large text columns for storage (🎯T151); backfill
-	// tracks the historical-row GC. Both have their own locking.
+	// tracks the historical-row GC. Both have their own locking. bgCtx
+	// is cancelled by Close so background codec work (auto-train) stops
+	// before the handles go away.
 	codec    *textCodec
 	backfill backfillState
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
@@ -1173,6 +1177,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		n = 1
 	}
 	done := make(chan struct{})
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	s := &Store{
 		writeDB:     writeDB,
 		readDB:      readDB,
@@ -1180,6 +1185,8 @@ func New(dbPath, projectDir string) (*Store, error) {
 		projectDir:  projectDir,
 		offsets:     make(map[string]int64),
 		codec:       newTextCodec(),
+		bgCtx:       bgCtx,
+		bgCancel:    bgCancel,
 		imageSem:    make(chan struct{}, n),
 		exclusions:  &exclusionRegistry{},
 		upgradeDone: done,
@@ -1220,13 +1227,13 @@ func New(dbPath, projectDir string) (*Store, error) {
 				// Compressed writes need text_z/content_z; until here
 				// the writer stored plain rows on the old schema.
 				s.enableCompression()
-				s.autoTrainDictionaries(context.Background())
+				s.autoTrainDictionaries(s.bgCtx)
 			}
 		}()
 	} else {
 		close(done)
 		s.enableCompression()
-		go s.autoTrainDictionaries(context.Background())
+		go s.autoTrainDictionaries(s.bgCtx)
 	}
 
 	return s, nil
@@ -1252,6 +1259,9 @@ func (s *Store) Close() error {
 	// an in-flight VACUUM INTO or sqlift.Apply (🎯T114.1).
 	if s.upgradeDone != nil {
 		<-s.upgradeDone
+	}
+	if s.bgCancel != nil {
+		s.bgCancel()
 	}
 
 	// Drain order matters (🎯T97.1): quiesce the read pool first, then
