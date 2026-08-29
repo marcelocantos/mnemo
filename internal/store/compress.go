@@ -268,17 +268,6 @@ func newTextCodec() *textCodec {
 // after the deferred migration lands (🎯T114.1).
 func (s *Store) CompressionReady() bool { return s.codec.ready.Load() }
 
-// enableCompression loads the dictionaries and flips the codec to ready.
-// Called from New when the schema is current, and from the upgrade
-// goroutine once a deferred migration has applied.
-func (s *Store) enableCompression() {
-	if err := s.loadDicts(); err != nil {
-		slog.Warn("compression dictionaries not loaded; writing plain text", "err", err)
-		return
-	}
-	s.codec.ready.Store(true)
-}
-
 // loadDicts reads compression_dicts, registers every dictionary for
 // decoding and makes the newest per family the active encoder.
 func (s *Store) loadDicts() error {
@@ -959,23 +948,5 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 		if err := s.saveBackfillCursor(entriesFieldsFamily, next, 0, false); err != nil {
 			return err
 		}
-	}
-}
-
-// materialiseEntriesAtBoot runs MaterialiseEntries once compression is
-// ready, logging the outcome; a cancelled ctx (Close) is silent.
-func (s *Store) materialiseEntriesAtBoot(ctx context.Context) {
-	if ok, err := s.EntriesMaterialised(); err == nil && ok {
-		s.codec.entriesPackable.Store(true)
-		return
-	}
-	res, err := s.MaterialiseEntries(ctx)
-	switch {
-	case err != nil && ctx.Err() != nil:
-	case err != nil:
-		slog.Warn("entries field materialisation stopped", "rows", res.Rows, "err", err)
-	default:
-		s.codec.entriesPackable.Store(true)
-		slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
 	}
 }

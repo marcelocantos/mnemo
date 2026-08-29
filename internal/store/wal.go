@@ -67,18 +67,22 @@ const (
 // next tick tries again. Frames copied by a busy attempt are still
 // progress.
 func (s *Store) StartWALMaintenance(ctx context.Context) {
-	go func() {
+	// The caller's ctx and the store's bgCtx both stop this: goLoop
+	// passes bgCtx, and Close cancels it before draining.
+	s.goLoop("wal-maintenance", func(bg context.Context) error {
 		ticker := time.NewTicker(walMaintenanceInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				return
+				return nil
+			case <-bg.Done():
+				return nil
 			case <-ticker.C:
 				s.maybeCheckpointWAL()
 			}
 		}
-	}()
+	})
 }
 
 // maybeCheckpointWAL truncates the WAL when it has grown past the

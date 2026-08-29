@@ -116,9 +116,10 @@ func newTestStore(t *testing.T, projectDir string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Boot-time codec work writes (dictionary auto-train, 🎯T152 entries
-	// materialisation cursor); settle it before the test observes the DB.
-	s.AwaitCodecBoot()
+	// Startup writes (dictionary auto-train, the 🎯T152 entries
+	// materialisation cursor, image backfills); settle all of it before
+	// the test observes the database (🎯T154).
+	s.AwaitStartup()
 	t.Cleanup(func() { s.Close() })
 	return s
 }

@@ -1698,23 +1698,33 @@ CREATE VIEW docs_v AS
 -- 🎯T152: entries with raw decoded and the sixteen hot fields under
 -- their original names, sourced from the materialised columns. A simple
 -- projection, so SQLite flattens queries onto the *_m indexes.
+-- Each field is COALESCE(materialised, generated) so the view is correct
+-- at every point in the 🎯T152 rollout, not only after the boot-time
+-- materialisation finishes: a compressed row has raw NULL and only the
+-- _m value; a not-yet-materialised legacy row has only the generated
+-- value; a materialised row has both, equal. Without the COALESCE a
+-- reader in the materialisation window gets NULL — a silently wrong
+-- answer rather than an error, which is the worst failure mode of the
+-- three. The cost is that a filter on one of these columns cannot use
+-- idx_entries_*_m; queries that need the index read the base table
+-- directly under INDEXED BY (see SelectCompactionCandidates).
 CREATE VIEW entries_v AS
 		SELECT id, session_id, project, type, timestamp,
 			mnemo_raw(raw, raw_z) AS raw,
-			uuid_m AS uuid,
-			model_m AS model,
-			stop_reason_m AS stop_reason,
-			input_tokens_m AS input_tokens,
-			output_tokens_m AS output_tokens,
-			cache_read_tokens_m AS cache_read_tokens,
-			cache_creation_tokens_m AS cache_creation_tokens,
-			agent_id_m AS agent_id,
-			version_m AS version,
-			slug_m AS slug,
-			is_sidechain_m AS is_sidechain,
-			data_type_m AS data_type,
-			data_command_m AS data_command,
-			data_hook_event_m AS data_hook_event,
-			top_tool_use_id_m AS top_tool_use_id,
-			parent_tool_use_id_m AS parent_tool_use_id
+			COALESCE(uuid_m, uuid) AS uuid,
+			COALESCE(model_m, model) AS model,
+			COALESCE(stop_reason_m, stop_reason) AS stop_reason,
+			COALESCE(input_tokens_m, input_tokens) AS input_tokens,
+			COALESCE(output_tokens_m, output_tokens) AS output_tokens,
+			COALESCE(cache_read_tokens_m, cache_read_tokens) AS cache_read_tokens,
+			COALESCE(cache_creation_tokens_m, cache_creation_tokens) AS cache_creation_tokens,
+			COALESCE(agent_id_m, agent_id) AS agent_id,
+			COALESCE(version_m, version) AS version,
+			COALESCE(slug_m, slug) AS slug,
+			COALESCE(is_sidechain_m, is_sidechain) AS is_sidechain,
+			COALESCE(data_type_m, data_type) AS data_type,
+			COALESCE(data_command_m, data_command) AS data_command,
+			COALESCE(data_hook_event_m, data_hook_event) AS data_hook_event,
+			COALESCE(top_tool_use_id_m, top_tool_use_id) AS top_tool_use_id,
+			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id
 		FROM entries;

@@ -486,6 +486,9 @@ func loadArchivedCard(path string) *RateCard {
 // is more honest than no prices at all. Only the absence of any card is a
 // reportable condition, and that is the doctor's job, not this loop's.
 func StartRateCardRefresher(ctx context.Context, log func(msg string, args ...any)) {
+	// Package-level: no Store to supervise it. Runs for the process's
+	// life and writes only the cached rate-card file, never SQLite, so it
+	// cannot race a database observer.
 	go func() {
 		// Check often; fetch rarely. The interval between checks is not
 		// the interval between fetches — a check that finds a fresh card

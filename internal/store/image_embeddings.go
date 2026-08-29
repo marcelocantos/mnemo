@@ -5,6 +5,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -286,7 +287,10 @@ func (s *Store) StartImageEmbedder() {
 		return
 	}
 	slog.Info("starting embedder backfill")
-	go processUnembeddedImages(s)
+	s.goOnce("image-embed-backfill", func(context.Context) error {
+		processUnembeddedImages(s)
+		return nil
+	})
 }
 
 // embedOneImage generates and stores an embedding for a single image.

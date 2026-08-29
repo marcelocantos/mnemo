@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -215,10 +216,11 @@ func (s *Store) triggerImageSidecars(imageID int64, data []byte, mimeType string
 // (🎯T105).
 func (s *Store) runSidecar(fn func()) {
 	s.imageSem <- struct{}{}
-	go func() {
+	s.goOnce("image-sidecar", func(context.Context) error {
 		defer func() { <-s.imageSem }()
 		fn()
-	}()
+		return nil
+	})
 }
 
 // extToMime maps common image extensions to MIME types.

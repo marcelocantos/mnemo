@@ -5,6 +5,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -101,7 +102,10 @@ func (s *Store) StartImageOCR() {
 		return
 	}
 	slog.Info("starting OCR backfill", "backend", backend)
-	go processPendingOCR(s.writeDB, backend)
+	s.goOnce("image-ocr-backfill", func(context.Context) error {
+		processPendingOCR(s.writeDB, backend)
+		return nil
+	})
 }
 
 // ocrOneImage runs OCR on a single newly-ingested image. Idempotent via

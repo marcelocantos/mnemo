@@ -232,6 +232,37 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		}},
 
 		// 🎯T145: stream reconciler overdue / hung pass visibility.
+		// Startup capability graph (🎯T154). startup.ready reports the
+		// coarse boot phase; this reports the declared capabilities, so a
+		// phase that failed or never resolved is visible here rather than
+		// only as a downstream symptom (a silently skipped backfill, an
+		// empty query result, a hung test).
+		diag.Check{Name: "startup.capabilities", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			st, _ := state()
+			if st == nil {
+				return storeNotReadyResult("startup.capabilities")
+			}
+			var pending, unavailable []string
+			for _, c := range st.StartupReport() {
+				switch c.State {
+				case "pending":
+					pending = append(pending, c.Name)
+				case "unavailable":
+					unavailable = append(unavailable, c.Name+" ("+c.Reason+")")
+				}
+			}
+			switch {
+			case len(unavailable) > 0:
+				return diag.Warning(
+					"startup capabilities unavailable: "+strings.Join(unavailable, "; "),
+					"the store is serving degraded: work requiring these is skipped with a logged reason rather than erroring. A failed schema upgrade is the usual cause — check the daemon log and restart to retry")
+			case len(pending) > 0:
+				return diag.Warning(
+					"startup capabilities still resolving: "+strings.Join(pending, ", "),
+					"normal during an upgrade boot (pre-migration backup, then the entries materialisation pass); if it persists past those, check the daemon log for a stuck phase")
+			}
+			return diag.Healthy("all startup capabilities available")
+		}},
 		diag.Check{Name: "streams.overdue", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {

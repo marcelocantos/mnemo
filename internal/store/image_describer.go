@@ -5,6 +5,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -168,18 +169,22 @@ func (s *Store) StartImageDescriber() {
 	}
 	w := describerBackfillWorkers()
 	slog.Info("starting describer backfill", "workers", w, "batch_size", describerBatchSize)
-	var wg sync.WaitGroup
-	for range w {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			drainDescriberQueue(s.writeDB)
-		}()
-	}
-	go func() {
+	// One supervised task owns the fan-out and joins it, so an external
+	// AwaitStartup covers the whole backfill rather than returning while
+	// workers are still writing image_descriptions (🎯T154).
+	s.goOnce("image-describe-backfill", func(context.Context) error {
+		var wg sync.WaitGroup
+		for range w {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				drainDescriberQueue(s.writeDB)
+			}()
+		}
 		wg.Wait()
 		slog.Debug("describer backfill drained")
-	}()
+		return nil
+	})
 }
 
 // drainDescriberQueue processes pending batches until the queue is empty.

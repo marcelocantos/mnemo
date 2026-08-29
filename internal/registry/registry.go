@@ -798,6 +798,9 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	// Periodic backup worker (🎯T61). Opted in by default; opt out via
 	// {"backup": {"disabled": true}} in config.json.
 	r.startBackupWorker(username, e, logger)
+	// Independent of backup configuration (🎯T154).
+	r.startStreamSegWatcher(e)
+	r.startStructuralRetirementBackfill(e)
 
 	// Daemon connection sweeper (🎯T60). Marks daemon_connections rows
 	// closed once last_seen_at falls outside the idle threshold. The
@@ -950,8 +953,14 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	// the first place.
 	e.store.StartWALMaintenance(r.baseCtx)
 
-	r.startStreamSegWatcher(e)
-	r.startStructuralRetirementBackfill(e)
+	// (🎯T154: the streamseg watcher and the structural-retirement
+	// backfill used to be started here, at the tail of this function.
+	// Every early return above — backups disabled, a bad window, a bad
+	// quiescence value, a worker that failed to construct — silently
+	// skipped both, including one whose own doc comment calls itself
+	// "a correctness requirement rather than an accelerator". They are
+	// started from startWorkers now, next to the other workers, so
+	// their lifecycle does not depend on backup configuration.)
 }
 
 // startStructuralRetirementBackfill demotes structural spans that a better

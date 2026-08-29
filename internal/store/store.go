@@ -101,11 +101,11 @@ type Store struct {
 	backfill backfillState
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
-	// codecBoot closes when boot-time codec work (dictionary auto-train
-	// and the 🎯T152 entries materialisation) has finished or been
-	// cancelled. Both write to the DB, so anything that measures the
-	// database or its WAL must wait on AwaitCodecBoot first.
-	codecBoot chan struct{}
+	// startup is the capability graph and background-work supervisor
+	// (🎯T154). Every background goroutine this package starts goes
+	// through it, so AwaitStartup is a complete answer to "is the store
+	// quiescent?" and Close can cancel and drain in one place.
+	startup *startupGraph
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
@@ -831,6 +831,10 @@ func relaxQuery(q string) string {
 	return strings.Join(words, " OR ")
 }
 
+// backgroundDrainGrace bounds how long Close waits for supervised
+// long-lived workers after cancelling them.
+const backgroundDrainGrace = 3 * time.Second
+
 func openDB(dbPath string, writer bool) (*sql.DB, error) {
 	// The read pool uses a driver that installs a read-only authorizer
 	// (see rodriver.go): mnemo_query runs arbitrary client SQL, and
@@ -1192,7 +1196,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		codec:       newTextCodec(),
 		bgCtx:       bgCtx,
 		bgCancel:    bgCancel,
-		codecBoot:   make(chan struct{}),
+		startup:     newStartupGraph(),
 		imageSem:    make(chan struct{}, n),
 		exclusions:  &exclusionRegistry{},
 		upgradeDone: done,
@@ -1216,51 +1220,88 @@ func New(dbPath, projectDir string) (*Store, error) {
 		}
 	}
 
+	// Startup phases (🎯T154). Declared here, in one place, with their
+	// requirements; the runner starts each when its requirements resolve
+	// and AwaitStartup covers all of them. Nothing else in this package
+	// may start background work with a bare `go` — see startup.go.
 	if prep.pendingUpgrade {
 		slog.Info("schema upgrade deferred to background (store serving on current schema)",
 			"db", dbPath)
 		boot.SetUpgrade("queued: pre-migration backup + schema apply")
-		go func() {
-			defer close(done)
-			defer close(s.codecBoot)
-			if err := upgradeSchema(dbPath); err != nil {
-				// Same degrade posture as a rejected sync apply: keep
-				// serving; new code paths that need missing columns fail
-				// at SQL level until a later binary succeeds.
-				slog.Warn("background schema upgrade failed; continuing on current schema",
-					"db", dbPath, "err", err)
-			} else {
+		s.startPhase(bgCtx, phase{
+			name:     "schema-upgrade",
+			provides: []Capability{CapSchemaCurrent},
+			run: func(context.Context) error {
+				defer close(done)
+				// upgradeSchema takes no context: it runs a VACUUM INTO
+				// backup and sqlift.Apply, neither of which is safe to
+				// abandon midway.
+				if err := upgradeSchema(dbPath); err != nil {
+					// Degrade rather than fail the store: keep serving on
+					// the old schema. CapSchemaCurrent resolves
+					// unavailable, so dependent phases skip and dependent
+					// consumers log one reason instead of erroring per
+					// statement.
+					slog.Warn("background schema upgrade failed; continuing on current schema",
+						"db", dbPath, "err", err)
+					return err
+				}
 				slog.Info("background schema upgrade complete", "db", dbPath)
-				// Compressed writes need text_z/content_z; until here
-				// the writer stored plain rows on the old schema.
-				s.enableCompression()
-				s.autoTrainDictionaries(s.bgCtx)
-				s.materialiseEntriesAtBoot(s.bgCtx)
-			}
-		}()
+				return nil
+			},
+		})
 	} else {
 		close(done)
-		s.enableCompression()
-		go func() {
-			defer close(s.codecBoot)
-			s.autoTrainDictionaries(s.bgCtx)
-			s.materialiseEntriesAtBoot(s.bgCtx)
-		}()
+		s.startPhase(bgCtx, phase{
+			name:     "schema-current",
+			provides: []Capability{CapSchemaCurrent},
+			run:      func(context.Context) error { return nil },
+		})
 	}
+
+	s.startPhase(bgCtx, phase{
+		name:     "codec",
+		requires: []Capability{CapSchemaCurrent},
+		provides: []Capability{CapCodecReady},
+		run: func(ctx context.Context) error {
+			if err := s.loadDicts(); err != nil {
+				return fmt.Errorf("load compression dictionaries: %w", err)
+			}
+			s.codec.ready.Store(true)
+			s.autoTrainDictionaries(ctx)
+			return nil
+		},
+	})
+
+	// On a boot with no migration the codec phase is only a dictionary
+	// load, and callers reasonably expect the first ingest to write
+	// packed rows. Wait for it here so that guarantee survives the move
+	// to phases; on an upgrade boot we must not wait, because the codec
+	// sits behind a migration that takes minutes.
+	if !prep.pendingUpgrade {
+		s.Await(CapCodecReady)
+	}
+
+	s.startPhase(bgCtx, phase{
+		name:     "entries-materialise",
+		requires: []Capability{CapCodecReady},
+		provides: []Capability{CapEntriesMaterialised},
+		run: func(ctx context.Context) error {
+			if ok, err := s.EntriesMaterialised(); err == nil && ok {
+				s.codec.entriesPackable.Store(true)
+				return nil
+			}
+			res, err := s.MaterialiseEntries(ctx)
+			if err != nil {
+				return err
+			}
+			s.codec.entriesPackable.Store(true)
+			slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
+			return nil
+		},
+	})
 
 	return s, nil
-}
-
-// AwaitCodecBoot blocks until boot-time codec work has finished: the
-// dictionary auto-train and the 🎯T152 entries field materialisation,
-// both of which write. Tests that measure the database, its WAL, or
-// row counts must call this first, or they race those writes — the
-// symptom is a size assertion that fails only under load or on a
-// slower filesystem.
-func (s *Store) AwaitCodecBoot() {
-	if s.codecBoot != nil {
-		<-s.codecBoot
-	}
 }
 
 // AwaitSchemaUpgrade blocks until any deferred schema upgrade has
@@ -1287,6 +1328,13 @@ func (s *Store) Close() error {
 	// does not observe the context, so the wait below still covers it.
 	if s.bgCancel != nil {
 		s.bgCancel()
+	}
+	// Drain supervised long-lived workers (🎯T154). Bounded: a worker
+	// wedged in a syscall must not hold Close open, and the checkpoint
+	// below is what actually needs to run.
+	if s.startup != nil && !s.awaitLoops(backgroundDrainGrace) {
+		slog.Warn("background workers did not stop within grace; closing anyway",
+			"grace", backgroundDrainGrace)
 	}
 	if s.upgradeDone != nil {
 		<-s.upgradeDone
@@ -3534,7 +3582,21 @@ func (s *Store) IngestAll() error {
 	// calls, but the LIKE scans over a large entries/messages table
 	// still dominate cold start — keep it off the critical path so
 	// stream backfills can stamp last_backfill promptly.
-	go backfillImages(s)
+	s.goOnce("image-backfill", func(ctx context.Context) error {
+		// Reads entries_v. On an upgrade boot that view may not exist
+		// yet, and this pass is one-shot — before 🎯T154 it logged one
+		// warning and skipped the whole corpus for the life of the
+		// process. Declaring the requirement makes the skip explicit and
+		// deferred rather than silent and permanent.
+		if !s.Requires(CapSchemaCurrent, "image backfill") {
+			s.Await(CapSchemaCurrent)
+			if !s.Have(CapSchemaCurrent) {
+				return nil
+			}
+		}
+		backfillImages(s)
+		return nil
+	})
 
 	// Git commits and GitHub PRs/issues are no longer backfilled at
 	// boot: the "commits" and "github" mirror streams are
@@ -6911,14 +6973,16 @@ func (s *Store) ingestFile(path string) error {
 
 	// Extract and store any images from newly ingested entries.
 	// Uses a targeted query so only new entries need scanning.
-	go func() {
+	s.goOnce("session-images", func(context.Context) error {
 		rows, err := s.readDB.Query(`
 			SELECT e.id, e.raw, COALESCE(e.timestamp, datetime('now'))
 			FROM entries_v e
 			WHERE e.session_id = ? AND e.raw LIKE '%"type":"image"%'
 			ORDER BY e.id DESC LIMIT 100`, sessionID)
 		if err != nil {
-			return
+			// Before 🎯T154 this was a bare return with no log, so a
+			// failure here was invisible.
+			return fmt.Errorf("scan session %s for images: %w", sessionID, err)
 		}
 		defer rows.Close()
 		for rows.Next() {
@@ -6929,7 +6993,8 @@ func (s *Store) ingestFile(path string) error {
 				ingestImagesForEntry(s, id, sessionID, raw, ts)
 			}
 		}
-	}()
+		return rows.Err()
+	})
 
 	return nil
 }

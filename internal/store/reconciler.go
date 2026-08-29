@@ -75,7 +75,7 @@ func (s *Store) StartReconciler(ctx context.Context, enabled bool) {
 		return
 	}
 
-	go func() {
+	s.goLoop("cost-reconciler", func(bg context.Context) error {
 		// Poll once immediately on startup, then on the interval ticker.
 		if err := s.reconcileOnce(apiKey); err != nil {
 			slog.Warn("cost reconciliation failed", "err", err)
@@ -86,14 +86,16 @@ func (s *Store) StartReconciler(ctx context.Context, enabled bool) {
 		for {
 			select {
 			case <-ctx.Done():
-				return
+				return nil
+			case <-bg.Done():
+				return nil
 			case <-ticker.C:
 				if err := s.reconcileOnce(apiKey); err != nil {
 					slog.Warn("cost reconciliation failed", "err", err)
 				}
 			}
 		}
-	}()
+	})
 }
 
 // reconcileOnce fetches the cost report for the last 30 days and upserts
