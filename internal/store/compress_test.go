@@ -316,8 +316,13 @@ func TestCompressBackfillIsResumableAndVerified(t *testing.T) {
 	}
 	for _, f := range st.Families {
 		if f.Family == FamilyMessagesText {
-			if !f.BackfillDone || f.BackfillSaved <= 0 || f.PlainBytes >= int64(plainBytes) {
+			if !f.BackfillDone || f.PlainBytes >= int64(plainBytes) {
 				t.Fatalf("family status: %+v (plain bytes before %d)", f, plainBytes)
+			}
+			// The persisted total is the sum of per-batch deltas — not the
+			// run's cumulative figure re-added every batch.
+			if want := res.Saved + res2.Saved; f.BackfillSaved != want {
+				t.Fatalf("persisted saved_bytes %d, want %d", f.BackfillSaved, want)
 			}
 		}
 	}

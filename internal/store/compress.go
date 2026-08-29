@@ -693,7 +693,7 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 				return err
 			}
 			res.Done = true
-			return s.saveBackfillCursor(family, maxID+1, res.Saved, true)
+			return s.saveBackfillCursor(family, maxID+1, 0, true)
 		}
 
 		tx, err := s.writeDB.BeginTx(ctx, nil)
@@ -737,14 +737,14 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 		res.Compressed += compressed
 		res.Saved += saved
 		next = batch[len(batch)-1].id + 1
-		if err := s.saveBackfillCursor(family, next, res.Saved, false); err != nil {
+		if err := s.saveBackfillCursor(family, next, saved, false); err != nil {
 			return err
 		}
 	}
 }
 
-// saveBackfillCursor upserts compression_gc. saved is this run's delta,
-// added to the persisted total.
+// saveBackfillCursor upserts compression_gc. savedDelta is the bytes
+// saved by the batch just committed, added to the persisted total.
 func (s *Store) saveBackfillCursor(family string, next int64, savedDelta int64, done bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	d := 0
