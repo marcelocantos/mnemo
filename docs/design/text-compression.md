@@ -213,3 +213,18 @@ pre-update row).
 `messages.tool_input` (0.38 GB behind fifteen `tool_*` generated
 columns) is deliberately left alone: 1% of the file does not justify
 fifteen more materialised columns.
+
+### Measured on the live corpus (🎯T152)
+
+`TestCompressLiveCorpus` on an online copy of the post-🎯T151 index
+(29.63 GB), 2026-08-29:
+
+| | before | after | ratio |
+|---|---|---|---|
+| `entries` (dbstat) | 19.37 GB | 7.17 GB | 37% |
+| file after VACUUM | 29.63 GB | 18.69 GB | 63% |
+
+5,063,388 rows visited, 5,057,202 compressed, 11.42 GB saved in 7m07s;
+the boot-time field pass ran inside the upgrade window; 20,000 sampled
+rows agree between decoded `raw` and `uuid_m`; VACUUM 3m03s. Together
+with 🎯T151 the index went from 34 GB to 18.7 GB.

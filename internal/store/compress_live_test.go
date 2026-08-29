@@ -98,6 +98,7 @@ func TestCompressLiveCorpus(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
+	compressed := map[string]int64{}
 	for _, family := range allFamilies {
 		start = time.Now()
 		id, err := s.TrainDictionary(ctx, family)
@@ -113,6 +114,7 @@ func TestCompressLiveCorpus(t *testing.T) {
 		}
 		t.Logf("%s: backfill visited %d rows, compressed %d, saved %.2f GB in %s (done=%v)",
 			family, res.Rows, res.Compressed, float64(res.Saved)/1e9, time.Since(start).Round(time.Second), res.Done)
+		compressed[family] = res.Compressed
 	}
 
 	// Spot-check: a random sample of compressed rows decodes and the FTS
@@ -170,10 +172,17 @@ func TestCompressLiveCorpus(t *testing.T) {
 		float64(docsAfter)/1e9, 100*float64(docsAfter)/float64(docsBefore),
 		float64(entAfter)/1e9, 100*float64(entAfter)/float64(entBefore))
 	t.Logf("file: %.2f GB -> %.2f GB (%.0f%%)", float64(before)/1e9, float64(after)/1e9, 100*float64(after)/float64(before))
-	if ratio := float64(msgAfter+docsAfter) / float64(msgBefore+docsBefore); ratio > 0.45 {
-		t.Errorf("messages+docs at %.0f%% of pre-GC size; 🎯T151 acceptance is at most 45%%", 100*ratio)
+	// A family whose rows were already compressed before this run has no
+	// plain baseline to measure against; only assert on the ones this
+	// run actually repacked.
+	if compressed[FamilyMessagesText]+compressed[FamilyDocsContent] > 1000 {
+		if ratio := float64(msgAfter+docsAfter) / float64(msgBefore+docsBefore); ratio > 0.45 {
+			t.Errorf("messages+docs at %.0f%% of pre-GC size; 🎯T151 acceptance is at most 45%%", 100*ratio)
+		}
 	}
-	if ratio := float64(entAfter) / float64(entBefore); ratio > 0.50 {
-		t.Errorf("entries at %.0f%% of pre-GC size; 🎯T152 acceptance is at most 50%%", 100*ratio)
+	if compressed[FamilyEntriesRaw] > 1000 {
+		if ratio := float64(entAfter) / float64(entBefore); ratio > 0.50 {
+			t.Errorf("entries at %.0f%% of pre-GC size; 🎯T152 acceptance is at most 50%%", 100*ratio)
+		}
 	}
 }

@@ -1261,11 +1261,15 @@ func (s *Store) AwaitSchemaUpgrade() {
 func (s *Store) Close() error {
 	// Wait for a deferred schema upgrade so we do not close handles under
 	// an in-flight VACUUM INTO or sqlift.Apply (🎯T114.1).
-	if s.upgradeDone != nil {
-		<-s.upgradeDone
-	}
+	// Cancel background codec work first: the 🎯T152 boot-time field
+	// materialisation runs inside the upgrade goroutine after the schema
+	// applies, and can take minutes on a large index. sqlift.Apply itself
+	// does not observe the context, so the wait below still covers it.
 	if s.bgCancel != nil {
 		s.bgCancel()
+	}
+	if s.upgradeDone != nil {
+		<-s.upgradeDone
 	}
 
 	// Drain order matters (🎯T97.1): quiesce the read pool first, then
