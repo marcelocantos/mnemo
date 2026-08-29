@@ -369,7 +369,31 @@ func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped
 	}
 
 	contentPlain, contentZ := s.codec.pack(FamilyDocsContent, content)
-	_, err = s.writeDB.Exec(`
+	// Until a deferred schema upgrade lands, docs has no content_z column
+	// (🎯T114.1 serves on the old schema meanwhile); write the legacy shape.
+	if !s.CompressionReady() {
+		_, err = s.writeDB.Exec(`
+		INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
+			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			repo         = excluded.repo,
+			kind         = excluded.kind,
+			title        = excluded.title,
+			content      = excluded.content,
+			content_hash = excluded.content_hash,
+			size         = excluded.size,
+			mtime        = excluded.mtime,
+			indexed_at   = excluded.indexed_at,
+			taxonomy     = excluded.taxonomy,
+			doc_date     = excluded.doc_date,
+			doc_status   = excluded.doc_status,
+			doc_target   = excluded.doc_target,
+			doc_source   = excluded.doc_source
+	`, repo, path, kind, title, content, hash, fi.Size(), mtime, now,
+			taxonomy, meta.Date, meta.Status, meta.Target, meta.Source)
+	} else {
+		_, err = s.writeDB.Exec(`
 		INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
 			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -389,7 +413,8 @@ func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped
 			doc_target   = excluded.doc_target,
 			doc_source   = excluded.doc_source
 	`, repo, path, kind, title, contentPlain, hash, fi.Size(), mtime, now,
-		taxonomy, meta.Date, meta.Status, meta.Target, meta.Source, contentZ)
+			taxonomy, meta.Date, meta.Status, meta.Target, meta.Source, contentZ)
+	}
 	if err != nil {
 		slog.Error("insert doc failed", "file", path, "err", err)
 		return

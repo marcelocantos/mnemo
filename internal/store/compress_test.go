@@ -356,3 +356,26 @@ func TestPackSkipsShortAndIncompressibleRows(t *testing.T) {
 		t.Fatal("codec not ready must write plain")
 	}
 }
+
+func TestDocsWriterUsesLegacyShapeUntilCodecReady(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	path := filepath.Join(t.TempDir(), "NOTES.md")
+	content := "# Notes\n\n" + longText("legacy", 30)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the pre-migration window (🎯T114.1): the codec is not
+	// ready, so the writer must not reference content_z at all.
+	s.codec.ready.Store(false)
+	if indexed, _ := s.ingestDocFile(path, "acme/webapp", 0); indexed != 1 {
+		t.Fatal("doc not indexed with the codec not ready")
+	}
+	var plain string
+	var z []byte
+	if err := s.readDB.QueryRow(`SELECT content, content_z FROM docs WHERE file_path = ?`, path).Scan(&plain, &z); err != nil {
+		t.Fatal(err)
+	}
+	if plain != content || z != nil {
+		t.Fatalf("legacy shape expected: plain=%d z=%d", len(plain), len(z))
+	}
+}
