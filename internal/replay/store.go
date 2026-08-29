@@ -6,6 +6,7 @@ package replay
 import (
 	"database/sql"
 	"fmt"
+	"github.com/marcelocantos/mnemo/internal/store"
 	"strings"
 	"time"
 )
@@ -21,7 +22,9 @@ type Scope struct {
 
 // DB reads replay candidates from a read-only SQLite handle.
 type DB struct {
-	db *sql.DB
+	db           *sql.DB
+	textZ        bool
+	textZChecked bool
 }
 
 func NewDB(db *sql.DB) *DB {
@@ -98,9 +101,14 @@ func (d *DB) queryToolRows(scope Scope) ([]ToolRow, error) {
 		args = append(args, scope.Source)
 	}
 
+	textExpr := "COALESCE(m.text, '')"
+	if d.hasTextZ() {
+		textExpr = "COALESCE(mnemo_text(m.text, m.text_z), '')"
+	}
+
 	q := fmt.Sprintf(`
 SELECT m.timestamp, m.session_id, COALESCE(sm.source,''), m.tool_name, m.tool_use_id,
-       m.tool_input, COALESCE(m.text, ''), COALESCE(m.tool_file_path, ''),
+       m.tool_input, %s, COALESCE(m.tool_file_path, ''),
        COALESCE(m.tool_content, ''), COALESCE(m.tool_old_string, ''), COALESCE(m.tool_new_string, ''),
        COALESCE(sm.cwd, ''), COALESCE(sm.repo, ''),
        tr.is_error
@@ -109,7 +117,7 @@ JOIN session_meta sm ON sm.session_id = m.session_id
 LEFT JOIN messages tr ON tr.session_id = m.session_id
   AND tr.content_type = 'tool_result' AND tr.tool_use_id = m.tool_use_id
 WHERE %s
-ORDER BY m.timestamp, m.session_id, sm.source, m.tool_use_id`, strings.Join(where, " AND "))
+ORDER BY m.timestamp, m.session_id, sm.source, m.tool_use_id`, textExpr, strings.Join(where, " AND "))
 
 	rs, err := d.db.Query(q, args...)
 	if err != nil {
@@ -146,10 +154,21 @@ ORDER BY m.timestamp, m.session_id, sm.source, m.tool_use_id`, strings.Join(wher
 	return out, rs.Err()
 }
 
+func (d *DB) hasTextZ() bool {
+	if d.textZChecked {
+		return d.textZ
+	}
+	d.textZChecked = true
+	var n int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'text_z'`).Scan(&n)
+	d.textZ = err == nil && n > 0
+	return d.textZ
+}
+
 // OpenReadOnly opens mnemo.db read-only for replay CLI use.
 func OpenReadOnly(dbPath string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=5000", dbPath)
-	return sql.Open("sqlite3", dsn)
+	return sql.Open(store.SQLiteDriverName, dsn)
 }
 
 func (d *DB) resolveSessionID(id string) (string, error) {

@@ -26,24 +26,32 @@ func cmdReplayFiles(args []string) {
 	out := fs.String("out", "", "quarantine output directory (default ~/.mnemo/replay/<run-id>)")
 	dryRun := fs.Bool("dry-run", false, "plan ops without writing files")
 	allowLive := fs.Bool("allow-live-tree", false, "allow writing inside a git work tree")
-	fileHistory := fs.Bool("file-history", false, "enrich empty Claude Write bodies from ~/.claude/file-history (optional)")
+	seedFrom := fs.String("seed-from", "", "pre-image dir, git rev, or stash ref (tried first per path)")
+	noSeed := fs.Bool("no-seed", false, "disable all forensics pre-image sources (Write/patch timeline only)")
 	jsonOut := fs.Bool("json", false, "emit machine-readable report JSON")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `usage: mnemo replay-files [flags]
 
-Reconstruct agent file writes from indexed transcripts into a quarantine tree.
+Forensics recovery: reconstruct agent file activity into a quarantine tree,
+seeding missing pre-images from every available source (git worktree/commit/
+stash, Grok rewind_points, Claude file-history, stitched Read tool_results),
+then applying Write/patch/delete ops in timestamp order.
+
 See docs/design/transcript-file-replay.md.
 
   --session <id>       replay one session (optional with --since/--until)
   --since / --until    time window (intra- or multi-session)
   --repo / --source    optional filters
   --out <dir>          quarantine root (default ~/.mnemo/replay/<run-id>)
+  --seed-from <ref>    explicit pre-image: directory, git rev, or stash@{n}
+  --no-seed            Write/patch only (legacy MVP behaviour)
   --dry-run            list planned ops without writing
   --allow-live-tree    override git worktree guard (dangerous)
   --json               print report as JSON
 
 Examples:
-  mnemo replay-files --session 84369401 --dry-run
+  mnemo replay-files --session 01a013f8 --dry-run
+  mnemo replay-files --session 01a013f8 --seed-from HEAD
   mnemo replay-files --since 2026-08-01T00:00:00Z --until 2026-08-26T00:00:00Z --source cursor
 `)
 	}
@@ -91,9 +99,14 @@ Examples:
 		fmt.Fprintf(os.Stderr, "replay-files: collect: %v\n", err)
 		os.Exit(1)
 	}
-	if fhWarns := replay.EnrichFileHistory(replay.ClaudeHome(), ops, *fileHistory); len(fhWarns) > 0 {
-		warns = append(warns, fhWarns...)
+
+	seedCfg := replay.SeedConfig{
+		DisableAll: *noSeed,
+		SeedFrom:   *seedFrom,
+		ClaudeHome: replay.ClaudeHome(),
 	}
+	seeds, seedWarns := replay.ResolveSeeds(db, ops, seedCfg)
+	warns = append(warns, seedWarns...)
 
 	outDir := *out
 	if outDir == "" {
@@ -109,7 +122,7 @@ Examples:
 	cfg.DryRun = *dryRun
 	cfg.AllowLiveTree = *allowLive
 	eng := replay.NewEngine(cfg)
-	report, err := eng.Run(outDir, ops)
+	report, err := eng.Run(outDir, ops, seeds...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "replay-files: %v\n", err)
 		os.Exit(1)
@@ -122,9 +135,15 @@ Examples:
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(report)
 	} else {
-		fmt.Printf("replay-files: quarantine=%s dry_run=%v\n", report.QuarantineRoot, report.DryRun)
+		fmt.Printf("replay-files: quarantine=%s dry_run=%v seeds=%d\n",
+			report.QuarantineRoot, report.DryRun, len(report.Seeds))
 		fmt.Printf("  planned=%d applied=%d skipped=%d failed=%d files=%d\n",
 			report.OpsPlanned, report.OpsApplied, report.OpsSkipped, report.OpsFailed, len(report.FilesWritten))
+		bySrc := map[replay.SeedSource]int{}
+		for _, s := range report.Seeds {
+			bySrc[s.Source]++
+			fmt.Printf("  seed %s %s (%d bytes) %s\n", s.Source, s.AbsPath, len(s.Body), s.Detail)
+		}
 		for _, w := range report.Warnings {
 			fmt.Printf("  warn: %s\n", w)
 		}

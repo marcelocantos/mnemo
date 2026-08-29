@@ -1,49 +1,68 @@
 # Transcript File Replay
 
-*Status: implemented — 2026-08-26 (🎯T150). Design note 🎯T150.1; engine,
-adapters, scope selectors, CLI, and tests 🎯T150.2–T150.9.*
+*Status: evolving — 2026-08-29 (🎯T150 + 🎯T150.10 forensics sources).
+MVP Write/patch timeline landed 2026-08-26; pre-image seeding is the
+forensics completion.*
 
-**Tracking.** Design source for 🎯T150 (parent) and its children. Grounded
-in mnemo's indexed `messages` rows (`tool_use` / `tool_result`) across
-Claude, Codex, Grok, and Cursor, plus optional Claude file-history
-sidecars.
+**Tracking.** Design source for 🎯T150 (parent), children T150.1–T150.9,
+and 🎯T150.10 (multi-source pre-images). Product intent: an
+**all-encompassing forensics and recovery** tool — every available
+source of file content is enlisted before giving up on a path.
 
 ---
 
 ## TL;DR
 
-Transcript file replay reconstructs **what agents wrote to disk** from
-indexed session transcripts into a **disposable quarantine tree** — never
-the live checkout unless an explicit, hard-to-typo override is used.
-Provider-specific tool signals are normalised into one globally ordered
-timeline of `{write, patch, delete}` ops; a shared engine applies them
-with **last-writer-wins** semantics, path safety, and dry-run support.
+Transcript file replay reconstructs **what agents wrote to disk** into a
+**disposable quarantine tree**. Provider tool signals become a globally
+ordered `{write, patch, delete}` timeline. **Before** patches apply,
+missing pre-images are filled from a forensics ladder (explicit seed →
+git worktree/commit/stash → provider snapshots → stitched Read results).
+Only then does `patch_no_base` fire.
 
-Shell-only mutations (`Bash`, `exec_command`, `run_terminal_command`, …)
-are **out of MVP fidelity** — recorded as skip+warn, not reconstructed.
+Shell-only mutations remain out of MVP fidelity (skip+warn).
 
 ---
 
 ## Problem
 
-Agents mutate files through tool calls recorded in transcripts. When the
-live tree has moved on — reverted commits, deleted branches, or work
-done only in a session that never landed — mnemo already holds the
-write/edit signals but not a way to **materialise** them safely.
+Agents mutate files through tool calls. Edits (`search_replace`, `Edit`,
+Codex `Update File`) are **deltas**, not full images — they need a base.
+When the live tree is gone (deleted untracked WIP, reset checkout),
+recovery must pull pre-images from wherever they still exist: git,
+provider sidecars, and Read tool results in the index.
 
-This is a **recovery / forensics** feature: answer "what did the agent
-try to write?" without touching production checkouts.
+Witness (2026-08-23 jevons): Grok session `01a013f8` held ~1090
+`search_replace`s and almost no full `write`s for `ui/`. Write-only
+replay recovered ~12 files. Successful manual recovery used Read
+tool_results + Grok `rewind_points.jsonl` + git stash — sources the
+MVP ignored.
 
-Evidence already indexed (approximate corpus counts at filing):
+---
 
-| Source | Tool signals | Notes |
-|--------|--------------|-------|
-| Claude | `Write`, `Edit` (~11k / ~65k) | Richest; optional `~/.claude/file-history/<session>/` backups |
-| Codex | `apply_patch` (~11k) | Patch text in `messages.text`, not structured `tool_input` |
-| Grok | `write`, `search_replace` | Paths via `normalizeAgentToolInput` → `tool_file_path` |
-| Cursor | `Write`, `StrReplace`, `Delete` | Same shape as Claude-like tools |
+## Forensics pre-image ladder (🎯T150.10)
 
-Read-only tools (`Read`, `Grep`, …) emit no replay ops.
+For each absolute path touched by an in-scope op, resolve a base in
+order. **First successful source wins**; the run report records
+`source`, `captured_at`, and `detail` per seed.
+
+| Priority | Source | Timestamp rule |
+|----------|--------|----------------|
+| 1 | In-timeline `write` / `Write` / Codex Add File | N/A (op itself) |
+| 2 | `--seed-from` (directory, git rev, or `stash@{n}`) | Operator-chosen |
+| 3 | Git **worktree** file if present | Skip if mtime ≫ first op (+1h) — likely post-loss rebuild |
+| 4 | Git **commit** at/before first op (`rev-list --before`) then `HEAD` | Commit time ≤ first op when possible |
+| 5 | Git **stash** newest with commit time ≤ first op, else newest | Stash `committer` time |
+| 6 | Provider snapshot: Grok `rewind_points.jsonl` `file_snapshots` / `after_snapshots` | Prefer latest snapshot ≤ first op; else latest |
+| 7 | Claude `~/.claude/file-history/<session>/` | Basename match |
+| 8 | Stitched `read_file` / `Read` **tool_results** (skip SearchReplace ack JSON; merge `N→` chunks) | Prefer coverage ≤ first op; else fattest stitch |
+| 9 | None → patches get `patch_no_base` | — |
+
+Reads are not privileged — they are one rung when git/sidecars lack the
+path (untracked trees never committed). Timestamps prevent seeding a
+post-edit image and then re-applying the same patches.
+
+Default CLI behaviour enables rungs 3–8. `--no-seed` restores Write/patch-only MVP. `--seed-from` forces rung 2 first.
 
 ---
 
@@ -257,11 +276,12 @@ Codex `apply_patch` grammar (MVP parser subset):
 
 Each row states MVP behaviour: **apply**, **skip+warn**, or **hard-fail**.
 The run report lists every skip/fail with the reason code cited here.
-🎯T150.9 table-driven tests map one-to-one to these rows.
+🎯T150.9 table-driven tests map one-to-one to these rows; forensics
+ladder properties live in `disaster_test.go` (see implementation map).
 
 | # | Edge case | MVP behaviour | Reason code |
 |---|-----------|---------------|-------------|
-| E1 | `Edit` / `search_replace` / `StrReplace` / Codex **Update File** when no base file exists in quarantine | **skip+warn** | `patch_no_base` |
+| E1 | `Edit` / `search_replace` / … with no base after forensics ladder | **skip+warn** | `patch_no_base` |
 | E2 | Patch op when base exists but `old_string` / deletion hunk not found in quarantine content | **skip+warn** | `patch_anchor_missing` |
 | E3 | `tool_use` paired with `tool_result.is_error = 1` | **skip+warn** (do not emit op) | `tool_use_failed` |
 | E4 | `tool_use` with no `tool_result` yet / missing pairing | **apply** (transcript-only reconstruction; warn once per session) | `tool_result_missing` |
@@ -272,7 +292,7 @@ The run report lists every skip/fail with the reason code cited here.
 | E9 | Binary content (NUL bytes in write body, or `file` magic heuristic on decoded text) | **skip+warn** | `binary_not_supported` |
 | E10 | Huge file (write body > 32 MiB after decode) | **skip+warn** | `file_too_large` |
 | E11 | Bash / exec / shell-only writes (content never in structured tool) | **skip+warn** | `shell_mutation_not_reconstructed` |
-| E12 | Claude file-history enrichment (`~/.claude/file-history/<session>/`) | **Off by default.** When `--file-history` set: `Write` may fill missing body from sidecar; sidecar missing → fall back to transcript-only; sidecar path mismatch → **skip+warn** | `file_history_miss` / `file_history_used` |
+| E12 | Claude file-history / Grok rewind | **On by default** in forensics mode (rungs 6–7); `--no-seed` disables | `file_history_miss` / seed source in report |
 | E13 | Dry-run (`--dry-run`) | **apply** to in-memory plan only; zero filesystem mutations; report lists would-be outcomes | — |
 | E14 | Partial failure mid-run (earlier ops applied, later op hard-fails) | **Stop or continue?** → **continue**; earlier writes stand; run exits non-zero if any hard-fail; report lists applied/skipped/failed per op | `partial_run` |
 | E15 | Path escape (resolved quarantine path would leave root) | **hard-fail** for that op | `path_escape` |
@@ -286,11 +306,9 @@ The run report lists every skip/fail with the reason code cited here.
 
 ### Patch-without-base rationale (E1)
 
-Transcripts record edits, not guaranteed pre-images. Replaying an `Edit`
-without a prior `Write` in scope cannot produce correct bytes unless
-file-history enrichment (E12) or an earlier op in the same run seeded the
-file. Inventing an empty base would silently corrupt content. **skip+warn**
-is honest; users widen scope or enable file-history to recover.
+Edits are deltas. After the forensics ladder (🎯T150.10) exhausts git,
+provider snapshots, and Read tool_results, **skip+warn** remains honest
+— inventing an empty base would silently corrupt content.
 
 ### Failed tool_use rationale (E3)
 
@@ -389,6 +407,26 @@ MCP exposure is optional and secondary; filesystem mutation prefers CLI.
 | 🎯T150.7 | Scope selector over `messages` / `session_meta` |
 | 🎯T150.8 | CLI (+ optional MCP) |
 | 🎯T150.9 | Fixture + matrix oracle tests |
+| 🎯T150.10 | Forensics pre-image ladder (see above) |
+
+### Forensics test strategy (T150.9 + T150.10)
+
+Do **not** enumerate lost-laptop stories. Manufacture disasters and assert
+load-bearing properties:
+
+1. **Policy matrix** — `TestMatrixOracle` locks E-row skip/fail behaviour.
+2. **Ladder units** — stitch / ack / path-match / commit-at-t0 / mtime guard.
+3. **Disaster generator** (`disaster_test.go`) — plant known `T0`, destroy
+   sources, recover:
+   - perfect-base twin (explicit `--seed-from` / live tree) vs git-only
+   - no silent invention (`DisableAll` → only `patch_no_base`)
+   - source ablation shrinks coverage, never invents new paths
+   - provenance order (CLI > worktree > git)
+   - dry-run outcome parity; shuffle-stable quarantine bytes
+   - miniaturised jevons-shaped rewind golden (`cockpit.css`)
+   - mutation drill: corrupt seed must diverge from twin
+
+Real incident corpses (scrubbed) accrete as goldens when recovery escapes.
 
 ---
 

@@ -18,17 +18,21 @@ ingests:
 
 Filter or inspect provenance via `session_meta.source` (`mnemo_query`).
 
-**Transcript file replay** (🎯T150) reconstructs agent file writes from indexed
-tool_use rows into a quarantine directory:
+**Transcript file replay** (🎯T150 / 🎯T150.10) is a forensics recovery
+tool: reconstruct agent file activity into a quarantine directory, seeding
+pre-images from git (worktree/commit/stash), Grok rewind snapshots, Claude
+file-history, and stitched Read tool_results before applying patches.
 
 ```bash
 mnemo replay-files --session <id> --dry-run
 mnemo replay-files --session <id>
+mnemo replay-files --session <id> --seed-from HEAD
+mnemo replay-files --session <id> --no-seed   # Write/patch timeline only
 mnemo replay-files --since 2026-08-01T00:00:00Z --until 2026-08-26T00:00:00Z --source cursor
 ```
 
-Design and edge-case policy: `docs/design/transcript-file-replay.md`. Never
-writes into a live git checkout unless `--allow-live-tree` is set.
+Design: `docs/design/transcript-file-replay.md`. Never writes into a live
+git checkout unless `--allow-live-tree` is set.
 
 ## Full setup (all steps required)
 

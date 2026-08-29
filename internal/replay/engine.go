@@ -13,10 +13,10 @@ import (
 
 // Config controls engine behaviour.
 type Config struct {
-	DryRun           bool
-	AllowLiveTree    bool
-	MaxWriteBytes    int
-	ContinueOnFail   bool // E14: default true
+	DryRun         bool
+	AllowLiveTree  bool
+	MaxWriteBytes  int
+	ContinueOnFail bool // E14: default true
 }
 
 // DefaultConfig returns MVP defaults from the design note.
@@ -37,6 +37,7 @@ type Report struct {
 	OpsSkipped     int
 	OpsFailed      int
 	FilesWritten   map[string]struct{}
+	Seeds          []Seed
 	Results        []OpResult
 	Warnings       []string
 }
@@ -54,7 +55,8 @@ func NewEngine(cfg Config) *Engine {
 }
 
 // Run validates the quarantine root and applies ops in order.
-func (e *Engine) Run(root string, ops []Op) (*Report, error) {
+// Optional seeds preload quarantine keys before the op timeline (forensics pre-images).
+func (e *Engine) Run(root string, ops []Op, seeds ...Seed) (*Report, error) {
 	if e.cfg.MaxWriteBytes <= 0 {
 		e.cfg.MaxWriteBytes = maxWriteBytes
 	}
@@ -63,6 +65,7 @@ func (e *Engine) Run(root string, ops []Op) (*Report, error) {
 		QuarantineRoot: root,
 		DryRun:         e.cfg.DryRun,
 		FilesWritten:   make(map[string]struct{}),
+		Seeds:          append([]Seed(nil), seeds...),
 	}
 
 	if inside, gitRoot := IsInsideGitWorkTree(root); inside && !e.cfg.AllowLiveTree {
@@ -74,7 +77,18 @@ func (e *Engine) Run(root string, ops []Op) (*Report, error) {
 	report.OpsPlanned = len(expanded)
 
 	// Virtual FS for dry-run and for patch base detection.
-	files := make(map[string][]byte)
+	files := SeedsToQuarantine(seeds, ops)
+	if !e.cfg.DryRun {
+		for key, body := range files {
+			full, err := QuarantinePath(root, key)
+			if err != nil {
+				continue
+			}
+			_ = os.MkdirAll(filepath.Dir(full), 0o755)
+			_ = os.WriteFile(full, body, 0o644)
+			report.FilesWritten[key] = struct{}{}
+		}
+	}
 
 	var lastTSKey = make(map[string]time.Time)
 
@@ -97,9 +111,6 @@ func (e *Engine) Run(root string, ops []Op) (*Report, error) {
 		}
 	}
 
-	for _, w := range report.Warnings {
-		_ = w
-	}
 	return report, nil
 }
 
