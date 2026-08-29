@@ -29,7 +29,7 @@ func stageDeferredUpgrade(t *testing.T) (dbPath string, started, release chan st
 	if err := s0.Close(); err != nil {
 		t.Fatalf("seed Close: %v", err)
 	}
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

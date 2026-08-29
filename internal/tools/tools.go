@@ -278,8 +278,11 @@ Tables:
       top_tool_use_id, parent_tool_use_id
     — entry types: user, assistant, progress, system, file-history-snapshot
     — use json_extract(raw, '$.path') for fields without virtual columns
-  messages (id, entry_id, session_id, project, role, text, timestamp, type, is_noise)
+  messages_v — view: (id, entry_id, session_id, project, role, text, timestamp, type, is_noise, ...)
     — content blocks from user/assistant entries. entry_id links to entries.
+    — READ TEXT HERE. The base table messages stores text zstd-compressed in text_z
+      with text = '' for those rows; messages_v decodes it. On the base table use
+      mnemo_text(text, text_z). Same columns otherwise.
     — tool_use fields: tool_name, tool_use_id, tool_input (JSONB), content_type
     — virtual columns from tool_input: tool_file_path, tool_command, etc.
   messages_fts — FTS5 virtual table (excludes noise). Use: WHERE messages_fts MATCH 'terms'
@@ -312,7 +315,8 @@ Tables:
     — pattern_type: direct_jsonl_read, transcript_grep, repeated_query, repeated_search
     — repos / sessions / representative_excerpts are JSON arrays; use json_each()
   patterns_fts — FTS5 on pattern_type, signature, representative_excerpts
-  docs (id, repo, file_path, kind, title, content, updated_at)
+  docs_v — view: (id, repo, file_path, kind, title, content, indexed_at)
+    — READ CONTENT HERE; base table docs holds compressed content_z (see messages_v).
     — README / CHANGELOG / design notes / PDFs across tracked repos
     — kind: md, txt, pdf. Synthesis docs carry a taxonomy tag.
   docs_fts — FTS5 on title, content, repo
@@ -329,7 +333,7 @@ Tables:
   github_prs_fts / github_issues_fts — FTS5 on title, body
 
 Join pattern — message with its entry metadata:
-  SELECT m.text, e.model, e.input_tokens FROM messages m JOIN entries e ON e.id = m.entry_id
+  SELECT m.text, e.model, e.input_tokens FROM messages_v m JOIN entries e ON e.id = m.entry_id
 
 Token usage query:
   SELECT date(timestamp) AS day, SUM(input_tokens) AS input, SUM(output_tokens) AS output
@@ -466,6 +470,7 @@ Hot-reload coverage:
   - linked_instances: persisted to disk but requires a daemon restart to take effect (the federation client is built once at startup).
   - menu_bar_app: show the multi-purpose native shim's menu-bar status item (default false). The shim itself is always supervised when Mnemo.app is installed — it presents health notifications and consumes the health stream — so this flag is chrome-only, not an on/off switch for the shim. Applied live via SSE, no restart (hiding the status item won't force-quit a running app). The Threads daemon API — mnemo_thread_* tools, the "mnemo thread" CLI, the HTTP thread routes — stays available regardless of this flag.
   - image_embeddings.enabled (🎯T121): opt-in (default false) for the CLIP image embedder. It shells out to "uv run --script tools/embed-clip/embed.py", which resolves PyPI dependencies and downloads CLIP model weights from the HuggingFace Hub (~2 GB of caches), so it stays off until you ask for it — same posture as cost_reconciliation. Applied live (read per attempt), no restart. Image extraction, OCR, descriptions and FTS work regardless; only embedding-based semantic/similar image search depends on this.
+  - terminal.backend (🎯T126): which app opens threads and resumes sessions — "iterm2" (default) or "cmux". Applied live (read per open), no restart. An unsupported value is rejected at write/load time.
   - plugins (🎯T102.2): list of {name, enabled, transport, command|url|script, args?, params?}. Applied live — enable starts an instance, disable tears one down, no restart. Metadata (facets, UI, config_schema) is discovered from each plugin's manifest endpoint, not stored in config. Optional default home: ~/.mnemo/plugins/<name>/.
 
 Response includes which fields changed, which were adopted live, and which require a restart.`),

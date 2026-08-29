@@ -63,9 +63,9 @@ func searchCorpora() []corpusSpec {
 			kind:   "message",
 			fts:    "messages_fts",
 			source: "messages",
-			selectSQL: `SELECT rowid, COALESCE(role,''), COALESCE(text,''),
+			selectSQL: `SELECT rowid, COALESCE(role,''), COALESCE(mnemo_text(text, text_z),''),
 				COALESCE(session_id,''), COALESCE(timestamp,'') FROM messages`,
-			sampleExpr: "text",
+			sampleExpr: "mnemo_text(text, text_z)",
 			inDefault:  true,
 		},
 		{
@@ -90,9 +90,9 @@ func searchCorpora() []corpusSpec {
 			kind:   "doc",
 			fts:    "docs_fts",
 			source: "docs",
-			selectSQL: `SELECT rowid, COALESCE(title, file_path), COALESCE(content,''),
+			selectSQL: `SELECT rowid, COALESCE(title, file_path), COALESCE(mnemo_text(content, content_z),''),
 				COALESCE(repo,'') || ' ' || COALESCE(file_path,''), COALESCE(mtime,'') FROM docs`,
-			sampleExpr: "COALESCE(title,'') || ' ' || COALESCE(content,'')",
+			sampleExpr: "COALESCE(title,'') || ' ' || COALESCE(mnemo_text(content, content_z),'')",
 			inDefault:  true,
 		},
 		{

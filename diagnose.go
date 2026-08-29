@@ -505,7 +505,7 @@ func checkDatabase() checkResult {
 
 	// Open read-only so we don't conflict with the running daemon.
 	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=2000", dbPath)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open(store.SQLiteDriverName, dsn)
 	if err != nil {
 		r.status = statusFail
 		r.add(fmt.Sprintf("open: %v", err))
@@ -579,7 +579,7 @@ func checkIndexFreshness() checkResult {
 		r.add("no database to compare against")
 		return r
 	}
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro&_busy_timeout=2000", dbPath))
+	db, err := sql.Open(store.SQLiteDriverName, fmt.Sprintf("file:%s?mode=ro&_busy_timeout=2000", dbPath))
 	if err != nil {
 		r.status = statusFail
 		r.add(err.Error())

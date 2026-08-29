@@ -171,7 +171,32 @@ CREATE TABLE docs (
 			doc_date TEXT NOT NULL DEFAULT '',
 			doc_status TEXT NOT NULL DEFAULT '',
 			doc_target TEXT NOT NULL DEFAULT '',
-			doc_source TEXT NOT NULL DEFAULT ''
+			doc_source TEXT NOT NULL DEFAULT '',
+			-- 🎯T151: zstd frame of content when compressed; content is then ''.
+			-- Read through mnemo_text(content, content_z) or the docs_v view.
+			content_z BLOB
+		);
+
+-- 🎯T151: dictionary lineage for per-row zstd compression. dict_id is
+-- the id carried in every frame header, so a row written under any
+-- past dictionary decodes as long as its row is here. Never deleted.
+CREATE TABLE compression_dicts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			dict_id INTEGER NOT NULL UNIQUE,
+			family TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			sample_rows INTEGER NOT NULL DEFAULT 0,
+			dict BLOB NOT NULL
+		);
+
+-- 🎯T151: resumable cursor for the historical-row backfill, one per family.
+CREATE TABLE compression_gc (
+			family TEXT PRIMARY KEY,
+			next_id INTEGER NOT NULL DEFAULT 0,
+			done INTEGER NOT NULL DEFAULT 0,
+			saved_bytes INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			last_error TEXT NOT NULL DEFAULT ''
 		);
 
 CREATE TABLE entries (
@@ -453,7 +478,11 @@ CREATE TABLE messages (
 			tool_prompt TEXT GENERATED ALWAYS AS (tool_input->>'prompt'),
 			tool_subject TEXT GENERATED ALWAYS AS (tool_input->>'subject'),
 			tool_status TEXT GENERATED ALWAYS AS (tool_input->>'status'),
-			tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId'))
+			tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId')),
+			-- 🎯T151: zstd frame of text when compressed; text is then ''.
+			-- Read through mnemo_text(text, text_z) or the messages_v view.
+			-- Last so ALTER TABLE ADD COLUMN reproduces this order exactly.
+			text_z BLOB
 		);
 
 -- 🎯T64.7: workaround patterns, promoted from a live query to a
@@ -1222,21 +1251,21 @@ CREATE TRIGGER decisions_au AFTER UPDATE ON decisions
 CREATE TRIGGER docs_ad AFTER DELETE ON docs
 		BEGIN
 			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind, taxonomy)
-			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind, old.taxonomy);
+			VALUES ('delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy);
 		END;
 
 CREATE TRIGGER docs_ai AFTER INSERT ON docs
 		BEGIN
 			INSERT INTO docs_fts(rowid, title, content, repo, kind, taxonomy)
-			VALUES (new.id, new.title, new.content, new.repo, new.kind, new.taxonomy);
+			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
 		END;
 
 CREATE TRIGGER docs_au AFTER UPDATE ON docs
 		BEGIN
 			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind, taxonomy)
-			VALUES ('delete', old.id, old.title, old.content, old.repo, old.kind, old.taxonomy);
+			VALUES ('delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy);
 			INSERT INTO docs_fts(rowid, title, content, repo, kind, taxonomy)
-			VALUES (new.id, new.title, new.content, new.repo, new.kind, new.taxonomy);
+			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
 		END;
 
 CREATE TRIGGER entries_file_snapshot AFTER INSERT ON entries
@@ -1396,7 +1425,7 @@ CREATE TRIGGER notes_au AFTER UPDATE ON notes
 CREATE TRIGGER messages_ai AFTER INSERT ON messages
 		BEGIN
 			INSERT INTO messages_fts(rowid, text, role, project, session_id)
-			SELECT new.id, new.text, new.role, new.project, new.session_id
+			SELECT new.id, mnemo_text(new.text, new.text_z), new.role, new.project, new.session_id
 			WHERE new.is_noise = 0;
 
 			INSERT INTO session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
@@ -1575,3 +1604,24 @@ CREATE VIEW sessions AS
 		FROM session_summary ss
 		LEFT JOIN session_meta sm ON sm.session_id = ss.session_id;
 
+-- 🎯T151: plaintext views over the compressed tables. Same columns as
+-- the base tables with text/content decoded; the documented surface for
+-- ad-hoc SQL (mnemo_query) now that the base columns hold '' for
+-- compressed rows.
+CREATE VIEW messages_v AS
+		SELECT id, entry_id, session_id, project, role,
+			mnemo_text(text, text_z) AS text,
+			timestamp, type, is_noise, content_type, tool_name, tool_use_id,
+			tool_input, is_error,
+			tool_file_path, tool_command, tool_pattern, tool_description,
+			tool_skill, tool_old_string, tool_new_string, tool_content,
+			tool_query, tool_url, tool_name_param, tool_prompt, tool_subject,
+			tool_status, tool_task_id
+		FROM messages;
+
+CREATE VIEW docs_v AS
+		SELECT id, repo, file_path, kind, title,
+			mnemo_text(content, content_z) AS content,
+			content_hash, size, mtime, indexed_at, taxonomy, doc_date,
+			doc_status, doc_target, doc_source
+		FROM docs;

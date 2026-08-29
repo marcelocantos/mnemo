@@ -93,6 +93,11 @@ type Store struct {
 	dbPath     string
 	projectDir string
 
+	// codec packs large text columns for storage (🎯T151); backfill
+	// tracks the historical-row GC. Both have their own locking.
+	codec    *textCodec
+	backfill backfillState
+
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
 
@@ -153,6 +158,9 @@ type Store struct {
 	// Mutated only via SetCursorRoots; existence is checked lazily in
 	// cursorDirs.
 	cursorRoots []string
+	// cursorChatRoots are Agent CLI chat roots (~/.cursor/chats) for
+	// store.db fidelity (🎯T149.1). Set via SetCursorChatRoots.
+	cursorChatRoots []string
 
 	// todoGlobs are extra repo-relative globs that IngestTodos matches
 	// when discovering TODO files, beyond the default TODO.md / todos.md
@@ -349,11 +357,38 @@ func (s *Store) SetCursorRoots(roots []string) {
 	s.cursorRoots = append(s.cursorRoots[:0:0], roots...)
 }
 
+// SetCursorChatRoots configures the Cursor Agent CLI chat roots whose
+// store.db files supply tool_result / cwd / title / model fidelity
+// (🎯T149.1). Pass CursorChatRootsFor; existence is checked lazily.
+func (s *Store) SetCursorChatRoots(roots []string) {
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	if len(roots) == 0 {
+		s.cursorChatRoots = nil
+		return
+	}
+	s.cursorChatRoots = append(s.cursorChatRoots[:0:0], roots...)
+}
+
 // cursorDirs returns the configured Cursor project roots that currently
 // exist on disk. Empty when not configured or ~/.cursor isn't present.
 func (s *Store) cursorDirs() []string {
 	s.rootsMu.RLock()
 	roots := append([]string(nil), s.cursorRoots...)
+	s.rootsMu.RUnlock()
+	var out []string
+	for _, d := range roots {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// cursorChatDirs returns configured Cursor chat roots that exist on disk.
+func (s *Store) cursorChatDirs() []string {
+	s.rootsMu.RLock()
+	roots := append([]string(nil), s.cursorChatRoots...)
 	s.rootsMu.RUnlock()
 	var out []string
 	for _, d := range roots {
@@ -792,7 +827,7 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 	// (see rodriver.go): mnemo_query runs arbitrary client SQL, and
 	// PRAGMA query_only=1 alone is bypassable (🎯T103) and does not gate
 	// ATTACH (🎯T106). The writer keeps the stock driver.
-	driver := "sqlite3"
+	driver := writerDriverName
 	if !writer {
 		driver = readOnlyDriverName
 	}
@@ -1009,7 +1044,7 @@ func (s *Store) Optimize() {
 // backup hook) and is best-effort. Called after a schema migration adds
 // or changes indexes (🎯T93).
 func analyzeForPlanner(dbPath string) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		slog.Warn("post-migration ANALYZE: open failed; planner stats may be stale", "err", err)
 		return
@@ -1040,7 +1075,7 @@ func analyzeForPlanner(dbPath string) {
 // avoid the close-then-reopen file-lock churn that mattn/go-sqlite3
 // exhibits on Windows (see the pre-migration backup note above).
 func applyFreshSchema(dbPath string) (bool, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		return false, fmt.Errorf("open for fresh-schema check: %w", err)
 	}
@@ -1144,6 +1179,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		dbPath:      dbPath,
 		projectDir:  projectDir,
 		offsets:     make(map[string]int64),
+		codec:       newTextCodec(),
 		imageSem:    make(chan struct{}, n),
 		exclusions:  &exclusionRegistry{},
 		upgradeDone: done,
@@ -1181,10 +1217,16 @@ func New(dbPath, projectDir string) (*Store, error) {
 					"db", dbPath, "err", err)
 			} else {
 				slog.Info("background schema upgrade complete", "db", dbPath)
+				// Compressed writes need text_z/content_z; until here
+				// the writer stored plain rows on the old schema.
+				s.enableCompression()
+				s.autoTrainDictionaries(context.Background())
 			}
 		}()
 	} else {
 		close(done)
+		s.enableCompression()
+		go s.autoTrainDictionaries(context.Background())
 	}
 
 	return s, nil
@@ -2881,7 +2923,7 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 		sessionID).Scan(&fromID)
 
 	rows, err := db.Query(`
-		SELECT id, role, text, timestamp
+		SELECT id, role, mnemo_text(text, text_z), timestamp
 		FROM messages
 		WHERE session_id = ?
 		  AND content_type = 'text'
@@ -3347,6 +3389,35 @@ func (s *Store) IngestAll() error {
 			return nil
 		})
 	}
+	// Cursor Agent CLI chats (🎯T149.1): store.db tool_result + meta fidelity.
+	for _, dir := range s.cursorChatDirs() {
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				slog.Warn("cursor chats dir unavailable, skipping", "dir", dir)
+			} else {
+				slog.Warn("cursor chats dir stat failed, skipping", "dir", dir, "err", err)
+			}
+			continue
+		}
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !isCursorStore(path) {
+				return nil
+			}
+			s.mu.Lock()
+			offset := s.offsets[path]
+			s.mu.Unlock()
+			if offset >= info.Size() && offset > 0 {
+				return nil
+			}
+			files = append(files, fileEntry{
+				path:   path,
+				mtime:  info.ModTime(),
+				size:   info.Size(),
+				offset: offset,
+			})
+			return nil
+		})
+	}
 
 	if len(files) == 0 {
 		return nil
@@ -3378,6 +3449,8 @@ func (s *Store) IngestAll() error {
 					parse = parseGrokFile
 				case isCursorTranscript(fe.path):
 					parse = parseCursorFile
+				case isCursorStore(fe.path):
+					parse = parseCursorStoreFile
 				}
 				if pf, err := parse(fe.path, fe.offset); err == nil {
 					parsedCh <- pf
@@ -3446,6 +3519,12 @@ const (
 		VALUES (?, ?, ?, ?, jsonb(?))`
 	messageInsertSQL = `INSERT INTO messages
 		(entry_id, session_id, project, role, text, timestamp, type, is_noise,
+		 content_type, tool_name, tool_use_id, tool_input, is_error, text_z)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?)`
+	// messageInsertLegacySQL is used while a deferred schema upgrade has
+	// not yet added text_z (🎯T114.1 serves on the old schema meanwhile).
+	messageInsertLegacySQL = `INSERT INTO messages
+		(entry_id, session_id, project, role, text, timestamp, type, is_noise,
 		 content_type, tool_name, tool_use_id, tool_input, is_error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?)`
 )
@@ -3455,10 +3534,12 @@ type writerState struct {
 	tx        *sql.Tx
 	entryStmt *sql.Stmt
 	msgStmt   *sql.Stmt
+	codec     *textCodec
+	packed    bool // msgStmt carries the text_z parameter
 }
 
-func newWriterState(db *sql.DB) (*writerState, error) {
-	tx, err := db.Begin()
+func (s *Store) newWriterState() (*writerState, error) {
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -3467,13 +3548,31 @@ func newWriterState(db *sql.DB) (*writerState, error) {
 		tx.Rollback()
 		return nil, err
 	}
-	msgStmt, err := tx.Prepare(messageInsertSQL)
+	insertSQL := messageInsertSQL
+	packed := s.codec.ready.Load()
+	if !packed {
+		insertSQL = messageInsertLegacySQL
+	}
+	msgStmt, err := tx.Prepare(insertSQL)
 	if err != nil {
 		entryStmt.Close()
 		tx.Rollback()
 		return nil, err
 	}
-	return &writerState{tx: tx, entryStmt: entryStmt, msgStmt: msgStmt}, nil
+	return &writerState{tx: tx, entryStmt: entryStmt, msgStmt: msgStmt, codec: s.codec, packed: packed}, nil
+}
+
+// insertMessage runs msgStmt with text packed for storage (🎯T151).
+func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text string, timestamp, typ any,
+	isNoise any, contentType, toolName, toolUseID any, toolInput any, isError any) {
+	if !ws.packed {
+		ws.msgStmt.Exec(entryID, sessionID, project, role, text, timestamp, typ, isNoise,
+			contentType, toolName, toolUseID, toolInput, isError)
+		return
+	}
+	plain, z := ws.codec.pack(FamilyMessagesText, text)
+	ws.msgStmt.Exec(entryID, sessionID, project, role, plain, timestamp, typ, isNoise,
+		contentType, toolName, toolUseID, toolInput, isError, z)
 }
 
 func (ws *writerState) Close() {
@@ -3487,7 +3586,7 @@ func (ws *writerState) Close() {
 func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	const commitInterval = 200 * time.Millisecond
 
-	ws, err := newWriterState(s.writeDB)
+	ws, err := s.newWriterState()
 	if err != nil {
 		return err
 	}
@@ -3504,7 +3603,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 		if err := ws.tx.Commit(); err != nil {
 			return err
 		}
-		ws, err = newWriterState(s.writeDB)
+		ws, err = s.newWriterState()
 		if err != nil {
 			return err
 		}
@@ -3557,7 +3656,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 	if pf.source == "grok" {
 		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
 		_, _ = ws.tx.Exec(`
-			DELETE FROM messages WHERE session_id = ? AND text LIKE '[grok signals]%'`,
+			DELETE FROM messages WHERE session_id = ? AND mnemo_text(text, text_z) LIKE '[grok signals]%'`,
 			pf.sessionID)
 		_, _ = ws.tx.Exec(`
 			DELETE FROM entries WHERE session_id = ? AND raw->>'$.uuid' = ?`,
@@ -3594,7 +3693,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 		if m.toolInput != nil {
 			toolInput = string(m.toolInput)
 		}
-		ws.msgStmt.Exec(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+		ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 			m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
 
 		// 🎯T72 recursion guard: flag claudia-spawned compaction runs
@@ -3843,6 +3942,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	roots = append(roots, s.codexDirs()...)
 	roots = append(roots, s.grokDirs()...)
 	roots = append(roots, s.cursorDirs()...)
+	roots = append(roots, s.cursorChatDirs()...)
 	if sdir, err := skillsDir(); err == nil {
 		roots = append(roots, sdir)
 	}
@@ -3908,7 +4008,7 @@ func (s *Store) Watch(ctx context.Context) error {
 
 	handlePath := func(name string, writeOrCreate bool, removeOrRename bool) {
 		name = canonPath(name)
-		if writeOrCreate && strings.HasSuffix(name, ".jsonl") {
+		if writeOrCreate && (strings.HasSuffix(name, ".jsonl") || isCursorStore(name)) {
 			poller.NoteEvent(name, time.Now())
 			db.enqueue(name, func() {
 				if isCodexRollout(name) {
@@ -3926,6 +4026,12 @@ func (s *Store) Watch(ctx context.Context) error {
 				if isCursorTranscript(name) {
 					if err := s.ingestCursorFile(name); err != nil {
 						slog.Error("ingest cursor failed", "file", name, "err", err)
+					}
+					return
+				}
+				if isCursorStore(name) {
+					if err := s.ingestCursorStoreFile(name); err != nil {
+						slog.Error("ingest cursor store failed", "file", name, "err", err)
 					}
 					return
 				}
@@ -4109,6 +4215,12 @@ func (s *Store) ingestJSONLPath(path string) {
 		}
 		return
 	}
+	if isCursorStore(path) {
+		if err := s.ingestCursorStoreFile(path); err != nil {
+			slog.Error("ingest cursor store failed", "file", path, "err", err)
+		}
+		return
+	}
 	if err := s.ingestFile(path); err != nil {
 		slog.Error("ingest failed", "file", path, "err", err)
 	}
@@ -4173,7 +4285,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		}
 
 		row := s.readDB.QueryRow(`
-			SELECT m.id, m.session_id, m.project, m.role, m.text, m.timestamp
+			SELECT m.id, m.session_id, m.project, m.role, mnemo_text(m.text, m.text_z), m.timestamp
 			FROM messages m
 			WHERE m.id = ?
 		`, h.rowid)
@@ -4290,7 +4402,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	// alongside transcript messages so search surfaces both at once.
 	// repoFilter and sessionType are not applied — annotations are cross-repo.
 	vaultRows, vaultErr := s.readDB.Query(`
-		SELECT d.id, d.file_path, d.content, f.rank
+		SELECT d.id, d.file_path, mnemo_text(d.content, d.content_z), f.rank
 		FROM docs d
 		JOIN docs_fts f ON f.rowid = d.id
 		WHERE docs_fts MATCH ? AND d.kind = 'vault'
@@ -4426,10 +4538,10 @@ func (s *Store) fetchContext(sessionID string, messageID int, count int, before,
 	}
 	var q string
 	if before {
-		q = `SELECT id, role, text, timestamp FROM messages
+		q = `SELECT id, role, mnemo_text(text, text_z), timestamp FROM messages
 			WHERE session_id = ? AND id < ?` + filter + ` ORDER BY id DESC LIMIT ?`
 	} else {
-		q = `SELECT id, role, text, timestamp FROM messages
+		q = `SELECT id, role, mnemo_text(text, text_z), timestamp FROM messages
 			WHERE session_id = ? AND id > ?` + filter + ` ORDER BY id ASC LIMIT ?`
 	}
 
@@ -5728,7 +5840,7 @@ SELECT {
     topic: sess.topic,
     excerpts: SELECT { id: ex.id, role: ex.role, text: ex.text, timestamp: ex.timestamp }
       FROM (
-        SELECT id, role, text, timestamp FROM messages
+        SELECT id, role, mnemo_text(text, text_z) AS text, timestamp FROM messages
         WHERE session_id = sess.session_id AND is_noise = 0 AND role IN ('user', 'assistant')
         ORDER BY id DESC LIMIT :maxExcerpts
       ) ex
@@ -5855,7 +5967,7 @@ func (s *Store) ReadSession(sessionID string, role string, offset int, limit int
 
 	args = append(args, limit, offset)
 
-	q := `SELECT id, role, text, timestamp, is_noise FROM messages
+	q := `SELECT id, role, mnemo_text(text, text_z), timestamp, is_noise FROM messages
 		WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY id ASC
 		LIMIT ? OFFSET ?`
@@ -5904,7 +6016,7 @@ func (s *Store) ReadSessionAfter(sessionID string, afterID int64, limit int) ([]
 	}
 
 	rows, err := s.readDB.Query(`
-		SELECT id, role, text, timestamp, is_noise FROM messages
+		SELECT id, role, mnemo_text(text, text_z), timestamp, is_noise FROM messages
 		WHERE session_id = ? AND id > ? AND is_noise = 0
 		ORDER BY id ASC
 		LIMIT ?`, resolvedID, afterID, limit)
@@ -6481,6 +6593,9 @@ func (s *Store) ingestFile(path string) error {
 	if isCursorTranscript(path) {
 		return s.ingestCursorFile(path)
 	}
+	if isCursorStore(path) {
+		return s.ingestCursorStoreFile(path)
+	}
 
 	s.mu.Lock()
 	offset := s.offsets[path]
@@ -6508,7 +6623,7 @@ func (s *Store) ingestFile(path string) error {
 	var metaCwd, metaBranch, metaTopic string
 	metaCompactorInternal := 0 // 🎯T72: set when a compactor-run marker is seen
 
-	ws, err := newWriterState(s.writeDB)
+	ws, err := s.newWriterState()
 	if err != nil {
 		return err
 	}
@@ -6580,7 +6695,7 @@ func (s *Store) ingestFile(path string) error {
 				isErr = 1
 			}
 
-			ws.msgStmt.Exec(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+			ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
 				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
 			count++
 
@@ -6637,7 +6752,7 @@ func (s *Store) ingestFile(path string) error {
 				}
 
 				// Start a new transaction.
-				ws, err = newWriterState(s.writeDB)
+				ws, err = s.newWriterState()
 				if err != nil {
 					return err
 				}

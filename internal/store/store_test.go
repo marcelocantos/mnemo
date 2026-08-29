@@ -126,7 +126,7 @@ func TestWriteParsedFileDoesNotRegressOffset(t *testing.T) {
 
 	writeParsed := func(off int64) {
 		t.Helper()
-		ws, err := newWriterState(s.writeDB)
+		ws, err := s.newWriterState()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +557,7 @@ func TestQueryRejectsAttach(t *testing.T) {
 
 	// A victim database holding a secret, distinct from mnemo's own DB.
 	victim := filepath.Join(t.TempDir(), "victim.db")
-	vdb, err := sql.Open("sqlite3", victim)
+	vdb, err := sql.Open(writerDriverName, victim)
 	if err != nil {
 		t.Fatal(err)
 	}

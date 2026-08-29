@@ -149,7 +149,7 @@ func (s *Store) SubstantiveMessagesSince(sessionID string, afterMsgID, limit int
 		limit = 200
 	}
 	rows, err := s.readDB.Query(`
-		SELECT id, role, text, timestamp
+		SELECT id, role, mnemo_text(text, text_z), timestamp
 		FROM messages
 		WHERE session_id = ? AND id > ? AND is_noise = 0
 		ORDER BY id

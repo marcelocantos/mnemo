@@ -30,7 +30,7 @@ func TestNewReturnsWhilePreMigrationBackupBlocked(t *testing.T) {
 	if err := s0.Close(); err != nil {
 		t.Fatalf("seed Close: %v", err)
 	}
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestNewReturnsWhilePreMigrationBackupBlocked(t *testing.T) {
 	}
 
 	// After Close (waits for upgradeDone), the dropped table is restored.
-	db2, err := sql.Open("sqlite3", dbPath)
+	db2, err := sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestApplySchemaStillUpgradesSynchronously(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestApplySchemaStillUpgradesSynchronously(t *testing.T) {
 		t.Fatalf("applySchema: %v", err)
 	}
 
-	db, err = sql.Open("sqlite3", dbPath)
+	db, err = sql.Open(writerDriverName, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

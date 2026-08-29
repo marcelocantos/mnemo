@@ -80,7 +80,7 @@ func freshDB(t *testing.T) string {
 // rowCount returns the count of rows in tbl, or -1 if the table is missing.
 func rowCount(t *testing.T, path, tbl string) int {
 	t.Helper()
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open(writerDriverName, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestUpgradeMirrorStatusBackoffColumns(t *testing.T) {
 		);
 	`)
 	{
-		db, err := sql.Open("sqlite3", path)
+		db, err := sql.Open(writerDriverName, path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestUpgradeMirrorStatusBackoffColumns(t *testing.T) {
 	}
 	// Existing row preserved; new columns take their defaults.
 	{
-		db, err := sql.Open("sqlite3", path)
+		db, err := sql.Open(writerDriverName, path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,7 +275,7 @@ func TestUpgradeAddsUsageIndex(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("AllowNone upgrade adding the usage index must succeed: %v", err)
 	}
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open(writerDriverName, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestUpgradePreservesData(t *testing.T) {
 	`)
 	// Seed data.
 	{
-		db, err := sql.Open("sqlite3", path)
+		db, err := sql.Open(writerDriverName, path)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -18,6 +18,7 @@ require github.com/marcelocantos/sqlift/go/sqlift v0.17.0
 require (
 	github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9
 	github.com/fsnotify/fsevents v0.2.0
+	github.com/klauspost/compress v1.19.2
 	github.com/yuin/goldmark v1.8.2
 )
 

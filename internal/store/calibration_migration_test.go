@@ -54,7 +54,7 @@ func TestCalibrationTableIsPurelyAdditive(t *testing.T) {
 
 	// Confirm the seed really lacks the table, so a false pass is not
 	// possible by seeding the new schema twice.
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open(writerDriverName, path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestCalibrationTableIsPurelyAdditive(t *testing.T) {
 	}
 
 	// And the table must actually exist afterwards.
-	db, err = sql.Open("sqlite3", path)
+	db, err = sql.Open(writerDriverName, path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestMigrationPreservesExistingData(t *testing.T) {
 	path := filepath.Join(dir, "data.db")
 	applyDDL(t, path, schemaWithoutCalibration(t))
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open(writerDriverName, path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestMigrationPreservesExistingData(t *testing.T) {
 		t.Fatalf("upgrade: %v", err)
 	}
 
-	db, err = sql.Open("sqlite3", path)
+	db, err = sql.Open(writerDriverName, path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

@@ -197,7 +197,7 @@ func (s *Store) InferChainHeuristic(sessionID string, limit int) ([]ChainCandida
 	// predecessor by design.
 	var firstText, firstTS string
 	err := s.readDB.QueryRow(`
-		SELECT m.text, m.timestamp
+		SELECT mnemo_text(m.text, m.text_z), m.timestamp
 		FROM messages m
 		WHERE m.session_id = ? AND m.role = 'user'
 		ORDER BY m.id ASC LIMIT 1
