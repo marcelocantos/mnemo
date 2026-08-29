@@ -8,6 +8,7 @@ package tools
 import (
 	"database/sql"
 	"fmt"
+	"github.com/marcelocantos/mnemo/internal/store"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,7 +82,7 @@ func agentCallCounts(t *testing.T) map[string]callCount {
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("no live index at %s", path)
 	}
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	db, err := sql.Open(store.SQLiteDriverName, "file:"+path+"?mode=ro")
 	if err != nil {
 		t.Skipf("open index: %v", err)
 	}

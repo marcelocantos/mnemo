@@ -47,7 +47,7 @@ func TestScanVariants(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("no live index at %s", path)
 	}
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	db, err := sql.Open(writerDriverName, "file:"+path+"?mode=ro")
 	if err != nil {
 		t.Skipf("open: %v", err)
 	}

@@ -144,7 +144,7 @@ func defaultDB() string {
 // than store.New: opening the store would run migrations and could start
 // a pre-migration backup against a database the daemon is holding.
 func loadGold(dbPath string, n int) ([]streamseg.GoldSession, error) {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open(store.SQLiteDriverName, "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +179,7 @@ func loadGold(dbPath string, n int) ([]streamseg.GoldSession, error) {
 		g := streamseg.GoldSession{SessionID: id}
 
 		mrows, err := db.Query(`
-			SELECT id, role, text, timestamp FROM messages
+			SELECT id, role, mnemo_text(text, text_z), timestamp FROM messages
 			WHERE session_id = ? AND is_noise = 0 ORDER BY id`, id)
 		if err != nil {
 			return nil, err

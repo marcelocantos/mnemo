@@ -163,7 +163,7 @@ func compactionHasTargetSignal(payloadJSON string) bool {
 // under full/includes scope.
 func (s *Store) vaultUserCorpusDocs() ([]ClusterCorpusDoc, error) {
 	rows, err := s.readDB.Query(`
-		SELECT id, COALESCE(repo,''), file_path, COALESCE(title,''), content, COALESCE(mtime,''), COALESCE(indexed_at,'')
+		SELECT id, COALESCE(repo,''), file_path, COALESCE(title,''), mnemo_text(content, content_z), COALESCE(mtime,''), COALESCE(indexed_at,'')
 		FROM docs
 		WHERE kind = 'vault'
 		ORDER BY id

@@ -105,6 +105,41 @@ func TestValidateVaultPathEmptyIsAllowed(t *testing.T) {
 	}
 }
 
+func TestValidateTerminalEmptyIsAllowed(t *testing.T) {
+	if err := (Config{}).validateTerminal(); err != nil {
+		t.Errorf("empty terminal.backend should pass, got %v", err)
+	}
+}
+
+func TestValidateTerminalAcceptsKnown(t *testing.T) {
+	for _, b := range []string{TerminalBackendITerm2, TerminalBackendCmux} {
+		cfg := Config{Terminal: TerminalConfig{Backend: b}}
+		if err := cfg.validateTerminal(); err != nil {
+			t.Errorf("backend %q: %v", b, err)
+		}
+	}
+}
+
+func TestValidateTerminalRejectsUnknown(t *testing.T) {
+	cfg := Config{Terminal: TerminalConfig{Backend: "ghostty"}}
+	err := cfg.validateTerminal()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "ghostty") {
+		t.Errorf("error should name the value: %v", err)
+	}
+}
+
+func TestTerminalEffectiveBackendDefault(t *testing.T) {
+	if got := (TerminalConfig{}).EffectiveBackend(); got != TerminalBackendITerm2 {
+		t.Errorf("got %q", got)
+	}
+	if got := (TerminalConfig{Backend: "  cmux "}).EffectiveBackend(); got != "cmux" {
+		t.Errorf("got %q", got)
+	}
+}
+
 // TestValidateVaultPathExpandsTilde checks that ~ expansion happens
 // against the supplied home before MkdirAll runs. A literal "~/v" must
 // not be passed to MkdirAll — that would create a directory named "~"

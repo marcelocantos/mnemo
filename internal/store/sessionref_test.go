@@ -149,7 +149,7 @@ func TestResolveSessionRefSkipsTrivialSessions(t *testing.T) {
 	}
 }
 
-// TestResumeCommandIsSourceAware: mnemo indexes three agents that do not
+// TestResumeCommandIsSourceAware: mnemo indexes several agents that do not
 // share a CLI. Opening a bare shell for a Codex session would look like
 // success while doing something else entirely.
 func TestResumeCommandIsSourceAware(t *testing.T) {
@@ -182,6 +182,16 @@ func TestResumeCommandIsSourceAware(t *testing.T) {
 	// continuing it.
 	if strings.Contains(grok, "--fork-session") || strings.Contains(grok, "--session-id") {
 		t.Errorf("resume must continue the original session, not fork it: %q", grok)
+	}
+
+	// Cursor Agent CLI (🎯T149): `agent --resume [chatId]` from `agent --help`.
+	cursorID := "32cc2bac-0bc4-4f7b-8de7-164d6b9f46c6"
+	cursor, err := (SessionRef{SessionID: cursorID, Source: "cursor"}).ResumeCommand()
+	if err != nil {
+		t.Fatalf("cursor sessions are resumable: %v", err)
+	}
+	if cursor != "agent --resume "+cursorID {
+		t.Errorf("cursor resume command = %q, want `agent --resume <id>`", cursor)
 	}
 
 	// Codex/ChatGPT has no verified terminal resume (🎯T128) — the indexed

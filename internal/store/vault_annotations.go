@@ -227,15 +227,17 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 			}
 			now := time.Now().Format(time.RFC3339)
 
+			contentPlain, contentZ := s.codec.pack(FamilyDocsContent, human)
 			_, err = s.writeDB.Exec(`
 				INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
-					size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
-				VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '')
+					size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z)
+				VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '', ?)
 				ON CONFLICT(file_path) DO UPDATE SET
 					repo         = excluded.repo,
 					kind         = excluded.kind,
 					title        = excluded.title,
 					content      = excluded.content,
+					content_z    = excluded.content_z,
 					content_hash = excluded.content_hash,
 					size         = excluded.size,
 					mtime        = excluded.mtime,
@@ -246,7 +248,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 					doc_target   = '',
 					doc_source   = ''
 				WHERE docs.kind = 'vault'
-			`, vaultRepo, path, title, human, hash, int64(len(human)), now, now)
+			`, vaultRepo, path, title, contentPlain, hash, int64(len(human)), now, now, contentZ)
 			if err != nil {
 				slog.Error("vault: ingest annotation failed", "file", path, "err", err)
 				return nil

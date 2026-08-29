@@ -22,6 +22,14 @@ Also ingests xAI **Grok CLI** sessions from `~/.grok/sessions/`
 transformed into the same content model, tagged
 `session_meta.source = 'grok'`. See `docs/design/grok-ingest.md`.
 
+Also ingests **Cursor Agent** transcripts from
+`~/.cursor/projects/**/agent-transcripts/` (honours `CURSOR_HOME`) —
+JSONL role/message streams transformed into the same content model,
+tagged `session_meta.source = 'cursor'`. Tool results, cwd, title, and
+model come from the sibling Agent CLI `~/.cursor/chats/**/store.db`
+(🎯T149.1). Resume is `agent --resume <id>`. See
+`docs/design/cursor-ingest.md`.
+
 ## Build & Run
 
 ```bash
@@ -72,7 +80,7 @@ user. Good moments to reach for mnemo:
 - `mnemo_stats` — Index statistics
 - `mnemo_compacted_session` — Return the compacted view of a session: its compaction summaries (the dense, durable layer) plus the addenda tail (substantive messages past the latest compaction cursor, computed live). The token-volume retrieval form (🎯T72) — use instead of `mnemo_read_session` when you want the distilled view rather than the raw transcript.
 - `mnemo_rework_history` — Return prior rework attempts for a bullseye target, ordered most-recent first. Sourced from compaction spans where the target appeared in targets_active or targets_progressed. Returns session_id, timestamp, repo, progress note, prose summary, and open threads. Feed output as `mnemo_history` to `bullseye_rework` to avoid repeating prior failed approaches.
-- `mnemo_config` — Read or update mnemo's runtime configuration (`~/.mnemo/config.json`) without restarting the daemon. `op=read` returns the current config + resolved paths; `op=write` with a `patch` object merges and persists. Hot-reload covers `vault_path`, `vault_profile`, `vault_bridges`, `vault_bridges_max_links` (🎯T64.5/T64.6, re-derived by rebuilding the vault exporter in place), `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2 enable/disable); `linked_instances` is persisted but requires a restart.
+- `mnemo_config` — Read or update mnemo's runtime configuration (`~/.mnemo/config.json`) without restarting the daemon. `op=read` returns the current config + resolved paths; `op=write` with a `patch` object merges and persists. Hot-reload covers `vault_path`, `vault_profile`, `vault_bridges`, `vault_bridges_max_links` (🎯T64.5/T64.6, re-derived by rebuilding the vault exporter in place), `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2 enable/disable), `terminal.backend` (🎯T126, read per open); `linked_instances` is persisted but requires a restart.
 
 ### Consolidated tools (🎯T143)
 
@@ -84,7 +92,7 @@ ignored**, so a wrong guess fails loudly.
 - `mnemo_vault` — Vault operations. `op=status|sync|gc|migration_doc|bridge_list|recluster|themes_inspect|themes_pin|themes_split|themes_merge`. Requires `vault_path`. `themes_split`/`themes_merge` remain stubs that record a `theme_overrides` row without applying live, and the description says so.
 - `mnemo_thread` — Thread navigation. `op=list|show|new|archive|go`. Same data as the daemon's `/api/thread/*` endpoints, which the menubar app uses.
 - `mnemo_note` — Cross-session inbox notes (🎯T65). `op=post|recv|list`. `recv` keeps its `unread_only=true` / `mark_read=true` defaults and its idempotency, so concurrent receivers never double-deliver. Inbox canonicalization is unchanged: a leading `~` is rejected, `./..` collapsed, symlinks resolved, and the directory must exist.
-- `mnemo_ops` — Operational surface. `op=doctor|compactor|divergence|backup_status|backup_now|restore`. `op=restore` is destructive and requires an explicit `session_id`. Note that `mnemo_status` and `mnemo_stats` are deliberately **not** folded in: they carry real traffic, and for a tool agents already find, a name beats an op.
+- `mnemo_ops` — Operational surface. `op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc`. `op=restore` is destructive and requires an explicit `session_id`. Note that `mnemo_status` and `mnemo_stats` are deliberately **not** folded in: they carry real traffic, and for a tool agents already find, a name beats an op.
 
 **Removed in 🎯T143.1** (no consumer in four months): `mnemo_plans`,
 `mnemo_ci`, `mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
@@ -116,6 +124,19 @@ mnemo/
 ```bash
 GOWORK=off go test -tags "sqlite_fts5" ./...
 ```
+
+## Text compression (🎯T151)
+
+`messages.text` and `docs.content` are stored per-row zstd-compressed in
+`text_z` / `content_z`, with the legacy column holding `''` for those
+rows. Read them through `mnemo_text(col, col_z)` or the `messages_v` /
+`docs_v` views — never the bare column, which a ratchet test
+(`compress_readers_test.go`) enforces over every SQL literal in the
+tree. Dictionaries are trained from the corpus and versioned in
+`compression_dicts`; each frame names its dictionary, so a retrain never
+invalidates history. Open `mnemo.db` with `store.SQLiteDriverName` (the
+triggers call `mnemo_text`). Ops: `mnemo_ops op=compress_status |
+compress_train | compress_gc`. Design: `docs/design/text-compression.md`.
 
 ## Schema policy
 

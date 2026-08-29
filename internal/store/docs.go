@@ -368,15 +368,17 @@ func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped
 		meta = parseInlineMetadata(content)
 	}
 
+	contentPlain, contentZ := s.codec.pack(FamilyDocsContent, content)
 	_, err = s.writeDB.Exec(`
 		INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
-			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
 			repo         = excluded.repo,
 			kind         = excluded.kind,
 			title        = excluded.title,
 			content      = excluded.content,
+			content_z    = excluded.content_z,
 			content_hash = excluded.content_hash,
 			size         = excluded.size,
 			mtime        = excluded.mtime,
@@ -386,8 +388,8 @@ func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped
 			doc_status   = excluded.doc_status,
 			doc_target   = excluded.doc_target,
 			doc_source   = excluded.doc_source
-	`, repo, path, kind, title, content, hash, fi.Size(), mtime, now,
-		taxonomy, meta.Date, meta.Status, meta.Target, meta.Source)
+	`, repo, path, kind, title, contentPlain, hash, fi.Size(), mtime, now,
+		taxonomy, meta.Date, meta.Status, meta.Target, meta.Source, contentZ)
 	if err != nil {
 		slog.Error("insert doc failed", "file", path, "err", err)
 		return
@@ -425,7 +427,7 @@ func (s *Store) SearchDocs(query string, repo string, kind string, limit int) ([
 
 	if query != "" {
 		ftsQuery := relaxQuery(query)
-		q := `SELECT d.id, d.repo, d.file_path, d.kind, d.title, d.content, d.content_hash, d.size, d.mtime, d.indexed_at
+		q := `SELECT d.id, d.repo, d.file_path, d.kind, d.title, mnemo_text(d.content, d.content_z), d.content_hash, d.size, d.mtime, d.indexed_at
 			FROM docs d
 			JOIN docs_fts f ON f.rowid = d.id
 			WHERE docs_fts MATCH ?`
@@ -453,7 +455,7 @@ func (s *Store) SearchDocs(query string, repo string, kind string, limit int) ([
 		where = append(where, "kind = ?")
 		args = append(args, kind)
 	}
-	q := `SELECT id, repo, file_path, kind, title, content, content_hash, size, mtime, indexed_at
+	q := `SELECT id, repo, file_path, kind, title, mnemo_text(content, content_z), content_hash, size, mtime, indexed_at
 		FROM docs WHERE ` + strings.Join(where, " AND ") + ` ORDER BY indexed_at DESC LIMIT ?`
 	args = append(args, limit)
 	return s.queryDocs(q, args...)

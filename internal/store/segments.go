@@ -102,7 +102,7 @@ func (s *Store) SegmentSession(sessionID string) error {
 	}
 
 	rows, err := s.readDB.Query(`
-		SELECT id, role, text, timestamp, COALESCE(is_noise, 0)
+		SELECT id, role, mnemo_text(text, text_z), timestamp, COALESCE(is_noise, 0)
 		FROM messages
 		WHERE session_id = ?
 		ORDER BY id

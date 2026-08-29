@@ -19,8 +19,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/marcelocantos/mnemo/internal/iterm"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/terminal"
 )
 
 // Result describes the tab that was focused or spawned, plus enough about
@@ -79,7 +79,7 @@ func Open(ctx context.Context, mem store.Backend, ref string) (Result, error) {
 		return Result{}, &UserError{msg: err.Error()}
 	}
 
-	res, err := iterm.Go(ctx, iterm.GoArgs{
+	res, err := terminal.Go(ctx, terminal.GoArgs{
 		Path: hit.CWD,
 		Name: filepath.Base(hit.CWD),
 		// Tag by session, not by path: several past conversations can share

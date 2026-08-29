@@ -125,6 +125,11 @@ func TestConsolidationPreservesCapabilities(t *testing.T) {
 			// (not a silent re-add of mnemo_budget / mnemo_agent_trees names).
 			"budget":      "mnemo_budget",
 			"agent_trees": "mnemo_agent_trees",
+			// 🎯T151: deliberate new capabilities (no prior tool) — the
+			// text-compression lifecycle lives under ops, not as tools.
+			"compress_status": "(new: 🎯T151)",
+			"compress_train":  "(new: 🎯T151)",
+			"compress_gc":     "(new: 🎯T151)",
 		}},
 	}
 

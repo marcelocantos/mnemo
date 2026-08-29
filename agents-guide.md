@@ -10,8 +10,29 @@ ingests:
 - **Grok CLI** — `~/.grok/sessions/**/updates.jsonl` plus sibling
   `summary.json` (`source=grok`; honour `GROK_HOME`; see
   `docs/design/grok-ingest.md`)
+- **Cursor Agent** — `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl`
+  plus Agent CLI `~/.cursor/chats/**/store.db` for tool_result / cwd /
+  title / model fidelity (🎯T149.1) (`source=cursor`; honour
+  `CURSOR_HOME`; see `docs/design/cursor-ingest.md`). Resume:
+  `agent --resume <id>`.
 
 Filter or inspect provenance via `session_meta.source` (`mnemo_query`).
+
+**Transcript file replay** (🎯T150 / 🎯T150.10) is a forensics recovery
+tool: reconstruct agent file activity into a quarantine directory, seeding
+pre-images from git (worktree/commit/stash), Grok rewind snapshots, Claude
+file-history, and stitched Read tool_results before applying patches.
+
+```bash
+mnemo replay-files --session <id> --dry-run
+mnemo replay-files --session <id>
+mnemo replay-files --session <id> --seed-from HEAD
+mnemo replay-files --session <id> --no-seed   # Write/patch timeline only
+mnemo replay-files --since 2026-08-01T00:00:00Z --until 2026-08-26T00:00:00Z --source cursor
+```
+
+Design: `docs/design/transcript-file-replay.md`. Never writes into a live
+git checkout unless `--allow-live-tree` is set.
 
 ## Full setup (all steps required)
 

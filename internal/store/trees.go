@@ -59,7 +59,7 @@ func (s *Store) LinkDocToTree(docID, treeID int64) error {
 // for consistency with existing callers.
 func (s *Store) DocsInTree(rootPath string) ([]DocInfo, error) {
 	rows, err := s.readDB.Query(`
-		SELECT d.id, d.repo, d.file_path, d.kind, d.title, d.content,
+		SELECT d.id, d.repo, d.file_path, d.kind, d.title, mnemo_text(d.content, d.content_z),
 			d.content_hash, d.size, d.mtime, d.indexed_at
 		FROM docs d
 		JOIN doc_tree_refs r ON r.doc_id = d.id

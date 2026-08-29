@@ -4,7 +4,9 @@
 package tools
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -176,6 +178,10 @@ var opsOps = opTable{
 		// the agent/MCP home.
 		{name: "budget", desc: "Monthly budget, projection, throttle state, and top agent trees"},
 		{name: "agent_trees", desc: "Costliest agent trees (T137), ranked by aggregate tree cost", params: []string{"days", "limit", "repo"}},
+		// 🎯T151: per-row zstd compression of messages.text / docs.content.
+		{name: "compress_status", desc: "Compression dictionaries and per-column compressed/plain accounting, plus backfill progress"},
+		{name: "compress_train", desc: "Train a new zstd dictionary for a column family from a random row sample and make it active for new rows", params: []string{"family"}},
+		{name: "compress_gc", desc: "Repack historical plain rows compressed, in resumable batches (background unless wait=true); VACUUM afterwards to reclaim space", params: []string{"family", "wait"}},
 	},
 }
 
@@ -193,6 +199,8 @@ Ops:`+opsOps.describe()),
 		mcp.WithNumber("days", mcp.Description("op=agent_trees: lookback days (default 7)")),
 		mcp.WithNumber("limit", mcp.Description("op=agent_trees: max trees (default 20)")),
 		mcp.WithString("repo", mcp.Description("op=agent_trees: repo filter")),
+		mcp.WithString("family", mcp.Description("op=compress_train / compress_gc: messages (default) or docs")),
+		mcp.WithBoolean("wait", mcp.Description("op=compress_gc: run to completion in this call instead of in the background")),
 	)
 }
 
@@ -218,6 +226,12 @@ func (h *callHandler) opsDispatch(args map[string]any, resolveCompactor func(str
 		return h.opsBudget()
 	case "agent_trees":
 		return h.opsAgentTrees(args)
+	case "compress_status":
+		return h.compressStatus()
+	case "compress_train":
+		return h.compressTrain(args)
+	case "compress_gc":
+		return h.compressGC(args)
 	}
 	return "mnemo_ops: op " + op + " has no handler", true, nil
 }
@@ -298,4 +312,128 @@ func formatOpsBudget(mem store.Backend, cfg store.BudgetConfig, thr func() (stri
 		}
 	}
 	return out.String(), false, nil
+}
+
+// --- Compression (🎯T151) ---
+
+// textCompressor is the slice of the store the compression ops need.
+// Optional: a Backend that is not the real store (federation, tests)
+// simply reports the ops as unavailable.
+type textCompressor interface {
+	CompressionStatus() (store.CompressionStatus, error)
+	TrainDictionary(ctx context.Context, family string) (uint32, error)
+	CompressBackfill(ctx context.Context, family string) (store.BackfillResult, error)
+}
+
+func (h *callHandler) compressor() (textCompressor, bool) {
+	c, ok := h.mem.(textCompressor)
+	return c, ok
+}
+
+func (h *callHandler) compressStatus() (string, bool, error) {
+	c, ok := h.compressor()
+	if !ok {
+		return "compression ops are not available on this backend", true, nil
+	}
+	st, err := c.CompressionStatus()
+	if err != nil {
+		return fmt.Sprintf("compress_status failed: %v", err), true, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Compression ready: %v\n\n", st.Ready)
+	if len(st.Dicts) == 0 {
+		b.WriteString("Dictionaries: none (rows are written dictionary-less; op=compress_train once a few thousand rows exist)\n")
+	} else {
+		b.WriteString("Dictionaries:\n")
+		for _, d := range st.Dicts {
+			active := ""
+			if d.Active {
+				active = "  (active)"
+			}
+			fmt.Fprintf(&b, "  %-16s id=%-10d %8s  trained %s on %d rows%s\n",
+				d.Family, d.DictID, humanSize(int64(d.Bytes)), d.CreatedAt, d.SampleRows, active)
+		}
+	}
+	b.WriteString("\nFamilies:\n")
+	for _, f := range st.Families {
+		fmt.Fprintf(&b, "  %-16s rows=%d compressed=%d plain=%s packed=%s",
+			f.Family, f.Rows, f.Compressed, humanSize(f.PlainBytes), humanSize(f.PackedBytes))
+		switch {
+		case f.Running:
+			fmt.Fprintf(&b, "  backfill: running (next id %d, saved %s)", f.BackfillNext, humanSize(f.BackfillSaved))
+		case f.BackfillDone:
+			fmt.Fprintf(&b, "  backfill: done at %s (saved %s)", f.BackfillAt, humanSize(f.BackfillSaved))
+		case f.BackfillNext > 0:
+			fmt.Fprintf(&b, "  backfill: paused at id %d (saved %s)", f.BackfillNext, humanSize(f.BackfillSaved))
+		default:
+			b.WriteString("  backfill: not started")
+		}
+		if f.LastError != "" {
+			fmt.Fprintf(&b, "  last error: %s", f.LastError)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\nSpace is reclaimed only by VACUUM (needs free disk equal to the DB size); run it after the backfill reports done.\n")
+	return b.String(), false, nil
+}
+
+func compressFamily(args map[string]any) (string, error) {
+	family, _ := args["family"].(string)
+	switch family {
+	case "", "messages":
+		return store.FamilyMessagesText, nil
+	case "docs":
+		return store.FamilyDocsContent, nil
+	case store.FamilyMessagesText, store.FamilyDocsContent:
+		return family, nil
+	}
+	return "", fmt.Errorf("unknown family %q (want messages or docs)", family)
+}
+
+func (h *callHandler) compressTrain(args map[string]any) (string, bool, error) {
+	c, ok := h.compressor()
+	if !ok {
+		return "compression ops are not available on this backend", true, nil
+	}
+	family, err := compressFamily(args)
+	if err != nil {
+		return err.Error(), true, nil
+	}
+	id, err := c.TrainDictionary(h.ctx, family)
+	if err != nil {
+		return fmt.Sprintf("compress_train failed: %v", err), true, nil
+	}
+	return fmt.Sprintf("Trained dictionary %d for %s; new rows use it from now. Existing rows keep their dictionary; run op=compress_gc to repack history.", id, family), false, nil
+}
+
+// compressGC starts the backfill in the background — over millions of
+// rows it runs for minutes, well past any MCP call budget — and returns
+// at once; op=compress_status reports progress and the resumable cursor.
+func (h *callHandler) compressGC(args map[string]any) (string, bool, error) {
+	c, ok := h.compressor()
+	if !ok {
+		return "compression ops are not available on this backend", true, nil
+	}
+	family, err := compressFamily(args)
+	if err != nil {
+		return err.Error(), true, nil
+	}
+	if wait, _ := args["wait"].(bool); wait {
+		res, err := c.CompressBackfill(h.ctx, family)
+		if err != nil {
+			return fmt.Sprintf("compress_gc failed after %d rows: %v", res.Rows, err), true, nil
+		}
+		return fmt.Sprintf("Backfill %s: visited %d rows, compressed %d, saved %s, done=%v",
+			family, res.Rows, res.Compressed, humanSize(res.Saved), res.Done), false, nil
+	}
+	go func() {
+		res, err := c.CompressBackfill(context.Background(), family)
+		if err != nil {
+			slog.Warn("compress backfill stopped", "family", family, "rows", res.Rows, "err", err)
+			return
+		}
+		slog.Info("compress backfill finished", "family", family,
+			"rows", res.Rows, "compressed", res.Compressed, "saved", res.Saved, "done", res.Done)
+	}()
+	return fmt.Sprintf("Backfill of %s started in the background; poll op=compress_status. It is resumable: a restart continues from the last committed batch.", family), false, nil
 }

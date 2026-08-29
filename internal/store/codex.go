@@ -637,7 +637,7 @@ func (s *Store) ingestCodexFile(path string) error {
 		return err
 	}
 
-	ws, err := newWriterState(s.writeDB)
+	ws, err := s.newWriterState()
 	if err != nil {
 		return err
 	}

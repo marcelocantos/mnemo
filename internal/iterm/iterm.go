@@ -199,12 +199,20 @@ func spawnScript(args GoArgs, tag string) []string {
 	return lines
 }
 
-// loginCommand wraps the per-thread script in a login shell so PATH is resolved
-// (claude is found) without the interactive-init noise of -i. iTerm2's
-// `command` parameter tokenizes respecting quotes but does NOT run the value
-// through a shell, so an explicit `/bin/zsh -lc '<script>'` is required. The
-// script is single-quoted, so it must contain no single quotes — the path and
-// printf format in spawnCommand are double-quoted for exactly that reason.
+// LoginCommand wraps the per-thread script in a login shell so PATH is
+// resolved (claude is found) without the interactive-init noise of -i.
+// Exported for the cmux backend (🎯T126), which runs the same script as a
+// layout surface command rather than through iTerm2's tokenizer.
+//
+// iTerm2's `command` parameter tokenizes respecting quotes but does NOT run
+// the value through a shell, so an explicit `/bin/zsh -lc '<script>'` is
+// required. The script is single-quoted, so it must contain no single
+// quotes — the path and printf format in spawnCommand are double-quoted
+// for exactly that reason.
+func LoginCommand(args GoArgs) string {
+	return loginCommand(args)
+}
+
 func loginCommand(args GoArgs) string {
 	return `/bin/zsh -lc '` + spawnCommand(args) + `'`
 }

@@ -40,7 +40,7 @@ func TestIngestOversizedLineNotDropped(t *testing.T) {
 	}
 
 	countLike := func(pattern string) int64 {
-		rows, err := s.Query("SELECT COUNT(*) AS c FROM messages WHERE text LIKE '%" + pattern + "%'")
+		rows, err := s.Query("SELECT COUNT(*) AS c FROM messages_v WHERE text LIKE '%" + pattern + "%'")
 		if err != nil {
 			t.Fatal(err)
 		}

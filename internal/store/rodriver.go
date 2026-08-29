@@ -32,7 +32,7 @@ func init() {
 	sql.Register(readOnlyDriverName, &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
 			conn.RegisterAuthorizer(readOnlyAuthorizer)
-			return nil
+			return registerTextFunc(conn)
 		},
 	})
 }
