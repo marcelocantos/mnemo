@@ -275,7 +275,8 @@ Results capped at 100 rows.
 
 Tip: If you find yourself running the same complex query pattern repeatedly, save it as a template with mnemo_define for reuse.`),
 			mcp.WithBoolean("describe", mcp.Description("Return the database schema catalogue instead of running a query; generated from the live database.")),
-			mcp.WithString("query", mcp.Required(), mcp.Description("SQL SELECT/WITH query, or sqldeep nested syntax (FROM ... SELECT { ... })")),
+			mcp.WithString("query",
+				mcp.Description("SQL SELECT/WITH query, or sqldeep nested syntax (FROM ... SELECT { ... })")),
 		),
 		mcp.NewTool("mnemo_repos",
 			mcp.WithDescription(`List repositories that have been worked on in Claude Code sessions. Returns, per repo: name, filesystem path, session count, last session activity, last git commit date, and a one-line summary derived from the repo's root CLAUDE.md (first non-blank, non-heading sentence, capped at ~120 chars).
@@ -413,8 +414,15 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	case "mnemo_read_session":
 		return ch.readSession(args)
 	case "mnemo_query":
+		// describe is checked first, and query is deliberately NOT
+		// mcp.Required(): a required sibling would force an agent asking
+		// for the schema to invent a dummy query, which a strict client
+		// rejects outright. The handler enforces "one of" instead.
 		if describe, _ := args["describe"].(bool); describe {
 			return ch.describeSchema()
+		}
+		if q, _ := args["query"].(string); strings.TrimSpace(q) == "" {
+			return "mnemo_query needs either a query, or describe=true for the schema catalogue", true, nil
 		}
 		return ch.query(args)
 	case "mnemo_repos":

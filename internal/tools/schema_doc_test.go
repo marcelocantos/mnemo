@@ -102,3 +102,26 @@ func shippedSchemaObjects(t *testing.T) map[string]bool {
 	}
 	return out
 }
+
+// TestQueryAcceptsDescribeWithoutAQuery pins the "one of" contract
+// (🎯T156). describe=true shipped alongside a REQUIRED query parameter,
+// which meant an agent asking for the schema had to invent a dummy
+// query and a strict client would reject the call outright. The schema
+// path must be reachable on its own, and a call with neither must say
+// so rather than run an empty query.
+func TestQueryAcceptsDescribeWithoutAQuery(t *testing.T) {
+	var queryRequired bool
+	for _, tool := range Definitions() {
+		if tool.Name != "mnemo_query" {
+			continue
+		}
+		for _, req := range tool.InputSchema.Required {
+			if req == "query" {
+				queryRequired = true
+			}
+		}
+	}
+	if queryRequired {
+		t.Error("mnemo_query marks query as required, so describe=true cannot be called on its own")
+	}
+}
