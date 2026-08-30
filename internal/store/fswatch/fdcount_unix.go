@@ -7,13 +7,24 @@ package fswatch
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
 
+// lsofTimeout bounds the fallback probe. lsof enumerates descriptors
+// across the system and can take seconds on a busy machine; an unbounded
+// probe once pinned the watcher and, through it, every Stats caller
+// (🎯T153). A probe that cannot answer promptly is worth less than the
+// latency it costs, so it is abandoned rather than waited on.
+const lsofTimeout = 2 * time.Second
+
 func openFDCountLsofImpl() int {
-	out, err := exec.Command("lsof", "-nP", "-p", fmt.Sprint(os.Getpid())).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), lsofTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-p", fmt.Sprint(os.Getpid())).Output()
 	if err != nil {
 		return -1
 	}

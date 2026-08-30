@@ -113,6 +113,10 @@ type Store struct {
 	// watchTel is live 🎯T142 tree-watch telemetry (backend, FDs, poll).
 	// Own mutex; not guarded by mu.
 	watchTel watchTelemetryState
+	// lastFDSample is the UnixNano of the last FD probe, rate-limiting a
+	// measurement that is a subprocess in the worst case. Atomic so the
+	// probe can run without watchTel.mu (🎯T153).
+	lastFDSample atomic.Int64
 
 	// queryTimeoutOverride, when > 0, replaces DefaultQueryTimeout for
 	// Store.Query (tests inject a short budget). Zero means default (🎯T74).
@@ -835,6 +839,47 @@ func relaxQuery(q string) string {
 // long-lived workers after cancelling them.
 const backgroundDrainGrace = 3 * time.Second
 
+// planIsMetadataOnly reports whether every operation in a migration plan
+// changes only schema metadata — views, triggers and indexes — and so
+// cannot alter or lose a row of table data (🎯T155).
+//
+// The pre-migration backup exists to insure table data against a botched
+// apply. For a plan that only redefines a view it insures nothing, while
+// costing the single largest delay in the startup path: redefining
+// entries_v on an 18.9 GB index spent ~18 minutes in VACUUM INTO, gzip
+// and integrity check, with every startup capability pending throughout.
+//
+// Conservative by construction: any operation type not on the list —
+// including ALTER TABLE ADD COLUMN, which SQLite implements as metadata
+// but which changes the table's own definition — keeps the backup, as
+// does anything sqlift flags destructive, rebuilding or data-dependent.
+// The second return value names why a backup is required, for the log.
+func planIsMetadataOnly(plan sqlift.MigrationPlan) (bool, string) {
+	ops := plan.Operations()
+	if len(ops) == 0 {
+		return false, ""
+	}
+	for _, op := range ops {
+		switch {
+		case op.Destructive:
+			return false, "destructive op on " + op.ObjectName
+		case op.RequiresRebuild:
+			return false, "table rebuild of " + op.ObjectName
+		case op.DataDependent:
+			return false, "data-dependent op on " + op.ObjectName
+		}
+		switch op.Type {
+		case sqlift.CreateView, sqlift.DropView,
+			sqlift.CreateTrigger, sqlift.DropTrigger,
+			sqlift.CreateIndex, sqlift.DropIndex:
+			// Metadata only: no table row is read or rewritten.
+		default:
+			return false, op.Type.String() + " on " + op.ObjectName
+		}
+	}
+	return true, ""
+}
+
 func openDB(dbPath string, writer bool) (*sql.DB, error) {
 	// The read pool uses a driver that installs a read-only authorizer
 	// (see rodriver.go): mnemo_query runs arbitrary client SQL, and
@@ -963,9 +1008,17 @@ func upgradeSchema(dbPath string) error {
 	}
 
 	// Pre-migration backup — insurance before Apply (🎯T61). Skipped when
-	// there are no tables (nothing to protect). VACUUM INTO is concurrent-
-	// safe with live mnemo readers/writers.
-	if len(current.Tables) > 0 {
+	// there are no tables (nothing to protect), and when the plan cannot
+	// touch table data (🎯T155). VACUUM INTO is concurrent-safe with live
+	// mnemo readers/writers.
+	metadataOnly, why := planIsMetadataOnly(plan)
+	if metadataOnly {
+		slog.Info("pre-migration backup skipped: metadata-only migration",
+			"db", dbPath, "ops", len(plan.Operations()))
+	} else if why != "" {
+		slog.Info("pre-migration backup required", "db", dbPath, "reason", why)
+	}
+	if len(current.Tables) > 0 && !metadataOnly {
 		backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 		if err := os.MkdirAll(backupDir, 0o755); err != nil {
 			slog.Warn("backup dir create failed; proceeding without pre-migration backup",

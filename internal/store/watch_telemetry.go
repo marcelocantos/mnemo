@@ -75,6 +75,8 @@ func (s *Store) WatchTelemetrySnapshot() WatchTelemetry {
 
 // noteWatchStarted records backend identity at Watch start.
 func (s *Store) noteWatchStarted(backend string, roots, dirWatches int, capHit bool) {
+	fds, sampled := s.sampleOpenFDs() // before the lock (🎯T153)
+
 	s.watchTel.mu.Lock()
 	defer s.watchTel.mu.Unlock()
 	s.watchTel.snap = WatchTelemetry{
@@ -85,15 +87,20 @@ func (s *Store) noteWatchStarted(backend string, roots, dirWatches int, capHit b
 		CapHit:     capHit,
 		StartedAt:  time.Now().UTC(),
 	}
-	s.sampleOpenFDsLocked()
+	if sampled {
+		s.watchTel.snap.ProcessOpenFDs = fds
+		s.watchTel.snap.SampledAt = time.Now().UTC()
+	}
 }
 
 // noteWatchStopped clears the running flag (daemon drain).
 func (s *Store) noteWatchStopped() {
+	// Deliberately does not probe: this runs on the shutdown path, where
+	// the value is never read again and a subprocess would only add
+	// latency to a drain that is already racing a grace period (🎯T153).
 	s.watchTel.mu.Lock()
 	defer s.watchTel.mu.Unlock()
 	s.watchTel.snap.Running = false
-	s.sampleOpenFDsLocked()
 }
 
 // noteWatchEvent increments the event counter after a filtered path is handled.
@@ -105,7 +112,17 @@ func (s *Store) noteWatchEvent() {
 }
 
 // noteWatchPoll records one safety-poll tick.
+//
+// The FD probe runs BEFORE the lock (🎯T153). It was inside it, and on a
+// machine where /dev/fd is unreadable it falls back to lsof — so every
+// WatchTelemetrySnapshot caller, which means every Stats and every
+// diagnostics pass, queued behind a subprocess. That is what made
+// shutdown miss its 3s drain grace: a goroutine dump caught
+// openFDCountLsofImpl in a syscall holding watchTel.mu while the ingest
+// worker blocked on it in Store.Stats.
 func (s *Store) noteWatchPoll(candidates int, poller *fswatch.PollTracker) {
+	fds, sampled := s.sampleOpenFDs()
+
 	s.watchTel.mu.Lock()
 	defer s.watchTel.mu.Unlock()
 	s.watchTel.snap.PollTicks++
@@ -114,16 +131,39 @@ func (s *Store) noteWatchPoll(candidates int, poller *fswatch.PollTracker) {
 	if poller != nil {
 		s.watchTel.snap.PollStated = int64(poller.StatCallCount())
 	}
-	// Sample FDs every poll (~5s) — cheap enough for the fast health path.
-	s.sampleOpenFDsLocked()
-}
-
-// sampleOpenFDsLocked updates ProcessOpenFDs. Caller holds watchTel.mu.
-func (s *Store) sampleOpenFDsLocked() {
-	if n := fswatch.OpenFDCount(); n >= 0 {
-		s.watchTel.snap.ProcessOpenFDs = n
+	if sampled {
+		s.watchTel.snap.ProcessOpenFDs = fds
 		s.watchTel.snap.SampledAt = time.Now().UTC()
 	}
+}
+
+// openFDCountProbe is the FD probe, indirected so a test can substitute a
+// slow one and assert that readers are not blocked behind it.
+var openFDCountProbe = fswatch.OpenFDCount
+
+// fdSampleInterval is the floor between FD probes. The poll fires every
+// ~5s; the probe is a directory read at best and a bounded subprocess at
+// worst, and the number it produces moves slowly, so sampling every poll
+// bought nothing and cost a process spawn.
+const fdSampleInterval = 60 * time.Second
+
+// sampleOpenFDs probes the process FD count without holding watchTel.mu,
+// rate-limited to fdSampleInterval. Reports the count and whether this
+// call actually sampled.
+func (s *Store) sampleOpenFDs() (int, bool) {
+	now := time.Now()
+	last := s.lastFDSample.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < fdSampleInterval {
+		return 0, false
+	}
+	if !s.lastFDSample.CompareAndSwap(last, now.UnixNano()) {
+		return 0, false // another poll is sampling
+	}
+	n := openFDCountProbe()
+	if n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // EvaluateWatchHealth maps telemetry to ok/warn/fail detail for doctor.
