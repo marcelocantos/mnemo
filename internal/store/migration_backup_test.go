@@ -46,17 +46,22 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// schema.sql is embedded from the checkout, so on Windows (autocrlf)
+	// it arrives with CRLF and a fixture keyed on "\n" matches nothing.
+	// Normalise before building variants; sqlift parses either.
+	base := strings.ReplaceAll(schemaSQL, "\r\n", "\n")
+
 	// The shipped schema against itself: nothing to do.
-	if ok, _ := planIsMetadataOnly(planFor(t, dbPath, schemaSQL)); ok {
+	if ok, _ := planIsMetadataOnly(planFor(t, dbPath, base)); ok {
 		t.Error("an empty plan must not be classified metadata-only (there is nothing to skip)")
 	}
 
 	// A view redefinition — exactly the change that cost ~18 minutes of
 	// VACUUM INTO on the live index.
-	viewChange := strings.Replace(schemaSQL,
+	viewChange := strings.Replace(base,
 		"CREATE VIEW docs_v AS",
 		"CREATE VIEW docs_v_extra AS SELECT id FROM docs;\nCREATE VIEW docs_v AS", 1)
-	if viewChange == schemaSQL {
+	if viewChange == base {
 		t.Fatal("fixture is stale: docs_v is no longer declared this way")
 	}
 	ok, why := planIsMetadataOnly(planFor(t, dbPath, viewChange))
@@ -65,7 +70,7 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	}
 
 	// An index addition is metadata too.
-	indexChange := schemaSQL + "\nCREATE INDEX idx_docs_kind_t155 ON docs(kind);\n"
+	indexChange := base + "\nCREATE INDEX idx_docs_kind_t155 ON docs(kind);\n"
 	if ok, why := planIsMetadataOnly(planFor(t, dbPath, indexChange)); !ok {
 		t.Errorf("an index-only plan must skip the backup, got required because: %s", why)
 	}
@@ -74,10 +79,10 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	// Appended last, which is the only shape the append-only schema policy
 	// permits — a column inserted mid-table makes sqlift plan a rebuild
 	// instead, which this classifier also (correctly) refuses.
-	colChange := strings.Replace(schemaSQL,
+	colChange := strings.Replace(base,
 		"			content_z BLOB\n		);",
 		"			content_z BLOB,\n			t155_probe TEXT\n		);", 1)
-	if colChange == schemaSQL {
+	if colChange == base {
 		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
 	}
 	ok, why = planIsMetadataOnly(planFor(t, dbPath, colChange))
@@ -90,7 +95,7 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 
 	// A mid-table column forces a rebuild; that must keep the backup too,
 	// and say so.
-	rebuild := strings.Replace(schemaSQL,
+	rebuild := strings.Replace(base,
 		"			doc_source TEXT NOT NULL DEFAULT ''",
 		"			doc_source TEXT NOT NULL DEFAULT '',\n			t155_mid TEXT", 1)
 	ok, why = planIsMetadataOnly(planFor(t, dbPath, rebuild))
@@ -102,7 +107,7 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	}
 
 	// A new table likewise.
-	tableChange := schemaSQL + "\nCREATE TABLE t155_new (id INTEGER PRIMARY KEY);\n"
+	tableChange := base + "\nCREATE TABLE t155_new (id INTEGER PRIMARY KEY);\n"
 	if ok, _ := planIsMetadataOnly(planFor(t, dbPath, tableChange)); ok {
 		t.Error("a plan creating a table must keep the backup")
 	}
