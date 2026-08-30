@@ -73,9 +73,10 @@ type BackupArgs struct {
 //  1. VACUUM INTO produces a fully-consistent standalone DB at a sibling
 //     temp file (same filesystem, so the later rename is atomic).
 //  2. PRAGMA integrity_check on the snapshot — bail if corrupted.
-//  3. Gzip-compress (level 1 — favours speed over size; the consecutive-
-//     snapshot redundancy gzip can't catch is left for a future zstd-dict
-//     or chunked-dedup pass) to destPath.tmp.
+//  3. Gzip-compress (level 1 — favours speed over size) to destPath.tmp.
+//     Slated to become zstd (🎯T159): measured on the live index, gzip -1
+//     manages ratio 0.734 at ~83 MB/s where libzstd reaches 0.689 at
+//     3947 MB/s, turning a ~3.8 minute CPU burn into ~5 seconds.
 //  4. fsync + atomic rename to destPath.
 //
 // On any failure the function leaves no partial output (temp files are
@@ -186,8 +187,12 @@ func integrityCheck(dbPath string) error {
 }
 
 // gzipFile compresses srcPath into destPath (atomic rename via .tmp). Uses
-// gzip BestSpeed; the consecutive-snapshot redundancy that gzip can't catch
-// is left for a future dedup pass.
+// gzip BestSpeed.
+//
+// Both this comment and the one above used to point at a future
+// cross-snapshot dedup or delta pass. That is retired, not pending:
+// retention is one snapshot now (🎯T158), and a delta needs a chain to
+// diff against. The remaining win is the compressor itself (🎯T159).
 func gzipFile(srcPath, destPath string) (int64, error) {
 	tmpPath := destPath + ".tmp"
 	out, err := os.Create(tmpPath)
