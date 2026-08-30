@@ -319,9 +319,8 @@ Export your knowledge graph as Markdown notes compatible with Obsidian
 and Logseq. Human annotations sync back into mnemo's FTS5 search within
 ~2 seconds. Zero overhead when disabled.
 
-Add to `~/.mnemo/config.json` and restart the daemon — or, with a
-running daemon, ask any MCP client to call `mnemo_config` with
-`op=write` and the patch below; changes are adopted in-process:
+Add to `~/.mnemo/config.json`. The daemon watches the file and adopts
+`vault_path` in place — no restart, no tool call:
 
 ```json
 {
@@ -434,7 +433,6 @@ patterns, and user notes via local TF-IDF by default; set
 
 | Tool | Description |
 |---|---|
-| `mnemo_config` | Read or update `~/.mnemo/config.json` without restarting the daemon. `op=read` returns the current effective config; `op=write` with a JSON `patch` merges, validates, persists, and hot-reloads. `vault_path`, `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2), and `terminal.backend` (🎯T126, read per open: `iterm2` or `cmux`) are applied live; `linked_instances` is persisted but requires a restart. |
 
 For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
 or run `mnemo --help-agent`.

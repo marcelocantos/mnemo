@@ -80,7 +80,19 @@ user. Good moments to reach for mnemo:
 - `mnemo_stats` — Index statistics
 - `mnemo_compacted_session` — Return the compacted view of a session: its compaction summaries (the dense, durable layer) plus the addenda tail (substantive messages past the latest compaction cursor, computed live). The token-volume retrieval form (🎯T72) — use instead of `mnemo_read_session` when you want the distilled view rather than the raw transcript.
 - `mnemo_rework_history` — Return prior rework attempts for a bullseye target, ordered most-recent first. Sourced from compaction spans where the target appeared in targets_active or targets_progressed. Returns session_id, timestamp, repo, progress note, prose summary, and open threads. Feed output as `mnemo_history` to `bullseye_rework` to avoid repeating prior failed approaches.
-- `mnemo_config` — Read or update mnemo's runtime configuration (`~/.mnemo/config.json`) without restarting the daemon. `op=read` returns the current config + resolved paths; `op=write` with a `patch` object merges and persists. Hot-reload covers `vault_path`, `vault_profile`, `vault_bridges`, `vault_bridges_max_links` (🎯T64.5/T64.6, re-derived by rebuilding the vault exporter in place), `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins` (🎯T102.2 enable/disable), `terminal.backend` (🎯T126, read per open); `linked_instances` is persisted but requires a restart.
+## Configuration (file-only, 🎯T156)
+
+Configuration lives in `~/.mnemo/config.json` and the **file is the only
+writer** — there is no config tool and no CLI write path. The daemon
+watches the file and adopts changes in place; `mnemo --help-config`
+prints the schema, generated from the `Config` struct's JSON tags so it
+cannot drift, split into keys adopted live and keys needing a restart
+(`linked_instances`). A config-schema ratchet fails the build when a
+field has no description or a description names no field.
+
+The MCP tool this replaced cost ~944 tokens of every session's context
+for 12 calls across 4 sessions, and its write path made the daemon a
+second writer of the file.
 
 ### Consolidated tools (🎯T143)
 

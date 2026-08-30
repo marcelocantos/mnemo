@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -67,13 +68,48 @@ func TestToolSurfaceRatchet(t *testing.T) {
 // against, so a slow drift back toward 70 has to be argued for rather
 // than accumulated.
 func TestToolSurfaceSize(t *testing.T) {
-	// Baseline set by 🎯T143 on 2026-08-07, down from 70 pre-audit.
-	const baseline = 18
+	// Baseline set by 🎯T143 on 2026-08-07 (70 → 18); 18 → 17 on
+	// 2026-08-30 when mnemo_config went file-only (🎯T156).
+	const baseline = 17
 	if got := len(registeredToolNames(t)); got != baseline {
 		t.Errorf("registered tool count is %d, ledger baseline is %d.\n"+
 			"If this change is intended, move the baseline in the same commit "+
 			"and say why in the message. The pre-🎯T143 surface was 70 tools, "+
 			"30 of which no agent had ever called.", got, baseline)
+	}
+}
+
+// TestToolSurfaceWeight pins what the surface COSTS, not just how many
+// entries it has (🎯T156).
+//
+// 🎯T143 optimised count, and count alone hid the real problem: on
+// 2026-08-30 the eighteen tools serialised to ~9,900 tokens paid by
+// every session that registers mnemo, and the distribution was
+// inverted — the five hottest tools were 95% of all calls but 36% of
+// the tokens, while the eight coldest were 0.8% of calls and another
+// 36%. A tool can be cheap to list and expensive to carry.
+//
+// The margin is deliberately loose: this catches a description that
+// grows by a page, not one that gains a sentence.
+func TestToolSurfaceWeight(t *testing.T) {
+	// Measured 2026-08-30 after mnemo_config went file-only.
+	const baselineBytes = 32120
+	const margin = 1.10
+
+	total := 0
+	for _, tool := range Definitions() {
+		b, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", tool.Name, err)
+		}
+		total += len(b)
+	}
+	if float64(total) > baselineBytes*margin {
+		t.Errorf("registered surface is %d bytes (~%d tokens), more than %.0f%% over the %d-byte baseline.\n"+
+			"Every session that registers mnemo pays this. Either trim a description, "+
+			"move reference material out of the always-loaded schema, or move the baseline "+
+			"in the same commit and say why.",
+			total, total*10/37, (margin-1)*100, baselineBytes)
 	}
 }
 
@@ -172,6 +208,12 @@ func TestRemovedToolsStayRemoved(t *testing.T) {
 		"mnemo_list_templates", "mnemo_images", "mnemo_get_memory",
 		"mnemo_tool_result", "mnemo_source_drift",
 		"mnemo_todos", "mnemo_todo_add", "mnemo_todo_set",
+		// 🎯T156: configuration is file-only. The tool cost ~944 tokens of
+		// every session's context for 12 calls across 4 sessions, and its
+		// write path was the only thing that made the daemon a second
+		// writer of config.json. The daemon watches the file instead, and
+		// `mnemo --help-config` documents the schema.
+		"mnemo_config",
 		// Folded into consolidated entry points.
 		"mnemo_vault_status", "mnemo_vault_sync", "mnemo_vault_gc",
 		"mnemo_docs", "mnemo_configs", "mnemo_skills", "mnemo_audit", "mnemo_targets",

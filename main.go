@@ -244,6 +244,7 @@ func main() {
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	helpAgent := flag.Bool("help-agent", false, "print agent guide and exit")
+	helpConfig := flag.Bool("help-config", false, "print the configuration schema and exit")
 	addr := flag.String("addr", defaultAddr, "HTTP listen address")
 	federatedAddr := flag.String("federated-addr", defaultFederatedAddr,
 		"mTLS federated listen address (empty disables federation)")
@@ -270,6 +271,14 @@ func main() {
 
 	if *showVersion {
 		fmt.Println("mnemo", version)
+		return
+	}
+	if *helpConfig {
+		path, err := store.ConfigPath()
+		if err != nil {
+			path = "~/.mnemo/config.json"
+		}
+		fmt.Print(store.ConfigSchemaDoc(path))
 		return
 	}
 	if *helpAgent {
@@ -1447,10 +1456,16 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	// running when installed (notifications + SSE consumer). menu_bar_app is
 	// chrome-only and is published as a retained "ui" event for the shim.
 	shimSup := newShimSupervisor()
-	handler.SetConfigController(configController{
+	cfgCtl := configController{
 		reg: reg, autoOrch: autoOrch,
 		onMenuBar: publishUIConfig,
-	})
+	}
+	handler.SetConfigController(cfgCtl)
+	// Configuration is file-only (🎯T156): the user's editor is the only
+	// writer, and this is what makes an edit take effect. Without it,
+	// removing mnemo_config would have quietly downgraded every
+	// hot-reloadable key to "restart required".
+	go watchConfigFile(ctx, cfgCtl)
 
 	// Wire the self-diagnostics registry into mnemo_ops op=doctor (🎯T83) — the
 	// same registry that backs the /health endpoint and the scheduler.
@@ -1955,11 +1970,15 @@ func (c configController) Get() store.Config {
 	return c.reg.CurrentConfig()
 }
 
-func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
+// adopt applies a configuration the daemon has just read from disk.
+//
+// It used to be Put, and used to write the file first: mnemo_config
+// op=write made the daemon a second writer of config.json. Configuration
+// is file-only now (🎯T156) — the user's editor is the only writer and
+// the watcher calls this — so the write step is gone and this is purely
+// the in-process adoption half.
+func (c configController) adopt(newCfg store.Config) registry.ReloadReport {
 	old := c.reg.CurrentConfig()
-	if err := store.WriteConfig(newCfg); err != nil {
-		return tools.ConfigReport{}, err
-	}
 	rep := c.reg.Reload(newCfg)
 	// menu_bar_app is chrome-only: tell the always-running shim whether to
 	// show the status item. Process lifecycle is independent (🎯T85.5).
@@ -1984,10 +2003,68 @@ func (c configController) Put(newCfg store.Config) (tools.ConfigReport, error) {
 			rep.Adopted = append(rep.Adopted, "auto_upgrade")
 		}
 	}
-	return tools.ConfigReport{
-		Changed:         rep.Changed,
-		Adopted:         rep.Adopted,
-		RequiresRestart: rep.RequiresRestart,
-		Warnings:        rep.Warnings,
-	}, nil
+	return rep
+}
+
+// configWatchInterval is how often the daemon looks for a config edit.
+// Polling mtime rather than using fsnotify: this is one file, editors
+// replace it by rename as often as they write in place (which fsnotify
+// reports inconsistently across platforms), and a two-second latency on
+// a hand edit is imperceptible.
+const configWatchInterval = 2 * time.Second
+
+// watchConfigFile adopts ~/.mnemo/config.json when it changes on disk.
+//
+// Reads are best-effort by design: a half-written file parses as invalid
+// JSON, which is logged and ignored, and the next write is picked up
+// normally. A parse error must never take the daemon down or clear live
+// settings — the user is mid-edit, not asking for defaults.
+func watchConfigFile(ctx context.Context, ctl configController) {
+	path, err := store.ConfigPath()
+	if err != nil {
+		slog.Warn("config watch disabled: cannot resolve config path", "err", err)
+		return
+	}
+	var lastMod time.Time
+	var lastSize int64
+	if fi, err := os.Stat(path); err == nil {
+		lastMod, lastSize = fi.ModTime(), fi.Size()
+	}
+	ticker := time.NewTicker(configWatchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue // deleted or unreadable: keep the live config
+		}
+		if fi.ModTime().Equal(lastMod) && fi.Size() == lastSize {
+			continue
+		}
+		lastMod, lastSize = fi.ModTime(), fi.Size()
+		newCfg, err := store.LoadConfig()
+		if err != nil {
+			slog.Warn("config file changed but does not parse; keeping the running configuration",
+				"path", path, "err", err)
+			continue
+		}
+		rep := ctl.adopt(newCfg)
+		switch {
+		case len(rep.Changed) == 0:
+			// Touched without a semantic change (a formatting edit, or an
+			// editor rewriting the file unchanged).
+		case len(rep.RequiresRestart) > 0:
+			slog.Info("config reloaded from disk", "changed", rep.Changed,
+				"adopted", rep.Adopted, "requires_restart", rep.RequiresRestart)
+		default:
+			slog.Info("config reloaded from disk", "changed", rep.Changed, "adopted", rep.Adopted)
+		}
+		for _, w := range rep.Warnings {
+			slog.Warn("config reload warning", "detail", w)
+		}
+	}
 }

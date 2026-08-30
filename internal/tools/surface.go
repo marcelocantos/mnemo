@@ -84,6 +84,5 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_note": consumerUser,
 
 	// Session control and introspection.
-	"mnemo_config":         consumerAgent, // 12 / 4
 	"mnemo_rework_history": consumerSkill, // bullseye_rework feeds on it
 }

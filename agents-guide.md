@@ -524,66 +524,22 @@ Vault pages land at `_mnemo/themes/<slug>.md` (archived under
 `_mnemo/themes/_archive/`). A 24h reconciler also runs when the daemon
 is up; use recluster for an immediate pass.
 
-### mnemo_config
+### Configuration (no tool — the file is the interface)
 
-Read or update mnemo's runtime configuration (`~/.mnemo/config.json`)
-without restarting the daemon. Use this to flip `vault_path` on or off,
-add a new workspace root, or rotate `synthesis_roots` from the same
-agent that just told you what to change.
+mnemo's runtime configuration lives in `~/.mnemo/config.json`. There is
+no config tool: the file is the only writer, and the daemon watches it
+and adopts changes in place. To change a setting, edit the file.
 
-Parameters:
-- `op` — `"read"` (default) or `"write"`
-- `patch` — for `op=write`, a JSON object with the keys to update.
-  Same shape as `~/.mnemo/config.json`. Only keys present in the patch
-  are modified; unspecified keys retain their current value. Set a
-  field to its zero value (empty string for `vault_path`, empty array
-  for the slices) to clear it.
+Run `mnemo --help-config` for the schema. It is generated from the
+config struct, so it lists every key that exists and cannot drift from
+the code, and it separates keys adopted live (`vault_path`,
+`workspace_roots`, `extra_project_dirs`, `synthesis_roots`, `plugins`,
+`terminal.backend`, …) from those needing a daemon restart
+(`linked_instances`).
 
-Hot-reload coverage:
-- `vault_path` — applied live. Old vault workers stop, a fresh
-  exporter is built at the new path, and an initial sync starts in the
-  background. Set to `""` to disable vault export entirely.
-- `vault_layout` — applied live. Values: `"v1"` (legacy root layout),
-  `"both"` (dual-write for migration), `"v2"` (new `_mnemo/` namespace,
-  default for new vaults). See `internal/vault/README.md` for the
-  migration path from v1 to v2.
-- `vault_profile`, `vault_bridges`, `vault_bridges_max_links` — applied
-  live (🎯T64.5 / 🎯T64.6). Profile selects Obsidian/Logseq/Foam/generic
-  link dialect; bridges inject fenced link blocks into user-owned anchors.
-- `vault_clustering` — read per clustering pass (no restart). Controls
-  engine, thresholds, label chain, and retire_after (🎯T64.8).
-- `workspace_roots`, `extra_project_dirs`, `synthesis_roots`,
-  `todo_globs` — applied live; subsequent ingest passes pick up the new
-  roots/globs.
-- `plugins` (🎯T102) — list of out-of-process (or in-process later)
-  extension instances. Each entry: `name`, `enabled`, `transport`
-  (`launch` | `connect` | `inprocess`), plus transport fields
-  (`command`/`args`, `url`, or `script`) and optional `params`. Applied
-  live: enable starts an instance, disable tears one down. Metadata
-  (facets, UI, config schema) comes from the plugin's `/manifest`, not
-  config. Optional default home: `~/.mnemo/plugins/<name>/`. Connect
-  attaches to a base URL (ready + manifest); launch spawns an executable
-  that prints `MNEMO_PLUGIN_PORT <port>` on stdout. Ready plugins are
-  reverse-proxied at `/plugins/<name>/*`. Facet adapters (reconcile /
-  check / notify) ride the existing scheduler and diag surface.
-  Health: `plugin.<name>.ready` on `mnemo_ops` (op=doctor) / `/health`.
-  UI (🎯T102.9): `GET /api/plugins` lists each ready plugin's menu
-  contribution; the menu-bar popup renders footer rows and loads
-  `preview_url` in a live WKWebView. `plugin.reload` on `/api/events`
-  forces a WebView reload.
-  In-process (🎯T102.6): `transport: "inprocess"` + `script` path to a
-  JS file defining `handle(req)` (goja). MCP tools (🎯T102.10): plugins
-  with `facets.mcp` exposing `GET …/mcp/tools` and `POST …/mcp/call`
-  appear as `plugin_<name>__<tool>` on mnemo's MCP list.
-- `signal_sources` (🎯T102.8) — pure-config liveness probes
-  (`file_mtime`, `launchd`, `newest_artifact`, `last_commit`) with
-  `cadence` + `grace_multiple`. Surface as `signal.<name>` on
-  `mnemo_ops` (op=doctor) / `/health` without a plugin process.
-- `linked_instances` — persisted but requires a daemon restart (the
-  federation client is wired once at startup).
-
-The write response lists which fields changed, which were adopted live,
-and which require a restart.
+An edit takes effect within a couple of seconds. A file that does not
+parse is logged and ignored — the running configuration is kept, so a
+half-saved edit never reverts the daemon to defaults.
 
 ## Federation across linked instances
 
