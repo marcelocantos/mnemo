@@ -176,3 +176,68 @@ func TestPhaseSkipsWhenRequirementUnavailable(t *testing.T) {
 		t.Error("StartupReport must carry the failure reason")
 	}
 }
+
+// TestDecodeDoesNotWaitForTheSchema is the regression test for the
+// outage this graph's first deployment caused (🎯T154).
+//
+// loadDicts sat behind CapSchemaCurrent, so for the twelve minutes of a
+// live migration every dictionary-compressed row failed to decode:
+// "mnemo_text: dictionary 516157145 not loaded". Compaction's circuit
+// breaker tripped and mnemo_compacted_session failed outright. Decoding
+// needs only compression_dicts, which predates the migration; writing
+// packed rows is what needs the new columns.
+func TestDecodeDoesNotWaitForTheSchema(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	s.startup = newStartupGraph()
+
+	// A migration that never finishes, standing in for the pre-migration
+	// backup window.
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	s.startPhase(s.bgCtx, phase{
+		name:     "slow-schema",
+		provides: []Capability{CapSchemaCurrent},
+		run: func(ctx context.Context) error {
+			select {
+			case <-blocked:
+			case <-ctx.Done():
+			}
+			return nil
+		},
+	})
+	s.startPhase(s.bgCtx, phase{
+		name:     "codec-decode",
+		provides: []Capability{CapCodecDecode},
+		run:      func(context.Context) error { return s.loadDicts() },
+	})
+	s.startPhase(s.bgCtx, phase{
+		name:     "codec-write",
+		requires: []Capability{CapSchemaCurrent, CapCodecDecode},
+		provides: []Capability{CapCodecReady},
+		run:      func(context.Context) error { return nil },
+	})
+
+	if !s.Await(CapCodecDecode) {
+		t.Fatal("codec.decode must resolve while the schema phase is still running")
+	}
+	if s.Have(CapSchemaCurrent) {
+		t.Fatal("test is not exercising the window: the schema phase already finished")
+	}
+	if s.Have(CapCodecReady) {
+		t.Error("packed writes must still wait for the schema")
+	}
+}
+
+// TestLoadDictsToleratesMissingTable: a database predating 🎯T151 has no
+// compression_dicts, and no compressed rows either. Nothing to load must
+// be success, or codec.decode resolves unavailable forever on the very
+// boot that migrates the table in.
+func TestLoadDictsToleratesMissingTable(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	if _, err := s.writeDB.Exec(`DROP TABLE compression_dicts`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.loadDicts(); err != nil {
+		t.Errorf("loadDicts on a pre-🎯T151 schema: %v", err)
+	}
+}

@@ -1259,14 +1259,26 @@ func New(dbPath, projectDir string) (*Store, error) {
 		})
 	}
 
+	// Decode first, and behind nothing: a dictionary-compressed row must
+	// be readable immediately, including throughout a migration that has
+	// not landed yet.
 	s.startPhase(bgCtx, phase{
-		name:     "codec",
-		requires: []Capability{CapSchemaCurrent},
+		name:     "codec-decode",
+		provides: []Capability{CapCodecDecode},
+		run: func(context.Context) error {
+			return s.loadDicts()
+		},
+	})
+	// Reads are served from the moment New returns; loadDicts is a small
+	// table scan, so waiting for it costs nothing and removes a window in
+	// which a compressed row would fail to decode.
+	s.Await(CapCodecDecode)
+
+	s.startPhase(bgCtx, phase{
+		name:     "codec-write",
+		requires: []Capability{CapSchemaCurrent, CapCodecDecode},
 		provides: []Capability{CapCodecReady},
 		run: func(ctx context.Context) error {
-			if err := s.loadDicts(); err != nil {
-				return fmt.Errorf("load compression dictionaries: %w", err)
-			}
 			s.codec.ready.Store(true)
 			s.autoTrainDictionaries(ctx)
 			return nil

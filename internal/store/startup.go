@@ -61,9 +61,23 @@ const (
 	// whatever schema is there.
 	CapSchemaCurrent Capability = "schema.current"
 
-	// CapCodecReady: the compression codec is loaded and new rows are
-	// written packed (🎯T151). Requires CapSchemaCurrent — the *_z
-	// columns arrive with the migration.
+	// CapCodecDecode: compression dictionaries are loaded, so a
+	// dictionary-compressed row can be read.
+	//
+	// This deliberately requires NOTHING. Decoding needs only the
+	// compression_dicts table, which predates any pending migration —
+	// whereas writing packed rows needs the *_z columns the migration
+	// adds. Gating both on the schema (as 🎯T151 did, and as 🎯T154
+	// first reproduced) makes every dictionary-compressed row
+	// unreadable for the length of a migration: on a live 18.9 GB
+	// index that was twelve minutes of "unknown dictionary" errors,
+	// a tripped compaction circuit breaker, and mnemo_compacted_session
+	// failing outright. Reads must not wait for a writer's schema.
+	CapCodecDecode Capability = "codec.decode"
+
+	// CapCodecReady: new rows are written packed (🎯T151). Requires
+	// CapSchemaCurrent — the *_z columns arrive with the migration —
+	// and CapCodecDecode, since packing uses the same dictionaries.
 	CapCodecReady Capability = "codec.ready"
 
 	// CapEntriesMaterialised: every pre-🎯T152 entries row has its *_m
@@ -76,6 +90,7 @@ const (
 // missing from here is not reported and cannot be awaited.
 var allCapabilities = []Capability{
 	CapSchemaCurrent,
+	CapCodecDecode,
 	CapCodecReady,
 	CapEntriesMaterialised,
 }

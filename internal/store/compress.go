@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -276,7 +277,7 @@ func (s *Store) loadDicts() error {
 		FROM compression_dicts
 		ORDER BY id`)
 	if err != nil {
-		return err
+		return missingTableIsEmpty(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -290,7 +291,21 @@ func (s *Store) loadDicts() error {
 			return err
 		}
 	}
-	return rows.Err()
+	return missingTableIsEmpty(rows.Err())
+}
+
+// missingTableIsEmpty maps "no such table" to success. A database
+// predating 🎯T151 has no compression_dicts — and therefore no
+// compressed rows to decode, so nothing to load is the correct outcome.
+// Reporting it as a failure would leave codec.decode unavailable forever
+// on the very boot that migrates the table in. database/sql surfaces
+// this either from Query or from Rows.Err depending on when the pooled
+// connection prepares, so both paths route through here.
+func missingTableIsEmpty(err error) error {
+	if err != nil && strings.Contains(err.Error(), "no such table") {
+		return nil
+	}
+	return err
 }
 
 func (c *textCodec) activate(family string, id uint32, dict []byte) error {
