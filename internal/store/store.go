@@ -983,6 +983,14 @@ func prepareSchema(dbPath string) (schemaPrep, error) {
 // Used synchronously by applySchema (tests / tools) and asynchronously by
 // store.New when a pending upgrade is deferred off the open path (🎯T114.1).
 func upgradeSchema(dbPath string) error {
+	return upgradeSchemaWith(dbPath, schemaSQL)
+}
+
+// upgradeSchemaWith is upgradeSchema against a caller-supplied desired
+// schema. Only tests pass anything other than the embedded schemaSQL —
+// it exists so the backup-skip decision (🎯T155) can be driven against
+// real sqlift plans rather than asserted from the classifier alone.
+func upgradeSchemaWith(dbPath, desiredSQL string) error {
 	defer boot.ClearUpgrade()
 
 	sdb, err := sqlift.Open(dbPath)
@@ -995,7 +1003,7 @@ func upgradeSchema(dbPath string) error {
 	if err != nil {
 		return fmt.Errorf("sqlift extract: %w", err)
 	}
-	desired, err := sqlift.Parse(schemaSQL)
+	desired, err := sqlift.Parse(desiredSQL)
 	if err != nil {
 		return fmt.Errorf("sqlift parse schema.sql: %w", err)
 	}

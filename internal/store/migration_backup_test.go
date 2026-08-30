@@ -4,9 +4,12 @@
 package store
 
 import (
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/sqlift/go/sqlift"
 )
 
@@ -46,13 +49,31 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// schema.sql is embedded from the checkout, so on Windows (autocrlf)
-	// it arrives with CRLF and a fixture keyed on "\n" matches nothing.
-	// Normalise before building variants; sqlift parses either.
-	base := strings.ReplaceAll(schemaSQL, "\r\n", "\n")
+	// schema.sql is embedded from the checkout, so under Windows autocrlf
+	// it arrives with CRLF. Do NOT normalise it: the live schema was
+	// created from this exact text, so an LF-normalised "desired" differs
+	// textually from what sqlite_master holds and sqlift plans a
+	// drop+create of an FTS virtual table — a destructive diff that has
+	// nothing to do with the fixture. Detect the line ending instead and
+	// build variants in the file's own terms.
+	base := schemaSQL
+	eol := "\n"
+	if strings.Contains(base, "\r\n") {
+		eol = "\r\n"
+	}
 
-	// The shipped schema against itself: nothing to do.
-	if ok, _ := planIsMetadataOnly(planFor(t, dbPath, base)); ok {
+	// The shipped schema against itself: nothing to do. Assert the plan is
+	// genuinely empty — otherwise the classifier could be returning false
+	// for the wrong reason and every case below would be meaningless.
+	selfPlan := planFor(t, dbPath, base)
+	if !selfPlan.Empty() {
+		var ops []string
+		for _, op := range selfPlan.Operations() {
+			ops = append(ops, op.Type.String()+" "+op.ObjectName)
+		}
+		t.Fatalf("the shipped schema diffs against a store it just created: %v", ops)
+	}
+	if ok, _ := planIsMetadataOnly(selfPlan); ok {
 		t.Error("an empty plan must not be classified metadata-only (there is nothing to skip)")
 	}
 
@@ -60,7 +81,7 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	// VACUUM INTO on the live index.
 	viewChange := strings.Replace(base,
 		"CREATE VIEW docs_v AS",
-		"CREATE VIEW docs_v_extra AS SELECT id FROM docs;\nCREATE VIEW docs_v AS", 1)
+		"CREATE VIEW docs_v_extra AS SELECT id FROM docs;"+eol+"CREATE VIEW docs_v AS", 1)
 	if viewChange == base {
 		t.Fatal("fixture is stale: docs_v is no longer declared this way")
 	}
@@ -70,7 +91,7 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	}
 
 	// An index addition is metadata too.
-	indexChange := base + "\nCREATE INDEX idx_docs_kind_t155 ON docs(kind);\n"
+	indexChange := base + eol + "CREATE INDEX idx_docs_kind_t155 ON docs(kind);" + eol
 	if ok, why := planIsMetadataOnly(planFor(t, dbPath, indexChange)); !ok {
 		t.Errorf("an index-only plan must skip the backup, got required because: %s", why)
 	}
@@ -80,8 +101,8 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	// permits — a column inserted mid-table makes sqlift plan a rebuild
 	// instead, which this classifier also (correctly) refuses.
 	colChange := strings.Replace(base,
-		"			content_z BLOB\n		);",
-		"			content_z BLOB,\n			t155_probe TEXT\n		);", 1)
+		"			content_z BLOB"+eol+"		);",
+		"			content_z BLOB,"+eol+"			t155_probe TEXT"+eol+"		);", 1)
 	if colChange == base {
 		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
 	}
@@ -97,7 +118,7 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	// and say so.
 	rebuild := strings.Replace(base,
 		"			doc_source TEXT NOT NULL DEFAULT ''",
-		"			doc_source TEXT NOT NULL DEFAULT '',\n			t155_mid TEXT", 1)
+		"			doc_source TEXT NOT NULL DEFAULT '',"+eol+"			t155_mid TEXT", 1)
 	ok, why = planIsMetadataOnly(planFor(t, dbPath, rebuild))
 	if ok {
 		t.Error("a plan rebuilding a table must keep the backup")
@@ -107,8 +128,79 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	}
 
 	// A new table likewise.
-	tableChange := base + "\nCREATE TABLE t155_new (id INTEGER PRIMARY KEY);\n"
+	tableChange := base + eol + "CREATE TABLE t155_new (id INTEGER PRIMARY KEY);" + eol
 	if ok, _ := planIsMetadataOnly(planFor(t, dbPath, tableChange)); ok {
 		t.Error("a plan creating a table must keep the backup")
+	}
+}
+
+// TestUpgradeSkipsBackupForMetadataOnlyPlan is the end-to-end half of
+// 🎯T155: not merely that the classifier says "metadata only", but that
+// upgradeSchema actually declines to call preMigrationBackup.
+//
+// The target's third criterion asked for this on a live-sized index. The
+// property is size-independent — what size changes is only how much time
+// the skipped VACUUM INTO would have cost (~18 minutes on the 18.9 GB
+// index that prompted the target) — so it is measured directly here
+// rather than by copying tens of gigabytes.
+func TestUpgradeSkipsBackupForMetadataOnlyPlan(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "t.db")
+	s, err := New(dbPath, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.AwaitStartup()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var backups int
+	orig := preMigrationBackup
+	preMigrationBackup = func(src, dest string, args *backup.BackupArgs) (backup.Result, error) {
+		backups++
+		return orig(src, dest, args)
+	}
+	t.Cleanup(func() { preMigrationBackup = orig })
+
+	eol := "\n"
+	if strings.Contains(schemaSQL, "\r\n") {
+		eol = "\r\n"
+	}
+
+	// A view-only change: the migration must apply with no snapshot.
+	withView := schemaSQL + eol + "CREATE VIEW t155_view AS SELECT id FROM docs;" + eol
+	if err := upgradeSchemaWith(dbPath, withView); err != nil {
+		t.Fatalf("view-only upgrade: %v", err)
+	}
+	if backups != 0 {
+		t.Errorf("a view-only migration took %d pre-migration backup(s); it can touch no table data", backups)
+	}
+	// And it really applied.
+	db, err := sql.Open(SQLiteDriverName, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='t155_view'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if n != 1 {
+		t.Fatal("the view-only migration did not apply")
+	}
+
+	// A column change must still be insured.
+	withCol := strings.Replace(withView,
+		"			content_z BLOB"+eol+"		);",
+		"			content_z BLOB,"+eol+"			t155_col TEXT"+eol+"		);", 1)
+	if withCol == withView {
+		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
+	}
+	if err := upgradeSchemaWith(dbPath, withCol); err != nil {
+		t.Fatalf("column upgrade: %v", err)
+	}
+	if backups != 1 {
+		t.Errorf("a column-adding migration took %d backups, want exactly 1", backups)
 	}
 }
