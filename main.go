@@ -2025,6 +2025,17 @@ func watchConfigFile(ctx context.Context, ctl configController) {
 		slog.Warn("config watch disabled: cannot resolve config path", "err", err)
 		return
 	}
+	watchConfigPath(ctx, path, store.LoadConfig, ctl.adopt)
+}
+
+// watchConfigPath is watchConfigFile with its dependencies passed in, so
+// a test can drive it against a temp file without a Registry.
+func watchConfigPath(
+	ctx context.Context,
+	path string,
+	load func() (store.Config, error),
+	adopt func(store.Config) registry.ReloadReport,
+) {
 	var lastMod time.Time
 	var lastSize int64
 	if fi, err := os.Stat(path); err == nil {
@@ -2046,17 +2057,22 @@ func watchConfigFile(ctx context.Context, ctl configController) {
 			continue
 		}
 		lastMod, lastSize = fi.ModTime(), fi.Size()
-		newCfg, err := store.LoadConfig()
+		newCfg, err := load()
 		if err != nil {
 			slog.Warn("config file changed but does not parse; keeping the running configuration",
 				"path", path, "err", err)
 			continue
 		}
-		rep := ctl.adopt(newCfg)
+		rep := adopt(newCfg)
+		// Logged unconditionally, including when nothing semantic
+		// changed. "Did mnemo see my edit?" has to be answerable from
+		// the log, and it was not: an edit to a key Reload does not
+		// report — terminal.backend, which is read per open — produced
+		// total silence, which is indistinguishable from a watcher that
+		// is not running.
 		switch {
 		case len(rep.Changed) == 0:
-			// Touched without a semantic change (a formatting edit, or an
-			// editor rewriting the file unchanged).
+			slog.Info("config file changed; no live-adopted keys differ", "path", path)
 		case len(rep.RequiresRestart) > 0:
 			slog.Info("config reloaded from disk", "changed", rep.Changed,
 				"adopted", rep.Adopted, "requires_restart", rep.RequiresRestart)
