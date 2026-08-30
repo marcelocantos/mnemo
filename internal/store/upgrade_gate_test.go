@@ -45,7 +45,7 @@ func stageDeferredUpgrade(t *testing.T) (dbPath string, started, release chan st
 	preMigrationBackup = func(src, dest string, args *backup.BackupArgs) (backup.Result, error) {
 		close(started)
 		<-release
-		return backup.Result{Path: dest, RawSize: 1, GzippedSize: 1, Elapsed: time.Millisecond}, nil
+		return backup.Result{Path: dest, RawSize: 1, CompressedSize: 1, Elapsed: time.Millisecond}, nil
 	}
 	t.Cleanup(func() { preMigrationBackup = prev })
 	return dbPath, started, release

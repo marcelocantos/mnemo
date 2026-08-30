@@ -6,14 +6,16 @@ package backup
 import (
 	"compress/gzip"
 	"database/sql"
-	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/marcelocantos/mnemo/internal/zstdc"
 )
 
 // seedDB creates a small SQLite DB with N rows. Returns its path.
@@ -40,34 +42,19 @@ func seedDB(t *testing.T, n int) string {
 	return path
 }
 
-// countRows opens a possibly-gzipped backup and returns the row count of
-// table t. For .gz it ungzips into a temp file first.
+// countRows opens a backup and returns the row count of table t. A
+// compressed backup is expanded through the production Decompress helper,
+// so these tests exercise the same reader a restore would.
 func countRows(t *testing.T, path string) int {
 	t.Helper()
 	dbPath := path
-	if strings.HasSuffix(path, ".gz") {
-		f, err := os.Open(path)
-		if err != nil {
-			t.Fatal(err)
+	if strings.HasSuffix(path, ExtZstd) || strings.HasSuffix(path, ExtGzip) {
+		dbPath = filepath.Join(t.TempDir(), "verify.db")
+		if _, err := Decompress(path, dbPath); err != nil {
+			t.Fatalf("Decompress(%s): %v", filepath.Base(path), err)
 		}
-		defer f.Close()
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer gz.Close()
-		out, err := os.CreateTemp("", "verify-*.db")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.Remove(out.Name())
-		if _, err := io.Copy(out, gz); err != nil {
-			t.Fatal(err)
-		}
-		out.Close()
-		dbPath = out.Name()
 	}
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +65,6 @@ func countRows(t *testing.T, path string) int {
 	}
 	return n
 }
-
 func TestBackupRoundTrip(t *testing.T) {
 	const rows = 250
 	src := seedDB(t, rows)
@@ -92,8 +78,8 @@ func TestBackupRoundTrip(t *testing.T) {
 	if res.Path != dest {
 		t.Errorf("Result.Path = %q, want %q", res.Path, dest)
 	}
-	if res.RawSize == 0 || res.GzippedSize == 0 {
-		t.Errorf("Result.RawSize=%d Result.GzippedSize=%d, both should be >0", res.RawSize, res.GzippedSize)
+	if res.RawSize == 0 || res.CompressedSize == 0 {
+		t.Errorf("Result.RawSize=%d Result.CompressedSize=%d, both should be >0", res.RawSize, res.CompressedSize)
 	}
 	if res.Elapsed <= 0 {
 		t.Errorf("Result.Elapsed = %v, want >0", res.Elapsed)
@@ -115,32 +101,37 @@ func TestBackupWithOnStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BackupWith: %v", err)
 	}
-	if res.GzippedSize == 0 {
-		t.Fatal("empty gzip result")
+	if res.CompressedSize == 0 {
+		t.Fatal("empty compression result")
 	}
 	if len(steps) < 3 {
-		t.Fatalf("want at least vacuum/integrity/gzip steps, got %v", steps)
+		t.Fatalf("want at least vacuum/integrity/compress steps, got %v", steps)
 	}
 	joined := strings.Join(steps, " | ")
 	if !strings.Contains(joined, "VACUUM") {
 		t.Errorf("missing VACUUM step: %v", steps)
 	}
-	if !strings.Contains(joined, "gzip") {
-		t.Errorf("missing gzip step: %v", steps)
+	if !strings.Contains(joined, "compressing") {
+		t.Errorf("missing compression step: %v", steps)
+	}
+	// Verification is a step in its own right, and must be reported: it is
+	// what makes deleting the previous snapshot safe at keep=1.
+	if !strings.Contains(joined, "verifying") {
+		t.Errorf("missing verification step: %v", steps)
 	}
 }
 
-func TestBackupRejectsNonGzDestination(t *testing.T) {
+func TestBackupRejectsWrongDestinationExtension(t *testing.T) {
 	src := seedDB(t, 1)
 	dir := t.TempDir()
-	dest := filepath.Join(dir, "snapshot.db") // missing .gz
-
-	_, err := Backup(src, dest)
-	if err == nil {
-		t.Fatal("expected error for non-.gz destination, got nil")
-	}
-	if !strings.Contains(err.Error(), ".gz") {
-		t.Errorf("error doesn't mention .gz: %v", err)
+	for _, dest := range []string{"snapshot.db", "snapshot.db.gz"} {
+		_, err := Backup(src, filepath.Join(dir, dest))
+		if err == nil {
+			t.Fatalf("%s: expected an error, got nil", dest)
+		}
+		if !strings.Contains(err.Error(), ExtZstd) {
+			t.Errorf("%s: error doesn't mention %s: %v", dest, ExtZstd, err)
+		}
 	}
 }
 
@@ -191,7 +182,7 @@ func TestBackupSurvivesPathWithQuote(t *testing.T) {
 func TestFilenameTagAndTimeFormat(t *testing.T) {
 	ts := time.Date(2026, 5, 18, 3, 17, 42, 0, time.UTC)
 	got := Filename(TagPreMigration, ts)
-	want := "mnemo-pre-migration-20260518T031742Z.db.gz"
+	want := "mnemo-pre-migration-20260518T031742Z.db.zst"
 	if got != want {
 		t.Errorf("Filename = %q, want %q", got, want)
 	}
@@ -202,5 +193,130 @@ func TestFilenameSortableChronologically(t *testing.T) {
 	newer := Filename(TagDaily, time.Date(2026, 5, 18, 4, 0, 0, 0, time.UTC))
 	if older >= newer {
 		t.Errorf("filenames don't sort chronologically: %s !< %s", older, newer)
+	}
+}
+
+// TestVerificationCatchesCorruption is the reason verification exists.
+// Retention keeps ONE snapshot (🎯T158), so the caller deletes the
+// previous backup once this one is declared good. A backup that cannot be
+// read back is therefore not a degraded backup, it is no backup — and the
+// only moment to find out is before the old one goes.
+func TestVerificationCatchesCorruption(t *testing.T) {
+	dir := t.TempDir()
+	src := seedDB(t, 200)
+	good := filepath.Join(dir, "good"+ExtZstd)
+	if _, err := Backup(src, good); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	b, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Flip bytes in the compressed payload, past the frame header. The
+	// XXH64 checksum written into the frame turns this into a hard read
+	// error rather than silently wrong bytes.
+	corrupt := append([]byte(nil), b...)
+	for i := len(corrupt) / 2; i < len(corrupt)/2+64 && i < len(corrupt); i++ {
+		corrupt[i] ^= 0xff
+	}
+	bad := filepath.Join(dir, "bad"+ExtZstd)
+	if err := os.WriteFile(bad, corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCompressed(bad, int64(len(b))); err == nil {
+		t.Error("verification accepted a corrupted artefact")
+	}
+
+	// Truncation is the other realistic failure — a full disk, an
+	// interrupted write. The frame never terminates, so the read fails.
+	short := filepath.Join(dir, "short"+ExtZstd)
+	if err := os.WriteFile(short, b[:len(b)/2], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCompressed(short, int64(len(b))); err == nil {
+		t.Error("verification accepted a truncated artefact")
+	}
+}
+
+// TestVerificationChecksSize guards the case a checksum cannot: an
+// artefact that decompresses cleanly but to the wrong content length.
+func TestVerificationChecksSize(t *testing.T) {
+	dir := t.TempDir()
+	src := seedDB(t, 50)
+	dest := filepath.Join(dir, "s"+ExtZstd)
+	res, err := Backup(src, dest)
+	if err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if err := verifyCompressed(dest, res.RawSize+1); err == nil {
+		t.Error("verification accepted a size mismatch")
+	}
+	if err := verifyCompressed(dest, res.RawSize); err != nil {
+		t.Errorf("verification rejected a sound artefact: %v", err)
+	}
+}
+
+// TestDecompressReadsLegacyGzip keeps snapshots taken before 🎯T159
+// restorable. The format switched; the backups already on disk did not,
+// and a restore path that cannot read them makes them worthless.
+func TestDecompressReadsLegacyGzip(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := seedDB(t, 30)
+	raw, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzPath := filepath.Join(dir, "legacy"+ExtGzip)
+	f, err := os.Create(gzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(f)
+	if _, err := gw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := countRows(t, gzPath); got != 30 {
+		t.Errorf("legacy gzip backup restored %d rows, want 30", got)
+	}
+}
+
+func TestDecompressRejectsUnknownExtension(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "x.bin")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decompress(src, filepath.Join(dir, "out")); err == nil {
+		t.Error("Decompress accepted an unrecognised extension")
+	}
+}
+
+// TestCompressionUsesAllWorkers guards the silent-single-thread failure
+// mode: libzstd built without ZSTD_MULTITHREAD accepts a worker count and
+// then ignores it, so the backup still succeeds and just takes the ~3.8
+// minutes the switch was meant to remove. Only the granted count reveals
+// it.
+func TestCompressionUsesAllWorkers(t *testing.T) {
+	if runtime.NumCPU() < 2 {
+		t.Skip("single-CPU machine")
+	}
+	dir := t.TempDir()
+	src := seedDB(t, 5000)
+	st, err := zstdc.CompressFile(src, filepath.Join(dir, "o"+ExtZstd), zstdc.LevelFast, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.WorkersUsed < 2 {
+		t.Errorf("libzstd granted %d workers on a %d-CPU machine — the "+
+			"vendored amalgamation looks single-threaded, so backups are "+
+			"paying gzip-era wall-clock", st.WorkersUsed, runtime.NumCPU())
 	}
 }

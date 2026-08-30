@@ -22,7 +22,7 @@ const (
 	PhaseListening Phase = "listening"
 	// PhaseOpeningStore covers store.New before/around schema work.
 	PhaseOpeningStore Phase = "opening_store"
-	// PhasePreMigrationBackup is VACUUM INTO + gzip before sqlift.Apply.
+	// PhasePreMigrationBackup is VACUUM INTO + zstd compress before sqlift.Apply.
 	PhasePreMigrationBackup Phase = "pre_migration_backup"
 	// PhaseApplyingSchema is sqlift.Apply / post-migration ANALYZE.
 	PhaseApplyingSchema Phase = "applying_schema"

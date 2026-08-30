@@ -94,9 +94,9 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("backup_now failed: %v", err), true, nil
 	}
-	return fmt.Sprintf("Backup written: %s\nRaw: %s | Gzipped: %s | Elapsed: %s",
+	return fmt.Sprintf("Backup written: %s\nRaw: %s | Compressed: %s | Elapsed: %s",
 		res.Path,
-		humanSize(res.RawSize), humanSize(res.GzippedSize),
+		humanSize(res.RawSize), humanSize(res.CompressedSize),
 		res.Elapsed.Round(time.Second)), false, nil
 }
 

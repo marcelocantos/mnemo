@@ -181,7 +181,7 @@ func (w *Worker) attemptBackup(ctx context.Context) {
 	slog.Info("backup worker: snapshot complete",
 		"path", res.Path,
 		"raw_mb", res.RawSize/(1<<20),
-		"gz_mb", res.GzippedSize/(1<<20),
+		"compressed_mb", res.CompressedSize/(1<<20),
 		"elapsed", res.Elapsed.Round(time.Second))
 
 	if removed, err := GCOldest(w.dir, w.keep); err != nil {
@@ -285,8 +285,20 @@ func GCOldest(dir string, keep int) ([]string, error) {
 // shape mismatch — caller treats that as "not a backup file".
 func parseFilename(name string) (Tag, time.Time, bool) {
 	const prefix = "mnemo-"
-	const suffix = ".db.gz"
-	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+	// BOTH extensions, deliberately. Retention only manages files this
+	// function recognises, so a format switch that taught it the new
+	// suffix and forgot the old one — or vice versa — would leave a pile
+	// of snapshots invisible to GC and growing forever. That is precisely
+	// how ~187 GB of unmanaged files accumulated beside a correctly
+	// functioning retention pool (🎯T158).
+	suffix := ""
+	for _, ext := range []string{ExtZstd, ExtGzip} {
+		if strings.HasSuffix(name, ext) {
+			suffix = ext
+			break
+		}
+	}
+	if !strings.HasPrefix(name, prefix) || suffix == "" {
 		return "", time.Time{}, false
 	}
 	mid := name[len(prefix) : len(name)-len(suffix)]

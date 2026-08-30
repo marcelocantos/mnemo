@@ -56,7 +56,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				if st.Upgrade != "" {
 					return diag.Warning(
 						"default-user store serving; schema upgrade in progress: "+st.Upgrade,
-						"tools and /health stay up — pre-migration VACUUM INTO + gzip run concurrently with the live SQLite pools; wait for apply to finish for new-schema features")
+						"tools and /health stay up — pre-migration VACUUM INTO + compression run concurrently with the live SQLite pools; wait for apply to finish for new-schema features")
 				}
 				return diag.Healthy("default-user store ready")
 			case boot.PhaseFailed:
@@ -66,7 +66,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			case boot.PhasePreMigrationBackup:
 				return diag.Warning(
 					boot.Summary(),
-					"pre-migration backup (VACUUM INTO + gzip) can take several minutes on multi-GB DBs; HTTP stays up — wait, or check the daemon log")
+					"pre-migration backup (VACUUM INTO + compression) can take several minutes on multi-GB DBs; HTTP stays up — wait, or check the daemon log")
 			case boot.PhaseApplyingSchema:
 				return diag.Warning(
 					boot.Summary(),

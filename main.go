@@ -1672,7 +1672,7 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	// Eager-start the default user's per-user workers (compactor,
 	// reviewer, CI poller, backup worker, etc.) at daemon boot (🎯T62).
 	// Runs after ListenAndServe so health stays available during
-	// store.New → applySchema → pre-migration VACUUM+gzip.
+	// store.New → applySchema → pre-migration VACUUM+compress.
 	// Multi-user lazy startup still works: ForUser(otherUser) on demand.
 	// Open in a goroutine so an immediate Listen failure is not masked
 	// by a multi-minute backup.

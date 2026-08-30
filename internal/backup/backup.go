@@ -9,7 +9,7 @@
 //
 // On-disk layout under the backup directory:
 //
-//	mnemo-{tag}-YYYYMMDDTHHMMSSZ.db.gz
+//	mnemo-{tag}-YYYYMMDDTHHMMSSZ.db.zst
 //
 // where {tag} is "daily" for the periodic snapshot or "pre-migration"
 // for the one taken before sqlift.Apply. Filenames are sortable by
@@ -27,9 +27,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/marcelocantos/mnemo/internal/zstdc"
 )
 
 // Tag classifies a backup by what triggered it.
@@ -43,18 +48,26 @@ const (
 
 // Result reports timing and sizes from a Backup call.
 type Result struct {
-	Path        string        // final on-disk path of the compressed backup
-	RawSize     int64         // size of the VACUUM INTO output before compression
-	GzippedSize int64         // size of the on-disk .gz file
-	Elapsed     time.Duration // total wall-clock for VACUUM + integrity + gzip
+	Path           string        // final on-disk path of the compressed backup
+	RawSize        int64         // size of the VACUUM INTO output before compression
+	CompressedSize int64         // size of the on-disk .db.zst file
+	Elapsed        time.Duration // total wall-clock for VACUUM + integrity + compress + verify
 }
 
 // Filename returns the canonical backup filename for the given tag and
 // timestamp. The format is sortable lexicographically by chronological
 // order, so worker rotation logic can just sort by name.
 func Filename(tag Tag, t time.Time) string {
-	return fmt.Sprintf("mnemo-%s-%s.db.gz", tag, t.UTC().Format("20060102T150405Z"))
+	return fmt.Sprintf("mnemo-%s-%s%s", tag, t.UTC().Format("20060102T150405Z"), ExtZstd)
 }
+
+// Backup file extensions. ExtZstd is what new backups are written with
+// (🎯T159); ExtGzip is still recognised so snapshots taken before the
+// switch remain listed, rotated and restorable.
+const (
+	ExtZstd = ".db.zst"
+	ExtGzip = ".db.gz"
+)
 
 // BackupArgs configures optional Backup behaviour. Zero value is fine.
 type BackupArgs struct {
@@ -73,10 +86,8 @@ type BackupArgs struct {
 //  1. VACUUM INTO produces a fully-consistent standalone DB at a sibling
 //     temp file (same filesystem, so the later rename is atomic).
 //  2. PRAGMA integrity_check on the snapshot — bail if corrupted.
-//  3. Gzip-compress (level 1 — favours speed over size) to destPath.tmp.
-//     Slated to become zstd (🎯T159): measured on the live index, gzip -1
-//     manages ratio 0.734 at ~83 MB/s where libzstd reaches 0.689 at
-//     3947 MB/s, turning a ~3.8 minute CPU burn into ~5 seconds.
+//  3. Compress with multithreaded zstd to destPath.tmp, then verify the
+//     artefact reads back before returning.
 //  4. fsync + atomic rename to destPath.
 //
 // On any failure the function leaves no partial output (temp files are
@@ -94,8 +105,8 @@ func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 			args.OnStep(s)
 		}
 	}
-	if filepath.Ext(destPath) != ".gz" {
-		return Result{}, fmt.Errorf("destPath must end in .gz: %s", destPath)
+	if !strings.HasSuffix(destPath, ExtZstd) {
+		return Result{}, fmt.Errorf("destPath must end in %s: %s", ExtZstd, destPath)
 	}
 	destDir := filepath.Dir(destPath)
 
@@ -129,17 +140,30 @@ func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 		return Result{}, err
 	}
 
-	step(fmt.Sprintf("gzipping %d MB snapshot", rawInfo.Size()/(1<<20)))
-	gzSize, err := gzipFile(tmpDBPath, destPath)
+	step(fmt.Sprintf("compressing %d MB snapshot", rawInfo.Size()/(1<<20)))
+	size, err := compressFile(tmpDBPath, destPath)
 	if err != nil {
 		return Result{}, err
 	}
 
+	// Verify the artefact, not just the snapshot that went into it.
+	// integrity_check above proves the DATABASE was sound; this proves the
+	// FILE we are about to keep can be read back. It matters more since
+	// retention became one snapshot (🎯T158): the caller deletes the
+	// previous backup after this returns, so an unreadable output would
+	// leave nothing. Decompression validates the frame's XXH64 checksum
+	// end to end and costs seconds at zstd speeds.
+	step("verifying compressed snapshot")
+	if err := verifyCompressed(destPath, rawInfo.Size()); err != nil {
+		os.Remove(destPath)
+		return Result{}, err
+	}
+
 	return Result{
-		Path:        destPath,
-		RawSize:     rawInfo.Size(),
-		GzippedSize: gzSize,
-		Elapsed:     time.Since(start),
+		Path:           destPath,
+		RawSize:        rawInfo.Size(),
+		CompressedSize: size,
+		Elapsed:        time.Since(start),
 	}, nil
 }
 
@@ -186,62 +210,107 @@ func integrityCheck(dbPath string) error {
 	return nil
 }
 
-// gzipFile compresses srcPath into destPath (atomic rename via .tmp). Uses
-// gzip BestSpeed.
+// compressFile compresses srcPath into destPath (atomic rename via .tmp)
+// using the vendored multithreaded libzstd.
 //
-// Both this comment and the one above used to point at a future
-// cross-snapshot dedup or delta pass. That is retired, not pending:
-// retention is one snapshot now (🎯T158), and a delta needs a chain to
-// diff against. The remaining win is the compressor itself (🎯T159).
-func gzipFile(srcPath, destPath string) (int64, error) {
+// It replaced gzip level 1 (🎯T159). End to end on the live 18.2 GB
+// index, 16 workers: 8.5s at ratio 0.548 (2132 MB/s), against gzip -1's
+// ~83 MB/s — a ~3.8 minute CPU burn every backup. Verification adds 11.2s
+// (single-threaded decode), so the whole compress-and-check stage costs
+// about 20s where compression alone used to cost 228s.
+//
+// The size was a bonus; the time was the point. Level 3 is zstd's own
+// default and sits at the knee — higher levels buy a few percent for
+// multiples of the CPU, which is the wrong trade for a snapshot that gets
+// replaced tomorrow.
+func compressFile(srcPath, destPath string) (int64, error) {
 	tmpPath := destPath + ".tmp"
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return 0, fmt.Errorf("create gz tmp: %w", err)
-	}
-	cleanup := func() { out.Close(); os.Remove(tmpPath) }
-
-	gw, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
-	if err != nil {
-		cleanup()
-		return 0, fmt.Errorf("gzip writer: %w", err)
-	}
-
-	in, err := os.Open(srcPath)
-	if err != nil {
-		gw.Close()
-		cleanup()
-		return 0, fmt.Errorf("open src for gzip: %w", err)
-	}
-	if _, err := io.Copy(gw, in); err != nil {
-		in.Close()
-		gw.Close()
-		cleanup()
-		return 0, fmt.Errorf("gzip copy: %w", err)
-	}
-	in.Close()
-	if err := gw.Close(); err != nil {
-		cleanup()
-		return 0, fmt.Errorf("gzip close: %w", err)
-	}
-	if err := out.Sync(); err != nil {
-		cleanup()
-		return 0, fmt.Errorf("fsync gz: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmpPath)
-		return 0, fmt.Errorf("close gz: %w", err)
-	}
-	fi, err := os.Stat(tmpPath)
+	// 0 workers means one per CPU. libzstd stitches the parallel jobs into
+	// a single frame, so the artefact is identical in shape to one written
+	// single-threaded.
+	st, err := zstdc.CompressFile(srcPath, tmpPath, zstdc.LevelFast, 0)
 	if err != nil {
 		os.Remove(tmpPath)
-		return 0, fmt.Errorf("stat gz: %w", err)
+		return 0, err
 	}
 	if err := os.Rename(tmpPath, destPath); err != nil {
 		os.Remove(tmpPath)
-		return 0, fmt.Errorf("rename gz: %w", err)
+		return 0, fmt.Errorf("rename compressed backup: %w", err)
 	}
-	return fi.Size(), nil
+	return st.OutBytes, nil
+}
+
+// verifyCompressed reads path back through the pure-Go decoder, checking
+// that it decompresses cleanly and yields wantBytes. Decompression
+// validates the frame's embedded XXH64 checksum, so this catches a
+// truncated or corrupted artefact before the caller retires the previous
+// backup.
+func verifyCompressed(path string, wantBytes int64) error {
+	n, err := decompressTo(path, io.Discard)
+	if err != nil {
+		return fmt.Errorf("verify %s: %w", filepath.Base(path), err)
+	}
+	if n != wantBytes {
+		return fmt.Errorf("verify %s: decompressed to %d bytes, snapshot was %d",
+			filepath.Base(path), n, wantBytes)
+	}
+	return nil
+}
+
+// Decompress expands a backup file to destPath. It reads both .db.zst and
+// .db.gz, so a snapshot taken before 🎯T159 is still restorable.
+//
+// It exists so restoring never depends on having the zstd CLI installed:
+// a disaster-recovery artefact that needs a package manager first is a
+// poor disaster-recovery artefact. gzip was universally available; zstd
+// is not yet, so mnemo carries its own reader.
+func Decompress(srcPath, destPath string) (int64, error) {
+	out, err := os.Create(destPath)
+	if err != nil {
+		return 0, fmt.Errorf("create restore target: %w", err)
+	}
+	n, err := decompressTo(srcPath, out)
+	if cerr := out.Close(); err == nil && cerr != nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(destPath)
+		return 0, err
+	}
+	return n, nil
+}
+
+// decompressTo streams srcPath into w, picking the reader from the file
+// extension. Returns the number of uncompressed bytes.
+func decompressTo(srcPath string, w io.Writer) (int64, error) {
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+
+	var r io.Reader
+	switch {
+	case strings.HasSuffix(srcPath, ExtZstd), strings.HasSuffix(srcPath, ExtZstd+".tmp"):
+		// Pure Go on purpose: only compression needs cgo, so restoring
+		// works in any build.
+		dec, err := zstd.NewReader(in)
+		if err != nil {
+			return 0, err
+		}
+		defer dec.Close()
+		r = dec
+	case strings.HasSuffix(srcPath, ExtGzip):
+		gr, err := gzip.NewReader(in)
+		if err != nil {
+			return 0, err
+		}
+		defer gr.Close()
+		r = gr
+	default:
+		return 0, fmt.Errorf("unrecognised backup extension: %s", filepath.Base(srcPath))
+	}
+	return io.Copy(w, r)
 }
 
 // replaceAll is a stdlib-equivalent helper kept local so backup.go has no

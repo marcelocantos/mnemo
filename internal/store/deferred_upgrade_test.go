@@ -15,7 +15,7 @@ import (
 
 // TestNewReturnsWhilePreMigrationBackupBlocked proves 🎯T114.1: store.New
 // opens long-lived handles and returns without waiting for the pre-migration
-// VACUUM+gzip that used to serialize the entire daemon open path.
+// VACUUM+compress that used to serialize the entire daemon open path.
 func TestNewReturnsWhilePreMigrationBackupBlocked(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "mnemo.db")
@@ -53,7 +53,7 @@ func TestNewReturnsWhilePreMigrationBackupBlocked(t *testing.T) {
 		// Real tiny backup so apply still has a clean path; dest need not
 		// exist for apply to proceed (backup failure is non-fatal), but a
 		// successful Result keeps the log path realistic.
-		return backup.Result{Path: dest, RawSize: 1, GzippedSize: 1, Elapsed: time.Millisecond}, nil
+		return backup.Result{Path: dest, RawSize: 1, CompressedSize: 1, Elapsed: time.Millisecond}, nil
 	}
 	t.Cleanup(func() { preMigrationBackup = prev })
 

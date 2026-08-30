@@ -846,7 +846,7 @@ const backgroundDrainGrace = 3 * time.Second
 // The pre-migration backup exists to insure table data against a botched
 // apply. For a plan that only redefines a view it insures nothing, while
 // costing the single largest delay in the startup path: redefining
-// entries_v on an 18.9 GB index spent ~18 minutes in VACUUM INTO, gzip
+// entries_v on an 18.9 GB index spent ~18 minutes in VACUUM INTO, compression
 // and integrity check, with every startup capability pending throughout.
 //
 // Conservative by construction: any operation type not on the list —
@@ -924,7 +924,7 @@ func openDB(dbPath string, writer bool) (*sql.DB, error) {
 }
 
 // preMigrationBackup runs the pre-migration snapshot. Overridden in tests
-// to prove store.New returns while a multi-minute VACUUM+gzip would block
+// to prove store.New returns while a multi-minute VACUUM+compress would block
 // the old synchronous path (🎯T114.1).
 var preMigrationBackup = func(srcPath, destPath string, args *backup.BackupArgs) (backup.Result, error) {
 	return backup.BackupWith(srcPath, destPath, args)
@@ -1048,7 +1048,7 @@ func upgradeSchemaWith(dbPath, desiredSQL string) error {
 				slog.Info("pre-migration backup written",
 					"path", res.Path,
 					"raw_mb", res.RawSize/(1<<20),
-					"gz_mb", res.GzippedSize/(1<<20),
+					"compressed_mb", res.CompressedSize/(1<<20),
 					"elapsed", res.Elapsed.Round(time.Second))
 			}
 		}
@@ -1203,7 +1203,7 @@ func applyFreshSchema(dbPath string) (bool, error) {
 //
 // Schema policy (🎯T114.1): prepareSchema runs synchronously (fresh create
 // or "is an upgrade pending?"). The long-lived pools open immediately so
-// tools can serve. When an upgrade is pending, pre-migration VACUUM+gzip
+// tools can serve. When an upgrade is pending, pre-migration VACUUM+compress
 // and sqlift.Apply run in a background goroutine — SQLite is designed for
 // concurrent VACUUM INTO against a live DB. Insurance order is preserved
 // inside that goroutine (backup finishes before Apply).

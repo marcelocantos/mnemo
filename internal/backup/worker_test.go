@@ -358,3 +358,67 @@ func TestGCKeepsOneAndOnlyTheNewest(t *testing.T) {
 		t.Errorf("kept %s, want the newest (%s)", got, names[len(names)-1])
 	}
 }
+
+// TestRetentionSpansBothFormats is the guard for the failure that put ~187
+// GB of unmanaged files on disk (🎯T158): retention only manages what
+// parseFilename recognises, so a format change that teaches it the new
+// suffix and drops the old one leaves every pre-existing snapshot
+// invisible — never listed, never collected, growing forever. The switch
+// to zstd (🎯T159) is exactly such a change, so both extensions are
+// pinned here.
+func TestRetentionSpansBothFormats(t *testing.T) {
+	dir := t.TempDir()
+	// Interleaved deliberately: the old gzip snapshot is NEWER than one of
+	// the zstd ones, so a correct implementation must order across formats
+	// rather than preferring the new suffix.
+	names := []string{
+		"mnemo-daily-20260101T000000Z.db.zst",
+		"mnemo-daily-20260102T000000Z.db.gz",
+		"mnemo-daily-20260103T000000Z.db.zst",
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != len(names) {
+		t.Fatalf("List saw %d of %d backups (%v) — an unlisted snapshot is "+
+			"one retention will never delete", len(list), len(names), namesOf(list))
+	}
+
+	removed, err := GCOldest(dir, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 2 {
+		t.Errorf("removed %d, want 2", len(removed))
+	}
+	left, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || filepath.Base(left[0].Path) != names[2] {
+		t.Errorf("kept %v, want just the newest (%s)", namesOf(left), names[2])
+	}
+}
+
+// TestParseFilenameRejectsForeignExtensions keeps the recognised set
+// closed. Recognising a file means retention may DELETE it, so a loose
+// suffix match is a data-loss bug, not a cosmetic one.
+func TestParseFilenameRejectsForeignExtensions(t *testing.T) {
+	for _, c := range []string{
+		"mnemo-daily-20260518T031742Z.db.zst.tmp",
+		"mnemo-daily-20260518T031742Z.db.bz2",
+		"mnemo-daily-20260518T031742Z.zst",
+		"mnemo-daily-20260518T031742Z.db",
+	} {
+		if _, _, ok := parseFilename(c); ok {
+			t.Errorf("parseFilename(%q) = ok; want rejected", c)
+		}
+	}
+}
