@@ -44,14 +44,24 @@ const (
 var toolConsumers = map[string]consumerKind{
 	// Retrieval — the load-bearing surface. mnemo_search alone was 55%
 	// of all agent calls; these are why the product exists.
-	"mnemo_search":            consumerAgent, // 1136 / 228
-	"mnemo_query":             consumerAgent, // 209 / 26
-	"mnemo_recent_activity":   consumerAgent, // 154 / 136, skill-driven
-	"mnemo_read_session":      consumerAgent, // 131 / 58
-	"mnemo_sessions":          consumerAgent, // 99 / 63
-	"mnemo_compacted_session": consumerAgent, // 6 / 4
-	"mnemo_session_structure": consumerAgent, // 6 / 5
-	"mnemo_locate_uuid":       consumerAgent, // 1 / 1
+	"mnemo_search":          consumerAgent, // 1136 / 228
+	"mnemo_query":           consumerAgent, // 209 / 26
+	"mnemo_recent_activity": consumerAgent, // 154 / 136, skill-driven
+	"mnemo_read_session":    consumerAgent, // 131 / 58
+	"mnemo_sessions":        consumerAgent, // 99 / 63
+	// Below ten agent calls each, so each carries its reason (🎯T156).
+	// 7 / 5. The token-volume retrieval form (🎯T72): a converged session
+	// is mostly summary plus a bounded tail, which is what makes reading
+	// a long session affordable at all.
+	"mnemo_compacted_session": consumerAgent,
+	// 6 / 5. Answers "what shape is this session" without reading it —
+	// the cheap probe before an expensive read.
+	"mnemo_session_structure": consumerAgent,
+	// 1 / 1, and 1506 bytes per call — the worst ratio on the surface.
+	// Retained because it is the only way to resolve a bare UUID from a
+	// stack trace or a log line back to its session, which is a recovery
+	// path, not a browsing one. Reconsider if it stays unused.
+	"mnemo_locate_uuid": consumerAgent,
 
 	// Cross-repo indexes.
 	"mnemo_repos": consumerAgent, // 14 / 12
@@ -63,26 +73,22 @@ var toolConsumers = map[string]consumerKind{
 
 	"mnemo_usage": consumerAgent, // 13 / 5
 
-	// Consolidated entry points (🎯T143.3/.4/.5).
-	"mnemo_vault":  consumerUser,  // maintenance; 10 tools folded
+	// Consolidated entry points (🎯T143.3/.4/.5). All three read cold on
+	// agent calls, and all three have a consumer that is not an agent —
+	// which is exactly why the audit counts the kinds separately.
+	"mnemo_vault":  consumerUser,  // maintenance workflow; 10 tools folded
 	"mnemo_thread": consumerApp,   // menubar app via /api/thread/*
-	"mnemo_ops":    consumerAgent, // 37 across the six folded tools
+	"mnemo_ops":    consumerAgent, // 0 direct calls but skill-driven; 37 across the six folded tools
 
-	// mnemo_note is on notice, and the ledger should say so rather than
-	// carry a stale justification.
-	//
-	// Its 63 calls looked like agent adoption. They were not: 55 came
-	// from two sessions running `/loop /inbox`, and the /inbox and /post
-	// skills that drove them were deleted 2026-08-07 as not having
-	// proven useful. Nothing has called any note op since 2026-07-19.
-	// So the consumer that justified consumerAgent no longer exists.
-	//
-	// Kept for now because 🎯T65 built it deliberately as a primitive
-	// and removing it is a product call, not a cleanup. Marked
-	// consumerUser so the audit reports it cold honestly instead of
-	// citing usage that a deleted skill generated.
-	"mnemo_note": consumerUser,
+	// mnemo_note was removed on 2026-08-30 (🎯T156). This ledger had it
+	// "on notice": its 63 calls came from two sessions running `/loop
+	// /inbox`, and the skills that drove them were deleted 2026-08-07,
+	// so nothing had called it since 2026-07-19. It cost 522 tokens of
+	// every session's context. The owner made the product call the
+	// ledger said was needed; the notes table and store API remain.
 
-	// Session control and introspection.
-	"mnemo_rework_history": consumerSkill, // bullseye_rework feeds on it
+	// 1 / 1, at 1218 bytes per call. Not agent-driven: bullseye_rework
+	// consumes its output as the mnemo_history parameter, so the calls
+	// are as rare as reworks are and the consumer is a skill.
+	"mnemo_rework_history": consumerSkill,
 }

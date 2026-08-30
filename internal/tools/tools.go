@@ -252,71 +252,10 @@ sqldeep example — repos with their recent sessions:
   }
   GROUP BY sm.repo
 
-Tables:
-  entries_v — view (id, session_id, project, type, timestamp, raw, uuid, model, stop_reason, input_tokens, ...)
-    — READ ENTRIES HERE. The base table entries stores raw zstd-compressed in raw_z with
-      raw NULL and its generated columns NULL for those rows; entries_v decodes raw and
-      serves the fields from materialised columns.
-    — every JSONL line stored as JSONB in 'raw'. Virtual columns:
-      model, stop_reason, input_tokens, output_tokens,
-      cache_read_tokens, cache_creation_tokens, agent_id, version,
-      slug, is_sidechain, data_type, data_command, data_hook_event,
-      top_tool_use_id, parent_tool_use_id
-    — entry types: user, assistant, progress, system, file-history-snapshot
-    — use json_extract(raw, '$.path') for fields without virtual columns
-  messages_v — view: (id, entry_id, session_id, project, role, text, timestamp, type, is_noise, ...)
-    — content blocks from user/assistant entries. entry_id links to entries.
-    — READ TEXT HERE. The base table messages stores text zstd-compressed in text_z
-      with text = '' for those rows; messages_v decodes it. On the base table use
-      mnemo_text(text, text_z). Same columns otherwise.
-    — tool_use fields: tool_name, tool_use_id, tool_input (JSONB), content_type
-    — virtual columns from tool_input: tool_file_path, tool_command, etc.
-  messages_fts — FTS5 virtual table (excludes noise). Use: WHERE messages_fts MATCH 'terms'
-  snapshot_files (id, entry_id, session_id, file_path, backup_time)
-    — auto-extracted from file-history-snapshot entries via trigger
-  snapshot_files_fts — FTS5 on file_path. Use: WHERE snapshot_files_fts MATCH 'pattern'
-  sessions — view: session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg
-  session_meta (session_id, repo, cwd, git_branch, work_type, topic)
-  session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
-  memories (id, project, file_path, name, description, memory_type, content, updated_at)
-    — auto-memory files from ~/.claude/projects/*/memory/*.md
-    — memory_type: user, feedback, project, reference
-  memories_fts — FTS5 on name, description, content, project
-  skills (id, file_path, name, description, content, updated_at)
-    — skill files from ~/.claude/skills/*.md
-  skills_fts — FTS5 on name, description, content
-  claude_configs (id, repo, file_path, content, updated_at)
-    — CLAUDE.md project instruction files from all repo roots
-  claude_configs_fts — FTS5 on content, repo
-  audit_entries (id, repo, file_path, date, skill, version, summary, raw_text)
-    — parsed entries from docs/audit-log.md in each repo
-    — skill: release, audit, docs, etc. version: vN.N.N if present
-  audit_entries_fts — FTS5 on summary, raw_text, repo
-  ci_runs (id, repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url)
-    — GitHub Actions runs polled from repos seen in session history
-    — status: completed, in_progress, queued; conclusion: success, failure, cancelled, skipped
-  ci_runs_fts — FTS5 on repo, workflow, branch, log_summary, conclusion
-  patterns (id, pattern_type, signature, occurrence_count, session_count, repos, sessions, first_seen, last_seen, representative_excerpts, computed_at)
-    — workaround patterns mined hourly; see mnemo_discover_patterns
-    — pattern_type: direct_jsonl_read, transcript_grep, repeated_query, repeated_search
-    — repos / sessions / representative_excerpts are JSON arrays; use json_each()
-  patterns_fts — FTS5 on pattern_type, signature, representative_excerpts
-  docs_v — view: (id, repo, file_path, kind, title, content, indexed_at)
-    — READ CONTENT HERE; base table docs holds compressed content_z (see messages_v).
-    — README / CHANGELOG / design notes / PDFs across tracked repos
-    — kind: md, txt, pdf. Synthesis docs carry a taxonomy tag.
-  docs_fts — FTS5 on title, content, repo
-  targets (id, repo, file_path, target_id, name, status, weight, description, raw_text)
-    — convergence targets from docs/targets.md. NOTE: bullseye.yaml is
-      NOT indexed here, so mnemo's own targets are absent.
-  targets_fts — FTS5 on name, description, raw_text
-  plans (id, repo, file_path, phase, content, updated_at)
-  plans_fts — FTS5 on content
-  git_commits (id, repo, commit_hash, author_name, author_email, commit_date, subject, body)
-  git_commits_fts — FTS5 on subject, body
-  github_prs (id, repo, pr_number, title, body, state, author, created_at, updated_at, merged_at, url)
-  github_issues (id, repo, issue_number, title, body, state, author, created_at, updated_at, url)
-  github_prs_fts / github_issues_fts — FTS5 on title, body
+Schema: call mnemo_query(describe=true) — or read the mnemo://schema resource —
+for the table/column catalogue, generated from the live database so it cannot
+drift. Read entries through entries_v, message text through messages_v and doc
+content through docs_v: the base tables store those columns compressed.
 
 Join pattern — message with its entry metadata:
   SELECT m.text, e.model, e.input_tokens FROM messages_v m JOIN entries_v e ON e.id = m.entry_id
@@ -335,6 +274,7 @@ is_noise = 1 for interrupts, compaction summaries, tool-loaded markers, slash co
 Results capped at 100 rows.
 
 Tip: If you find yourself running the same complex query pattern repeatedly, save it as a template with mnemo_define for reuse.`),
+			mcp.WithBoolean("describe", mcp.Description("Return the database schema catalogue instead of running a query; generated from the live database.")),
 			mcp.WithString("query", mcp.Required(), mcp.Description("SQL SELECT/WITH query, or sqldeep nested syntax (FROM ... SELECT { ... })")),
 		),
 		mcp.NewTool("mnemo_repos",
@@ -370,21 +310,15 @@ Use this when you need context about recent work, OR to check whether fresh tran
 			mcp.WithNumber("truncate_len", mcp.Description("Truncate assistant messages to this length (default 200)")),
 		),
 		mcp.NewTool("mnemo_usage",
-			mcp.WithDescription(`Token usage analytics across sessions. Aggregates input, output, cache read, and cache creation tokens with cost estimates.
+			mcp.WithDescription(`Token usage analytics across sessions: input, output, cache-read and cache-creation tokens, with costs.
 
-Returns per-period breakdown and totals. Costs come from a fetched model rate card, matched on the EXACT model identifier — there is no prefix matching and no fallback, because both produced large silent errors (opus-4-5 priced as opus-4 is a 3x overcharge; an unknown model priced as Sonnet is how another provider's corpus got billed at Anthropic's rates).
+Two disclosure fields matter as much as the totals, and a total read without them is wrong:
+  "unpriced_models" — counted but NOT costed, because the rate card has no entry. Normal for a newly released model, which is exactly the spend you want to see.
+  "uncounted" — volume EXCLUDED from every row and total, per source, with the reason. A record with no message id cannot be deduplicated, and deduplication is worth 1.95x-2.83x.
 
-Two fields report what a total leaves out, and both matter more than the total:
+Each row carries "source": "estimated" (from token counts) or "reconciled" (authoritative, Admin API). A top-level "freshness" timestamp bounds ingest lag.
 
-"unpriced_models" names models whose tokens are counted but NOT costed, because the rate card has no entry. This is normal for a newly released model — which is exactly the spend you want to see. Their tokens are in the counts; their cost is in nobody's.
-
-"uncounted" reports volume EXCLUDED from every row and total, per source, with the reason. A record with no message id cannot be deduplicated, and deduplication is worth 1.95x-2.83x, so sources that supply no key (Codex, Grok today) are reported separately rather than summed into a figure that claims to be deduplicated. Codex volume is additionally inflated by an ingest artifact.
-
-Pricing requires opting in via {"pricing": {"enabled": true}} in ~/.mnemo/config.json, which lets mnemo fetch the rate card. Without it, token counts are exact and every model reports as unpriced.
-
-Each row includes a "source" field: "estimated" (computed from token counts), "reconciled" (authoritative cost from Anthropic Admin API), or "mixed" (aggregation spans both). Reconciliation requires ANTHROPIC_ADMIN_API_KEY env var; absent by default (all rows report "estimated").
-
-A top-level "freshness" field reports the RFC3339 timestamp of the most recently ingested assistant message, bounding indexer lag for real-time consumers.`),
+Costing needs {"pricing": {"enabled": true}} in ~/.mnemo/config.json; with it off every model reports unpriced rather than $0.00. Full method: docs/design/token-cost-specification.md.`),
 			mcp.WithNumber("days", mcp.Description("Recency window in days (default 30). Ignored when since/until are supplied.")),
 			mcp.WithString("since", mcp.Description("RFC3339 timestamp lower bound (inclusive). Overrides days when set.")),
 			mcp.WithString("until", mcp.Description("RFC3339 timestamp upper bound (inclusive). Defaults to now when only since is set.")),
@@ -441,7 +375,6 @@ Use this to build a rework diagnosis context: the bullseye_rework tool accepts t
 			mcp.WithNumber("limit", mcp.Description("Max attempts to return (default 20).")),
 		),
 		vaultTool(),
-		noteTool(),
 		threadTool(),
 		opsTool(),
 	}
@@ -480,6 +413,9 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 	case "mnemo_read_session":
 		return ch.readSession(args)
 	case "mnemo_query":
+		if describe, _ := args["describe"].(bool); describe {
+			return ch.describeSchema()
+		}
 		return ch.query(args)
 	case "mnemo_repos":
 		return ch.repos(args)
@@ -501,8 +437,6 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.reworkHistory(args)
 	case "mnemo_thread":
 		return ch.threadDispatch(args)
-	case "mnemo_note":
-		return ch.noteDispatch(args)
 	case "mnemo_ops":
 		return ch.opsDispatch(args, h.resolveCompactor, h.diagRunner)
 	case "mnemo_vault":
@@ -1757,4 +1691,15 @@ func (h *callHandler) callerHome() string {
 // path for read-side rendering.
 func osUserHome() (string, error) {
 	return store.EffectiveHome()
+}
+
+// describeSchema serves the generated catalogue (🎯T156). It reads the
+// live database rather than a checked-in string, so it cannot describe a
+// schema the database does not have.
+func (h *callHandler) describeSchema() (string, bool, error) {
+	doc, err := schemaCatalogue(h.mem.Query)
+	if err != nil {
+		return fmt.Sprintf("schema unavailable: %v", err), true, nil
+	}
+	return doc, false, nil
 }

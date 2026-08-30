@@ -7,6 +7,7 @@ package tools
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/marcelocantos/mnemo/internal/store"
 	"os"
@@ -46,17 +47,39 @@ func TestToolSurfaceAudit(t *testing.T) {
 	skills := skillReferences(t, registered)
 	http := httpTwins(t)
 
+	// Weight, alongside use (🎯T156). Counting tools hid the real problem:
+	// on 2026-08-30 the five hottest were 95% of calls but 36% of the
+	// tokens, while the eight coldest were 0.8% of calls and another 36%.
+	// A tool is cheap or expensive to CARRY independently of how often it
+	// is called, so both numbers belong in one table.
+	weight := map[string]int{}
+	total := 0
+	for _, tool := range Definitions() {
+		b, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", tool.Name, err)
+		}
+		weight[tool.Name] = len(b)
+		total += len(b)
+	}
+
 	var cold []string
-	t.Logf("%-26s %8s %8s %7s %6s", "TOOL", "CALLS", "SESSIONS", "SKILLS", "HTTP")
+	t.Logf("%-26s %8s %8s %7s %6s %7s %9s", "TOOL", "CALLS", "SESSIONS", "SKILLS", "HTTP", "BYTES", "B/CALL")
 	for _, name := range registered {
 		c := agent[name]
 		nSkill := len(skills[name])
 		hasHTTP := http[strings.TrimPrefix(name, "mnemo_")]
-		t.Logf("%-26s %8d %8d %7d %6v", name, c.calls, c.sessions, nSkill, hasHTTP)
+		perCall := "-"
+		if c.calls > 0 {
+			perCall = fmt.Sprintf("%d", weight[name]/c.calls)
+		}
+		t.Logf("%-26s %8d %8d %7d %6v %7d %9s", name, c.calls, c.sessions, nSkill, hasHTTP, weight[name], perCall)
 		if c.calls == 0 && nSkill == 0 && !hasHTTP {
 			cold = append(cold, name)
 		}
 	}
+	t.Logf("\nSurface weight: %d tools, %d bytes, ~%d tokens carried by every session that registers mnemo.",
+		len(registered), total, total*10/37)
 
 	if len(cold) == 0 {
 		t.Log("\nNo tool is cold on all three measures.")

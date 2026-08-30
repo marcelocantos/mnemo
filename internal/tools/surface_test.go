@@ -70,7 +70,7 @@ func TestToolSurfaceRatchet(t *testing.T) {
 func TestToolSurfaceSize(t *testing.T) {
 	// Baseline set by 🎯T143 on 2026-08-07 (70 → 18); 18 → 17 on
 	// 2026-08-30 when mnemo_config went file-only (🎯T156).
-	const baseline = 17
+	const baseline = 16
 	if got := len(registeredToolNames(t)); got != baseline {
 		t.Errorf("registered tool count is %d, ledger baseline is %d.\n"+
 			"If this change is intended, move the baseline in the same commit "+
@@ -92,8 +92,11 @@ func TestToolSurfaceSize(t *testing.T) {
 // The margin is deliberately loose: this catches a description that
 // grows by a page, not one that gains a sentence.
 func TestToolSurfaceWeight(t *testing.T) {
-	// Measured 2026-08-30 after mnemo_config went file-only.
-	const baselineBytes = 32120
+	// Measured 2026-08-30 at the end of 🎯T156: mnemo_config and
+	// mnemo_note removed, mnemo_query's schema catalogue moved to a
+	// generated resource, mnemo_usage's methodology essay moved to its
+	// design doc. Down from 36,667 bytes (~9,910 tokens) pre-🎯T156.
+	const baselineBytes = 24917
 	const margin = 1.10
 
 	total := 0
@@ -144,11 +147,6 @@ func TestConsolidationPreservesCapabilities(t *testing.T) {
 			"new":     "mnemo_thread_new",
 			"archive": "mnemo_thread_archive",
 			"go":      "mnemo_thread_go",
-		}},
-		{noteOps, map[string]string{
-			"post": "mnemo_note_post",
-			"recv": "mnemo_note_recv",
-			"list": "mnemo_note_list",
 		}},
 		{opsOps, map[string]string{
 			"doctor":        "mnemo_doctor",
@@ -214,6 +212,11 @@ func TestRemovedToolsStayRemoved(t *testing.T) {
 		// writer of config.json. The daemon watches the file instead, and
 		// `mnemo --help-config` documents the schema.
 		"mnemo_config",
+		// 🎯T156: 522 tokens for one call ever. The cross-session inbox
+		// concept survives in the notes table and store API; only the
+		// tool is gone, per the 🎯T143.1 precedent of retaining an index
+		// whose tool had no consumer.
+		"mnemo_note",
 		// Folded into consolidated entry points.
 		"mnemo_vault_status", "mnemo_vault_sync", "mnemo_vault_gc",
 		"mnemo_docs", "mnemo_configs", "mnemo_skills", "mnemo_audit", "mnemo_targets",

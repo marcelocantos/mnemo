@@ -89,6 +89,41 @@ func (h *Handler) RegisterToolsExcept(s *mcpserver.MCPServer, exclude map[string
 		}
 		s.AddTool(tool, h.LocalHandler(tool.Name))
 	}
+	h.registerSchemaResource(s)
+}
+
+// registerSchemaResource publishes the database catalogue as an MCP
+// resource (🎯T156).
+//
+// A resource is fetched on demand, so this costs a session nothing until
+// an agent asks — unlike the ~5 KB catalogue that used to sit in
+// mnemo_query's description and was carried whether or not the agent
+// ever wrote SQL. mnemo_query(describe=true) returns the same text for
+// clients that do not surface resources.
+func (h *Handler) registerSchemaResource(s *mcpserver.MCPServer) {
+	res := mcp.NewResource(
+		"mnemo://schema",
+		"mnemo database schema",
+		mcp.WithResourceDescription(
+			"Table and column catalogue for mnemo_query, generated from the live "+
+				"database so it cannot drift from what the database exposes."),
+		mcp.WithMIMEType("text/plain"),
+	)
+	s.AddResource(res, func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+		mem, err := h.resolve("")
+		if err != nil {
+			return nil, err
+		}
+		doc, err := schemaCatalogue(mem.Query)
+		if err != nil {
+			return nil, err
+		}
+		return []mcp.ResourceContents{mcp.TextResourceContents{
+			URI:      "mnemo://schema",
+			MIMEType: "text/plain",
+			Text:     doc,
+		}}, nil
+	})
 }
 
 // LocalHandler returns the standard tool-call closure for name —

@@ -567,7 +567,7 @@ When `linked_instances` is empty or absent, all tools return their
 original local-only response shape unchanged. Write- and
 control-shaped tools (`mnemo_ops`, `mnemo_query`,
 `mnemo_stats`, `mnemo_status`, `mnemo_vault`,
-`mnemo_thread`, `mnemo_note`) bypass federation entirely.
+`mnemo_thread`) bypass federation entirely.
 
 Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,

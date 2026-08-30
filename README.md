@@ -380,7 +380,6 @@ collapsed, so every spelling of one directory addresses one inbox.
 **Producer (session A, e.g. mid-`/release` in mnemo):**
 
 ```
-mnemo_note(op: "post", inbox: "../ytt", body: "mnemo v0.42 published, brew formula updated")
 ```
 
 **Consumer (session B, in the downstream repo):** type `/inbox` to pull
@@ -513,7 +512,7 @@ response returns regardless. Per-peer timeout default 5s.
 
 Write- and control-shaped tools (`mnemo_ops`, `mnemo_query`,
 `mnemo_stats`, `mnemo_status`, `mnemo_vault`,
-`mnemo_thread`, `mnemo_note`) bypass federation entirely.
+`mnemo_thread`) bypass federation entirely.
 
 When `linked_instances` is empty or absent, federation is disabled and
 all tools return their original local-only response shape unchanged
