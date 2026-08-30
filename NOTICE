@@ -42,6 +42,18 @@ the upstream modules' NOTICE files):
   nlohmann/json (via sqlift) — MIT License
   deepparser / liteparser (via sqldeep) — MIT License
 
+Third-party C source vendored directly into this repository:
+
+  Zstandard (zstd) v1.5.7 — Copyright (c) Meta Platforms, Inc. and
+  affiliates. Vendored at internal/zstdc/ as the upstream single-file
+  amalgamation (zstd.c) plus its public headers. zstd is dual-licensed
+  BSD 3-Clause OR GPLv2; it is used here under the BSD 3-Clause option,
+  which is compatible with this project's Apache 2.0 licence. The GPLv2
+  alternative is not exercised, and upstream's COPYING (GPLv2) is
+  deliberately not vendored. The full BSD licence text is retained at
+  internal/zstdc/LICENSE.zstd, and internal/zstdc/UPSTREAM.md records the
+  version and the exact steps to regenerate it.
+
 The optional CLIP image-embedding feature (off by default; see
 `image_embeddings` in the config) shells out to a Python script that
 resolves its own dependencies via `uv` at runtime and downloads the
