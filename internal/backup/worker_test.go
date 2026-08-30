@@ -317,3 +317,44 @@ func TestParseFilenameSplitsLastDash(t *testing.T) {
 		t.Errorf("time = %v, want %v", ts, want)
 	}
 }
+
+// TestGCKeepsOneAndOnlyTheNewest pins the retention the owner chose
+// (🎯T158): one snapshot in steady state, a second existing only while
+// its replacement is being written.
+//
+// At the previous default of 7 the directory held ~81 GB against an
+// 18.9 GB database. The snapshot exists so the file can be restored if
+// it is lost, and a restore takes the newest copy; keeping six older
+// ones only covers damage noticed after the next snapshot has run.
+func TestGCKeepsOneAndOnlyTheNewest(t *testing.T) {
+	dir := t.TempDir()
+	// Oldest to newest, across tags, since all tags share one pool.
+	names := []string{
+		"mnemo-daily-20260101T000000Z.db.gz",
+		"mnemo-pre-migration-20260102T000000Z.db.gz",
+		"mnemo-manual-20260103T000000Z.db.gz",
+		"mnemo-daily-20260104T000000Z.db.gz",
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := GCOldest(dir, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 3 {
+		t.Errorf("removed %d, want 3", len(removed))
+	}
+	left, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("kept %d backups, want exactly 1", len(left))
+	}
+	if got := filepath.Base(left[0].Path); got != names[len(names)-1] {
+		t.Errorf("kept %s, want the newest (%s)", got, names[len(names)-1])
+	}
+}

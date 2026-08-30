@@ -877,9 +877,18 @@ type BackupConfig struct {
 	// Empty → ~/.mnemo/backups.
 	Dir string `json:"dir,omitempty"`
 
-	// KeepDailies caps the number of snapshots retained. Older
-	// backups beyond this count are deleted after each successful run.
-	// 0 or unset → 7.
+	// KeepDailies caps the number of snapshots retained across ALL tags —
+	// daily, pre-migration and manual share one pool. Older backups
+	// beyond this count are deleted after a successful run, never
+	// before, so the replacement always exists before its predecessor
+	// is removed. 0 or unset → 1.
+	//
+	// One is deliberate. At 7 the directory held ~81 GB against an
+	// 18.9 GB database — 4.3x the data it protects, scaling with it.
+	// The snapshot guards against losing the file, and a restore uses
+	// the newest copy; depth would only help for damage noticed after
+	// the next snapshot has already run, which is a different problem
+	// from the one this solves. Raise it if you want that window.
 	KeepDailies int `json:"keep_dailies,omitempty"`
 
 	// WindowStart and WindowEnd bound the local time-of-day during
@@ -916,12 +925,12 @@ func (b BackupConfig) EffectiveDir(userHome string) string {
 	return d
 }
 
-// EffectiveKeepDailies returns KeepDailies or 7 when unset.
+// EffectiveKeepDailies returns KeepDailies or 1 when unset.
 func (b BackupConfig) EffectiveKeepDailies() int {
 	if b.KeepDailies > 0 {
 		return b.KeepDailies
 	}
-	return 7
+	return 1
 }
 
 // EffectiveWindow returns the [start, end) local time-of-day window for

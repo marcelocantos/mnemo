@@ -59,3 +59,19 @@ func TestConfigSchemaDocRenders(t *testing.T) {
 		t.Error("linked_instances must be documented under the restart section")
 	}
 }
+
+// TestDefaultRetentionIsOne guards the retention default (🎯T158). At
+// the previous default of 7 the backup directory held ~81 GB against an
+// 18.9 GB database — 4.3x the data it protects, and scaling with it. A
+// silent revert would multiply steady-state disk by seven with nothing
+// failing, which is why the number is pinned rather than merely
+// documented.
+func TestDefaultRetentionIsOne(t *testing.T) {
+	if got := (BackupConfig{}).EffectiveKeepDailies(); got != 1 {
+		t.Errorf("default keep_dailies = %d, want 1", got)
+	}
+	// An explicit value still wins, so more history stays one edit away.
+	if got := (BackupConfig{KeepDailies: 5}).EffectiveKeepDailies(); got != 5 {
+		t.Errorf("explicit keep_dailies = %d, want 5", got)
+	}
+}

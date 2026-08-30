@@ -135,6 +135,10 @@ var configDocs = map[string]configFieldDoc{
 	},
 	"backup": {
 		summary: "Daily backup snapshots: retention, window, quiescence.",
+		detail: "keep_dailies defaults to 1 and is shared across all tags " +
+			"(daily, pre-migration, manual). The replacement is always written " +
+			"and verified before its predecessor is deleted, so the peak on " +
+			"disk is two snapshots plus the uncompressed VACUUM temp.",
 	},
 	"connection_sweep": {
 		summary: "Sweep interval and staleness threshold for daemon connection records.",
