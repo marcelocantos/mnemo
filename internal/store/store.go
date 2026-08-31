@@ -930,6 +930,18 @@ var preMigrationBackup = func(srcPath, destPath string, args *backup.BackupArgs)
 	return backup.BackupWith(srcPath, destPath, args)
 }
 
+// backupKeepFromConfig resolves the retention depth for backups taken
+// outside the worker. Reading config here rather than threading it down
+// keeps the migration path independent of daemon wiring; an unreadable
+// config falls back to the same default the worker would use.
+func backupKeepFromConfig() int {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return BackupConfig{}.EffectiveKeepDailies()
+	}
+	return cfg.Backup.EffectiveKeepDailies()
+}
+
 // schemaPrep is the cheap result of prepareSchema: either the DB is at the
 // desired shape, or an upgrade (backup + apply) is still required.
 type schemaPrep struct {
@@ -1050,6 +1062,21 @@ func upgradeSchemaWith(dbPath, desiredSQL string) error {
 					"raw_mb", res.RawSize/(1<<20),
 					"compressed_mb", res.CompressedSize/(1<<20),
 					"elapsed", res.Elapsed.Round(time.Second))
+				// Prune here too. This path took a snapshot and pruned
+				// nothing, so a day with three migrations added three
+				// snapshots and removed none until the next successful
+				// nightly run — and if backups were disabled or failing,
+				// never (🎯T158). The snapshot just written is the
+				// newest, so retention cannot discard the insurance it
+				// was taken for.
+				keep := backupKeepFromConfig()
+				if removed, gcErr := backup.GCOldest(backupDir, keep); gcErr != nil {
+					slog.Warn("pre-migration retention failed; old backups may accumulate",
+						"dir", backupDir, "err", gcErr)
+				} else if len(removed) > 0 {
+					slog.Info("pre-migration retention removed old snapshots",
+						"count", len(removed), "keep", keep)
+				}
 			}
 		}
 	}

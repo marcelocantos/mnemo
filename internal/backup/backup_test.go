@@ -6,9 +6,11 @@ package backup
 import (
 	"compress/gzip"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -319,4 +321,70 @@ func TestCompressionUsesAllWorkers(t *testing.T) {
 			"vendored amalgamation looks single-threaded, so backups are "+
 			"paying gzip-era wall-clock", st.WorkersUsed, runtime.NumCPU())
 	}
+}
+
+// TestInterruptedBackupLeavesNothingBehind is acceptance criterion 1 of
+// 🎯T158. A backup that fails between VACUUM INTO and a finished
+// artefact must leave the directory exactly as it found it — no
+// multi-gigabyte VACUUM temp, no half-written .tmp, no partial output
+// under the final name. The 104 GB of orphans that motivated the target
+// came from process death rather than a returned error, but an error
+// path that leaks is the same bug with a smaller blast radius.
+func TestInterruptedBackupLeavesNothingBehind(t *testing.T) {
+	orig := compressFileFn
+	defer func() { compressFileFn = orig }()
+
+	cases := []struct {
+		name string
+		fn   func(src, dst string) (int64, error)
+	}{
+		{"compressor fails before writing anything", func(string, string) (int64, error) {
+			return 0, errors.New("injected: compressor failed")
+		}},
+		{"compressor fails after writing a partial temp", func(_, dst string) (int64, error) {
+			if err := os.WriteFile(dst+".tmp", []byte("partial output"), 0o644); err != nil {
+				return 0, err
+			}
+			return 0, errors.New("injected: compressor died mid-write")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := seedDB(t, 40)
+			dir := t.TempDir()
+			before := dirSnapshot(t, dir)
+
+			compressFileFn = tc.fn
+			_, err := Backup(src, filepath.Join(dir, Filename(TagDaily, time.Now())))
+			if err == nil {
+				t.Fatal("expected the injected failure to surface")
+			}
+
+			after := dirSnapshot(t, dir)
+			if len(after) != len(before) {
+				t.Errorf("directory changed after a failed backup:\nbefore %v\nafter  %v",
+					before, after)
+			}
+			for _, n := range after {
+				t.Errorf("leftover file after failed backup: %s", n)
+			}
+		})
+	}
+}
+
+// dirSnapshot lists every entry in dir, including dot-prefixed ones —
+// which is the point: the stranded VACUUM temps were invisible to a
+// plain ls precisely because their names start with a dot.
+func dirSnapshot(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
 }

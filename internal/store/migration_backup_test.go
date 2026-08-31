@@ -5,6 +5,7 @@ package store
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -202,5 +203,76 @@ func TestUpgradeSkipsBackupForMetadataOnlyPlan(t *testing.T) {
 	}
 	if backups != 1 {
 		t.Errorf("a column-adding migration took %d backups, want exactly 1", backups)
+	}
+}
+
+// TestPreMigrationBackupPrunes is the test the retention ratchet's
+// exemption promises exists (🎯T158).
+//
+// The migration path is allowed to call backup.BackupWith directly
+// rather than CreateAndRetain, because it needs the destination path up
+// front for boot-phase progress reporting. That exemption is only safe
+// while it prunes by other means — this asserts it does. Without it, a
+// day of three migrations added three snapshots and removed none, and
+// with backups disabled or failing, pruning never happened at all.
+func TestPreMigrationBackupPrunes(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "t.db")
+	s, err := New(dbPath, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.AwaitStartup()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Older snapshots that retention should collect. keep resolves from
+	// config, which is absent here, so the default (1) applies.
+	backupDir := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{
+		"mnemo-daily-20260101T000000Z.db.zst",
+		"mnemo-daily-20260102T000000Z.db.gz",
+		"mnemo-pre-migration-20260103T000000Z.db.zst",
+	} {
+		if err := os.WriteFile(filepath.Join(backupDir, n), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	eol := "\n"
+	if strings.Contains(schemaSQL, "\r\n") {
+		eol = "\r\n"
+	}
+	// A column addition: table-touching, so it must take a snapshot.
+	withCol := strings.Replace(schemaSQL,
+		"			content_z BLOB"+eol+"		);",
+		"			content_z BLOB,"+eol+"			t158_col TEXT"+eol+"		);", 1)
+	if withCol == schemaSQL {
+		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
+	}
+	if err := upgradeSchemaWith(dbPath, withCol); err != nil {
+		t.Fatalf("column upgrade: %v", err)
+	}
+
+	list, err := backup.List(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		var names []string
+		for _, b := range list {
+			names = append(names, b.Name)
+		}
+		t.Fatalf("after a migration the backup dir holds %d snapshots, want 1 "+
+			"(the pre-migration path took one and pruned nothing): %v", len(list), names)
+	}
+	// The survivor must be the insurance just taken, not an older file.
+	if list[0].Tag != backup.TagPreMigration {
+		t.Errorf("kept a %s snapshot; the pre-migration backup should be newest and survive",
+			list[0].Tag)
 	}
 }

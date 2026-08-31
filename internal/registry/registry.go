@@ -906,6 +906,27 @@ func (r *Registry) stopReconcilerWorker(e *userEntry) {
 // worker — backup failures should never block the rest of the daemon.
 func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog.Logger) {
 	bcfg := r.cfg.Backup
+	dir := bcfg.EffectiveDir(e.homeDir)
+
+	// Sweep before the enabled check, and before any config validation
+	// can bail out. Stranded VACUUM temps are the residue of backups
+	// that ALREADY ran, so whether backups are switched on now has no
+	// bearing on whether the residue should be cleaned up — and a user
+	// who disabled backups after a crash is precisely the person left
+	// carrying a database-sized orphan with no worker coming to collect
+	// it (🎯T158). Only scratch is swept: real snapshots are the user's
+	// data and are never deleted merely because the worker is off.
+	if swept, err := backup.SweepOrphans(dir, backup.DefaultOrphanAge); err != nil {
+		logger.Warn("backup: orphan sweep failed", "dir", dir, "err", err)
+	} else if len(swept) > 0 {
+		var freed int64
+		for _, s := range swept {
+			freed += s.Size
+		}
+		logger.Info("backup: swept stranded scratch files at startup",
+			"count", len(swept), "freed_mb", freed/(1<<20), "dir", dir)
+	}
+
 	if !bcfg.IsEnabled() {
 		logger.Info("backup: disabled by config")
 		return
@@ -920,7 +941,6 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		logger.Warn("backup: invalid quiescence_min, worker not started", "err", err)
 		return
 	}
-	dir := bcfg.EffectiveDir(e.homeDir)
 	keep := bcfg.EffectiveKeepDailies()
 
 	w, err := backup.NewWorker(backup.Config{

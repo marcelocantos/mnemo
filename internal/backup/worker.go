@@ -105,15 +105,27 @@ func NewWorker(cfg Config) (*Worker, error) {
 //  3. Wait for ≥Quiescence of inactivity. Poll every PollInterval. If
 //     no quiescent moment is observed by WindowEnd+1h, log warn and
 //     skip the day.
-//  4. Snapshot via Backup() into dir/Filename(TagDaily, now).
-//  5. GC: keep only the most-recent Keep backups across all tags.
-//  6. Loop back to step 1 (tomorrow's window).
+//  4. Snapshot into dir/Filename(TagDaily, now) and apply retention,
+//     via CreateAndRetain.
+//  5. Loop back to step 1 (tomorrow's window).
+//
+// Housekeeping — the sweep for stranded scratch files, and retention
+// itself — runs at startup and again every cycle, whether or not a
+// backup was taken. That independence is the point: retention used to
+// run only after a SUCCESSFUL DAILY backup, so a run of failed backups,
+// a disabled schedule, or a day of migrations pruned nothing while
+// snapshots kept arriving (🎯T158).
 func (w *Worker) Run(ctx context.Context) {
 	if err := os.MkdirAll(w.dir, 0o755); err != nil {
 		slog.Error("backup worker: cannot create backup dir; worker exiting",
 			"dir", w.dir, "err", err)
 		return
 	}
+	// At startup, before waiting a day for the first window: an orphan
+	// from the crash that just happened should not survive until
+	// tomorrow morning, and a directory over retention should come down
+	// now.
+	w.housekeep()
 	for {
 		next := w.scheduleNext(time.Now())
 		slog.Info("backup worker: next attempt scheduled", "at", next)
@@ -122,7 +134,28 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-time.After(time.Until(next)):
 		}
+		// Housekeeping first, so it happens even on a day the backup
+		// itself is skipped for lack of a quiescent window.
+		w.housekeep()
 		w.attemptBackup(ctx)
+	}
+}
+
+// housekeep sweeps stranded scratch files and enforces retention,
+// independently of whether a backup succeeds. Both steps log their own
+// failures and neither is fatal to the worker.
+func (w *Worker) housekeep() {
+	if _, err := SweepOrphans(w.dir, DefaultOrphanAge); err != nil {
+		slog.Warn("backup worker: orphan sweep failed", "dir", w.dir, "err", err)
+	}
+	removed, err := GCOldest(w.dir, w.keep)
+	if err != nil {
+		slog.Warn("backup worker: scheduled retention failed", "dir", w.dir, "err", err)
+		return
+	}
+	if len(removed) > 0 {
+		slog.Info("backup worker: scheduled retention removed old snapshots",
+			"count", len(removed), "keep", w.keep)
 	}
 }
 
@@ -172,8 +205,7 @@ func (w *Worker) attemptBackup(ctx context.Context) {
 		}
 	}
 
-	destPath := filepath.Join(w.dir, Filename(TagDaily, time.Now().UTC()))
-	res, err := Backup(w.src, destPath)
+	res, removed, err := CreateAndRetain(w.src, w.dir, TagDaily, w.keep, nil)
 	if err != nil {
 		slog.Error("backup worker: snapshot failed", "err", err)
 		return
@@ -182,14 +214,8 @@ func (w *Worker) attemptBackup(ctx context.Context) {
 		"path", res.Path,
 		"raw_mb", res.RawSize/(1<<20),
 		"compressed_mb", res.CompressedSize/(1<<20),
-		"elapsed", res.Elapsed.Round(time.Second))
-
-	if removed, err := GCOldest(w.dir, w.keep); err != nil {
-		slog.Warn("backup worker: GC failed; old backups may accumulate",
-			"err", err)
-	} else if len(removed) > 0 {
-		slog.Info("backup worker: GC'd old backups", "count", len(removed))
-	}
+		"elapsed", res.Elapsed.Round(time.Second),
+		"retention_removed", len(removed))
 }
 
 // isQuiescent reports whether enough time has passed since the last
@@ -315,4 +341,77 @@ func parseFilename(name string) (Tag, time.Time, bool) {
 		return "", time.Time{}, false
 	}
 	return tag, ts, true
+}
+
+// CreateAndRetain takes a snapshot and immediately applies retention.
+//
+// This exists because "take a backup" and "prune old backups" were
+// separate calls, and only ONE of the three call sites made both
+// (🎯T158). The pre-migration path and `mnemo_ops op=backup_now` each
+// created snapshots and pruned nothing, so a day of migrations — or a
+// few manual backups — grew the directory without bound while the daily
+// worker's retention looked healthy. At keep=1 a non-pruning path
+// doubles the directory every time it runs.
+//
+// Fixing the two call sites would have fixed the bug; making retention
+// part of taking a backup is what stops the fourth call site from
+// reintroducing it. New code should reach for this, not Backup.
+//
+// Retention failure is reported but does not fail the backup: a snapshot
+// that exists and was verified is worth more than a tidy directory, and
+// the caller has already paid for it.
+func CreateAndRetain(srcPath, dir string, tag Tag, keep int, args *BackupArgs) (Result, []string, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return Result{}, nil, fmt.Errorf("create backup dir: %w", err)
+	}
+	destPath, err := uniqueDest(dir, tag, time.Now().UTC())
+	if err != nil {
+		return Result{}, nil, err
+	}
+	res, err := BackupWith(srcPath, destPath, args)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	removed, gcErr := GCOldest(dir, keep)
+	if gcErr != nil {
+		slog.Warn("backup: snapshot written but retention failed; old backups may accumulate",
+			"dir", dir, "err", gcErr)
+	} else if len(removed) > 0 {
+		slog.Info("backup: retention removed old snapshots",
+			"count", len(removed), "keep", keep)
+	}
+	return res, removed, nil
+}
+
+// uniqueDest picks a destination path that does not already exist.
+//
+// Filename's timestamp has one-second granularity, so two backups
+// started in the same second name the same file and the second silently
+// overwrites the first — the rename at the end of Backup replaces
+// whatever is there. Backups normally take minutes, so this needs two
+// forced manual runs in quick succession to hit, which is exactly what
+// happened while testing op=backup_now. Nothing is corrupted, but a
+// snapshot the caller was told was written has quietly replaced another,
+// and with keep>1 the directory ends up holding fewer snapshots than
+// retention promises.
+//
+// Advancing a second at a time keeps the canonical filename shape, so
+// parseFilename, ordering and retention are unaffected.
+func uniqueDest(dir string, tag Tag, when time.Time) (string, error) {
+	const maxAttempts = 60
+	for i := 0; i < maxAttempts; i++ {
+		p := filepath.Join(dir, Filename(tag, when.Add(time.Duration(i)*time.Second)))
+		_, err := os.Stat(p)
+		if os.IsNotExist(err) {
+			return p, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("stat candidate backup path: %w", err)
+		}
+	}
+	return "", fmt.Errorf("no free backup filename for tag %s near %s after %d attempts",
+		tag, when.Format(time.RFC3339), maxAttempts)
 }

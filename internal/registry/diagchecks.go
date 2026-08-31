@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/mnemo/internal/boot"
 	"github.com/marcelocantos/mnemo/internal/compact"
 	"github.com/marcelocantos/mnemo/internal/diag"
@@ -370,6 +371,48 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 						"maintenance truncates it when writes go quiet", size>>20))
 			}
 			return diag.Healthy("WAL size healthy")
+		}},
+
+		// 🎯T158: the backup directory's cost, not its snapshot count.
+		// Retention manages only files it recognises, so a directory can
+		// be simultaneously "correctly retaining N backups" and hundreds
+		// of gigabytes over budget — which is exactly what happened: 187
+		// GB of stranded VACUUM temps sat beside five properly-rotated
+		// snapshots, invisible to retention and to a plain ls (the names
+		// start with a dot). Comparing bytes on disk against what
+		// retention accounts for is the check that would have caught it.
+		diag.Check{Name: "backup.disk", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("no default-user store yet")
+			}
+			dir := filepath.Join(filepath.Dir(s.DBPath()), "backups")
+			u, err := backup.Usage(dir)
+			if err != nil {
+				return diag.Warning(
+					fmt.Sprintf("cannot measure backup directory %s: %v", dir, err),
+					"check the path exists and is readable by the daemon")
+			}
+			if u.RetainedCount == 0 && u.OtherCount == 0 {
+				return diag.Healthy("backup directory is empty")
+			}
+			// Unaccounted bytes are the real signal. A small margin is
+			// normal (a backup in flight owns a temp the size of the
+			// database), so only flag material waste.
+			const slackBytes = 1 << 30 // 1 GiB
+			if u.OtherCount > 0 && u.OtherBytes > slackBytes {
+				return diag.Warning(
+					fmt.Sprintf("backup directory holds %.1f GiB in %d file(s) that retention "+
+						"does not manage, beside %d backup(s) totalling %.1f GiB",
+						float64(u.OtherBytes)/(1<<30), u.OtherCount,
+						u.RetainedCount, float64(u.RetainedBytes)/(1<<30)),
+					"usually stranded VACUUM INTO temps from a killed backup (.backup-*.db, "+
+						"dot-prefixed so ls hides them); the worker sweeps its own scratch "+
+						"older than 6h at startup and each cycle — if they persist, inspect "+
+						"the directory by hand")
+			}
+			return diag.Healthy(fmt.Sprintf("%s, %.1f GiB on disk",
+				u.String(), float64(u.TotalBytes)/(1<<30)))
 		}},
 
 		// 🎯T121: whether the image embedder ran or was skipped, and why,

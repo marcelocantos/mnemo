@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/backup"
+	"github.com/marcelocantos/mnemo/internal/store"
 )
 
 // osMkdirAll wraps os.MkdirAll so the mkdirAll var above can shadow it
@@ -24,6 +25,18 @@ func osMkdirAll(dir string, mode os.FileMode) error { return os.MkdirAll(dir, mo
 // that to keep the tool surface small.
 func (h *callHandler) backupDir() string {
 	return filepath.Join(filepath.Dir(h.mem.DBPath()), "backups")
+}
+
+// backupKeep resolves the retention count the same way the worker does,
+// so a manual backup prunes to the configured depth rather than to a
+// number of its own. An unreadable config falls back to the same default
+// EffectiveKeepDailies applies.
+func backupKeep() int {
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		return store.BackupConfig{}.EffectiveKeepDailies()
+	}
+	return cfg.Backup.EffectiveKeepDailies()
 }
 
 // backupStatus implements mnemo_backup_status: list backups newest-first
@@ -51,7 +64,21 @@ func (h *callHandler) backupStatus() (string, bool, error) {
 			info.Name, string(info.Tag), humanSize(info.Size), humanAge(age))
 		totalBytes += info.Size
 	}
-	fmt.Fprintf(&b, "\nTotal: %d backups, %s on disk\n", len(list), humanSize(totalBytes))
+	fmt.Fprintf(&b, "\nTotal: %d backups, %s\n", len(list), humanSize(totalBytes))
+
+	// What retention manages is not the same as what the directory
+	// costs. Reporting only the first number is how 187 GB of scratch
+	// files sat unnoticed beside five correctly-retained backups
+	// (🎯T158), so the gap is printed rather than left to be inferred.
+	if u, err := backup.Usage(dir); err == nil {
+		fmt.Fprintf(&b, "On disk:  %s total in the directory\n", humanSize(u.TotalBytes))
+		if u.OtherCount > 0 {
+			fmt.Fprintf(&b, "\nWARNING: %d file(s) totalling %s are not backups retention "+
+				"recognises — scratch files from an interrupted run, or strays. The "+
+				"daemon sweeps its own scratch files older than %s; anything else needs "+
+				"a look.\n", u.OtherCount, humanSize(u.OtherBytes), backup.DefaultOrphanAge)
+		}
+	}
 	return b.String(), false, nil
 }
 
@@ -80,24 +107,29 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	}
 
 	src := h.mem.DBPath()
-	destName := backup.Filename(backup.TagManual, time.Now().UTC())
-	dest := filepath.Join(dir, destName)
 
-	// Best-effort ensure dir exists; Backup() also creates the file
-	// inside it, but the directory must already exist for the
-	// VACUUM-INTO temp file.
+	// Best-effort ensure dir exists; CreateAndRetain does this too, but
+	// failing here gives a clearer message than failing mid-backup.
 	if err := ensureDir(dir); err != nil {
 		return fmt.Sprintf("backup_now: cannot ensure backup dir %s: %v", dir, err), true, nil
 	}
 
-	res, err := backup.Backup(src, dest)
+	// CreateAndRetain, not Backup: this path used to snapshot and prune
+	// nothing, so repeated manual backups grew the directory without
+	// bound while the daily worker's retention looked healthy (🎯T158).
+	keep := backupKeep()
+	res, removed, err := backup.CreateAndRetain(src, dir, backup.TagManual, keep, nil)
 	if err != nil {
 		return fmt.Sprintf("backup_now failed: %v", err), true, nil
 	}
-	return fmt.Sprintf("Backup written: %s\nRaw: %s | Compressed: %s | Elapsed: %s",
+	out := fmt.Sprintf("Backup written: %s\nRaw: %s | Compressed: %s | Elapsed: %s",
 		res.Path,
 		humanSize(res.RawSize), humanSize(res.CompressedSize),
-		res.Elapsed.Round(time.Second)), false, nil
+		res.Elapsed.Round(time.Second))
+	if len(removed) > 0 {
+		out += fmt.Sprintf("\nRetention (keep=%d) removed %d older snapshot(s).", keep, len(removed))
+	}
+	return out, false, nil
 }
 
 // ensureDir creates dir with 0755 if missing. Returns nil on success or

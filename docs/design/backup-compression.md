@@ -120,3 +120,64 @@ count back out of the context and reports it, and two tests
 (`TestMultithreadingIsReal`, `TestCompressionUsesAllWorkers`) fail rather
 than let that regression pass quietly. Both are green on macOS/arm64 and
 Windows/arm64.
+
+## Retention, and why it is part of taking a backup (🎯T158)
+
+Retention keeps **one** snapshot by default. That number is only safe if
+every path that creates a snapshot also prunes, and originally none of
+that was true: `GCOldest` had exactly one caller, inside the daily
+worker's run. The pre-migration backup and `mnemo_ops op=backup_now`
+both created snapshots and pruned nothing.
+
+The consequences scaled with how tight retention was. At keep=7 a
+non-pruning path added about 14% to the directory; at keep=1 it doubles
+it. A day with three migrations added three snapshots and removed none;
+with backups disabled or failing, pruning stopped entirely while
+migrations kept adding files.
+
+So `CreateAndRetain` snapshots and prunes as one operation, and it is
+what every call site uses. Fixing the two offending callers would have
+fixed the bug of the day; making retention part of taking a backup is
+what stops the fourth call site from reintroducing it.
+`retention_ratchet_test.go` fails the build on any new caller of
+`Backup`/`BackupWith` outside an allowlist, and each allowlist entry
+carries the reason it prunes by other means plus a test proving it does.
+Today there is one: the migration path, which needs the destination path
+up front for boot-phase progress reporting and calls `GCOldest`
+explicitly.
+
+Housekeeping — the sweep and retention — also runs on its own at startup
+and once per worker cycle, so pruning is not a side effect of a
+*successful* backup.
+
+## Scratch files, and the 187 GB that hid beside a working pool
+
+Retention only manages files `parseFilename` recognises. Everything else
+in the directory is invisible to it, permanently. On 2026-08-30 that
+directory held 221 GB, of which 34 GB were backups: seven
+`.backup-<random>.db` files of 1.2–25 GB each, stranded VACUUM INTO
+targets from processes killed mid-backup. Retention was rotating five
+files correctly the whole time, and `ls` showed nothing, because the
+names start with a dot.
+
+`Backup` cleans up its own temps on every return, including error
+returns — a test injects a compressor failure and asserts the directory
+is byte-for-byte as it started. What it cannot clean up is a hard kill,
+where no defer runs. `SweepOrphans` covers that: it removes
+`.backup-*.db` (and `-journal` / `-wal` / `-shm` siblings) plus
+`mnemo-*.tmp`, and nothing else — a sweep that guessed would be a worse
+bug than the leak, since this is the code that deletes things.
+
+Two guards stop it removing a file still in use. A path this process is
+currently writing is registered in `liveTemps` and never a candidate,
+regardless of age. Everything else must be older than
+`DefaultOrphanAge` (6h) — three orders of magnitude past the ~2 minutes
+a VACUUM of an 18 GB index actually takes. Cross-process safety rests on
+that age threshold, which is sound here because mnemo is single-writer:
+one process owns `mnemo.db`.
+
+`Usage` reports retained bytes and total bytes separately, `op=backup_status`
+prints both, and the `backup.disk` health check warns when the
+unaccounted portion exceeds 1 GiB. Reporting only the retained figure is
+what let a directory be simultaneously "correctly retaining 5 backups"
+and 187 GB over budget.

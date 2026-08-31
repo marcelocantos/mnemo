@@ -256,6 +256,19 @@ before the previous one is retired, and **one** snapshot is kept
 (🎯T158, 🎯T159). Older `.db.gz` snapshots stay restorable. Backups are
 reachable through `mnemo_ops` (`op=backup_status`, `op=backup_now`).
 
+Every path that takes a snapshot applies retention — the daily worker,
+`op=backup_now`, and the pre-migration backup — and retention also runs
+on its own at startup and each cycle, so a run of failed backups or a
+day of migrations cannot quietly accumulate snapshots. The daemon
+additionally sweeps its own stranded scratch files (`.backup-*.db` left
+by a backup that was killed mid-`VACUUM`) once they are over six hours
+old; that sweep runs even when backups are disabled, because the residue
+belongs to backups that already ran. `op=backup_status` reports total
+bytes in the directory alongside the retained snapshots, and the
+`backup.disk` health check warns when the two diverge — the gap between
+"retention is working" and "the directory is enormous" is where 187 GB
+once hid.
+
 The daemon serves throughout, on the *old* schema, and says so:
 
 ```

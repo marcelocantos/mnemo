@@ -422,3 +422,131 @@ func TestParseFilenameRejectsForeignExtensions(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateAndRetainPrunes covers the shared entry point every
+// snapshot-creating path now uses.
+func TestCreateAndRetainPrunes(t *testing.T) {
+	src := seedDB(t, 25)
+	dir := t.TempDir()
+	// Pre-existing snapshots, older than anything we are about to write.
+	for _, n := range []string{
+		"mnemo-daily-20260101T000000Z.db.zst",
+		"mnemo-daily-20260102T000000Z.db.gz",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, removed, err := CreateAndRetain(src, dir, TagManual, 1, nil)
+	if err != nil {
+		t.Fatalf("CreateAndRetain: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Errorf("retention removed %d, want 2", len(removed))
+	}
+	list, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("kept %d snapshots at keep=1: %v", len(list), namesOf(list))
+	}
+	// The snapshot just taken must be the survivor — retention must never
+	// discard the backup its caller just paid two minutes for.
+	if list[0].Path != res.Path {
+		t.Errorf("kept %s, want the snapshot just written (%s)", list[0].Path, res.Path)
+	}
+}
+
+// TestCreateAndRetainKeepFloor stops a zero or negative keep from being
+// read as "retain nothing" and deleting the snapshot just written.
+func TestCreateAndRetainKeepFloor(t *testing.T) {
+	src := seedDB(t, 5)
+	for _, keep := range []int{0, -1} {
+		dir := t.TempDir()
+		res, _, err := CreateAndRetain(src, dir, TagDaily, keep, nil)
+		if err != nil {
+			t.Fatalf("keep=%d: %v", keep, err)
+		}
+		if _, err := os.Stat(res.Path); err != nil {
+			t.Errorf("keep=%d deleted the snapshot it just wrote: %v", keep, err)
+		}
+	}
+}
+
+// TestHousekeepRunsWithoutABackup is acceptance criterion 4: retention
+// must not be a side effect of a successful daily backup. A run of
+// failed backups, a disabled schedule, or a day of migrations must still
+// prune — that coupling is the reason a directory could grow while
+// retention looked healthy.
+func TestHousekeepRunsWithoutABackup(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{
+		"mnemo-daily-20260101T000000Z.db.zst",
+		"mnemo-daily-20260102T000000Z.db.zst",
+		"mnemo-daily-20260103T000000Z.db.zst",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A stranded VACUUM temp from a killed run, old enough to sweep.
+	orphan := filepath.Join(dir, ".backup-stranded.db")
+	if err := os.WriteFile(orphan, []byte("huge"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(orphan, when, when); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &Worker{dir: dir, keep: 1}
+	w.housekeep() // no backup taken, deliberately
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Error("housekeep left a stranded VACUUM temp behind")
+	}
+	list, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Errorf("housekeep left %d snapshots at keep=1: %v", len(list), namesOf(list))
+	}
+}
+
+// TestBackupsInTheSameSecondDoNotCollide guards a silent overwrite.
+// Filename has one-second granularity, so two snapshots started in the
+// same second named the same file and the second replaced the first via
+// the closing rename — the caller was told both were written. Found by
+// calling op=backup_now twice in quick succession.
+func TestBackupsInTheSameSecondDoNotCollide(t *testing.T) {
+	src := seedDB(t, 10)
+	dir := t.TempDir()
+
+	first, _, err := CreateAndRetain(src, dir, TagManual, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := CreateAndRetain(src, dir, TagManual, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Path == second.Path {
+		t.Fatalf("both snapshots claimed the same path %s — the second overwrote the first",
+			first.Path)
+	}
+	for _, p := range []string{first.Path, second.Path} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("reported snapshot missing from disk: %s", p)
+		}
+	}
+	list, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Errorf("directory holds %d snapshots, want 2: %v", len(list), namesOf(list))
+	}
+}

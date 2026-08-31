@@ -484,6 +484,14 @@ summariser workdir, `claude` on PATH, configured roots, the compaction
 circuit-breaker, backfill progress and database responsiveness. The same
 data backs `GET /health` and the dashboard.
 
+`op=backup_status` reports the retained snapshots AND the total bytes in
+the backup directory. When those disagree, the difference is scratch
+from an interrupted run; the daemon sweeps its own (`.backup-*.db`,
+`*.tmp`) once over six hours old, and the `backup.disk` check in
+`op=doctor` warns about the rest. Every snapshot path — daily worker,
+`op=backup_now`, pre-migration — prunes to the configured retention,
+which defaults to one.
+
 `op=restore` is destructive and requires an explicit `session_id`.
 
 An unknown op answers with the valid list, and a parameter belonging to

@@ -98,7 +98,7 @@ func Backup(srcPath, destPath string) (Result, error) {
 }
 
 // BackupWith is Backup plus optional progress callbacks (see BackupArgs).
-func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
+func BackupWith(srcPath, destPath string, args *BackupArgs) (_ Result, err error) {
 	start := time.Now()
 	step := func(s string) {
 		if args != nil && args.OnStep != nil {
@@ -123,6 +123,10 @@ func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 	if err := os.Remove(tmpDBPath); err != nil {
 		return Result{}, fmt.Errorf("remove tmpdb placeholder: %w", err)
 	}
+	// Register before the long stages so a concurrent sweep in this
+	// process cannot mistake an in-progress VACUUM for an orphan.
+	markTempLive(tmpDBPath)
+	defer markTempDone(tmpDBPath)
 	defer os.Remove(tmpDBPath)
 
 	step("VACUUM INTO (consistent snapshot)")
@@ -141,7 +145,17 @@ func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 	}
 
 	step(fmt.Sprintf("compressing %d MB snapshot", rawInfo.Size()/(1<<20)))
-	size, err := compressFile(tmpDBPath, destPath)
+	// Own the destination namespace's cleanup here rather than trusting
+	// the compressor to tidy up after itself. compressFile does remove
+	// its own .tmp on error, but this function's documented contract is
+	// that a failure leaves NOTHING behind, and a contract that depends
+	// on a collaborator's diligence is one refactor from being false.
+	defer func() {
+		if err != nil {
+			os.Remove(destPath + ".tmp")
+		}
+	}()
+	size, err := compressFileFn(tmpDBPath, destPath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -210,6 +224,10 @@ func integrityCheck(dbPath string) error {
 	return nil
 }
 
+// compressFileFn is the seam a test uses to fail compression mid-backup
+// and assert nothing is left behind. Production always uses compressFile.
+var compressFileFn = compressFile
+
 // compressFile compresses srcPath into destPath (atomic rename via .tmp)
 // using the vendored multithreaded libzstd.
 //
@@ -225,6 +243,8 @@ func integrityCheck(dbPath string) error {
 // replaced tomorrow.
 func compressFile(srcPath, destPath string) (int64, error) {
 	tmpPath := destPath + ".tmp"
+	markTempLive(tmpPath)
+	defer markTempDone(tmpPath)
 	// 0 workers means one per CPU. libzstd stitches the parallel jobs into
 	// a single frame, so the artefact is identical in shape to one written
 	// single-threaded.

@@ -154,6 +154,25 @@ invalidates history. Open `mnemo.db` with `store.SQLiteDriverName` (the
 triggers call `mnemo_text`). Ops: `mnemo_ops op=compress_status |
 compress_train | compress_gc`. Design: `docs/design/text-compression.md`.
 
+## Backups
+
+One snapshot is retained (`backup.keep_dailies`, default 1), written as
+multithreaded-zstd `.db.zst` and verified by decompression before the
+previous one is retired. `backup.Decompress` reads both `.db.zst` and
+`.db.gz`, so restoring never needs the zstd CLI.
+
+Retention is not optional per call site: take snapshots through
+`backup.CreateAndRetain`, which snapshots *and* prunes. A ratchet
+(`retention_ratchet_test.go`) fails the build on a caller that reaches
+for `Backup`/`BackupWith` instead, because two of the three original
+call sites pruned nothing and at keep=1 that doubles the directory on
+every run. The one exemption (the migration path, which needs the
+destination up front) prunes explicitly and is held to it by a test.
+
+Housekeeping runs independently of a successful backup — at startup and
+each worker cycle — and the scratch sweep runs even when backups are
+disabled. Design: `docs/design/backup-compression.md`.
+
 ## Schema policy
 
 The schema of `~/.mnemo/mnemo.db` is an append-only contract.
