@@ -396,6 +396,22 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			if u.RetainedCount == 0 && u.OtherCount == 0 {
 				return diag.Healthy("backup directory is empty")
 			}
+			// Retention itself failing looks different from orphans:
+			// the files are well-formed backups, just too many of them.
+			// One extra is normal — a snapshot in flight, or one taken
+			// between prunes — so only flag a real overshoot.
+			keep := store.BackupConfig{}.EffectiveKeepDailies()
+			if cfg, err := store.LoadConfig(); err == nil {
+				keep = cfg.Backup.EffectiveKeepDailies()
+			}
+			if u.RetainedCount > keep+1 {
+				return diag.Warning(
+					fmt.Sprintf("backup directory holds %d snapshots (%.1f GiB) with retention "+
+						"set to keep=%d", u.RetainedCount, float64(u.RetainedBytes)/(1<<30), keep),
+					"every snapshot path prunes on completion and the worker prunes again each "+
+						"cycle, so a persistent overshoot means retention is failing — check the "+
+						"daemon log for 'retention failed', and file permissions on the directory")
+			}
 			// Unaccounted bytes are the real signal. A small margin is
 			// normal (a backup in flight owns a temp the size of the
 			// database), so only flag material waste.
