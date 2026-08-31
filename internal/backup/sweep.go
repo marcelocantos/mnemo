@@ -41,7 +41,7 @@ type SweptFile struct {
 
 // SweepOrphans removes stale scratch files from a backup directory:
 // VACUUM INTO temps (`.backup-*.db` and their `-journal` / `-wal` /
-// `-shm` siblings) and half-written compressor output (`*.tmp`).
+// `-shm` siblings) and half-written compressor output (`mnemo-*.tmp`).
 //
 // These are the files that made retention look like it was working while
 // the directory grew without bound (🎯T158). Backup's own defers clean

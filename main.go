@@ -81,7 +81,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.91.0"
+	version              = "0.92.0"
 	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 

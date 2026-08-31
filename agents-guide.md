@@ -486,8 +486,9 @@ data backs `GET /health` and the dashboard.
 
 `op=backup_status` reports the retained snapshots AND the total bytes in
 the backup directory. When those disagree, the difference is scratch
-from an interrupted run; the daemon sweeps its own (`.backup-*.db`,
-`*.tmp`) once over six hours old, and the `backup.disk` check in
+from an interrupted run; the daemon sweeps its own (`.backup-*.db` and
+its `-journal`/`-wal`/`-shm` siblings, plus `mnemo-*.tmp`) once over six
+hours old, and the `backup.disk` check in
 `op=doctor` warns about the rest. Every snapshot path — daily worker,
 `op=backup_now`, pre-migration — prunes to the configured retention,
 which defaults to one.
@@ -617,15 +618,41 @@ checks runs on a schedule — the full suite at startup, fast checks every
 ~3 minutes, the full suite hourly — each returning a severity
 (ok / warn / fail), a detail, and a remediation hint.
 
-Checks: `compactor.workdir` (the summariser's working dir exists and is
-writable), `claude.path` (the `claude` binary is on the daemon's PATH),
-`ingest.roots` (configured roots resolve), `compactor.breaker` (the
-compaction circuit-breaker has not tripped), `ingest.backfill` (the
-indexer has backfilled since the daemon started), `db.readable`,
-`images.embedder` (🎯T121 — whether the CLIP image embedder ran or was
-skipped and why: disabled by config, no `uv`, no helper script, or
-running with per-outcome counts; failures are never retried past their
-attempt budget, and are also queryable in `image_embedding_attempts`).
+Checks, grouped by what they answer (the roster is
+`internal/registry/diagchecks.go`; plugins can add more at runtime):
+
+*Is the daemon up and current?* — `startup.ready` (the store is serving,
+and whether a schema upgrade is running concurrently),
+`startup.capabilities` (the startup capability graph: what is available,
+pending, or unavailable and why), `schema.upgrade` (a migration is
+pending or in progress), `upgrade.available` (a newer release exists),
+`background.lease` (background work holds a valid lease).
+
+*Is ingest keeping up?* — `ingest.roots` (configured roots resolve),
+`ingest.backfill` (the indexer has backfilled since startup),
+`streams.overdue` (a convergence stream is behind), `watch.fds` (open
+descriptors against the vnode budget).
+
+*Is the database healthy?* — `db.readable`, `db.wal` (WAL size, and
+whether it is still growing — a long reader or a stuck writer).
+
+*Is compaction working?* — `compactor.workdir` (the summariser's working
+dir exists and is writable), `claude.path` (the `claude` binary is on
+the daemon's PATH), `compactor.breaker` (the compaction circuit-breaker
+has not tripped).
+
+*What is it costing?* — `budget.projection` (month-end projection
+against the cap, or "unpriced" with no rate card), `budget.throttle`
+(whether mnemo is throttling its own agents).
+
+*Is anything accumulating?* — `backup.disk` (🎯T158 — the backup
+directory's bytes on disk against the bytes retention accounts for;
+warns on more than 1 GiB unaccounted, or more snapshots than `keep`
+implies), `images.embedder` (🎯T121 — whether the CLIP image embedder
+ran or was skipped and why: disabled by config, no `uv`, no helper
+script, or running with per-outcome counts; failures are never retried
+past their attempt budget, and are also queryable in
+`image_embedding_attempts`).
 
 Three surfaces expose the same report:
 - **`mnemo_ops` (op=doctor)** (MCP) — runs the full suite on demand: the single

@@ -81,9 +81,10 @@ proves the **file** can be read back: it decompresses the whole artefact,
 which validates the frame's embedded XXH64 over the original content, and
 checks the byte count against the snapshot.
 
-This matters because retention is one snapshot. The caller deletes the
-previous backup once this one returns successfully, so an unreadable
-output is not a degraded backup — it is no backup. Verification costs
+This matters because retention is one snapshot. Retention runs inside
+CreateAndRetain, deleting the previous backup once this one returns
+successfully, so an unreadable output is not a degraded backup — it is
+no backup. Verification costs
 11.2s against a 228s saving, and it runs on **every** snapshot rather than
 once at the format transition, which is the stronger guarantee.
 
@@ -154,10 +155,12 @@ and once per worker cycle, so pruning is not a side effect of a
 
 Retention only manages files `parseFilename` recognises. Everything else
 in the directory is invisible to it, permanently. On 2026-08-30 that
-directory held 221 GB, of which 34 GB were backups: seven
-`.backup-<random>.db` files of 1.2–25 GB each, stranded VACUUM INTO
-targets from processes killed mid-backup. Retention was rotating five
-files correctly the whole time, and `ls` showed nothing, because the
+directory held 221 GB against 34 GB of actual backups — 187 GB
+unaccounted for. The largest single component was seven
+`.backup-<random>.db` files of 1.2–25 GB each totalling ~104 GB,
+stranded VACUUM INTO targets from processes killed mid-backup, the rest
+being older snapshots and other scratch. Retention was rotating its
+files correctly the whole time, and `ls` showed none of it, because the
 names start with a dot.
 
 `Backup` cleans up its own temps on every return, including error

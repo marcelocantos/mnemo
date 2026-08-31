@@ -171,7 +171,11 @@ destination up front) prunes explicitly and is held to it by a test.
 
 Housekeeping runs independently of a successful backup — at startup and
 each worker cycle — and the scratch sweep runs even when backups are
-disabled. Design: `docs/design/backup-compression.md`.
+disabled. `backup.Usage` separates retained bytes from total bytes on
+disk; `mnemo_ops op=backup_status` prints both, and the `backup.disk`
+health check warns when the unaccounted portion exceeds 1 GiB or the
+snapshot count exceeds `keep`. Design:
+`docs/design/backup-compression.md`.
 
 ## Schema policy
 

@@ -265,7 +265,7 @@ by a backup that was killed mid-`VACUUM`) once they are over six hours
 old; that sweep runs even when backups are disabled, because the residue
 belongs to backups that already ran. `op=backup_status` reports total
 bytes in the directory alongside the retained snapshots, and the
-`backup.disk` health check warns when the two diverge — the gap between
+`backup.disk` health check warns when they diverge materially — the gap between
 "retention is working" and "the directory is enormous" is where 187 GB
 once hid.
 
