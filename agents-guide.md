@@ -182,8 +182,9 @@ Three things that trip agents up here:
    session reconnects on its own.
 3. **The first start afterwards can take many minutes, and that is
    normal.** If the release changes the schema, mnemo takes a full
-   pre-migration backup before applying it — around 11 minutes on a
-   21 GB index. The daemon serves on the old schema throughout and
+   pre-migration backup before applying it — a couple of minutes on a
+   20 GB index, most of it the `VACUUM INTO` rather than the
+   compression (🎯T159). The daemon serves on the old schema throughout and
    logs `schema upgrade deferred to background`; `mnemo_ops` (op=doctor)'s
    `schema.upgrade` check says the same. **Do not restart it to "fix"
    this** — let the migration finish. Tools keep working meanwhile.
@@ -279,49 +280,45 @@ Parameters:
 Run a read-only SQL query against the database. Accepts plain SQL
 (SELECT/WITH) or sqldeep nested syntax for hierarchical JSON output.
 
-Key tables and columns:
+**Do not hand-maintain a schema list — ask for it.** Call
+`mnemo_query(describe=true)`, or read the `mnemo://schema` resource, for
+the table and column catalogue. It is generated from the live database,
+so unlike the inline listing that used to sit here it cannot drift
+(🎯T156). It paginates: pass `page` for more.
 
-| Table | Key columns |
+**Read text through the views, never the bare column.** `messages.text`,
+`docs.content` and `entries.raw` are stored zstd-compressed per row
+(🎯T151, 🎯T152) in `text_z` / `content_z` / `raw_z`, and the legacy
+column holds `''` (or NULL for `entries.raw`) for those rows. A query
+against the base table returns empty strings and looks like a data
+problem rather than a reading error. Use:
+
+| Instead of | Read from |
 |---|---|
-| `messages` | id, session_id, project, role, text, timestamp, is_noise, content_type, tool_name, tool_use_id, tool_input (JSONB), is_error |
-| `messages` (virtual) | tool_file_path, tool_command, tool_pattern, tool_description, tool_skill — computed from tool_input |
-| `messages_fts` | FTS5 virtual table (excludes noise). `WHERE messages_fts MATCH 'terms'` |
-| `sessions` | View: session_id, project, session_type, repo, work_type, topic, total_msgs, substantive_msgs, first_msg, last_msg |
-| `session_summary` | Materialised session stats (trigger-maintained) |
-| `session_meta` | Per-session metadata: repo, cwd, git_branch, work_type, topic |
-| `memories` | id, project, file_path, name, description, memory_type, content |
-| `memories_fts` | FTS5 on name, description, content, project |
-| `skills` | id, file_path, name, description, content |
-| `skills_fts` | FTS5 on name, description, content |
-| `claude_configs` | id, repo, file_path, content |
-| `claude_configs_fts` | FTS5 on content, repo |
-| `audit_entries` | id, repo, file_path, date, skill, version, summary, raw_text |
-| `audit_entries_fts` | FTS5 on summary, raw_text, repo |
-| `targets` | id, repo, file_path, target_id, name, status, weight, description |
-| `targets_fts` | FTS5 on name, description, raw_text, repo |
-| `plans` | id, repo, file_path, phase, content |
-| `plans_fts` | FTS5 on content, repo, phase |
-| `ci_runs` | id, repo, run_id, workflow, branch, commit_sha, status, conclusion, started_at, completed_at, log_summary, url |
-| `ci_runs_fts` | FTS5 on repo, workflow, branch, log_summary, conclusion |
-| `session_chains` | successor_id (PK), predecessor_id, boundary, gap_ms, confidence, mechanism, detected_at |
+| `messages` | `messages_v` |
+| `docs` | `docs_v` |
+| `entries` | `entries_v` |
+
+or call `mnemo_text(col, col_z)` explicitly. A ratchet test enforces
+this over every SQL literal in the tree.
 
 Content types in `content_type`: `text`, `tool_use`, `tool_result`, `thinking`.
 
 Example queries:
 ```sql
 -- All Bash commands in a session
-SELECT tool_command FROM messages WHERE tool_name = 'Bash' AND session_id = ?
+SELECT tool_command FROM messages_v WHERE tool_name = 'Bash' AND session_id = ?
 
 -- Files edited across all sessions
-SELECT DISTINCT tool_file_path FROM messages WHERE tool_name = 'Edit'
+SELECT DISTINCT tool_file_path FROM messages_v WHERE tool_name = 'Edit'
 
--- Failed tool calls
-SELECT tool_name, text FROM messages WHERE content_type = 'tool_result' AND is_error = 1
+-- Failed tool calls (text comes from the view, or it comes back empty)
+SELECT tool_name, text FROM messages_v WHERE content_type = 'tool_result' AND is_error = 1
 
 -- Tool call with its result (join via tool_use_id)
 SELECT tu.tool_name, tu.tool_command, tr.text AS result
-FROM messages tu
-JOIN messages tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
+FROM messages_v tu
+JOIN messages_v tr ON tr.tool_use_id = tu.tool_use_id AND tr.content_type = 'tool_result'
 WHERE tu.content_type = 'tool_use' AND tu.tool_name = 'Bash'
 ```
 
@@ -476,6 +473,38 @@ Parameters:
 - `context_before` — context messages before the match (default 3)
 - `context_after` — context messages after the match (default 3)
 
+### mnemo_ops
+
+Operational surface, op-dispatched:
+`op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc`.
+
+`op=doctor` is the first thing to reach for when something looks wrong —
+a per-check health report (ok/warn/fail plus remediation) covering the
+summariser workdir, `claude` on PATH, configured roots, the compaction
+circuit-breaker, backfill progress and database responsiveness. The same
+data backs `GET /health` and the dashboard.
+
+`op=restore` is destructive and requires an explicit `session_id`.
+
+An unknown op answers with the valid list, and a parameter belonging to
+a different op is **rejected rather than ignored**, so a wrong guess
+fails loudly instead of silently doing something else.
+
+### mnemo_thread
+
+Thread navigation: `op=list|show|new|archive|go`. Same data as the
+daemon's `/api/thread/*` endpoints, which the menubar app uses.
+
+### mnemo_rework_history
+
+Prior rework attempts for a bullseye target, most recent first —
+session_id, timestamp, repo, progress note, prose summary and open
+threads. Sourced from compaction spans where the target appeared in
+`targets_active` or `targets_progressed`.
+
+Feed the output to `bullseye_rework` as `mnemo_history` so a retry does
+not repeat an approach that already failed.
+
 ### mnemo_vault (🎯T143.3)
 
 All vault operations behind one `op`: `status`, `sync`, `gc`,
@@ -543,10 +572,9 @@ half-saved edit never reverts the daemon to defaults.
 
 ## Federation across linked instances
 
-If `~/.mnemo/config.json` declares `linked_instances`, 16 read-shaped
+If `~/.mnemo/config.json` declares `linked_instances`, four read-shaped
 tools (`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
-
-`mnemo_repos`, `mnemo_read_session`) wrap their result in a `FanoutEnvelope`
+`mnemo_rework_history`) wrap their result in a `FanoutEnvelope`
 attributing per-instance results:
 
 ```json
@@ -565,9 +593,10 @@ Per-peer timeout default 5s.
 
 When `linked_instances` is empty or absent, all tools return their
 original local-only response shape unchanged. Write- and
-control-shaped tools (`mnemo_ops`, `mnemo_query`,
-`mnemo_stats`, `mnemo_status`, `mnemo_vault`,
-`mnemo_thread`) bypass federation entirely.
+control-shaped tools bypass federation entirely — as do read-shaped
+tools whose result format does not merge into buckets (`mnemo_ops`,
+`mnemo_query`, `mnemo_stats`, `mnemo_status`, `mnemo_vault`,
+`mnemo_thread`, `mnemo_repos`, `mnemo_read_session`).
 
 Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,

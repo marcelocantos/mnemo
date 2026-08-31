@@ -475,3 +475,7 @@ maintenance activities. Append-only — newest entries at the bottom.
   goja host (T102.6), signal_sources (T102.8), MCP tool bridge (T102.10),
   proof-of-surface + walkthrough (T102.11), lifecycle boundaries (T102.12).
   Parent T102 achieved.
+
+## 2026-08-31 — /release v0.91.0
+
+- **Outcome**: Released v0.91.0. Configuration is file-only with `mnemo --help-config` (🎯T156); `mnemo_config` and `mnemo_note` removed, tool surface down ~32% by weight to 16 tools. Backups compress with vendored multithreaded libzstd (🎯T159): 8.5s at 2132 MB/s on an 18.2 GB index against gzip -1's ~83 MB/s, and every snapshot is now verified by decompression before the previous one is retired (retention is one snapshot, 🎯T158). `backup.Decompress` reads both `.db.zst` and `.db.gz`, so pre-release snapshots stay restorable without the zstd CLI. Documentation pass: repaired five empty README tool tables and a section documenting a removed tool, corrected the tool count (27 → 16) and the federated-tool count (16 → 4), rewrote the agent guide's schema section to point at the generated catalogue and to read through `messages_v`/`docs_v`/`entries_v` (its examples had been silently returning empty text since per-row compression landed), and closed four `NOTICE` attribution gaps including the two AWS modules' mandatory NOTICE content. Added a `workflow_dispatch` dry run to `release.yml` so the three build targets CI never covers are proven before the tag.

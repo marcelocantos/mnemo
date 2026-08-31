@@ -9,7 +9,10 @@ below covers every third-party module in the shipped binary's build
 closure (`go list -tags sqlite_fts5 -deps ./...`), which is what the
 BSD and MIT notice-retention terms attach to.
 
-  github.com/dlclark/regexp2 — MIT License
+  github.com/aws/aws-sdk-go-v2 — Apache License 2.0 (see below)
+  github.com/aws/smithy-go — Apache License 2.0 (see below)
+  github.com/coder/websocket — ISC License (Copyright (c) 2025 Coder)
+  github.com/dlclark/regexp2/v2 — MIT License
   github.com/dop251/goja — MIT License
   github.com/fsnotify/fsnotify — BSD 3-Clause License
   github.com/fsnotify/fsevents — BSD 3-Clause License
@@ -17,6 +20,8 @@ BSD and MIT notice-retention terms attach to.
   github.com/google/jsonschema-go — MIT License
   github.com/google/pprof — Apache License 2.0
   github.com/google/uuid — BSD 3-Clause License
+  github.com/klauspost/compress — BSD 3-Clause License (The Go Authors
+    and Klaus Post; gzhttp is Apache 2.0, s2/cmd/internal is MIT)
   github.com/mark3labs/mcp-go — MIT License
   github.com/mattn/go-sqlite3 — MIT License
   github.com/spf13/cast — MIT License
@@ -26,6 +31,16 @@ BSD and MIT notice-retention terms attach to.
   golang.org/x/sys — BSD 3-Clause License (The Go Authors)
   golang.org/x/text — BSD 3-Clause License (The Go Authors)
   gopkg.in/yaml.v3 — MIT License and Apache License 2.0
+
+The two AWS modules ship their own NOTICE files. Apache License 2.0
+section 4(d) requires their content to be carried forward, so it is
+reproduced here verbatim:
+
+  AWS SDK for Go
+  Copyright 2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  Copyright 2014-2015 Stripe, Inc.
+
+  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 github.com/mattn/go-sqlite3 embeds the SQLite amalgamation, which is in
 the public domain.

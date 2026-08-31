@@ -63,9 +63,15 @@ with its tools, since nothing else read it.
 
 *Consolidated* behind an `op` parameter, capability-for-capability:
 `mnemo_vault` (was 10 `mnemo_vault_*` tools), `mnemo_thread` (was 5),
-`mnemo_note` (was 3), `mnemo_ops` (was `mnemo_doctor`,
+`mnemo_ops` (was `mnemo_doctor`,
 `mnemo_compactor_status`, `mnemo_divergence`, `mnemo_backup_status`,
-`mnemo_backup_now`, `mnemo_restore`). `mnemo_status` and `mnemo_stats`
+`mnemo_backup_now`, `mnemo_restore`). `mnemo_note` was consolidated
+the same way (was 3) and then **removed entirely** in 🎯T156, along
+with `mnemo_config`: configuration became file-only, with the schema
+served by `mnemo --help-config` rather than a tool, because the tool
+cost ~944 tokens of every session's context for twelve calls across
+four sessions and made the daemon a second writer of the config file.
+`mnemo_status` and `mnemo_stats`
 were deliberately **not** folded in — they carry real traffic, and for
 a tool agents already find, a name beats an op.
 
@@ -775,8 +781,8 @@ local-only deployments.
 `unknown_instance`, `unknown`. Peers are sorted by instance name for
 deterministic ordering. Only four tools fan out: `mnemo_search`,
 `mnemo_sessions`, `mnemo_recent_activity`, `mnemo_rework_history`. The
-remaining fourteen bypass federation — `mnemo_compacted_session`,
-`mnemo_config`, `mnemo_locate_uuid`, `mnemo_note`, `mnemo_ops`,
+remaining twelve bypass federation — `mnemo_compacted_session`,
+`mnemo_locate_uuid`, `mnemo_ops`,
 `mnemo_query`, `mnemo_read_session`, `mnemo_repos`,
 `mnemo_session_structure`, `mnemo_stats`, `mnemo_status`,
 `mnemo_thread`, `mnemo_usage`, `mnemo_vault` — because they are either

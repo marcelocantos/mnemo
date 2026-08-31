@@ -7,7 +7,8 @@ mnemo indexes Claude Code (`~/.claude/projects/`), Codex CLI
 (`~/.codex/sessions/`), Grok CLI (`~/.grok/sessions/`), and Cursor
 Agent (`~/.cursor/projects/**/agent-transcripts/`) transcripts
 into a realtime SQLite FTS5 index, and exposes a deliberately small
-set of MCP tools — 27, sized to what agents actually use (🎯T143).
+set of MCP tools — 16, sized to what agents actually use (🎯T143,
+🎯T143.1, 🎯T156).
 New transcripts are picked up automatically via filesystem watching. A
 browser dashboard is served on the same port at `http://localhost:19419`
 — no separate process or build step required.
@@ -247,8 +248,13 @@ which reports the running version against the latest release.
 When a release changes the database schema, mnemo takes a
 **pre-migration backup before applying it** — a full compressed
 snapshot, so an upgrade can never be the thing that loses data. On a
-large index that is not quick: roughly 11 minutes for a 21 GB
-database.
+20 GB index that runs a couple of minutes, most of it the `VACUUM INTO`
+that produces the consistent snapshot.
+
+Snapshots are multithreaded-zstd `.db.zst`, decompressed and checked
+before the previous one is retired, and **one** snapshot is kept
+(🎯T158, 🎯T159). Older `.db.gz` snapshots stay restorable. Backups are
+reachable through `mnemo_ops` (`op=backup_status`, `op=backup_now`).
 
 The daemon serves throughout, on the *old* schema, and says so:
 
@@ -356,43 +362,20 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
 
-### Cross-project knowledge
+### Convergence and threads
 
 | Tool | Description |
 |---|---|
-
-### Cross-session messaging
-
-Directory-addressed inbox notes let one Claude Code session hand work
-off to another — "A finishes its bit, B picks up" — without copy-paste
-between terminals. A note is addressed to a **directory** (typically a
-repo root): the producer posts, the consumer pulls.
-
-| Tool | Description |
-|---|---|
-
-The inbox is a canonicalized absolute path — a leading `~` is rejected
-(shell home-expansion is ambiguous), relative paths resolve against the
-**session's initial cwd** (not the process
-pwd, which drifts when an agent `cd`s), and symlinks plus `./..` are
-collapsed, so every spelling of one directory addresses one inbox.
-
-**Producer (session A, e.g. mid-`/release` in mnemo):**
-
-```
-```
-
-**Consumer (session B, in the downstream repo):** type `/inbox` to pull
-pending notes. For the wait-on-event case — B is blocked on a release
-that's ~30 minutes out — run `/loop /inbox` and walk away: the loop
-self-paces (cache-aware `ScheduleWakeup`) until a note arrives, then
-injects it and continues. mnemo's MCP layer stays synchronous; the wait
-primitive lives in the harness, not the daemon.
+| `mnemo_rework_history` | Prior rework attempts for a bullseye target, most recent first — feed to `bullseye_rework` so a retry does not repeat a failed approach |
+| `mnemo_thread` | Thread navigation: `op=list\|show\|new\|archive\|go`. Same data as the daemon's `/api/thread/*` endpoints, which the menubar app uses |
 
 ### External source indexing
 
-| Tool | Description |
-|---|---|
+mnemo indexes docs, commits, PRs, issues, CI runs, plans, skills and
+memories alongside transcripts. These have **no dedicated tools** — they
+are reachable through `mnemo_search` (which spans them by default) and
+`mnemo_query`. 🎯T143.1 removed twelve narrow tools that had no consumer
+in four months; the indexes behind them stayed.
 
 ### Analytics and observability
 
@@ -404,7 +387,7 @@ primitive lives in the harness, not the daemon.
 
 | Tool | Description |
 |---|---|
-| `mnemo_query` | Read-only SQL or sqldeep nested syntax against the full database |
+| `mnemo_query` | Read-only SQL or sqldeep nested syntax against the full database. Call `mnemo_query(describe=true)` — or read the `mnemo://schema` resource — for the table/column catalogue, generated from the live database so it cannot drift (🎯T156). Read message text through `messages_v`, doc content through `docs_v` and entries through `entries_v`: those columns are zstd-compressed per row (🎯T151, 🎯T152) and the bare column is empty for compressed rows |
 | `mnemo_repos` | List repos with paths, session counts, last activity. Supports globs. |
 | `mnemo_stats` | Index statistics — sessions and messages by type |
 
@@ -427,11 +410,20 @@ patterns, and user notes via local TF-IDF by default; set
 
 | Tool | Description |
 |---|---|
+| `mnemo_vault` | `op=status\|sync\|gc\|migration_doc\|bridge_list\|recluster\|themes_inspect\|themes_pin\|themes_split\|themes_merge`. Requires `vault_path` |
 
 ### Runtime configuration
 
-| Tool | Description |
-|---|---|
+Configuration is **file-only** (🎯T156): `~/.mnemo/config.json` is the
+only writer, and there is no config tool. The daemon watches the file
+and adopts most changes in place. Run `mnemo --help-config` for the
+schema — it is generated from the config struct, split into keys adopted
+live and keys needing a restart, and a build-time ratchet fails if a
+field is undocumented.
+
+The tool this replaced cost ~944 tokens of every session's context for
+twelve calls across four sessions, and its write path made the daemon a
+second writer of the file.
 
 For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
 or run `mnemo --help-agent`.
@@ -494,8 +486,9 @@ On each host:
 
 ### Behaviour
 
-When `linked_instances` is non-empty, 16 read-shaped tools wrap their
-response in a `FanoutEnvelope`:
+When `linked_instances` is non-empty, four read-shaped tools
+(`mnemo_search`, `mnemo_sessions`, `mnemo_recent_activity`,
+`mnemo_rework_history`) wrap their response in a `FanoutEnvelope`:
 
 ```json
 {
@@ -510,9 +503,10 @@ Slow or offline peers drop into `warnings[]` with a typed
 `server_error`, `malformed_response`, `connect_failed`); the local
 response returns regardless. Per-peer timeout default 5s.
 
-Write- and control-shaped tools (`mnemo_ops`, `mnemo_query`,
-`mnemo_stats`, `mnemo_status`, `mnemo_vault`,
-`mnemo_thread`) bypass federation entirely.
+Every other tool bypasses federation — write- and control-shaped ones,
+plus read-shaped ones whose result format does not merge into buckets
+(`mnemo_ops`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
+`mnemo_vault`, `mnemo_thread`, `mnemo_repos`, `mnemo_read_session`).
 
 When `linked_instances` is empty or absent, federation is disabled and
 all tools return their original local-only response shape unchanged

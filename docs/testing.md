@@ -142,8 +142,8 @@ Failure modes that ONLY surface end-to-end:
 - MCP request → tool handler → resolver wiring → backend response
   serialisation.
 - Per-user routing and the `?user=` query-param fallback.
-- Hot-reload paths (`mnemo_config(op=write, ...)`) and their
-  in-process adoption.
+- Hot-reload paths (an edit to `~/.mnemo/config.json`, picked up by the
+  config watcher) and their in-process adoption.
 - The streamable-HTTP transport's session handling under real load.
 
 The harness uses [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go)'s

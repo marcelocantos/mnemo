@@ -3,6 +3,17 @@ name: Release
 on:
   release:
     types: [published]
+  # Dry run. The real build fires on `release: published` — i.e. AFTER
+  # the tag exists — so a build failure on a leg CI does not cover
+  # forces a re-cut of the release. ci.yml builds ubuntu-latest and
+  # windows-latest only; this workflow additionally builds darwin/arm64,
+  # linux/arm64 and windows/arm64 (cross, via llvm-mingw), and links
+  # statically on Windows. Since 🎯T159 every one of those legs compiles
+  # a vendored 2.1 MB libzstd amalgamation through cgo, so the
+  # uncovered legs now carry real build risk. Dispatch this before
+  # tagging: it builds and packages everything and skips only the
+  # uploads.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -188,7 +199,15 @@ jobs:
       - name: Package
         working-directory: mnemo
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          # On a dry run the ref is a branch, not a tag, so there is no
+          # version to strip a leading v from. Use a placeholder that is
+          # still shaped like a version — the Windows installer feeds it
+          # to Inno Setup as AppVersion.
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dryrun"
+          fi
           case "${{ matrix.archive }}" in
             tar.gz)
               tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "mnemo${{ matrix.ext }}"
@@ -208,7 +227,11 @@ jobs:
           # causing ISCC to treat them as extra script filenames.
           MSYS_NO_PATHCONV: "1"
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dryrun"
+          fi
           # Stage alongside the .iss file so Inno Setup's relative
           # Source: paths (resolved from the .iss file's directory)
           # find LICENSE.txt and mnemo.exe.
@@ -237,6 +260,7 @@ jobs:
           ls -la "mnemo-${VERSION}-windows-${{ matrix.goarch }}-setup.exe"
 
       - name: Upload release artifact
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: mnemo
@@ -246,7 +270,7 @@ jobs:
             "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}"
 
       - name: Upload Windows installer
-        if: matrix.goos == 'windows'
+        if: github.event_name == 'release' && matrix.goos == 'windows'
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: mnemo
@@ -286,6 +310,10 @@ jobs:
 
   homebrew:
     needs: build
+    # Never on a dry run: there is no release to read a tag from, so the
+    # formula would be published pointing at a version that does not
+    # exist.
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: Justintime50/homebrew-releaser@v3

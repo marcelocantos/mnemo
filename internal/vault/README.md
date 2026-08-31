@@ -81,15 +81,17 @@ touched**.
 
 Two paths, both equivalent. Pick whichever is more convenient.
 
-**Live (no restart)** — ask Claude (or any MCP client) to call
-`mnemo_config`:
+**Live (no restart)** — edit `~/.mnemo/config.json` and set
+`vault_path`:
 
-```
-mnemo_config(op="write", patch={"vault_path": "~/Documents/mnemo-vault"})
+```json
+{ "vault_path": "~/Documents/mnemo-vault" }
 ```
 
-The daemon validates, persists to `~/.mnemo/config.json`, stops the
-old vault workers (if any), and starts new ones against the new path.
+The daemon watches the file, validates the change, stops the old vault
+workers (if any), and starts new ones against the new path. There is no
+config tool: since 🎯T156 the file is the only writer. Run
+`mnemo --help-config` for the schema.
 An initial sync kicks off in the background. Setting `vault_path` back
 to `""` disables vault export the same way.
 
