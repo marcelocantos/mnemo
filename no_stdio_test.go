@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +111,13 @@ func TestPipedStdinRunsTheDaemon(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a binary and starts a daemon")
 	}
-	bin := filepath.Join(t.TempDir(), "mnemo-under-test")
+	// .exe on Windows, or the built file is not executable and exec
+	// reports "executable file not found in %PATH%".
+	name := "mnemo-under-test"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
 	if out, err := exec.Command("go", "build", "-tags", "sqlite_fts5", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
