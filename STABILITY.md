@@ -309,6 +309,8 @@ session-binding, compaction anchoring, and chain detection.
 | `--federated-addr` | string | `:19420` | Needs review |
 | `--version` | bool | false | Stable |
 | `--help-agent` | bool | false | Stable |
+| `--help-config` | bool | false | Needs review |
+| `--home` | string | `""` | Needs review |
 
 `--federated-addr` enables the mTLS federated MCP endpoint (🎯T15.3).
 An empty value disables federation entirely; the daemon makes no
@@ -326,6 +328,15 @@ outbound peer calls and accepts no inbound mTLS connections.
 | `print-endpoint` | `--dir` | all | Emit `~/.mnemo/endpoint/cert.pem` for paste-distribution to peers (generates on first call) | Needs review |
 | `print-federated-addr` | `--addr` | all | Emit the URL peers paste into their `linked_instances` entry (defaults to `https://<hostname>:19420/mcp`) | Needs review |
 | `ping-peer` | `--tool`, `<name>` | all | Invoke a tool (default `mnemo_stats`) on a configured federation peer; manual smoke test | Needs review |
+| `thread` | see `thread --help` | all | Thread navigation from the CLI (same data as `/api/thread/*`) | Needs review |
+| `resume` | see `resume --help` | all | Resume a prior session in its own CLI | Needs review |
+| `budget` | see `budget --help` | all | Monthly budget, projection and throttle state | Needs review |
+| `edge` | see `edge --help` | all | Edge/backend routing operations | Needs review |
+| `replay-files` | see `replay-files --help` | all | Replay transcript file operations into a quarantine root | Needs review |
+
+This table is the whole of mnemo's argv surface. There is no mode
+selector and no stdio subcommand: bare `mnemo` runs the HTTP daemon,
+and nothing about how it was launched changes that (🎯T160).
 
 Subcommand history: v0.22.0 shipped SCM-backed `install-service` /
 `uninstall-service`; v0.23.0 replaced them with Scheduled-Task-based

@@ -104,6 +104,18 @@ mnemo --addr 127.0.0.1:8080   # custom local port
 mnemo --addr :19419           # deliberate network exposure
 ```
 
+`mnemo` always runs the HTTP daemon; there is no other mode and nothing
+about the invocation changes that. If the port is already taken — most
+often because `brew services` already has the daemon up — it prints the
+bind error and exits 1:
+
+```
+mnemo: listen tcp 127.0.0.1:19419: bind: address already in use
+```
+
+That is a running server, not a broken one. Check with `brew services
+list` before concluding anything is wrong.
+
 ### 3. Register as an MCP server
 
 **Claude Code** (global install to `~/.claude.json`):
