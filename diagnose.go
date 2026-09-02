@@ -357,7 +357,7 @@ var externalTools = []toolSpec{
 	{"pdftotext", false, []string{"-v"}, "PDF docs skipped"},
 	{"mutool", false, []string{"-v"}, "PDF docs fallback skipped"},
 	{"lsof", false, []string{"-v"}, "live-session discovery (mnemo_whatsup) degrades"},
-	{"brew", false, []string{"--version"}, "auto-start fallback in stdio-migration won't fire"},
+	{"brew", false, []string{"--version"}, "auto-upgrade cannot restart the service after upgrading"},
 }
 
 func checkExternalTools() checkResult {
@@ -719,16 +719,19 @@ func checkClaudeIntegration() checkResult {
 		return r
 	}
 	t, _ := entry["type"].(string)
-	if t == "stdio" {
-		// mcpbridge is the supported pattern for wrapping the HTTP
-		// daemon over stdio (used to keep MCP sessions alive across
-		// daemon restarts). Recognise it; pull the wrapped URL out
-		// of the args for further validation.
-		cmd, _ := entry["command"].(string)
+	if cmd, _ := entry["command"].(string); cmd != "" {
+		// A registration that names a command rather than a URL.
+		// mnemo is an HTTP server and is never launched by an MCP
+		// client, so the only valid shape here is mcpbridge — a
+		// separate binary that wraps the HTTP daemon and speaks the
+		// stdio transport to the client, which keeps MCP sessions
+		// alive across daemon restarts. The stdio transport is the
+		// bridge's, not mnemo's. Recognise it and validate the URL it
+		// wraps; anything else pointing at a command is broken.
 		args, _ := entry["args"].([]any)
 		if filepath.Base(cmd) == "mcpbridge" {
 			wrappedURL := mcpbridgeArg(args, "--url")
-			r.add(fmt.Sprintf("type: stdio via mcpbridge → %s", wrappedURL))
+			r.add(fmt.Sprintf("via mcpbridge → %s", wrappedURL))
 			if wrappedURL == "" {
 				r.add("[warn] mcpbridge entry has no --url arg")
 				r.status = statusWarn
@@ -743,8 +746,8 @@ func checkClaudeIntegration() checkResult {
 			return r
 		}
 		r.status = statusFail
-		r.add(fmt.Sprintf("mnemo is registered as raw stdio (command=%s) — should be HTTP since v0.20.0", cmd))
-		r.add("re-run `mnemo register-mcp` to migrate")
+		r.add(fmt.Sprintf("mnemo is registered to run a command (%s), but mnemo is an HTTP server", cmd))
+		r.add("re-run `mnemo register-mcp` to point the entry at the daemon's URL")
 		return r
 	}
 	url, _ := entry["url"].(string)

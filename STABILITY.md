@@ -207,6 +207,19 @@ existence), Claude Code integration (`~/.claude.json` mnemo entry
 shape, recognises mcpbridge wrappers), and recent ERROR/WARN log
 lines. Exit code 1 on any FAIL so it's scriptable.
 
+**v0.93.0 note (🎯T160)**: mnemo runs the HTTP daemon, and only the
+HTTP daemon. Nothing inspects stdin to guess how it was launched, and
+no code path installs or starts mnemo as a service on its own behalf.
+Both existed to smooth a transport change that completed in v0.20.0,
+and both had outlived it: a pipe on stdin — which is what every process
+supervisor, CI runner and container entrypoint provides — was read as
+"an MCP client launched me", which rewrote `~/.claude.json`, ran `brew
+services start mnemo`, and exited. Invocation mode now comes from argv
+alone, which is the only input that carries intent. A registration that
+names a command instead of a URL is reported as broken by `mnemo
+diagnose` rather than silently rewritten; `mnemo register-mcp` remains
+the only code that writes a registration, and only when you run it.
+
 **v0.27.0 note**: Trim `mnemo_status` defaults so a routine call no
 longer blows past Claude Code's 25KB inline tool-result threshold.
 Defaults: `max_sessions` 3 → 2, `max_excerpts` 20 → 6, `truncate_len`
@@ -216,16 +229,6 @@ stop dominating response size. A typical 30-day call against a
 moderately busy machine drops from ~74 KB to ~6 KB. Behaviour is
 configurable per call — pass larger explicit values to recover the
 old verbosity. No CLI or MCP surface change.
-
-**v0.26.0 note**: Auto-migration from legacy stdio registrations.
-mnemo launched with stdin piped (i.e. invoked by Claude Code's
-old `claude mcp add --transport stdio mnemo` registration) now
-rewrites `~/.claude.json` in place to the HTTP+`?user=<name>`
-shape used since v0.25.0, best-effort starts the daemon via
-`brew services start mnemo` if nothing's listening yet, and exits
-asking the user to restart their session. One restart instead of
-three terminal commands. Falls back to the manual hint on any
-failure path. No CLI or MCP surface change.
 
 **v0.25.0 note (🎯T32 groundwork)**: Per-user Registry + Windows
 Service. The daemon no longer runs as a singleton tied to one home
@@ -296,9 +299,7 @@ serve daemon coupled by a custom UDS JSON-RPC protocol) to a single HTTP
 MCP daemon. Registration is now
 `claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp`.
 The `Mcp-Session-Id` HTTP header replaces the UDS connection ID for
-session-binding, compaction anchoring, and chain detection. Stale
-stdio registrations get an actionable migration hint on launch
-instead of failing silently.
+session-binding, compaction anchoring, and chain detection.
 
 ### CLI flags
 
@@ -814,8 +815,7 @@ across instances) before 1.0.
 - Single HTTP MCP daemon — no more stdio proxy, no more UDS
   custom-protocol. mark3labs/mcp-go StreamableHTTP serves directly.
   `internal/rpc/` and `internal/bridge/` deleted. connection_id
-  sourced from Mcp-Session-Id header. Stale stdio registrations get
-  a migration hint on launch.
+  sourced from Mcp-Session-Id header.
 
 **Delivered in v0.18.0** (removed from the 1.0 out-of-scope list):
 
