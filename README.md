@@ -98,12 +98,14 @@ Or do it yourself:
 brew install marcelocantos/tap/mnemo
 brew services start mnemo
 claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp
+# or: grok mcp add --transport http mnemo http://localhost:19419/mcp
 ```
 
 Then confirm the server is listening (`lsof -iTCP:19419 -sTCP:LISTEN`)
-and restart your Claude Code session. Do **not** probe `/mcp` with
+and restart your agent session. Do **not** probe `/mcp` with
 `curl` — MCP endpoints only answer POST with a JSON-RPC body. After
-restart, call `mnemo_stats` to confirm the tools are live.
+restart, call `mnemo_stats` to confirm the tools are live. Other
+clients: see [Registering as an MCP server](#registering-as-an-mcp-server).
 
 ## Install
 
@@ -292,6 +294,11 @@ normal, and it is the one moment worth **not** restarting the daemon —
 let the backup and migration finish. Search and the MCP tools keep
 working the whole time.
 
+After the schema is current, historical plaintext rows pack in the
+background (🎯T162). Watch `compress.backfill` in `mnemo_ops`
+(op=doctor) for phase and outstanding plain bytes. Repacking does not
+return space to the filesystem — VACUUM stays a manual operator step.
+
 ### Auto-upgrade (opt-in)
 
 ```json
@@ -383,7 +390,7 @@ Full setup guide: [`internal/vault/README.md`](internal/vault/README.md)
 | `mnemo_compacted_session` | Distilled view of a session — compaction summaries plus the live addenda tail past the latest cursor |
 | `mnemo_recent_activity` | Per-repo summary of recent session activity with work types and topics |
 | `mnemo_status` | Rich status report: repos, sessions, and conversation excerpts, plus a transcript-ingest freshness/lag diagnostics block |
-| `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, backfill-since-startup, db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
+| `mnemo_ops` (op=doctor) | Self-diagnostics: per-check health report (ok/warn/fail + remediation) — summariser workdir, `claude` on PATH, configured roots, the compaction circuit-breaker, ingest backfill-since-startup, compression backfill (`compress.backfill`), db responsiveness. Same data backs `GET /health`, the dashboard health page, and opt-out OS notifications |
 | `mnemo_session_structure` | Structural summary of a session — counts of entry types, stop_reasons, content-block kinds, tool names |
 | `mnemo_locate_uuid` | Locate any entry by full or prefix UUID across six uuid sources, with surrounding context |
 

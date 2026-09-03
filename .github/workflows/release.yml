@@ -210,10 +210,10 @@ jobs:
           fi
           case "${{ matrix.archive }}" in
             tar.gz)
-              tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "mnemo${{ matrix.ext }}"
+              tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "mnemo${{ matrix.ext }}" NOTICE
               ;;
             zip)
-              7z a "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "mnemo${{ matrix.ext }}"
+              7z a "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "mnemo${{ matrix.ext }}" NOTICE
               ;;
           esac
 
@@ -239,6 +239,7 @@ jobs:
           mkdir -p "$STAGE"
           cp "mnemo.exe" "$STAGE/"
           cp LICENSE "$STAGE/LICENSE.txt"
+          cp NOTICE "$STAGE/NOTICE.txt"
           # Inno Setup 6 is preinstalled on windows-latest amd64 runners
           # but not on the windows-11-arm image. Install via Chocolatey
           # when missing so both matrix legs work identically. Inno

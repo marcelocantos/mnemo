@@ -223,6 +223,9 @@ Key parameters:
   user/assistant messages as context. `"all"` includes tool calls,
   system messages, etc.
 - `limit` — max results (default 20)
+- `kinds` — corpora to search. Default covers messages plus segment,
+  decision, doc, target, commit, pr and memory. Pass
+  `plan` / `config` / `skill` / `audit` to include those too.
 
 Each result includes a `message_id` for follow-up queries.
 
@@ -313,6 +316,13 @@ problem rather than a reading error. Use:
 
 or call `mnemo_text(col, col_z)` explicitly. A ratchet test enforces
 this over every SQL literal in the tree.
+
+The daemon packs historical plain rows itself (🎯T162) whenever it
+finds a backlog — `compression.auto_backfill` defaults on. Doctor
+reports `compress.backfill` (phase plus outstanding plain bytes).
+Repacking empties the legacy columns; it does **not** reclaim disk.
+VACUUM stays a manual operator step. `op=compress_gc` is an explicit
+one-family override, not the only path.
 
 Content types in `content_type`: `text`, `tool_use`, `tool_result`, `thinking`.
 
@@ -493,8 +503,8 @@ Operational surface, op-dispatched:
 `op=doctor` is the first thing to reach for when something looks wrong —
 a per-check health report (ok/warn/fail plus remediation) covering the
 summariser workdir, `claude` on PATH, configured roots, the compaction
-circuit-breaker, backfill progress and database responsiveness. The same
-data backs `GET /health` and the dashboard.
+circuit-breaker, ingest and compression backfill, and database
+responsiveness. The same data backs `GET /health` and the dashboard.
 
 `op=backup_status` reports the retained snapshots AND the total bytes in
 the backup directory. When those disagree, the difference is scratch
@@ -504,6 +514,18 @@ hours old, and the `backup.disk` check in
 `op=doctor` warns about the rest. Every snapshot path — daily worker,
 `op=backup_now`, pre-migration — prunes to the configured retention,
 which defaults to one.
+
+`op=compactor` is the compaction diagnostic: tick counts include
+`deferred` vs `failed`, and the quarantined count excludes deferrals
+(🎯T163). A deferred tick (summariser returned a well-formed
+non-payload) is not a failure and does not increment `fail_count`.
+Leftover `last_error=deferred` rows are cleared on watcher start. Only
+hard failures and timeouts accrue toward quarantine.
+
+`op=compress_status` reports dictionary and cursor state.
+`op=compress_gc` is an explicit one-family override of the automatic
+backfill (🎯T162); leave it alone unless you have paused
+`compression.auto_backfill`.
 
 `op=restore` is destructive and requires an explicit `session_id`.
 
@@ -651,7 +673,11 @@ whether it is still growing — a long reader or a stuck writer).
 *Is compaction working?* — `compactor.workdir` (the summariser's working
 dir exists and is writable), `claude.path` (the `claude` binary is on
 the daemon's PATH), `compactor.breaker` (the compaction circuit-breaker
-has not tripped).
+has not tripped). Deferred ticks do not quarantine a session (🎯T163);
+`op=compactor` is the diagnostic.
+
+*Is historical compression finishing?* — `compress.backfill` (🎯T162 —
+phase plus outstanding plain bytes; 0 reclaimed / VACUUM is manual).
 
 *What is it costing?* — `budget.projection` (month-end projection
 against the cap, or "unpriced" with no rate card), `budget.throttle`
@@ -739,9 +765,9 @@ an empty source and is surfaced, not hidden.
 - **Find past decisions**: `mnemo_search` with query `"decided to" OR "went with" OR "chose"`
 - **Recent work on a repo**: `mnemo_sessions` with `repo: "org/repo"` and `limit: 5`
 - **Read a specific session**: `mnemo_sessions` to find the ID, then `mnemo_read_session`
-- **What files were edited**: `mnemo_query` with `SELECT DISTINCT tool_file_path FROM messages WHERE tool_name = 'Edit'`
-- **What commands were run**: `mnemo_query` with `SELECT tool_command FROM messages WHERE tool_name = 'Bash'`
+- **What files were edited**: `mnemo_query` with `SELECT DISTINCT tool_file_path FROM messages_v WHERE tool_name = 'Edit'`
+- **What commands were run**: `mnemo_query` with `SELECT tool_command FROM messages_v WHERE tool_name = 'Bash'`
 - **Search within a repo**: `mnemo_search` with `repo: "mnemo"` and a query term
-- **Trace a work span across /clear**:  with any session ID — returns the full chain of linked sessions
+- **Trace a work span across /clear**: `mnemo_compacted_session` with any session ID — distilled summaries plus the live addenda tail; `session_chains` via `mnemo_query` for the linked-session graph
 - **Which sessions are live?**: `mnemo_sessions` — live sessions are annotated with `[LIVE pid=NNNNN]`
 - **Custom analytics**: `mnemo_query` with SQL — e.g., message volume by day, most active projects
