@@ -197,6 +197,13 @@ var configDocs = map[string]configFieldDoc{
 		summary: "Provider and model for compaction summaries.",
 		detail:  "provider: \"claude\" or \"grok\". Auto mode prefers Grok when its CLI is on PATH.",
 	},
+	"compression": {
+		summary: "Automatic historical-row compression backfill.",
+		detail: "auto_backfill defaults on: the daemon packs leftover plain rows " +
+			"when it finds a backlog. Set false only to pause the worker. " +
+			"VACUUM stays manual — packing empties columns, it does not shrink the file.",
+		hotReload: true,
+	},
 }
 
 // ConfigKeys returns every top-level JSON key Config declares, sorted.

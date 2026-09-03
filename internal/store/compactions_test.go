@@ -551,6 +551,49 @@ func TestSelectCompactionCandidatesQuarantine(t *testing.T) {
 	}
 }
 
+// TestSelectCompactionCandidatesIgnoresDeferredQuarantine covers 🎯T163:
+// a leftover last_error=deferred row does not exclude the session, and
+// ClearDeferredQuarantine removes it.
+func TestSelectCompactionCandidatesIgnoresDeferredQuarantine(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	writeJSONL(t, dir, "p", "sess-d", []map[string]any{
+		msg("user", "a question with enough text here", now.Add(-2*time.Minute).Format(time.RFC3339)),
+		asstTok("a sizeable answer body", now.Add(-1*time.Minute).Format(time.RFC3339), 200, 0, 500),
+	})
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatalf("IngestAll: %v", err)
+	}
+
+	for i := 0; i < DefaultQuarantineThreshold; i++ {
+		if err := s.RecordCompactionFailure("sess-d", "deferred"); err != nil {
+			t.Fatalf("RecordCompactionFailure: %v", err)
+		}
+	}
+	if !candidateIDs(t, s, 100, 0.10)["sess-d"] {
+		t.Errorf("a session whose only quarantine rows are last_error=deferred must stay eligible")
+	}
+	if n := s.QuarantinedCount(DefaultQuarantineThreshold, now.Add(-DefaultQuarantineCooldown)); n != 0 {
+		t.Errorf("QuarantinedCount must ignore deferred rows, got %d", n)
+	}
+
+	cleared, err := s.ClearDeferredQuarantine()
+	if err != nil {
+		t.Fatalf("ClearDeferredQuarantine: %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("ClearDeferredQuarantine cleared %d rows, want 1", cleared)
+	}
+	var left int
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM compactor_quarantine WHERE session_id = 'sess-d'`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("deferred row still present after clear, count=%d", left)
+	}
+}
+
 // TestSelectCompactionCandidatesSince covers the 🎯T120 incremental
 // form: restricted to sessions that gained an entry past a watermark, it
 // returns exactly the sessions that crossed the budget in that window

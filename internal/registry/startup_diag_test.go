@@ -6,6 +6,7 @@ package registry
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,18 +37,30 @@ func TestStartupCapabilitiesCheckReports(t *testing.T) {
 	r.mu.Unlock()
 
 	rep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), true, time.Now())
-	var seen bool
+	var seen, sawCompress bool
 	for _, res := range rep.Results {
-		if res.Name != "startup.capabilities" {
-			continue
-		}
-		seen = true
-		if res.Severity != "ok" {
-			t.Errorf("startup.capabilities severity=%s detail=%s", res.Severity, res.Detail)
+		switch res.Name {
+		case "startup.capabilities":
+			seen = true
+			if res.Severity != "ok" {
+				t.Errorf("startup.capabilities severity=%s detail=%s", res.Severity, res.Detail)
+			}
+		case "compress.backfill":
+			sawCompress = true
+			if res.Severity != "ok" && res.Severity != "warn" {
+				t.Errorf("compress.backfill severity=%s detail=%s", res.Severity, res.Detail)
+			}
+			if res.Detail == "" || (!strings.Contains(res.Detail, "VACUUM") &&
+				!strings.Contains(res.Detail, "reclaimed")) {
+				t.Errorf("compress.backfill detail=%q, want phase + VACUUM/reclaimed", res.Detail)
+			}
 		}
 	}
 	if !seen {
 		t.Fatal("startup.capabilities is not in the shipped check set")
+	}
+	if !sawCompress {
+		t.Fatal("compress.backfill is not in the shipped check set")
 	}
 
 	// Every declared capability is reported, and reports a state the

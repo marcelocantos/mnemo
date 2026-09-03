@@ -125,6 +125,15 @@ batch, and a run over a finished table visits nothing. Progress is in
 free disk equal to the database and blocks writers while it runs; it is
 left to the operator.
 
+The daemon enqueues the backfill itself (🎯T162) whenever it finds a
+backlog of compressible plain rows — not only on upgrade or boot. The
+worker is batched, resumable, and yields between commits. A persisted
+`done` marker stops the walk; re-appearance of plain rows clears it and
+restarts. `compress.backfill` on doctor reports the phase and outstanding
+plain bytes, and distinguishes bytes repacked from bytes reclaimed.
+`compression.auto_backfill: false` pauses the worker. `op=compress_gc`
+remains for an explicit one-family run.
+
 ## Ops
 
 ```

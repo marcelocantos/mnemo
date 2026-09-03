@@ -665,9 +665,9 @@ func (n *nonPayloadLLM) Call(ctx context.Context, sys, user string) (LLMResult, 
 	return LLMResult{Text: "Understood — waiting for your direction."}, nil
 }
 
-// TestWatcherDefersNonPayload covers 🎯T77: a non-payload (conversational)
-// reply is a "deferred" outcome — NOT a hard failure — but it is durably
-// recorded so the session accrues toward quarantine.
+// TestWatcherDefersNonPayload covers 🎯T77 + 🎯T163: a non-payload
+// (conversational) reply is a "deferred" outcome — NOT a hard failure
+// and NOT a RecordCompactionFailure call.
 func TestWatcherDefersNonPayload(t *testing.T) {
 	src := &fakeStoreSource{}
 	src.setCandidates(store.CompactionCandidate{SessionID: "s1"})
@@ -676,7 +676,7 @@ func TestWatcherDefersNonPayload(t *testing.T) {
 	compactor := New(cs, llm, Config{})
 	w := NewWatcher(src, compactor, WatcherConfig{ScanInterval: 10 * time.Millisecond})
 
-	runUntil(t, w, func() bool { return src.recordCount("s1") >= 1 })
+	runUntil(t, w, func() bool { return w.Health().Counts["deferred"] >= 1 })
 
 	hs := w.Health()
 	if hs.Counts["deferred"] < 1 {
@@ -685,8 +685,8 @@ func TestWatcherDefersNonPayload(t *testing.T) {
 	if hs.Counts["failed"] != 0 {
 		t.Errorf("a non-payload reply must NOT count as a hard failure, got %d", hs.Counts["failed"])
 	}
-	if src.recordCount("s1") < 1 {
-		t.Errorf("a deferred tick must durably record a failure for quarantine, got %d", src.recordCount("s1"))
+	if src.recordCount("s1") != 0 {
+		t.Errorf("a deferred tick must not record a quarantine failure, got %d", src.recordCount("s1"))
 	}
 }
 

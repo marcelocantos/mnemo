@@ -148,7 +148,12 @@ its sixteen generated columns are NULL for those rows and their
 materialised twins (`uuid_m`, `model_m`, …) are the source of truth —
 read entries through the `entries_v` view, which serves the original
 column names and decoded `raw`. A boot-time pass fills the twins for
-historical rows before `compress_gc family=entries` is allowed. Dictionaries are trained from the corpus and versioned in
+historical rows before `compress_gc family=entries` is allowed. The daemon
+enqueues that packer itself when it finds a backlog (🎯T162); `compress_gc`
+is no longer the only path. Doctor reports `compress.backfill` (plain bytes
+outstanding, running/complete/throttled/disabled) and distinguishes bytes
+repacked from bytes reclaimed — VACUUM stays manual. Dictionaries are trained
+from the corpus and versioned in
 `compression_dicts`; each frame names its dictionary, so a retrain never
 invalidates history. Open `mnemo.db` with `store.SQLiteDriverName` (the
 triggers call `mnemo_text`). Ops: `mnemo_ops op=compress_status |

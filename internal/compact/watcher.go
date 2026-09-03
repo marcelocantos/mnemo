@@ -129,8 +129,9 @@ type storeSource interface {
 	SessionCWD(sessionID string) string
 	// RecordCompactionFailure / ClearCompactionFailure maintain the
 	// durable per-session quarantine (🎯T77): the watcher records a hard
-	// failure or non-payload deferral and clears it on a clean tick, and
+	// failure or timeout and clears it on a clean tick, and
 	// SelectCompactionCandidates excludes quarantined sessions.
+	// Deferrals are not recorded (🎯T163).
 	RecordCompactionFailure(sessionID, errMsg string) error
 	ClearCompactionFailure(sessionID string) error
 	// QuarantinedCount reports how many sessions are currently excluded
@@ -468,23 +469,21 @@ func (w *Watcher) scan(ctx context.Context) {
 			slog.Warn("compact: summariser rate-limited; backing off",
 				"cooldown", rateLimitCooldown)
 			return
-		case outcomeFailed, outcomeTimeout, outcomeDeferred:
+		case outcomeDeferred:
+			// A non-payload reply is not a failure (🎯T163). Recording
+			// it used to exile sessions at fail_count 88 with
+			// last_error=deferred; they could never clear because a
+			// successful tick is what deletes the row. Retry later.
+			okTicks++
+		case outcomeFailed, outcomeTimeout:
 			// Durably record the failure (🎯T77) so a permanently-broken
-			// session is quarantined across restarts. Deferrals (non-
-			// payload replies) accrue toward quarantine too, even though
-			// they are not hard failures in the ratio.
+			// session is quarantined across restarts. Only hard failures
+			// and timeouts accrue; deferrals do not (🎯T163).
 			if rerr := w.src.RecordCompactionFailure(c.SessionID, string(outcome)); rerr != nil {
 				slog.Warn("compact: record failure", "session_id", c.SessionID, "err", rerr)
 			}
-			// Breaker tally (🎯T84): a deferral means the summariser ran
-			// (a content issue), so it is not a systemic worker failure; a
-			// hard failure / timeout is.
-			if outcome == outcomeDeferred {
-				okTicks++
-			} else {
-				failedTicks++
-				lastTickErr = string(outcome)
-			}
+			failedTicks++
+			lastTickErr = string(outcome)
 		default:
 			// compacted / nothing_to_compact / budget_exceeded — the
 			// session is healthy; clear any durable quarantine.
@@ -525,8 +524,8 @@ const (
 	// non-payload — usually a conversational reply to the transcript
 	// ("Understood — waiting for your direction") rather than the JSON
 	// object. It is NOT a hard failure (it does not count in the failed
-	// tally), but it accrues toward the durable quarantine so a session
-	// that keeps producing non-payloads is eventually excluded.
+	// tally) and does not accrue toward quarantine (🎯T163): a session
+	// that keeps producing non-payloads is retried, not exiled.
 	outcomeDeferred tickOutcome = "deferred"
 )
 
@@ -638,8 +637,7 @@ func (w *Watcher) runTick(ctx context.Context, c store.CompactionCandidate, tc *
 		return outcomeRateLimited, []any{"reason", err.Error()}
 	case errors.Is(err, ErrNoPayload):
 		// The summariser replied but not with a payload (🎯T77) — not a
-		// hard failure; defer the session and let it accrue toward
-		// quarantine.
+		// hard failure and not a quarantine event (🎯T163).
 		return outcomeDeferred, []any{"reason", err.Error()}
 	case errors.Is(err, exec.ErrNotFound):
 		slog.Error("compact: claude subprocess spawn failed — executable not found in PATH",

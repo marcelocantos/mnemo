@@ -603,6 +603,10 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			e.store.StartImageDescriber()
 			e.store.StartImageOCR()
 			e.store.StartImageEmbedder()
+			// 🎯T162: pack leftover plain rows without anyone calling
+			// compress_gc. After schema + dictionaries, a detected
+			// backlog is enough — not an upgrade or a boot edge.
+			e.store.StartCompressBackfill()
 		}()
 		if err := e.store.IngestMemories(); err != nil {
 			logger.Error("memory ingest failed", "err", err)
@@ -680,6 +684,11 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		sumModel, sumProv := r.compactorModel, r.summariserProvider
 
 		// Compaction watcher.
+		if n, err := e.store.ClearDeferredQuarantine(); err != nil {
+			logger.Warn("clear deferred quarantine failed", "err", err)
+		} else if n > 0 {
+			logger.Info("cleared leftover deferred quarantine rows", "rows", n)
+		}
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()

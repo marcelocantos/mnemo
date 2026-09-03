@@ -221,10 +221,10 @@ var ErrLLMUnavailable = errors.New("compact: summariser temporarily unavailable"
 // that simply isn't a JSON payload — most often a conversational reply
 // to the transcript ("Understood — waiting for your direction") rather
 // than the requested object (🎯T77). It is NOT a hard failure: it does
-// not count toward the failed tally, the watcher defers the session and
-// lets it back off, and a session that keeps producing non-payloads is
-// eventually quarantined. The 🎯T77 prompt-framing change makes this
-// rare, but the classification stops it polluting the failure ratio.
+// not count toward the failed tally, and the watcher does not record it
+// as a quarantine failure (🎯T163). The 🎯T77 prompt-framing change
+// makes this rare; the classification stops it polluting the failure
+// ratio and stops it exiling the session.
 var ErrNoPayload = errors.New("compact: summariser output was not a JSON payload")
 
 // oneLine collapses whitespace (incl. newlines) so a non-payload reply
@@ -334,8 +334,8 @@ func (c *Compactor) Compact(ctx context.Context, connectionID, sessionID string,
 		}
 		// Otherwise the summariser returned something that just isn't a
 		// payload — almost always a conversational reply to the
-		// transcript. That is not a hard failure (🎯T77): defer the
-		// session rather than counting it against the failure ratio.
+		// transcript. That is not a hard failure (🎯T77) and is not
+		// recorded as a quarantine event (🎯T163).
 		return nil, fmt.Errorf("%w: %.120q", ErrNoPayload, oneLine(res.Text))
 	}
 

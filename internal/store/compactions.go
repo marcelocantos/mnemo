@@ -438,15 +438,17 @@ func (s *Store) SelectCompactionCandidatesSince(
 		      END) >= ?
 		  -- Durable quarantine (🎯T77): skip sessions that have failed at
 		  -- least the threshold number of times and whose last failure is
-		  -- still within the cooldown window. The row is deleted on any
-		  -- clean tick, and a session past the cooldown gets one parole
-		  -- retry, so a transiently-broken session recovers while a
-		  -- permanently-broken one stops failing every scan.
+		  -- still within the cooldown window. last_error = deferred is
+		  -- not a failure (🎯T163) — leftover rows from the old
+		  -- accrue-deferrals path must not exclude a session.
+		  -- The row is deleted on any clean tick, and a session past
+		  -- the cooldown gets one parole retry.
 		  AND NOT EXISTS (
 		    SELECT 1 FROM compactor_quarantine q
 		    WHERE q.session_id = s.session_id
 		      AND q.fail_count >= ?
 		      AND q.last_failed_at > ?
+		      AND q.last_error != 'deferred'
 		  )
 		ORDER BY s.last_msg DESC
 		LIMIT ?
@@ -515,9 +517,9 @@ const DefaultAddendaBudgetTokens int64 = 50_000
 // — the query in the 🎯T131 notes reproduces the measurement.
 const FallbackTokensPerMessage int64 = 4_000
 
-// DefaultQuarantineThreshold is how many failures (hard failures plus
-// non-payload deferrals) a session may accrue before the candidate
-// query excludes it for the cooldown window (🎯T77).
+// DefaultQuarantineThreshold is how many hard failures or timeouts a
+// session may accrue before the candidate query excludes it for the
+// cooldown window (🎯T77). Deferrals do not count (🎯T163).
 const DefaultQuarantineThreshold = 4
 
 // DefaultQuarantineCooldown is how long a quarantined session stays
@@ -566,9 +568,23 @@ func (s *Store) QuarantinedCount(threshold int, since time.Time) int {
 	var n int
 	_ = s.readDB.QueryRow(`
 		SELECT COUNT(*) FROM compactor_quarantine
-		WHERE fail_count >= ? AND last_failed_at > ?`,
+		WHERE fail_count >= ? AND last_failed_at > ? AND last_error != 'deferred'`,
 		threshold, since.UTC().Format(time.RFC3339Nano)).Scan(&n)
 	return n
+}
+
+// ClearDeferredQuarantine deletes leftover rows whose last_error is
+// deferred (🎯T163). Those rows were written when a non-payload reply
+// accrued toward quarantine; they can never self-clear because a
+// successful tick is what deletes the row, and a quarantined session
+// is never ticked. Product GC, not a schema change.
+func (s *Store) ClearDeferredQuarantine() (int64, error) {
+	res, err := s.writeDB.Exec(`DELETE FROM compactor_quarantine WHERE last_error = 'deferred'`)
+	if err != nil {
+		return 0, fmt.Errorf("clear deferred quarantine: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // AddendaTokens returns the addenda token volume for a session past a

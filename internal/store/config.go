@@ -279,6 +279,30 @@ type Config struct {
 	// launchd, newest_artifact, last_commit), a path/label, an expected
 	// cadence, and a grace multiple. Evaluated by the diag surface.
 	SignalSources []SignalSource `json:"signal_sources,omitempty"`
+
+	// Compression controls historical-row packing (🎯T162). Absent →
+	// the daemon enqueues the backfill itself. This is finishing a
+	// shipped migration, not opt-in egress, so the safe default is on.
+	Compression CompressionConfig `json:"compression,omitempty"`
+}
+
+// CompressionConfig gates the automatic historical-row packer (🎯T162).
+// Zero value / section omitted → auto-backfill is on.
+type CompressionConfig struct {
+	// AutoBackfill, when explicitly false, stops the daemon from
+	// enqueueing historical-row compression. Default true (absent = on).
+	// Pointer so a missing key is distinguishable from false.
+	AutoBackfill *bool `json:"auto_backfill,omitempty"`
+}
+
+// AutoBackfillEnabled reports whether the daemon should pack leftover
+// plain rows on its own. True unless the operator set auto_backfill to
+// false.
+func (c CompressionConfig) AutoBackfillEnabled() bool {
+	if c.AutoBackfill == nil {
+		return true
+	}
+	return *c.AutoBackfill
 }
 
 // SignalSource kinds (🎯T102.8).

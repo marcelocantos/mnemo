@@ -383,12 +383,29 @@ type FamilyStatus struct {
 	Compressed    int64
 	PlainBytes    int64 // bytes still held in the legacy column
 	PackedBytes   int64 // bytes held in the *_z column
+	Outstanding   int64 // compressible plain bytes (length ≥ compressMinBytes, z-col NULL)
 	BackfillDone  bool
 	BackfillNext  int64 // next row id the backfill will visit
 	BackfillSaved int64 // bytes saved so far by the backfill
 	BackfillAt    string
 	Running       bool
 	LastError     string
+}
+
+// Compress worker phases (🎯T162). Reported by the health check and
+// CompressWorkerStatus so an unfinished migration cannot hide.
+const (
+	CompressPhaseDisabled  = "disabled"
+	CompressPhaseThrottled = "throttled"
+	CompressPhaseRunning   = "running"
+	CompressPhaseComplete  = "complete"
+	CompressPhaseIdle      = "idle"
+)
+
+// CompressWorkerSnapshot is the auto-backfill worker's last decision.
+type CompressWorkerSnapshot struct {
+	Phase  string
+	Reason string
 }
 
 // familySpec maps a family to its table and columns. Identifiers are
@@ -491,9 +508,43 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		}
 		f.BackfillDone = done == 1
 		f.Running = s.backfill.running(family)
+		if n, err := s.familyOutstanding(fs); err != nil {
+			return st, err
+		} else {
+			f.Outstanding = n
+		}
 		st.Families = append(st.Families, f)
 	}
 	return st, nil
+}
+
+// familyOutstanding is the compressible residue: plain rows that would
+// pay to pack. Short rows and already-packed sentinels are excluded so
+// a finished family does not look unfinished forever.
+func (s *Store) familyOutstanding(fs familySpec) (int64, error) {
+	q := fmt.Sprintf(`
+		SELECT COALESCE(SUM(length(%[2]s)), 0)
+		FROM %[1]s
+		WHERE %[3]s IS NULL AND length(%[2]s) >= ?`, fs.table, fs.plainCol, fs.zCol)
+	var n int64
+	err := s.readDB.QueryRow(q, compressMinBytes).Scan(&n)
+	return n, err
+}
+
+// reopenBackfill clears the completion marker so a newly-detected
+// backlog is walked from the start. saved_bytes is kept — it is a
+// cumulative counter, not a claim that the file shrank.
+func (s *Store) reopenBackfill(family string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.writeDB.Exec(`
+		INSERT INTO compression_gc (family, next_id, done, saved_bytes, updated_at, last_error)
+		VALUES (?, 0, 0, 0, ?, '')
+		ON CONFLICT(family) DO UPDATE SET
+			next_id = 0,
+			done = 0,
+			updated_at = excluded.updated_at,
+			last_error = ''`, family, now)
+	return err
 }
 
 // TrainDictionary samples rows of family, builds a zstd dictionary,
@@ -635,11 +686,46 @@ func (s *Store) sampleRows(ctx context.Context, fs familySpec, n int) ([][]byte,
 }
 
 // backfillState tracks in-flight CompressBackfill runs per family so the
-// op can be started from MCP and observed while it runs.
+// op can be started from MCP and observed while it runs. The auto
+// worker (🎯T162) also parks its last phase here for the health check.
 type backfillState struct {
-	mu      sync.Mutex
-	active  map[string]bool
-	lastErr map[string]string
+	mu            sync.Mutex
+	active        map[string]bool
+	lastErr       map[string]string
+	yield         time.Duration
+	phase         string
+	reason        string
+	started       bool
+	forceDisabled bool
+}
+
+func (b *backfillState) setPhase(phase, reason string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.phase = phase
+	b.reason = reason
+}
+
+func (b *backfillState) snapshot() CompressWorkerSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	phase := b.phase
+	if phase == "" {
+		phase = CompressPhaseIdle
+	}
+	return CompressWorkerSnapshot{Phase: phase, Reason: b.reason}
+}
+
+func (b *backfillState) setYield(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.yield = d
+}
+
+func (b *backfillState) getYield() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.yield
 }
 
 func (b *backfillState) running(family string) bool {
@@ -672,6 +758,10 @@ func (b *backfillState) finish(family string, err error) {
 		b.lastErr[family] = ""
 	}
 }
+
+// ErrBackfillRunning is returned when CompressBackfill is already in
+// flight for that family — the auto worker and the MCP op share a lock.
+var ErrBackfillRunning = errors.New("backfill already running")
 
 // BackfillResult summarises one CompressBackfill run.
 type BackfillResult struct {
@@ -706,7 +796,7 @@ func (s *Store) CompressBackfill(ctx context.Context, family string) (BackfillRe
 		}
 	}
 	if !s.backfill.start(family) {
-		return BackfillResult{}, fmt.Errorf("%s: backfill already running", family)
+		return BackfillResult{}, fmt.Errorf("%s: %w", family, ErrBackfillRunning)
 	}
 	res := BackfillResult{Family: family}
 	err = s.compressBackfill(ctx, fs, family, &res)
@@ -816,6 +906,13 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 		next = batch[len(batch)-1].id + 1
 		if err := s.saveBackfillCursor(family, next, saved, false); err != nil {
 			return err
+		}
+		if d := s.backfill.getYield(); d > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(d):
+			}
 		}
 	}
 }

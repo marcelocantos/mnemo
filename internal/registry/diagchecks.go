@@ -455,6 +455,50 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			return diag.Healthy(detail)
 		}},
 
+		// 🎯T162: historical-row compression must not sit unfinished
+		// behind an all-green doctor. Reports phase and outstanding
+		// plain bytes; VACUUM is never implied.
+		diag.Check{Name: "compress.backfill", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("store not started yet")
+			}
+			snap := s.CompressWorkerStatus()
+			st, err := s.CompressionStatus()
+			if err != nil {
+				return diag.Warning("compression status: "+err.Error(),
+					"check the daemon log for compress/dictionary errors")
+			}
+			var outstanding int64
+			var saved int64
+			var parts []string
+			for _, f := range st.Families {
+				outstanding += f.Outstanding
+				saved += f.BackfillSaved
+				if f.Outstanding > 0 || f.Running {
+					parts = append(parts, fmt.Sprintf("%s %s plain / %s packed",
+						f.Family, formatIEC(f.Outstanding), formatIEC(f.PackedBytes)))
+				}
+			}
+			detail := snap.Phase
+			if snap.Reason != "" {
+				detail += " (" + snap.Reason + ")"
+			}
+			if len(parts) > 0 {
+				detail += ": " + strings.Join(parts, "; ")
+			}
+			detail += fmt.Sprintf("; %s repacked, 0 reclaimed (VACUUM is manual)", formatIEC(saved))
+			switch {
+			case snap.Phase == store.CompressPhaseDisabled:
+				return diag.Healthy(detail)
+			case outstanding > 0:
+				return diag.Warning(detail,
+					"the daemon packs leftover rows on its own; space returns to the filesystem only after a manual VACUUM")
+			default:
+				return diag.Healthy(detail)
+			}
+		}},
+
 		// 🎯T97.2: newer release available (warn). Uses the last
 		// Detector snapshot so the diag path itself does not force a
 		// network call — the detector worker owns polling.
@@ -547,5 +591,23 @@ func storeNotReadyResult(check string) diag.CheckResult {
 		return diag.Healthy(check + ": store not started yet")
 	default:
 		return diag.Warning(boot.Summary(), "see startup.ready")
+	}
+}
+
+func formatIEC(n int64) string {
+	const (
+		ki = 1024
+		mi = 1024 * ki
+		gi = 1024 * mi
+	)
+	switch {
+	case n >= gi:
+		return fmt.Sprintf("%.2f GiB", float64(n)/float64(gi))
+	case n >= mi:
+		return fmt.Sprintf("%.1f MiB", float64(n)/float64(mi))
+	case n >= ki:
+		return fmt.Sprintf("%.0f KiB", float64(n)/float64(ki))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
 }
