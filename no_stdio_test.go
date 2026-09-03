@@ -71,8 +71,9 @@ func TestNoStdinModeSniffing(t *testing.T) {
 //
 // A daemon may be installed as a service by an operator. It may not
 // install itself. `brew services restart` in the auto-upgrade path is
-// deliberately allowed — it restarts a service the operator already
-// installed and opted into, and installs nothing.
+// deliberately allowed when launchd owns the daemon — it restarts a
+// service the operator already installed and opted into, and installs
+// nothing. Under SUPERVISOR_ENABLED it must not run (🎯T164).
 func TestNeverInstallsItselfAsAService(t *testing.T) {
 	banned := []struct{ pattern, why string }{
 		{`"services", "start"`, "starts a brew service for itself"},

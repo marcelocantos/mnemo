@@ -1090,8 +1090,7 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 		DrainOld: func(ctx context.Context) error {
 			reg.ReleaseLease()
 			if homeForLease == "" || !upgrade.RouteConfigured(homeForLease) {
-				slog.Info("auto-upgrade: brew services restart mnemo")
-				return runBrewServicesRestart(ctx)
+				return restartManagedDaemon(ctx)
 			}
 			// Affinity drain: keep serving pinned sessions until edge
 			// reports pin_counts[self]==0, then graceful SIGTERM.
@@ -1751,6 +1750,22 @@ func runBrewUpgrade(ctx context.Context) error {
 		return fmt.Errorf("brew upgrade mnemo: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func underSupervisor() bool {
+	return os.Getenv("SUPERVISOR_ENABLED") != ""
+}
+
+func restartManagedDaemon(ctx context.Context) error {
+	if underSupervisor() {
+		// brew services restart would reload launchd and fight
+		// supervisord for :19419. Exit; autorestart picks up the
+		// new Cellar binary (🎯T164).
+		slog.Info("auto-upgrade: exiting so supervisord restarts onto the new binary")
+		return signalSelfSIGTERM()
+	}
+	slog.Info("auto-upgrade: brew services restart mnemo")
+	return runBrewServicesRestart(ctx)
 }
 
 func runBrewServicesRestart(ctx context.Context) error {

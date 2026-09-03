@@ -48,6 +48,30 @@ brew services start mnemo                                                       
 claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp          # register
 ```
 
+### One daemon only — do not double-serve
+
+On this Mac, day-to-day MCP is **supervisord** running the Homebrew
+Cellar binary (not `brew services`). Launchd and supervisord must not
+both own `:19419`.
+
+```bash
+./supervisor/install.sh       # once: stop brew services, start under supervisord
+supervisorctl status mnemo
+mnemo --version
+```
+
+**Never** run `bin/mnemo` (or any tree-built binary) on `:19419`
+while the supervised daemon is running.
+
+| Goal | Do this |
+|------|---------|
+| Normal agent / MCP work | `supervisorctl start mnemo` — leave it alone. `brew services stop mnemo` must stay stopped |
+| After `brew upgrade mnemo` | `brew services stop mnemo` (stay unloaded), then `supervisorctl restart mnemo` — **not** `brew services restart` |
+| Test unreleased tree code | keep supervisor on `:19419`; `bin/mnemo --addr :19429` |
+| Sanity check | `lsof -nP -iTCP:19419 -sTCP:LISTEN` — exactly **one** mnemo, Cellar path; `supervisorctl status mnemo` is RUNNING |
+
+Do not `brew services start mnemo` — that reloads launchd and fights supervisord.
+
 After installing, add the following to your global `~/.claude/CLAUDE.md`
 so agents know when to use mnemo:
 

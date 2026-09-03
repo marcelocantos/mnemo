@@ -63,6 +63,12 @@ brew services start mnemo
 This starts mnemo on `localhost:19419` via IPv4 and IPv6 loopback listeners
 and keeps it running across reboots. Logs go to `$(brew --prefix)/var/log/mnemo.log`.
 
+On a machine that already runs supervisord, `./supervisor/install.sh`
+takes over `:19419` from brew services (same shape as spyder/bullseye).
+After that, `supervisorctl status mnemo` is the owner; do **not**
+`brew services start` / `restart` — that reloads launchd and fights
+supervisord. Logs then go to `~/.local/var/log/mnemo.log`.
+
 The Homebrew formula's service block sets `PATH` to
 `$(brew --prefix)/bin:~/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin`
 so that mnemo's compactor can find the `claude` binary. If you run
@@ -113,8 +119,9 @@ bind error and exits 1:
 mnemo: listen tcp 127.0.0.1:19419: bind: address already in use
 ```
 
-That is a running server, not a broken one. Check with `brew services
-list` before concluding anything is wrong.
+That is a running server, not a broken one. Check `supervisorctl status
+mnemo` if this machine uses supervisord, otherwise `brew services list`,
+before concluding anything is wrong.
 
 ### 3. Register as an MCP server
 
@@ -158,7 +165,8 @@ lsof -iTCP:19419 -sTCP:LISTEN
 
 This should show the mnemo process listening on `127.0.0.1:19419` and/or
 `[::1]:19419`, not `*:19419`. If nothing is shown, the server isn't running —
-check `brew services list` and `$(brew --prefix)/var/log/mnemo.log`.
+check `supervisorctl status mnemo` (or `brew services list`) and
+`~/.local/var/log/mnemo.log` (or `$(brew --prefix)/var/log/mnemo.log`).
 
 Do **not** use `curl` to probe `/mcp` — MCP endpoints only respond to
 POST requests with a JSON-RPC body. A plain GET or empty POST returns
@@ -175,6 +183,10 @@ If the user asks you to upgrade mnemo:
 
 ```bash
 brew upgrade marcelocantos/tap/mnemo
+# supervisord owner (this Mac after ./supervisor/install.sh):
+brew services stop mnemo             # stay unloaded
+supervisorctl restart mnemo
+# otherwise:
 brew services restart mnemo          # REQUIRED — see below
 ```
 

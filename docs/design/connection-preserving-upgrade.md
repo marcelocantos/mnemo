@@ -98,7 +98,9 @@ work; the apply state machine enters `notify_only` and never runs brew.
    with `Mcp-Session-Id` unpins so counts can reach zero. Route-file
    read errors are `PinUnknown` (not zero) so torn JSON cannot force-reap.
    Crash-only path may set `repin_all` (FailoverRepin). Single-daemon
-   without edge → `brew services restart mnemo`.
+   without edge → `restartManagedDaemon`: SIGTERM under
+   `SUPERVISOR_ENABLED` so supervisord autorestarts onto the new
+   binary (🎯T164); otherwise `brew services restart mnemo`.
 
 Non-Homebrew and Windows: phase stays `notify_only`.
 
