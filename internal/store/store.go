@@ -523,7 +523,21 @@ type RecentActivityInfo struct {
 	LastActivity string   `json:"last_activity"`
 	WorkTypes    []string `json:"work_types,omitempty"`
 	Topics       []string `json:"topics,omitempty"`
+	// TopicsOmitted and WorkTypesOmitted count the values dropped from
+	// the two lists above by the per-repo cap (🎯T165). A repo worked on
+	// for a month has one topic per session, and a 30-day call that
+	// listed all of them returned 1.7 MB of JSON into an agent's
+	// context. Zero means the lists are complete.
+	TopicsOmitted    int `json:"topics_omitted,omitempty"`
+	WorkTypesOmitted int `json:"work_types_omitted,omitempty"`
 }
+
+// recentActivityListCap bounds each repo's topics and work_types list.
+// The lists are a flavour of what the repo saw, not an inventory: ten
+// distinct topics already say what kind of work it was, and the
+// eleventh costs an agent context for nothing. What was dropped is
+// counted, never silently discarded.
+const recentActivityListCap = 10
 
 // StatusResult is the top-level response from Status.
 type StatusResult struct {
@@ -686,6 +700,12 @@ type UsageResult struct {
 	// the card in force at the time of the records (🎯T135); this reports
 	// the current card, which is the one applied to anything recent.
 	RateCardFetchedAt string `json:"rate_card_fetched_at,omitempty"`
+	// RowsOmitted is how many grouped rows were dropped from Rows to
+	// bound the payload (🎯T165), and OmittedTotal aggregates exactly
+	// those rows. Total covers every row, omitted ones included, so a
+	// truncated answer still adds up. Zero means Rows is complete.
+	RowsOmitted  int       `json:"rows_omitted,omitempty"`
+	OmittedTotal *UsageRow `json:"omitted_total,omitempty"`
 	// Uncounted reports volume that was deliberately EXCLUDED from Rows,
 	// Total and every cost above, because its records carry no
 	// deduplication key (🎯T135). Reported rather than dropped: an
@@ -5292,6 +5312,15 @@ func extractClaudeMDSummary(content string) string {
 	return ""
 }
 
+// capList truncates a per-repo list to recentActivityListCap and returns
+// it with the number of values dropped.
+func capList(xs []string) ([]string, int) {
+	if len(xs) <= recentActivityListCap {
+		return xs, 0
+	}
+	return xs[:recentActivityListCap], len(xs) - recentActivityListCap
+}
+
 // RecentActivity returns per-repo summaries of session activity within the
 // given recency window. Only interactive sessions are included.
 func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error) {
@@ -5344,10 +5373,10 @@ func (s *Store) RecentActivity(days int, repoFilter string) ([]RecentActivityInf
 			continue
 		}
 		if workTypes.Valid && workTypes.String != "" {
-			r.WorkTypes = strings.Split(workTypes.String, ",")
+			r.WorkTypes, r.WorkTypesOmitted = capList(strings.Split(workTypes.String, ","))
 		}
 		if topics.Valid && topics.String != "" {
-			r.Topics = strings.Split(topics.String, ",")
+			r.Topics, r.TopicsOmitted = capList(strings.Split(topics.String, ","))
 		}
 		results = append(results, r)
 	}
@@ -5714,6 +5743,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 			result.Rows = append(result.Rows, *r)
 		}
 	}
+	capUsageRows(result)
 	result.Total.Period = "total"
 	if totalReconciled && totalEstimated {
 		result.Total.Source = "mixed"
@@ -5761,6 +5791,51 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 	}
 
 	return result, nil
+}
+
+// maxUsageRows bounds how many grouped rows one usage answer carries
+// (🎯T165).
+//
+// It is set above every grouping whose row count is bounded by
+// something a reader would want enumerated in full — a year of days,
+// every model on the rate card, every repo the owner has touched — and
+// below the one that is not: group_by=session enumerates one row per
+// session in the window, which on a busy month is thousands of rows and
+// hundreds of kilobytes of an agent's context. The rows beyond the cap
+// are summarised rather than dropped, and Total never depends on the
+// cap.
+const maxUsageRows = 500
+
+// capUsageRows truncates result.Rows to maxUsageRows, moving what it
+// drops into OmittedTotal. Order is preserved: the tail goes, so a day
+// series stays a series rather than being re-sorted by cost.
+func capUsageRows(result *UsageResult) {
+	if len(result.Rows) <= maxUsageRows {
+		return
+	}
+	dropped := result.Rows[maxUsageRows:]
+	omitted := UsageRow{Period: "omitted"}
+	sources := map[string]bool{}
+	for _, r := range dropped {
+		omitted.InputTokens += r.InputTokens
+		omitted.OutputTokens += r.OutputTokens
+		omitted.CacheReadTokens += r.CacheReadTokens
+		omitted.CacheCreationTokens += r.CacheCreationTokens
+		omitted.Messages += r.Messages
+		omitted.CostUSD += r.CostUSD
+		sources[r.Source] = true
+	}
+	switch {
+	case len(sources) > 1:
+		omitted.Source = "mixed"
+	case sources["reconciled"]:
+		omitted.Source = "reconciled"
+	default:
+		omitted.Source = "estimated"
+	}
+	result.Rows = result.Rows[:maxUsageRows]
+	result.RowsOmitted = len(dropped)
+	result.OmittedTotal = &omitted
 }
 
 // usageByBlock groups assistant messages into 5-hour billing blocks.
@@ -5936,6 +6011,7 @@ func (s *Store) usageByBlock(
 			Source:              "estimated",
 		})
 	}
+	capUsageRows(result)
 	result.Total.Period = "total"
 	result.Total.Source = "estimated"
 	if !maxTS.IsZero() {
