@@ -6,6 +6,7 @@ package store
 import (
 	"database/sql"
 	"strings"
+	"sync/atomic"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
@@ -54,6 +55,8 @@ func init() {
 // other pragmas (journal_mode, synchronous, … set by openDB) pass.
 func readOnlyAuthorizer(op int, arg1, arg2, arg3 string) int {
 	switch op {
+	case sqlite3.SQLITE_SELECT:
+		readSelectCount.Add(1)
 	case sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH:
 		return sqlite3.SQLITE_DENY
 	case sqlite3.SQLITE_PRAGMA:
@@ -63,3 +66,17 @@ func readOnlyAuthorizer(op int, arg1, arg2, arg3 string) int {
 	}
 	return sqlite3.SQLITE_OK
 }
+
+// readSelectCount counts SELECT authorisations on the read pool. SQLite
+// consults the authorizer once per SELECT clause at prepare time (nested
+// subselects included), and database/sql prepares afresh on every
+// Query/QueryRow, so the count tracks statements issued rather than rows
+// read. It exists for the perf ratchet: a search that issues one query
+// per hit shows up here as hundreds of selects, and the ratchet pins the
+// number so an N+1 cannot creep back in silently.
+var readSelectCount atomic.Int64
+
+// ReadSelectCount returns the process-wide number of SELECT authorisations
+// on the read pool so far. Take a delta around the call under test; the
+// absolute value is meaningless.
+func ReadSelectCount() int64 { return readSelectCount.Load() }

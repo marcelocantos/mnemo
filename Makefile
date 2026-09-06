@@ -1,4 +1,4 @@
-.PHONY: bullseye build test test-scale snapshot vet fmt-check
+.PHONY: bullseye build test test-scale snapshot vet fmt-check bench bench-lock bench-gate
 
 # Parent ~/work/github.com/marcelocantos/go.work only lists claudia and
 # jevons. Go walks up to it, then `./...` in this module fails with
@@ -60,6 +60,38 @@ snapshot:
 
 vet:
 	go vet -tags "$(BUILD_TAGS)" ./...
+
+# 🎯T165: benchmarks for the hot tools, locked both ways.
+#
+#   make bench       run them, results in $(BENCH_OUT)
+#   make bench-gate  run them and compare against docs/perf/baseline.txt;
+#                    fails on a regression AND on an improvement, because
+#                    an improvement means the baseline no longer describes
+#                    the code and must be re-locked in the same commit
+#   make bench-lock  run them and make the result the new baseline
+#
+# Timing is only comparable on the machine the baseline was recorded on
+# (docs/perf/baseline.md names it). Elsewhere, and in CI, pass
+# BENCH_GATE_FLAGS=-timing=false to compare just the deterministic
+# metrics (payload bytes, statements issued, rows returned).
+BENCH_PKG   := ./internal/store/
+BENCH_RE    := ^(BenchmarkSearch|BenchmarkRecentActivity|BenchmarkUsage|BenchmarkIngestTranscript)$$
+BENCH_COUNT ?= 6
+BENCH_OUT   ?= bin/bench.txt
+BENCH_GATE_FLAGS ?=
+
+bench:
+	@mkdir -p $(dir $(BENCH_OUT))
+	go test -tags "$(BUILD_TAGS)" -run '^$$' -bench '$(BENCH_RE)' -benchmem \
+	  -count=$(BENCH_COUNT) -benchtime=1s $(BENCH_PKG) > $(BENCH_OUT)
+	@grep -E '^(Benchmark|goos|goarch|pkg|cpu)' $(BENCH_OUT)
+
+bench-lock: bench
+	cp $(BENCH_OUT) docs/perf/baseline.txt
+	@echo "locked docs/perf/baseline.txt — update docs/perf/baseline.md alongside it"
+
+bench-gate: bench
+	go run ./cmd/benchgate -base docs/perf/baseline.txt -new $(BENCH_OUT) $(BENCH_GATE_FLAGS)
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || (gofmt -l .; exit 1)
