@@ -181,15 +181,37 @@ func (s *stubNopLLM) Call(ctx context.Context, sys, user string) (LLMResult, err
 	}, nil
 }
 
+// lockedBuffer is a bytes.Buffer safe for a watcher goroutine to write
+// into while the test polls it. The watcher logs from Run's own
+// goroutine and every caller of captureSlog reads the buffer from the
+// test goroutine, so an unguarded bytes.Buffer is a data race — one the
+// race detector reports on four of these tests.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // captureSlog installs a text-handler logger that writes into a
 // buffer for the duration of the test, returning the buffer and a
 // restore function. All levels are enabled so DEBUG lines land.
-func captureSlog() (*bytes.Buffer, func()) {
-	var buf bytes.Buffer
-	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+func captureSlog() (*lockedBuffer, func()) {
+	buf := &lockedBuffer{}
+	h := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	old := slog.Default()
 	slog.SetDefault(slog.New(h))
-	return &buf, func() { slog.SetDefault(old) }
+	return buf, func() { slog.SetDefault(old) }
 }
 
 // runUntil starts the watcher, polls `until` until it returns true
