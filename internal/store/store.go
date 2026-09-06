@@ -738,10 +738,18 @@ type UncountedVolume struct {
 // so `json_extract(raw, ...)` in the query and a virtual column reading
 // the same path do identical work. The column was only ever notation.
 const (
-	sqlMessageID    = `json_extract(e.raw, '$.message.id')`
-	sqlRequestID    = `e.raw->>'$.requestId'`
-	sqlCacheWrite5m = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')`
-	sqlCacheWrite1h = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')`
+	//
+	// These are entries_v columns (🎯T165). They used to be json_extract
+	// over e.raw, which on a compressed row means decoding the whole
+	// JSON line — four times per row, once per field — for every
+	// assistant record in the window: 1.5 GB of allocation and two
+	// seconds per usage call on a 1,200-session corpus. The view serves
+	// the materialised twin and decodes only for rows the entries.usage
+	// backfill has not reached.
+	sqlMessageID    = `e.message_id`
+	sqlRequestID    = `e.request_id`
+	sqlCacheWrite5m = `e.cache_write_5m`
+	sqlCacheWrite1h = `e.cache_write_1h`
 )
 
 // effectiveDedupKey reads the configured deduplication key, falling back
@@ -1397,6 +1405,28 @@ func New(dbPath, projectDir string) (*Store, error) {
 			}
 			s.codec.entriesPackable.Store(true)
 			slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
+			return nil
+		},
+	})
+
+	// 🎯T165: fill the usage twins on historical rows. It provides no
+	// capability because nothing has to wait for it — entries_v answers
+	// correctly either way, just slower for rows it has not reached —
+	// and it runs after the fields pass so the two are not competing
+	// for the single writer.
+	s.startPhase(bgCtx, phase{
+		name:     "entries-usage-materialise",
+		requires: []Capability{CapEntriesMaterialised},
+		run: func(ctx context.Context) error {
+			outstanding, err := s.EntriesUsageOutstanding()
+			if err != nil || outstanding == 0 {
+				return err
+			}
+			res, err := s.MaterialiseEntriesUsage(ctx)
+			if err != nil {
+				return err
+			}
+			slog.Info("entries usage twins materialised", "rows", res.Rows, "updated", res.Compressed)
 			return nil
 		},
 	})
@@ -3723,7 +3753,8 @@ const (
 		 uuid_m, model_m, stop_reason_m, input_tokens_m, output_tokens_m,
 		 cache_read_tokens_m, cache_creation_tokens_m, agent_id_m, version_m, slug_m,
 		 is_sidechain_m, data_type_m, data_command_m, data_hook_event_m,
-		 top_tool_use_id_m, parent_tool_use_id_m)
+		 top_tool_use_id_m, parent_tool_use_id_m,
+		 message_id_m, request_id_m, cache_write_5m_m, cache_write_1h_m)
 		VALUES (?1, ?2, ?3, ?4, CASE WHEN ?6 IS NULL THEN jsonb(?5) END, ?6,
 		 COALESCE(?5->>'$.uuid', ?5->>'$.messageId'),
 		 ?5->>'$.message.model',
@@ -3740,7 +3771,11 @@ const (
 		 ?5->>'$.data.command',
 		 ?5->>'$.data.hookEvent',
 		 ?5->>'$.toolUseID',
-		 ?5->>'$.parentToolUseID')`
+		 ?5->>'$.parentToolUseID',
+		 COALESCE(?5->>'$.message.id', ''),
+		 COALESCE(?5->>'$.requestId', ''),
+		 COALESCE(json_extract(?5, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'), 0),
+		 COALESCE(json_extract(?5, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'), 0))`
 	// entryInsertLegacySQL is used while a deferred schema upgrade has
 	// not yet added the *_m columns (🎯T114.1 serves on the old schema).
 	entryInsertLegacySQL = `INSERT OR IGNORE INTO entries

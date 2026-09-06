@@ -248,7 +248,20 @@ CREATE TABLE entries (
 			-- 🎯T152: zstd frame of the JSON line when compressed; raw is
 			-- then NULL (an empty string would make the generated columns
 			-- raise "malformed JSON"). Read through mnemo_raw(raw, raw_z).
-			raw_z BLOB
+			raw_z BLOB,
+			-- 🎯T165: the four fields the usage rollups need that had no
+			-- twin, so every usage call decoded the compressed JSON of
+			-- every assistant row in its window four times over. Written
+			-- at ingest, backfilled by the entries.usage pass. NULL means
+			-- not yet materialised; an absent value is stored as '' / 0,
+			-- which is what every reader COALESCEd it to anyway, so the
+			-- view can fall back to the decode only for NULL. Read them
+			-- through entries_v (message_id, request_id, cache_write_5m,
+			-- cache_write_1h). Appended after raw_z for ADD COLUMN order.
+			message_id_m TEXT,
+			request_id_m TEXT,
+			cache_write_5m_m INTEGER,
+			cache_write_1h_m INTEGER
 		);
 
 CREATE TABLE git_commits (
@@ -953,6 +966,13 @@ CREATE INDEX idx_entries_assistant_usage_m
 			ON entries(timestamp, model_m, input_tokens_m, output_tokens_m, cache_read_tokens_m, cache_creation_tokens_m, session_id)
 			WHERE type = 'assistant';
 CREATE INDEX idx_entries_addenda_m ON entries(session_id, id, output_tokens_m, cache_creation_tokens_m) WHERE type = 'assistant';
+
+-- 🎯T165: the work queue for the entries.usage backfill. Holds exactly
+-- the assistant rows whose usage twins are still NULL, so the pass can
+-- find its next batch, and the auto-backfill worker can count what is
+-- left, without sweeping the table. Empties as the pass completes and
+-- costs nothing at ingest, which writes the twins.
+CREATE INDEX idx_entries_usage_unmaterialised ON entries(id) WHERE type = 'assistant' AND message_id_m IS NULL;
 CREATE INDEX idx_entries_data_hook_event_m ON entries(data_hook_event_m) WHERE data_hook_event_m IS NOT NULL;
 CREATE INDEX idx_entries_data_type_m ON entries(data_type_m) WHERE data_type_m IS NOT NULL;
 CREATE INDEX idx_entries_model_m ON entries(model_m) WHERE model_m IS NOT NULL;
@@ -1333,7 +1353,11 @@ CREATE TRIGGER entries_materialise AFTER INSERT ON entries
 				data_command_m = data_command,
 				data_hook_event_m = data_hook_event,
 				top_tool_use_id_m = top_tool_use_id,
-				parent_tool_use_id_m = parent_tool_use_id
+				parent_tool_use_id_m = parent_tool_use_id,
+				message_id_m = COALESCE(raw->>'$.message.id', ''),
+				request_id_m = COALESCE(raw->>'$.requestId', ''),
+				cache_write_5m_m = COALESCE(json_extract(raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'), 0),
+				cache_write_1h_m = COALESCE(json_extract(raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'), 0)
 			WHERE id = new.id;
 		END;
 
@@ -1726,5 +1750,9 @@ CREATE VIEW entries_v AS
 			COALESCE(data_command_m, data_command) AS data_command,
 			COALESCE(data_hook_event_m, data_hook_event) AS data_hook_event,
 			COALESCE(top_tool_use_id_m, top_tool_use_id) AS top_tool_use_id,
-			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id
+			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id,
+			COALESCE(message_id_m, mnemo_raw(raw, raw_z)->>'$.message.id') AS message_id,
+			COALESCE(request_id_m, mnemo_raw(raw, raw_z)->>'$.requestId') AS request_id,
+			COALESCE(cache_write_5m_m, json_extract(mnemo_raw(raw, raw_z), '$.message.usage.cache_creation.ephemeral_5m_input_tokens')) AS cache_write_5m,
+			COALESCE(cache_write_1h_m, json_extract(mnemo_raw(raw, raw_z), '$.message.usage.cache_creation.ephemeral_1h_input_tokens')) AS cache_write_1h
 		FROM entries;

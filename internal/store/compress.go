@@ -1062,3 +1062,108 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 		}
 	}
 }
+
+// entriesUsageFamily names the pass that fills the four usage twins on
+// historical entries rows (🎯T165): message_id_m, request_id_m,
+// cache_write_5m_m and cache_write_1h_m.
+//
+// It is not a compression family — nothing is encoded — and unlike
+// entries.fields it keeps no cursor, because it does not need one. Its
+// work queue is the partial index
+// idx_entries_usage_unmaterialised, which holds exactly the assistant
+// rows still missing a twin; ingest writes the twins, so the queue
+// empties and stays empty, and a restored older backup refills it
+// without anybody having to reopen a "done" marker.
+const entriesUsageFamily = "entries.usage"
+
+// entriesUsageSet fills the four twins from the row's JSON line,
+// decoded through mnemo_raw so a compressed row (raw NULL, raw_z set)
+// is filled the same way a plain one is. An absent value is stored as
+// '' or 0 — what every reader COALESCEd it to — so a filled row never
+// needs the decode again, and NULL keeps meaning "not yet filled".
+const entriesUsageSet = `
+	message_id_m = COALESCE(mnemo_raw(raw, raw_z)->>'$.message.id', ''),
+	request_id_m = COALESCE(mnemo_raw(raw, raw_z)->>'$.requestId', ''),
+	cache_write_5m_m = COALESCE(json_extract(mnemo_raw(raw, raw_z),
+		'$.message.usage.cache_creation.ephemeral_5m_input_tokens'), 0),
+	cache_write_1h_m = COALESCE(json_extract(mnemo_raw(raw, raw_z),
+		'$.message.usage.cache_creation.ephemeral_1h_input_tokens'), 0)`
+
+// MaterialiseEntriesUsage drains the usage-twin work queue in id order,
+// batch by batch. Idempotent, resumable, and cheap to call on a store
+// that has nothing to do: the probe is a seek on the partial index.
+//
+// Until it completes, entries_v still answers correctly for the rows it
+// has not reached — the view falls back to decoding the JSON line — so
+// this is a performance pass, not a correctness one. That fallback is
+// also what made it worth writing: on a corpus of any size the decode
+// ran four times per assistant row per usage call.
+func (s *Store) MaterialiseEntriesUsage(ctx context.Context) (BackfillResult, error) {
+	res := BackfillResult{Family: entriesUsageFamily}
+	if !s.CompressionReady() {
+		return res, errors.New("compression schema not ready (deferred upgrade still running?)")
+	}
+	if !s.backfill.start(entriesUsageFamily) {
+		return res, fmt.Errorf("%s: already running", entriesUsageFamily)
+	}
+	err := s.materialiseEntriesUsage(ctx, &res)
+	s.backfill.finish(entriesUsageFamily, err)
+	return res, err
+}
+
+func (s *Store) materialiseEntriesUsage(ctx context.Context, res *BackfillResult) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var lo, hi sql.NullInt64
+		var count int64
+		err := s.readDB.QueryRowContext(ctx, `
+			SELECT MIN(id), MAX(id), COUNT(*) FROM (
+				SELECT id FROM entries
+				WHERE type = 'assistant' AND message_id_m IS NULL
+				ORDER BY id LIMIT ?)`, backfillBatchRows).Scan(&lo, &hi, &count)
+		if err != nil {
+			return err
+		}
+		if !hi.Valid {
+			res.Done = true
+			return nil
+		}
+		r, err := s.writeDB.ExecContext(ctx, `
+			UPDATE entries SET`+entriesUsageSet+`
+			WHERE id BETWEEN ? AND ? AND type = 'assistant' AND message_id_m IS NULL`,
+			lo.Int64, hi.Int64)
+		if err != nil {
+			return err
+		}
+		n, _ := r.RowsAffected()
+		res.Rows += count
+		res.Compressed += n
+		// A batch that changed nothing would loop on the same ids
+		// forever; the queue is defined by the same predicate the UPDATE
+		// clears, so this can only mean the write is not taking effect.
+		if n == 0 {
+			return fmt.Errorf("%s: %d queued rows in [%d,%d] but the fill updated none",
+				entriesUsageFamily, count, lo.Int64, hi.Int64)
+		}
+		if d := s.backfill.getYield(); d > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(d):
+			}
+		}
+	}
+}
+
+// EntriesUsageOutstanding counts assistant rows whose usage twins are
+// still unfilled. It reads the partial index, so it costs nothing on a
+// converged store.
+func (s *Store) EntriesUsageOutstanding() (int64, error) {
+	var n int64
+	err := s.readDB.QueryRow(`
+		SELECT COUNT(*) FROM entries
+		WHERE type = 'assistant' AND message_id_m IS NULL`).Scan(&n)
+	return n, err
+}
