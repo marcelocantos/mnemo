@@ -13,15 +13,19 @@
 // change that earned it.
 //
 // Metrics are compared by kind. Deterministic ones — payload-bytes,
-// selects/op, rows/op, hits/op — must match exactly. Allocation counts
-// get a small tolerance. Timing and bytes-per-op get a wider one, and
-// can be switched off (-timing=false) where the two files came from
-// different machines, since ns/op recorded on one box says nothing
-// about another.
+// selects/op, rows/op, hits/op — must match exactly: they are functions
+// of the corpus and the code, and the corpus is synthetic and fixed.
+// Allocation counts get a small tolerance, timing and bytes-per-op a
+// wider one.
+//
+// -scope exact compares only the first group. That is what a run on a
+// different machine can honestly decide: ns/op recorded on one box says
+// nothing about another, and allocation counts differ between operating
+// systems because the code paths under them do.
 //
 // Usage:
 //
-//	benchgate -base docs/perf/baseline.txt -new new.txt [-timing=false]
+//	benchgate -base docs/perf/baseline.txt -new new.txt [-scope exact]
 //
 // Both files are raw `go test -bench` output. Repeated runs of a
 // benchmark (-count=N) are collapsed to their median per metric first,
@@ -34,6 +38,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -50,8 +55,18 @@ const (
 	allocTolerance  = 0.10
 )
 
+// Values for -scope.
+const (
+	scopeAll   = "all"
+	scopeExact = "exact"
+)
+
 // exactMetrics are locked to the digit. They are functions of the input
-// corpus and the code, never of the machine.
+// corpus and the code, never of the machine — but they are still
+// REPORTED as a per-iteration average, so a background worker's stray
+// read shows up as 19.03 selects rather than 19. Their samples are
+// therefore reduced by minimum and compared floored: noise only ever
+// adds, and it adds a fraction, while a real extra statement adds one.
 var exactMetrics = map[string]bool{
 	"payload-bytes": true,
 	"selects/op":    true,
@@ -111,6 +126,22 @@ func median(xs []float64) float64 {
 	return s[(len(s)-1)/2]
 }
 
+// reduce collapses one metric's repeated runs to the value the gate
+// compares: the floored minimum for an exact metric (see exactMetrics),
+// the median for everything else.
+func reduce(metric string, xs []float64) float64 {
+	if !exactMetrics[metric] {
+		return median(xs)
+	}
+	lo := xs[0]
+	for _, x := range xs[1:] {
+		if x < lo {
+			lo = x
+		}
+	}
+	return math.Floor(lo)
+}
+
 // verdict is one row of the comparison.
 type verdict struct {
 	name, metric string
@@ -121,7 +152,7 @@ type verdict struct {
 
 // compare produces one verdict per (benchmark, metric) in the union of
 // both files.
-func compare(base, got results, timing bool) []verdict {
+func compare(base, got results, exactOnly bool) []verdict {
 	var out []verdict
 	names := map[string]bool{}
 	for n := range base {
@@ -154,10 +185,10 @@ func compare(base, got results, timing bool) []verdict {
 		for _, metric := range metrics {
 			gv, ok := g[metric]
 			if !ok {
-				out = append(out, verdict{name: name, metric: metric, base: median(b[metric]), status: "MISSING"})
+				out = append(out, verdict{name: name, metric: metric, base: reduce(metric, b[metric]), status: "MISSING"})
 				continue
 			}
-			v := verdict{name: name, metric: metric, base: median(b[metric]), got: median(gv)}
+			v := verdict{name: name, metric: metric, base: reduce(metric, b[metric]), got: reduce(metric, gv)}
 			if v.base != 0 {
 				v.delta = (v.got - v.base) / v.base
 			} else if v.got != 0 {
@@ -167,15 +198,14 @@ func compare(base, got results, timing bool) []verdict {
 			switch {
 			case exactMetrics[metric]:
 				tol = 0
-			case timingMetrics[metric]:
-				if !timing {
-					v.status = "skip"
-					out = append(out, v)
-					continue
-				}
+			case !exactOnly && timingMetrics[metric]:
 				tol = timingTolerance
-			default: // allocs/op and anything unknown
+			case !exactOnly: // allocs/op and anything unknown
 				tol = allocTolerance
+			default:
+				v.status = "skip"
+				out = append(out, v)
+				continue
 			}
 			// MB/s runs the other way: more is better.
 			delta := v.delta
@@ -199,7 +229,9 @@ func compare(base, got results, timing bool) []verdict {
 func main() {
 	basePath := flag.String("base", "docs/perf/baseline.txt", "locked baseline (raw go test -bench output)")
 	newPath := flag.String("new", "", "fresh run to compare (raw go test -bench output)")
-	timing := flag.Bool("timing", true, "compare ns/op, B/op and MB/s; disable across machines")
+	scope := flag.String("scope", scopeAll, "which metrics to compare: "+scopeAll+
+		" (every metric) or "+scopeExact+" (only the machine-independent ones, for a run "+
+		"on a different machine than the baseline)")
 	flag.Parse()
 	if *newPath == "" {
 		fmt.Fprintln(os.Stderr, "benchgate: -new is required")
@@ -220,7 +252,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	verdicts := compare(base, got, *timing)
+	if *scope != scopeAll && *scope != scopeExact {
+		fmt.Fprintf(os.Stderr, "benchgate: -scope must be %s or %s\n", scopeAll, scopeExact)
+		os.Exit(2)
+	}
+	verdicts := compare(base, got, *scope == scopeExact)
 	failed := 0
 	w := os.Stdout
 	fmt.Fprintf(w, "%-52s %-14s %14s %14s %8s  %s\n", "benchmark", "metric", "baseline", "now", "delta", "status")

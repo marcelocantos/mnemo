@@ -1079,7 +1079,7 @@ const entriesUsageFamily = "entries.usage"
 // entriesUsageSet fills the four twins from the row's JSON line,
 // decoded through mnemo_raw so a compressed row (raw NULL, raw_z set)
 // is filled the same way a plain one is. An absent value is stored as
-// '' or 0 — what every reader COALESCEd it to — so a filled row never
+// ” or 0 — what every reader COALESCEd it to — so a filled row never
 // needs the decode again, and NULL keeps meaning "not yet filled".
 const entriesUsageSet = `
 	message_id_m = COALESCE(mnemo_raw(raw, raw_z)->>'$.message.id', ''),

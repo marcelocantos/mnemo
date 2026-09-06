@@ -1,0 +1,126 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/marcelocantos/mnemo/internal/store
+cpu: Apple M4 Max
+BenchmarkSearch/messages-16     	      34	  33171290 ns/op	        20.00 hits/op	        19.09 selects/op	 6953959 B/op	   16723 allocs/op
+BenchmarkSearch/messages-16     	      36	  32635804 ns/op	        20.00 hits/op	        19.00 selects/op	  926554 B/op	    5802 allocs/op
+BenchmarkSearch/messages-16     	      36	  32725435 ns/op	        20.00 hits/op	        19.00 selects/op	  921657 B/op	    5801 allocs/op
+BenchmarkSearch/messages-16     	      36	  34678142 ns/op	        20.00 hits/op	        19.00 selects/op	  922128 B/op	    5802 allocs/op
+BenchmarkSearch/messages-16     	      32	  32698284 ns/op	        20.00 hits/op	        19.00 selects/op	  923387 B/op	    5802 allocs/op
+BenchmarkSearch/messages-16     	      36	  35390725 ns/op	        20.00 hits/op	        19.00 selects/op	  931634 B/op	    5802 allocs/op
+BenchmarkSearch/messages-16     	      32	  35465703 ns/op	        20.00 hits/op	        19.00 selects/op	  923057 B/op	    5802 allocs/op
+BenchmarkSearch/messages-16     	      32	  35524389 ns/op	        20.00 hits/op	        19.00 selects/op	  925512 B/op	    5801 allocs/op
+BenchmarkSearch/messages-16     	      33	  37332610 ns/op	        20.00 hits/op	        19.00 selects/op	  928392 B/op	    5803 allocs/op
+BenchmarkSearch/messages-16     	      34	  36021058 ns/op	        20.00 hits/op	        19.00 selects/op	  930378 B/op	    5803 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      34	  34520322 ns/op	         8.000 hits/op	        20.00 selects/op	  398052 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      32	  35893779 ns/op	         8.000 hits/op	        20.00 selects/op	  393717 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      36	  34366442 ns/op	         8.000 hits/op	        20.00 selects/op	  398291 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      36	  32281591 ns/op	         8.000 hits/op	        20.00 selects/op	  395128 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      36	  33252363 ns/op	         8.000 hits/op	        20.00 selects/op	  396851 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      36	  41894125 ns/op	         8.000 hits/op	        20.00 selects/op	  391000 B/op	    3250 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      33	  36404045 ns/op	         8.000 hits/op	        20.00 selects/op	  396081 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      34	  34944288 ns/op	         8.000 hits/op	        20.00 selects/op	  398332 B/op	    3252 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      33	  36981836 ns/op	         8.000 hits/op	        20.00 selects/op	  398386 B/op	    3251 allocs/op
+BenchmarkSearch/messages_repo_filter-16         	      34	  38335782 ns/op	         8.000 hits/op	        20.00 selects/op	  394398 B/op	    3251 allocs/op
+BenchmarkSearch/unified_default-16              	      24	  45939733 ns/op	        20.00 hits/op	        62.00 selects/op	 2662662 B/op	   15583 allocs/op
+BenchmarkSearch/unified_default-16              	      24	  43224826 ns/op	        20.00 hits/op	        62.00 selects/op	 2665177 B/op	   15582 allocs/op
+BenchmarkSearch/unified_default-16              	      20	  50657867 ns/op	        20.00 hits/op	        62.00 selects/op	 2657357 B/op	   15582 allocs/op
+BenchmarkSearch/unified_default-16              	      22	  47455606 ns/op	        20.00 hits/op	        62.00 selects/op	 2655131 B/op	   15582 allocs/op
+BenchmarkSearch/unified_default-16              	      27	  39083105 ns/op	        20.00 hits/op	        62.00 selects/op	 2662635 B/op	   15581 allocs/op
+BenchmarkSearch/unified_default-16              	      30	  48880643 ns/op	        20.00 hits/op	        62.00 selects/op	 2655917 B/op	   15581 allocs/op
+BenchmarkSearch/unified_default-16              	      26	  50654168 ns/op	        20.00 hits/op	        62.00 selects/op	 2659292 B/op	   15582 allocs/op
+BenchmarkSearch/unified_default-16              	      25	  44666042 ns/op	        20.00 hits/op	        62.00 selects/op	 2657360 B/op	   15583 allocs/op
+BenchmarkSearch/unified_default-16              	      28	  38658183 ns/op	        20.00 hits/op	        62.00 selects/op	 2664599 B/op	   15581 allocs/op
+BenchmarkSearch/unified_default-16              	      30	  37956600 ns/op	        20.00 hits/op	        62.00 selects/op	 2659741 B/op	   15581 allocs/op
+BenchmarkSearch/unified_all-16                  	      28	  36490688 ns/op	        74.00 selects/op	 2677734 B/op	   15796 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36171583 ns/op	        74.00 selects/op	 2679850 B/op	   15797 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36243525 ns/op	        74.00 selects/op	 2677603 B/op	   15797 allocs/op
+BenchmarkSearch/unified_all-16                  	      31	  36635098 ns/op	        74.00 selects/op	 2683095 B/op	   15798 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36378461 ns/op	        74.00 selects/op	 2683578 B/op	   15797 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36355770 ns/op	        74.00 selects/op	 2685404 B/op	   15800 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36664599 ns/op	        74.00 selects/op	 2683193 B/op	   15798 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36484362 ns/op	        74.00 selects/op	 2684712 B/op	   15799 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36522794 ns/op	        74.00 selects/op	 2675598 B/op	   15796 allocs/op
+BenchmarkSearch/unified_all-16                  	      32	  36467826 ns/op	        74.00 selects/op	 2681251 B/op	   15798 allocs/op
+BenchmarkRecentActivity/7d-16                   	     890	   1298926 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.003 selects/op	  449120 B/op	    5162 allocs/op
+BenchmarkRecentActivity/7d-16                   	     939	   1256085 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292467 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     942	   1261365 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292463 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     958	   1264390 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292450 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     940	   1281127 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292467 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     949	   1252122 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292455 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     963	   1253781 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292442 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     964	   1249675 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292443 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     969	   1245424 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292436 B/op	    4879 allocs/op
+BenchmarkRecentActivity/7d-16                   	     955	   1253182 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292449 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     940	   1264289 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292465 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     932	   1249029 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292474 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     958	   1251719 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292451 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     939	   1253633 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292468 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     949	   1251280 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292457 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     946	   1248007 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292459 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     936	   1263083 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292472 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     937	   1250120 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292467 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     958	   1264191 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292448 B/op	    4879 allocs/op
+BenchmarkRecentActivity/30d-16                  	     954	   1256256 ns/op	    162391 payload-bytes	       300.0 rows/op	         1.000 selects/op	  292451 B/op	    4879 allocs/op
+BenchmarkUsage/day-16                           	       5	 240054775 ns/op	         2.000 rows/op	         5.000 selects/op	 9353958 B/op	  328697 allocs/op
+BenchmarkUsage/day-16                           	       5	 203216183 ns/op	         2.000 rows/op	         5.000 selects/op	 9354137 B/op	  328699 allocs/op
+BenchmarkUsage/day-16                           	       6	 214642944 ns/op	         2.000 rows/op	         5.000 selects/op	 9354006 B/op	  328697 allocs/op
+BenchmarkUsage/day-16                           	       6	 219633542 ns/op	         2.000 rows/op	         5.000 selects/op	 9353530 B/op	  328696 allocs/op
+BenchmarkUsage/day-16                           	       4	 257926854 ns/op	         2.000 rows/op	         5.000 selects/op	 9354608 B/op	  328700 allocs/op
+BenchmarkUsage/day-16                           	       6	 199276618 ns/op	         2.000 rows/op	         5.000 selects/op	 9353818 B/op	  328698 allocs/op
+BenchmarkUsage/day-16                           	       4	 299841625 ns/op	         2.000 rows/op	         5.000 selects/op	 9354552 B/op	  328699 allocs/op
+BenchmarkUsage/day-16                           	       5	 257683500 ns/op	         2.000 rows/op	         5.000 selects/op	 9353939 B/op	  328697 allocs/op
+BenchmarkUsage/day-16                           	       4	 514405167 ns/op	         2.000 rows/op	         5.000 selects/op	 9354388 B/op	  328698 allocs/op
+BenchmarkUsage/day-16                           	       4	 276719510 ns/op	         2.000 rows/op	         5.000 selects/op	 9355246 B/op	  328701 allocs/op
+BenchmarkUsage/model-16                         	       6	 174970202 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349662 B/op	  328659 allocs/op
+BenchmarkUsage/model-16                         	       6	 181693771 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349793 B/op	  328660 allocs/op
+BenchmarkUsage/model-16                         	       6	 198508306 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349604 B/op	  328658 allocs/op
+BenchmarkUsage/model-16                         	       5	 224285417 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9350179 B/op	  328661 allocs/op
+BenchmarkUsage/model-16                         	       5	 241674483 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9350019 B/op	  328660 allocs/op
+BenchmarkUsage/model-16                         	       4	 250770177 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9350786 B/op	  328663 allocs/op
+BenchmarkUsage/model-16                         	       6	 206744611 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349734 B/op	  328659 allocs/op
+BenchmarkUsage/model-16                         	       6	 187609507 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349684 B/op	  328659 allocs/op
+BenchmarkUsage/model-16                         	       6	 245019680 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349494 B/op	  328657 allocs/op
+BenchmarkUsage/model-16                         	       5	 225290425 ns/op	       850.0 payload-bytes	         1.000 rows/op	         5.000 selects/op	 9349907 B/op	  328659 allocs/op
+BenchmarkUsage/repo-16                          	       4	 263035750 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9706664 B/op	  335538 allocs/op
+BenchmarkUsage/repo-16                          	       4	 281690021 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9705934 B/op	  335536 allocs/op
+BenchmarkUsage/repo-16                          	       4	 256661500 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9706612 B/op	  335538 allocs/op
+BenchmarkUsage/repo-16                          	       6	 224476986 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9679988 B/op	  335537 allocs/op
+BenchmarkUsage/repo-16                          	       5	 250815858 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9690540 B/op	  335539 allocs/op
+BenchmarkUsage/repo-16                          	       4	 348873094 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9706190 B/op	  335538 allocs/op
+BenchmarkUsage/repo-16                          	       6	 192495048 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9679120 B/op	  335533 allocs/op
+BenchmarkUsage/repo-16                          	       6	 225690257 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9679381 B/op	  335535 allocs/op
+BenchmarkUsage/repo-16                          	       6	 214472771 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9679248 B/op	  335534 allocs/op
+BenchmarkUsage/repo-16                          	       3	 440126097 ns/op	     86013 payload-bytes	       300.0 rows/op	         5.000 selects/op	 9733378 B/op	  335542 allocs/op
+BenchmarkUsage/session-16                       	       1	1037229166 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	11333904 B/op	  355129 allocs/op
+BenchmarkUsage/session-16                       	       5	 269304467 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10807273 B/op	  355105 allocs/op
+BenchmarkUsage/session-16                       	       6	 223290778 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10785005 B/op	  355104 allocs/op
+BenchmarkUsage/session-16                       	       6	 227668632 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10784265 B/op	  355101 allocs/op
+BenchmarkUsage/session-16                       	       6	 220776535 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10784425 B/op	  355102 allocs/op
+BenchmarkUsage/session-16                       	       6	 197076097 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10784372 B/op	  355102 allocs/op
+BenchmarkUsage/session-16                       	       6	 187721403 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10784454 B/op	  355102 allocs/op
+BenchmarkUsage/session-16                       	       5	 276113225 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10806766 B/op	  355104 allocs/op
+BenchmarkUsage/session-16                       	       5	 259843942 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10806945 B/op	  355105 allocs/op
+BenchmarkUsage/session-16                       	       6	 240954264 ns/op	    168537 payload-bytes	       500.0 rows/op	         5.000 selects/op	10784573 B/op	  355103 allocs/op
+BenchmarkUsage/block-16                         	       4	 265764990 ns/op	         5.000 rows/op	         3.000 selects/op	24967014 B/op	  540542 allocs/op
+BenchmarkUsage/block-16                         	       6	 214190188 ns/op	         5.000 rows/op	         3.000 selects/op	24965652 B/op	  540540 allocs/op
+BenchmarkUsage/block-16                         	       7	 182202780 ns/op	         5.000 rows/op	         3.000 selects/op	24965253 B/op	  540539 allocs/op
+BenchmarkUsage/block-16                         	       7	 183899690 ns/op	         5.000 rows/op	         3.000 selects/op	24965306 B/op	  540539 allocs/op
+BenchmarkUsage/block-16                         	       6	 235777708 ns/op	         5.000 rows/op	         3.000 selects/op	24966524 B/op	  540541 allocs/op
+BenchmarkUsage/block-16                         	       6	 198592021 ns/op	         5.000 rows/op	         3.000 selects/op	24965857 B/op	  540542 allocs/op
+BenchmarkUsage/block-16                         	       6	 176113965 ns/op	         5.000 rows/op	         3.000 selects/op	24965702 B/op	  540540 allocs/op
+BenchmarkUsage/block-16                         	       7	 170837327 ns/op	         5.000 rows/op	         3.000 selects/op	24965677 B/op	  540540 allocs/op
+BenchmarkUsage/block-16                         	       7	 209881060 ns/op	         5.000 rows/op	         3.000 selects/op	24965269 B/op	  540539 allocs/op
+BenchmarkUsage/block-16                         	       6	 394686264 ns/op	         5.000 rows/op	         3.000 selects/op	24966330 B/op	  540543 allocs/op
+BenchmarkIngestTranscript-16                    	      98	  26279091 ns/op	   2.61 MB/s	 9018547 B/op	   17961 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  20578031 ns/op	   3.34 MB/s	 8976942 B/op	   17931 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  17471361 ns/op	   3.93 MB/s	 8894001 B/op	   17737 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  14754533 ns/op	   4.66 MB/s	 9024574 B/op	   17983 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  10949072 ns/op	   6.28 MB/s	 9063212 B/op	   18031 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  14151608 ns/op	   4.86 MB/s	 9149885 B/op	   18238 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  31111339 ns/op	   2.21 MB/s	 9172658 B/op	   18367 allocs/op
+BenchmarkIngestTranscript-16                    	      97	  13530114 ns/op	   5.08 MB/s	 8838332 B/op	   17634 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  13840095 ns/op	   4.97 MB/s	 9066676 B/op	   18071 allocs/op
+BenchmarkIngestTranscript-16                    	     100	  21025900 ns/op	   3.27 MB/s	 8389868 B/op	   16887 allocs/op
+PASS
+ok  	github.com/marcelocantos/mnemo/internal/store	246.833s

@@ -26,7 +26,11 @@ import (
 //     the N+1 detector.
 //   - payload-bytes: size of the tool's indented-JSON answer, where the
 //     benchmark stands in for a tool. This is what an agent's context
-//     pays for.
+//     pays for. Only the aggregating tools report it: a search answer is
+//     NOT byte-stable between processes, because message ids depend on
+//     the order sixteen ingest workers happened to write 1,200 files,
+//     and a tie in BM25 rank then breaks differently. The hit COUNT is
+//     stable, and that is what the search benchmarks lock.
 //   - hits/op or rows/op: how much the call returned, so a speed-up
 //     that came from returning less is visible as such.
 
@@ -77,7 +81,7 @@ func BenchmarkSearch(b *testing.B) {
 	b.Run("unified_default", func(b *testing.B) {
 		b.ReportAllocs()
 		before := store.ReadSelectCount()
-		var hits, bytes int
+		var hits int
 		opts := store.UnifiedOpts{
 			Limit: perfSearchLimit, SessionType: "interactive",
 			ContextBefore: perfContext, ContextAfter: perfContext, SubstantiveOnly: true,
@@ -88,13 +92,9 @@ func BenchmarkSearch(b *testing.B) {
 				b.Fatal(err)
 			}
 			hits = len(res.Hits)
-			if i == 0 {
-				bytes = perfPayloadBytes(b, res)
-			}
 		}
 		perfSelects(b, before)
 		b.ReportMetric(float64(hits), "hits/op")
-		b.ReportMetric(float64(bytes), "payload-bytes")
 	})
 
 	b.Run("unified_all", func(b *testing.B) {
@@ -137,6 +137,13 @@ func BenchmarkRecentActivity(b *testing.B) {
 	}
 }
 
+// timeBucketedUsage names the groupings whose answer depends on the wall
+// clock: their period buckets, and therefore the digits of each bucket's
+// summed cost, shift as the corpus ages relative to now. Their payload
+// size is not stable between runs, so they report rows and statements
+// and leave payload-bytes to the groupings that are stable.
+var timeBucketedUsage = map[string]bool{"day": true, "block": true}
+
 func BenchmarkUsage(b *testing.B) {
 	s := newPerfStore(b, perfBenchShape)
 	for _, groupBy := range []string{"day", "model", "repo", "session", "block"} {
@@ -156,7 +163,9 @@ func BenchmarkUsage(b *testing.B) {
 			}
 			perfSelects(b, before)
 			b.ReportMetric(float64(rows), "rows/op")
-			b.ReportMetric(float64(bytes), "payload-bytes")
+			if !timeBucketedUsage[groupBy] {
+				b.ReportMetric(float64(bytes), "payload-bytes")
+			}
 		})
 	}
 }

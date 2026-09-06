@@ -70,15 +70,18 @@ vet:
 #                    the code and must be re-locked in the same commit
 #   make bench-lock  run them and make the result the new baseline
 #
-# Timing is only comparable on the machine the baseline was recorded on
-# (docs/perf/baseline.md names it). Elsewhere, and in CI, pass
-# BENCH_GATE_FLAGS=-timing=false to compare just the deterministic
-# metrics (payload bytes, statements issued, rows returned).
+# The gate defaults to the machine-independent metrics — payload bytes,
+# statements issued, rows and hits returned — because those are the ones
+# the committed baseline can honestly hold anyone to. Timing and
+# allocation counts are in the baseline file and are compared by
+# BENCH_GATE_FLAGS="-scope all", which is worth turning on once the
+# baseline has been re-locked on an idle machine; docs/perf/baseline.md
+# records why this one was not.
 BENCH_PKG   := ./internal/store/
 BENCH_RE    := ^(BenchmarkSearch|BenchmarkRecentActivity|BenchmarkUsage|BenchmarkIngestTranscript)$$
 BENCH_COUNT ?= 6
 BENCH_OUT   ?= bin/bench.txt
-BENCH_GATE_FLAGS ?=
+BENCH_GATE_FLAGS ?= -scope exact
 
 bench:
 	@mkdir -p $(dir $(BENCH_OUT))

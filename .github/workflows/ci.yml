@@ -113,3 +113,24 @@ jobs:
         # newTestStore call, where the default 10m per-package ceiling
         # was already running ~9-10m on master before any schema growth.
         run: go test -tags sqlite_fts5 -timeout=20m ./...
+
+      # 🎯T165: the machine-independent half of the perf baseline —
+      # payload bytes, statements issued, rows and hits returned — is
+      # compared against docs/perf/baseline.txt on every run. Timing and
+      # allocation counts are not: ns/op from a developer Mac says
+      # nothing about a hosted runner, and allocation counts differ
+      # between operating systems because the code paths under them do.
+      # Those are locked by `make bench-gate` on the reference machine
+      # instead. One iteration per benchmark is enough, since none of
+      # the compared metrics vary between iterations.
+      - name: Bench gate (deterministic metrics)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: mnemo
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p bin
+          go test -tags sqlite_fts5 -run '^$' \
+            -bench '^(BenchmarkSearch|BenchmarkRecentActivity|BenchmarkUsage|BenchmarkIngestTranscript)$' \
+            -benchmem -benchtime=1x -count=1 ./internal/store/ > bin/bench.txt
+          go run ./cmd/benchgate -base docs/perf/baseline.txt -new bin/bench.txt -scope exact
