@@ -4511,6 +4511,144 @@ func (s *Store) ingestJSONLPath(path string) {
 	}
 }
 
+// ftsHit is one row of a phase-1 FTS scan: the message rowid and its
+// BM25 rank, in rank order.
+type ftsHit struct {
+	rowid int
+	rank  float64
+}
+
+// searchSnippetCap is how much of a matched message body a search hit
+// carries. It is a preview, not the message: the reader follows up with
+// mnemo_read_session when they want the rest.
+const searchSnippetCap = 500
+
+// truncateSnippet caps s at searchSnippetCap, marking that it was cut.
+func truncateSnippet(s string) string {
+	const ellipsis = "..."
+	if len(s) <= searchSnippetCap {
+		return s
+	}
+	return s[:searchSnippetCap-len(ellipsis)] + ellipsis
+}
+
+// eligibleHits returns the first `limit` hits whose message passes the
+// session-type and repo filters, in the rank order it was given
+// (🎯T165).
+//
+// Both filters are properties of the hit's session, and both are
+// evaluated by SQLite in a single statement over the whole batch —
+// where they used to be a QueryRow per hit. EXISTS rather than a JOIN
+// because session_meta has one row per session but a JOIN would still
+// duplicate a hit if that ever stopped holding.
+//
+// An unfiltered search needs no statement at all: every hit is
+// eligible, and only the first `limit` of them are ever fetched.
+func (s *Store) eligibleHits(hits []ftsHit, sessionType, repoFilter string, limit int) ([]ftsHit, error) {
+	needSessionFilter := sessionType != "all"
+	needRepoFilter := repoFilter != ""
+	if !needSessionFilter && !needRepoFilter {
+		if len(hits) > limit {
+			hits = hits[:limit]
+		}
+		return hits, nil
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+
+	args := make([]any, 0, len(hits)+3)
+	for _, h := range hits {
+		args = append(args, h.rowid)
+	}
+	q := `SELECT m.id FROM messages m WHERE m.id IN (` + placeholders(len(hits)) + `)`
+	if needSessionFilter {
+		q += ` AND EXISTS (SELECT 1 FROM session_summary ss
+			WHERE ss.session_id = m.session_id AND ss.session_type = ?)`
+		args = append(args, sessionType)
+	}
+	if needRepoFilter {
+		q += ` AND EXISTS (SELECT 1 FROM session_meta sm
+			WHERE sm.session_id = m.session_id AND (sm.cwd LIKE ? OR sm.repo LIKE ?))`
+		pattern := "%" + repoFilter + "%"
+		args = append(args, pattern, pattern)
+	}
+
+	rows, err := s.readDB.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pass := make(map[int]bool, len(hits))
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		pass[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]ftsHit, 0, limit)
+	for _, h := range hits {
+		if !pass[h.rowid] {
+			continue
+		}
+		out = append(out, h)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// fetchSearchRows loads the message rows behind a batch of hits in one
+// statement and returns them in the hits' order, carrying each hit's
+// rank (🎯T165). A hit whose message row has since vanished is dropped,
+// which is what the per-hit loop's scan error did.
+func (s *Store) fetchSearchRows(hits []ftsHit) ([]SearchResult, error) {
+	if len(hits) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(hits))
+	for i, h := range hits {
+		args[i] = h.rowid
+	}
+	rows, err := s.readDB.Query(`
+		SELECT m.id, m.session_id, m.project, m.role, mnemo_text(m.text, m.text_z), m.timestamp
+		FROM messages m
+		WHERE m.id IN (`+placeholders(len(hits))+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byID := make(map[int]SearchResult, len(hits))
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.MessageID, &r.SessionID, &r.Project, &r.Role, &r.Text, &r.Timestamp); err != nil {
+			return nil, err
+		}
+		r.Text = truncateSnippet(r.Text)
+		byID[r.MessageID] = r
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	results := make([]SearchResult, 0, len(hits))
+	for _, h := range hits {
+		r, ok := byID[h.rowid]
+		if !ok {
+			continue
+		}
+		r.Rank = h.rank
+		results = append(results, r)
+	}
+	return results, nil
+}
+
 // Search performs a full-text search and returns matching messages
 // with optional surrounding context messages.
 func (s *Store) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]SearchResult, error) {
@@ -4548,10 +4686,6 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		return nil, err
 	}
 
-	type ftsHit struct {
-		rowid int
-		rank  float64
-	}
 	var hits []ftsHit
 	for ftsRows.Next() {
 		var h ftsHit
@@ -4562,48 +4696,25 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	}
 	ftsRows.Close()
 
-	// Phase 2: enrich hits with message data and apply filters.
-	var results []SearchResult
-	for _, h := range hits {
-		if len(results) >= limit {
-			break
-		}
-
-		row := s.readDB.QueryRow(`
-			SELECT m.id, m.session_id, m.project, m.role, mnemo_text(m.text, m.text_z), m.timestamp
-			FROM messages m
-			WHERE m.id = ?
-		`, h.rowid)
-
-		var r SearchResult
-		if err := row.Scan(&r.MessageID, &r.SessionID, &r.Project, &r.Role, &r.Text, &r.Timestamp); err != nil {
-			continue
-		}
-		r.Rank = h.rank
-
-		// Apply session type filter.
-		if needSessionFilter {
-			var st string
-			err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", r.SessionID).Scan(&st)
-			if err != nil || st != sessionType {
-				continue
-			}
-		}
-
-		// Apply repo filter.
-		if needRepoFilter {
-			var count int
-			pattern := "%" + repoFilter + "%"
-			err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", r.SessionID, pattern, pattern).Scan(&count)
-			if err != nil || count == 0 {
-				continue
-			}
-		}
-
-		if len(r.Text) > 500 {
-			r.Text = r.Text[:497] + "..."
-		}
-		results = append(results, r)
+	// Phase 2: enrich the hits with message data, filters applied.
+	//
+	// 🎯T165: this used to issue one QueryRow per hit for the message
+	// row, one more for the session type, and one more for the repo
+	// match — up to three statements per over-fetched hit, so a
+	// repo-filtered search over 200 FTS hits prepared and ran 841
+	// statements to return eight results. It is now two: SQL decides
+	// which hits pass (one statement, both filters as EXISTS), and the
+	// surviving top-`limit` rows are fetched together. The per-hit work
+	// was never the bulk of search time — the FTS scan is — but every
+	// one of those statements took the read pool's lock, which is what
+	// makes a hot tool interfere with the rest of the daemon.
+	eligible, err := s.eligibleHits(hits, sessionType, repoFilter, limit)
+	if err != nil {
+		return nil, err
+	}
+	results, err := s.fetchSearchRows(eligible)
+	if err != nil {
+		return nil, err
 	}
 
 	// Phase 2.5 (🎯T72): compaction summaries — the dense, durable layer.
@@ -4615,14 +4726,29 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	type matchedSpan struct{ from, to int }
 	coveredBy := map[string][]matchedSpan{}
 	var compactionResults []SearchResult
-	compRows, compErr := s.readDB.Query(`
+	// The same two session filters as phase 2, and for the same reason
+	// (🎯T165) they are conditions on this statement rather than a
+	// QueryRow per compaction row.
+	compQuery := `
 		SELECT c.id, c.session_id, c.summary, c.entry_id_from, c.entry_id_to, f.rank
 		FROM compactions c
 		JOIN compactions_fts f ON f.rowid = c.id
-		WHERE compactions_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?
-	`, ftsQuery, fetchLimit)
+		WHERE compactions_fts MATCH ?`
+	compArgs := []any{ftsQuery}
+	if needSessionFilter {
+		compQuery += ` AND EXISTS (SELECT 1 FROM session_summary ss
+			WHERE ss.session_id = c.session_id AND ss.session_type = ?)`
+		compArgs = append(compArgs, sessionType)
+	}
+	if needRepoFilter {
+		compQuery += ` AND EXISTS (SELECT 1 FROM session_meta sm
+			WHERE sm.session_id = c.session_id AND (sm.cwd LIKE ? OR sm.repo LIKE ?))`
+		pattern := "%" + repoFilter + "%"
+		compArgs = append(compArgs, pattern, pattern)
+	}
+	compQuery += ` ORDER BY rank LIMIT ?`
+	compArgs = append(compArgs, fetchLimit)
+	compRows, compErr := s.readDB.Query(compQuery, compArgs...)
 	if compErr != nil {
 		slog.Warn("compaction FTS query failed", "err", compErr)
 	} else {
@@ -4634,23 +4760,8 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 			if err := compRows.Scan(&id, &sid, &summary, &from, &to, &rank); err != nil {
 				continue
 			}
-			if needSessionFilter {
-				var st string
-				if err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", sid).Scan(&st); err != nil || st != sessionType {
-					continue
-				}
-			}
-			if needRepoFilter {
-				var cnt int
-				pattern := "%" + repoFilter + "%"
-				if err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", sid, pattern, pattern).Scan(&cnt); err != nil || cnt == 0 {
-					continue
-				}
-			}
 			coveredBy[sid] = append(coveredBy[sid], matchedSpan{from: from, to: to})
-			if len(summary) > 500 {
-				summary = summary[:497] + "..."
-			}
+			summary = truncateSnippet(summary)
 			compactionResults = append(compactionResults, SearchResult{
 				MessageID: int(id), // compaction id; Role distinguishes it
 				SessionID: sid,
@@ -4704,9 +4815,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 			if err := vaultRows.Scan(&docID, &filePath, &content, &rank); err != nil {
 				continue
 			}
-			if len(content) > 500 {
-				content = content[:497] + "..."
-			}
+			content = truncateSnippet(content)
 			results = append(results, SearchResult{
 				MessageID: int(-docID), // negative distinguishes from message row IDs
 				SessionID: filePath,
@@ -4738,17 +4847,26 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	// Fetch context messages for each transcript hit (skip vault and
 	// compaction entries — neither has surrounding message context).
 	if contextBefore > 0 || contextAfter > 0 {
+		var transcript []SearchResult
+		for _, r := range results {
+			if r.Role != "vault" && r.Role != "compaction" {
+				transcript = append(transcript, r)
+			}
+		}
+		var beforeCtx, afterCtx map[int][]ContextMessage
+		if contextBefore > 0 {
+			beforeCtx = s.fetchContextBatch(transcript, contextBefore, true, substantiveOnly)
+		}
+		if contextAfter > 0 {
+			afterCtx = s.fetchContextBatch(transcript, contextAfter, false, substantiveOnly)
+		}
 		for i := range results {
 			r := &results[i]
 			if r.Role == "vault" || r.Role == "compaction" {
 				continue
 			}
-			if contextBefore > 0 {
-				r.Before = s.fetchContext(r.SessionID, r.MessageID, contextBefore, true, substantiveOnly)
-			}
-			if contextAfter > 0 {
-				r.After = s.fetchContext(r.SessionID, r.MessageID, contextAfter, false, substantiveOnly)
-			}
+			r.Before = beforeCtx[r.MessageID]
+			r.After = afterCtx[r.MessageID]
 		}
 	}
 
@@ -4812,6 +4930,72 @@ func mergeBySourcePercentile(results []SearchResult) []SearchResult {
 		sorted[i] = results[idx]
 	}
 	return sorted
+}
+
+// fetchContextBatch retrieves the context messages on one side of every
+// search hit in a SINGLE statement (🎯T165), replacing the two
+// statements per hit that fetchContext cost — forty of them on a
+// default twenty-hit search, the largest N+1 left on the search path
+// once the enrichment loop was batched.
+//
+// ROW_NUMBER() over a partition per hit does what the per-hit LIMIT did:
+// SQLite walks each hit's session on the (session_id, id) index in the
+// right direction and the outer rn filter keeps the first `count` rows
+// of each partition. Text is decompressed only for the rows that
+// survive that filter, which is why the ranking CTE carries ids alone
+// and the outer query joins back to messages for the bodies.
+//
+// The result is keyed by hit message id. A hit with no context on that
+// side is simply absent.
+func (s *Store) fetchContextBatch(hits []SearchResult, count int, before, substantiveOnly bool) map[int][]ContextMessage {
+	if len(hits) == 0 || count <= 0 {
+		return nil
+	}
+	args := make([]any, 0, 2*len(hits)+1)
+	values := make([]string, 0, len(hits))
+	for _, h := range hits {
+		values = append(values, "(?,?)")
+		args = append(args, h.SessionID, h.MessageID)
+	}
+	filter := ""
+	if substantiveOnly {
+		filter = " AND m.is_noise = 0 AND m.role IN ('user', 'assistant')"
+	}
+	cmp, dir := "<", "DESC"
+	if !before {
+		cmp, dir = ">", "ASC"
+	}
+	args = append(args, count)
+	q := `
+		WITH hit(session_id, mid) AS (VALUES ` + strings.Join(values, ",") + `),
+		ctx AS (
+			SELECT h.mid AS mid, m.id AS id,
+			       ROW_NUMBER() OVER (PARTITION BY h.mid ORDER BY m.id ` + dir + `) AS rn
+			FROM hit h
+			JOIN messages m ON m.session_id = h.session_id AND m.id ` + cmp + ` h.mid` + filter + `
+		)
+		SELECT c.mid, m.id, m.role, mnemo_text(m.text, m.text_z), m.timestamp
+		FROM ctx c JOIN messages m ON m.id = c.id
+		WHERE c.rn <= ?
+		ORDER BY c.mid, m.id`
+
+	rows, err := s.readDB.Query(q, args...)
+	if err != nil {
+		slog.Warn("batched search context query failed", "err", err)
+		return nil
+	}
+	defer rows.Close()
+	out := map[int][]ContextMessage{}
+	for rows.Next() {
+		var mid int
+		var m ContextMessage
+		if err := rows.Scan(&mid, &m.ID, &m.Role, &m.Text, &m.Timestamp); err != nil {
+			continue
+		}
+		m.Text = truncateSnippet(m.Text)
+		out[mid] = append(out[mid], m)
+	}
+	return out
 }
 
 // fetchContext retrieves messages before or after a given message ID within the same session.

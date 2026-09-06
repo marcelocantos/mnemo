@@ -26,8 +26,8 @@ import (
 // issue reads of their own, so each measurement is the minimum of a few
 // runs — noise only ever adds.
 const (
-	ratchetSearchMessagesSelects  = 129
-	ratchetSearchUnifiedSelects   = 352
+	ratchetSearchMessagesSelects  = 19
+	ratchetSearchUnifiedSelects   = 62
 	ratchetRecentActivitySelects  = 1
 	ratchetUsageRepoSelects       = 5
 	ratchetRecentActivityBytes30d = 36732
