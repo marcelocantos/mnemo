@@ -1,0 +1,49 @@
+{
+  "targets": [
+    "T148",
+    "T69"
+  ],
+  "targets_active": [
+    "T148",
+    "T69"
+  ],
+  "targets_progressed": {
+    "T69": "audit in progress — verified NOTICE, LICENSE.zstd, UPSTREAM.md for vendored zstd v1.5.7; confirmed dual BSD/GPLv2 headers present but only BSD text vendored, no GPL-only files found; cross-checked go.mod build closure against NOTICE, found aws-sdk-go-v2, smithy-go, coder/websocket, klauspost/compress (Apache-2.0/MIT/BSD-ish, all compatible) not yet reconciled against root NOTICE list"
+  },
+  "decisions": [],
+  "files": [
+    "internal/zstdc/LICENSE.zstd",
+    "internal/zstdc/UPSTREAM.md",
+    "internal/zstdc/zstd.c",
+    "internal/zstdc/zstd.h",
+    "internal/zstdc/zstd_errors.h",
+    "internal/zstdc/bridge.c",
+    "internal/zstdc/bridge.h",
+    "NOTICE",
+    "LICENSE",
+    "go.mod",
+    "internal/store/ocr_darwin.h",
+    "ui/dashboard.html",
+    "main.go"
+  ],
+  "open_threads": [
+    "Root NOTICE's dependency list predates recent additions to go.mod (aws-sdk-go-v2, smithy-go, coder/websocket, klauspost/compress, fsnotify/fsevents, google/jsonschema-go, dop251/goja, yosida95/uritemplate, go-sourcemap/sourcemap, spf13/cast, dlclark/regexp2, google/pprof, google/uuid) — needs full reconciliation against NOTICE's stale list before the licence-audit digest can be finalised",
+    "Still need to check go:embed'd assets (agents-guide.md, dashboard.html, schema.sql) and examples/plugins/echo-check/main.js, scripts/field-census.py, tools/embed-clip/embed.py for embedded third-party content/licensing",
+    "Final concise digest report (blockers, gaps) not yet written — investigation was still gathering evidence when span ends"
+  ],
+  "summary": "Read-only licence/attribution audit of the mnemo repo ahead of a release: verified the vendored zstd v1.5.7 amalgamation (internal/zstdc/) carries correct BSD-3-Clause licence text, UPSTREAM.md, and NOTICE attribution, and confirmed no GPLv2-only files were pulled in despite zstd's dual-licence headers; then began cross-referencing the Go module build closure (via `go list -deps`) against the root NOTICE file, turning up several dependencies (aws-sdk-go-v2, smithy-go, coder/websocket, klauspost/compress, others) not yet reconciled against NOTICE's listed set.",
+  "spans": [
+    {
+      "from": 3634741,
+      "to": 3634816,
+      "label": "zstd vendoring GPL/BSD audit",
+      "summary": "Investigated internal/zstdc/ vendored zstd v1.5.7: confirmed LICENSE.zstd, UPSTREAM.md, and root NOTICE all correctly document the BSD-3-Clause option of zstd's dual BSD/GPLv2 licensing, and grepped all vendored C/H files for GPL markers — found only the expected dual-license header boilerplate (68 occurrences, all referencing both options), no GPL-only files or COPYING vendored, ruling out the release-blocker scenario."
+    },
+    {
+      "from": 3635076,
+      "to": 3635225,
+      "label": "go module closure vs NOTICE reconciliation",
+      "summary": "Searched for go:embed'd assets and non-Go source files (found ocr_darwin.h properly SPDX-tagged Apache-2.0, dashboard.html with no bundled third-party JS), then worked around go.work interference to list the full build-time module dependency closure via `GOWORK=off go list -deps`, and began checking licences of modules present in go.mod but not yet listed in NOTICE (aws-sdk-go-v2/smithy-go as Apache-2.0 with NOTICE files, coder/websocket permissive, klauspost/compress BSD-style with an embedded Apache-2.0 subsection for gzhttp/*) — reconciliation against NOTICE was incomplete when the span ends."
+    }
+  ]
+}

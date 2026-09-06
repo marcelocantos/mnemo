@@ -1,0 +1,40 @@
+{
+  "targets": [
+    "T153"
+  ],
+  "targets_active": [
+    "T153"
+  ],
+  "targets_progressed": {
+    "T153": "context refreshed — inventoried background goroutines in store.New/registry.startWorkers to locate unwaited background DB writers relevant to watch-telemetry/mutex-vs-subprocess concerns"
+  },
+  "targets_next": "T153",
+  "decisions": [],
+  "files": [
+    "internal/store/store.go",
+    "internal/store/compress.go",
+    "internal/store/images.go",
+    "internal/store/reconciler.go",
+    "internal/store/reconciler_drive.go",
+    "internal/store/wal.go",
+    "internal/store/pricing.go",
+    "internal/store/image_embeddings.go",
+    "internal/store/image_describer.go",
+    "internal/store/image_ocr.go",
+    "internal/registry/registry.go",
+    "main.go"
+  ],
+  "open_threads": [
+    "Full inventory of background goroutines (file:line, DB-write status, context cancellation, waitability) not yet completed — request covers internal/store, internal/registry, internal/compact, internal/api, main.go and analysis was cut off mid-way through internal/store/images.go/image_describer.go/image_ocr.go/image_embeddings.go review",
+    "Need to identify specifically which background writers have no completion signal (fire-and-forget) — several candidates seen so far: go backfillImages(s), go func() image extraction in ingestOne, go processUnembeddedImages(s), go StartWALMaintenance ticker loop, go StartRateCardRefresher ticker loop — none yet conclusively classified as unwaited vs waited"
+  ],
+  "summary": "User requested a read-only inventory of every background goroutine reachable from store.New or the registry's user-store startup path in the mnemo Go repo, specifically to find background DB writers with no completion signal that could race code observing the database. The assistant used grep/sed to enumerate `go func`/`go method(` call sites across internal/store, internal/registry, internal/compact, internal/api, and main.go, then began reading each site's context (store.New's schema-upgrade/codec-boot goroutines, ingest pipeline writer, registry.startWorkers' ingest/watch/compactor/reconciler/backup/vault/streamseg goroutines, WAL maintenance, cost reconciler, rate-card refresher, image backfill/describer/OCR/embeddings) to classify write behavior, context usage, and waitability; the deep-dive was still in progress (images/describer/OCR/embeddings goroutines) when the span ends.",
+  "spans": [
+    {
+      "from": 3611878,
+      "to": 3611940,
+      "label": "mnemo background goroutine inventory",
+      "summary": "Assistant performed a read-only audit of background goroutines started during mnemo daemon startup/store construction, grepping call sites across internal/store, internal/registry, internal/compact, internal/api, main.go, then reading store.New, ingest pipeline, registry.startWorkers, WAL maintenance, cost reconciler, and rate-card refresher code to determine which perform unawaited database writes; task was ongoing (image subsystem goroutines) at span end."
+    }
+  ]
+}

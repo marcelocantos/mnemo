@@ -1,0 +1,39 @@
+{
+  "targets": [
+    "T160"
+  ],
+  "targets_active": [
+    "T160"
+  ],
+  "targets_progressed": {
+    "T160": "documentation audit in progress for v0.93.0 release — reviewing README.md, agents-guide.md, CLAUDE.md, STABILITY.md, docs/*.md for stale stdio/auto-migration/self-install references against commit ab8ee88"
+  },
+  "targets_next": "T160",
+  "decisions": [],
+  "files": [
+    "README.md",
+    "agents-guide.md",
+    "CLAUDE.md",
+    "STABILITY.md",
+    "docs/audit-log.md",
+    "docs/convergence-report.md",
+    "docs/testing.md",
+    "main.go",
+    "diagnose.go",
+    "no_stdio_test.go",
+    "bullseye.yaml"
+  ],
+  "open_threads": [
+    "Documentation audit for v0.93.0 (🎯T160) not yet concluded — assistant was still grepping CLI subcommand table and audit-log.md at end of span; final digest with must-fix vs nice-to-have file:line references not yet produced",
+    "STABILITY.md v0.93.0 note already correctly documents the new behavior; need to confirm no other doc still references the deleted stdinPiped/autoMigrateStdioAndExit/portInUse machinery, agent auto-restart language, or missing bind-error documentation"
+  ],
+  "summary": "Investigation-only audit (no edits) of mnemo's documentation ahead of the v0.93.0 release, checking README.md, agents-guide.md, CLAUDE.md, STABILITY.md, and docs/*.md against commit ab8ee88 (🎯T160), which removed stdio-detection/auto-migration/self-service-start behavior from mnemo. The assistant reviewed the commit diff and grepped docs for stale references to stdio migration, auto-start, restart-your-session language, and port-in-use behavior, finding STABILITY.md already updated correctly; the full digest of must-fix vs nice-to-have findings had not yet been delivered when the span ends.",
+  "spans": [
+    {
+      "from": 3675915,
+      "to": 3675956,
+      "label": "mnemo v0.93.0 docs audit (T160)",
+      "summary": "User requested a read-only documentation audit of mnemo ahead of releasing v0.93.0, centered on commit ab8ee88 which removed stdio auto-migration/self-install behavior; assistant examined the commit diff and cross-referenced README.md, agents-guide.md, CLAUDE.md, STABILITY.md, and docs/*.md for now-false statements about auto-migration, self-starting as a service, and undocumented port-in-use behavior, without reaching a final report."
+    }
+  ]
+}

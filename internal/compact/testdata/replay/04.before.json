@@ -1,0 +1,47 @@
+{
+  "targets": [
+    "T162",
+    "T163"
+  ],
+  "targets_active": [
+    "T162",
+    "T163"
+  ],
+  "targets_progressed": {
+    "T162": "confirmed no binding-layer test gap; coverage lives in internal/store",
+    "T163": "confirmed no binding-layer test gap; coverage lives in internal/compact"
+  },
+  "decisions": [
+    {
+      "what": "mnemo has no language bindings (go/, python/, wasm/) requiring release-audit test coverage",
+      "why": "discover.sh's binding scan and manual glob/grep verification both return zero hits; shim/ is a Swift menubar UI client over HTTP, not a core-logic wrapper, so it's out of scope for the Phase B language-bindings audit item"
+    }
+  ],
+  "files": [
+    "bullseye.yaml",
+    "internal/store/compress.go",
+    "internal/store/compress_auto.go",
+    "internal/store/config.go",
+    "internal/store/compactions.go",
+    "internal/store/compactions_test.go",
+    "internal/compact/watcher.go",
+    "internal/compact/watcher_test.go",
+    "internal/compact/compact.go",
+    "shim/Package.swift",
+    "go.mod",
+    "CLAUDE.md",
+    "docs/design/text-compression.md",
+    "internal/registry/diagchecks.go",
+    "internal/registry/registry.go"
+  ],
+  "summary": "A read-only investigation agent audited the mnemo repo for language bindings ahead of a release, per an explicit no-commit/no-push/no-PR instruction. It ran discover.sh's bindings section and manually verified via glob/grep that no go/, python/, or wasm/ wrapper directories exist, confirmed shim/ (Swift menubar UI) and tools/embed-clip (CLIP subprocess script) are not core-logic bindings, and confirmed T162 (auto compression backfill) and T163 (compactor deferral quarantine) are daemon-internal features already covered by existing Go tests in internal/store and internal/compact. Final digest: none.",
+  "open_threads": [],
+  "spans": [
+    {
+      "from": 3714041,
+      "to": 3714339,
+      "label": "mnemo language-bindings release audit",
+      "summary": "Investigated whether mnemo has any go/python/wasm language-binding modules needing test coverage for the T162/T163 release; found none via discover.sh and manual search, verified shim/ and embed-clip are out of scope, and confirmed T162/T163 coverage lives in core Go tests."
+    }
+  ]
+}

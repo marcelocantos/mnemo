@@ -1,0 +1,26 @@
+{
+  "targets": [],
+  "targets_active": [],
+  "decisions": [],
+  "files": [
+    "main.go",
+    ".github/workflows/release.yml",
+    "hygiene.yaml",
+    "bullseye.yaml",
+    "installer/windows/mnemo.iss",
+    "internal/store/store_test.go",
+    "STABILITY.md"
+  ],
+  "open_threads": [
+    "Audit of mnemo release CLI flags (--version, --help, --help-agent) for v0.94.0 not yet reported back to user — investigation still in progress (build, tag comparison, exit-code checks) with no digest delivered yet"
+  ],
+  "summary": "Investigated mnemo's release CLI-flags audit: located version-string handling in main.go, checked release.yml and installer files for version bump mechanics, built the binary with sqlite_fts5 tag, and tested --version/--help/--help-agent flags and their exit codes against the v0.93.0 tag, without committing or pushing per instructions.",
+  "spans": [
+    {
+      "from": 3714020,
+      "to": 3714266,
+      "label": "mnemo release CLI-flags audit",
+      "summary": "Investigated version string source, --help/--help-agent flag support, and how the version gets updated for the mnemo binary ahead of v0.94.0, via repo greps, file reads, a local build, and CLI flag/exit-code tests; report to the user not yet completed within this span."
+    }
+  ]
+}

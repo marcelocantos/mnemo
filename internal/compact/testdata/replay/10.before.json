@@ -1,0 +1,42 @@
+{
+  "targets": [
+    "T162",
+    "T163"
+  ],
+  "targets_active": [
+    "T162"
+  ],
+  "targets_progressed": {
+    "T162": "context refreshed — found the compression backfill gap is real (compress_gc unreachable except via manual op), no config keys or doctor check exist; goal opened to implement automatic backlog-triggered backfill",
+    "T163": "not yet in bullseye ledger — identified as the compactor-deferral report from owner's Sept 2/3 email, needs to be filed before implementation"
+  },
+  "targets_next": "T163",
+  "decisions": [
+    {
+      "what": "Opened a Cursor CreateGoal spanning both T162 and T163 rather than working them as separate goals",
+      "why": "both stem from the same owner-report investigation session and the agent judged them tractable together: file T163 from the owner's report, then implement until both targets' acceptance criteria hold"
+    }
+  ],
+  "files": [
+    "bullseye.yaml",
+    "internal/compact/compact.go",
+    "internal/compact/watcher.go",
+    "internal/store/compress.go",
+    "internal/registry/diagchecks.go",
+    "docs/design/text-compression.md"
+  ],
+  "open_threads": [
+    "T163 still not filed in bullseye.yaml — needs to be created from the owner's compactor-deferral report once the report content is fully extracted from the Claude session transcript",
+    "T162 implementation (automatic CompressBackfill trigger, resumable/throttled background job, doctor health check, repacked-vs-reclaimed byte reporting) not yet started",
+    "agent was mid-extraction of the owner's original email/report text about compactor deferral counting from the Claude session e76a7e9f-1788-471a-8468-291b6f444072.jsonl when the span ends"
+  ],
+  "summary": "The agent investigated two related targets — T162 (automatic historical-row compression backfill) and T163 (compactor deferrals not counting toward quarantine, not yet filed) — by cross-referencing bullseye.yaml, mnemo transcript search, and a parallel Claude Code session, then opened a Cursor goal covering both before starting to trace the owner's original compactor-deferral report and the current compaction/watcher code.",
+  "spans": [
+    {
+      "from": 3711564,
+      "to": 3711768,
+      "label": "T162/T163 goal setup and investigation",
+      "summary": "Agent looked up T162 (compression backfill) and T163 (compactor deferral, unfiled) across bullseye.yaml, mnemo search, and a parallel Claude session transcript, read relevant compact/compress/diagchecks source files, opened a Cursor CreateGoal spanning both targets, and began extracting the owner's original email report on compactor deferral accounting."
+    }
+  ]
+}

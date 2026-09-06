@@ -1,0 +1,31 @@
+{
+  "targets_active": [
+    "T148",
+    "T156"
+  ],
+  "decisions": [],
+  "files": [
+    "agents-guide.md",
+    "README.md",
+    "CLAUDE.md",
+    "STABILITY.md",
+    "internal/vault/README.md",
+    "docs/testing.md",
+    "docs/audit-log.md",
+    "docs/design/backup-compression.md",
+    "docs/design/vault-library-wing.md",
+    "docs/design/vault-clustering.md",
+    "docs/design/threads-navigator.md",
+    "docs/audit/fable-2026-07.md",
+    "docs/audits/entropy-audit-2026-08-22.md"
+  ],
+  "open_threads": [
+    "Finish reading agents-guide.md sections 200-520 (tool docs, mnemo_status, mnemo_query) for staleness",
+    "Compile final digest of stale gotchas with file:line and recommended edits (not yet produced)",
+    "Check STABILITY.md:41,46,60,66,779 which still reference mnemo_config/mnemo_note as current tools — likely stale for this release",
+    "Check internal/vault/README.md:85-88 and docs/testing.md:145 referencing mnemo_config — likely stale",
+    "Confirm README.md/CLAUDE.md backup-retention and .db.gz references are all updated (README.md:248 already mentions compressed backup; need explicit check for 'seven' vs 'one' snapshot and .zst vs .gz)",
+    "No stale mnemo_note/mnemo_config references found yet in agents-guide.md itself, but README/CLAUDE.md/STABILITY.md sections still pending full staleness verdict"
+  ],
+  "summary": "Read-only investigation of the mnemo repo's agents-guide.md, README.md, and CLAUDE.md ahead of a release, checking MCP install-instruction completeness and hunting for stale gotchas (mnemo_config/mnemo_note removal, backup retention change from seven to one, gzip→zstd backup compression). Confirmed agents-guide.md exists, is referenced by README, and its multi-step install/verification instructions (brew install, brew services start, Claude/Grok registration, generic JSON config, restart note, lsof verification, curl warning) are all present; grep sweeps surfaced likely-stale mnemo_config/mnemo_note/backup-retention references in STABILITY.md, internal/vault/README.md, and docs/testing.md that still need file:line staleness verdicts, and the digest was not yet finalized when the span ended."
+}

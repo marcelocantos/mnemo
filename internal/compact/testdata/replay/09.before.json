@@ -1,0 +1,41 @@
+{
+  "targets": [
+    "T163"
+  ],
+  "targets_active": [
+    "T163"
+  ],
+  "targets_progressed": {
+    "T163": "identified — filed target and read through compaction/quarantine/compress code paths to scope the deferral-accrual fix"
+  },
+  "targets_next": "T163",
+  "decisions": [
+    {
+      "what": "Implement T163's deferral-accrual fix before starting T162's automatic compression backfill",
+      "why": "T163 is the smaller, well-defined change; T162 needs a background worker design"
+    }
+  ],
+  "files": [
+    "internal/store/compactions.go",
+    "internal/store/compactions_test.go",
+    "internal/store/compress.go",
+    "internal/store/compress_test.go",
+    "internal/store/schema.sql",
+    "internal/store/image_embeddings.go",
+    "internal/store/config.go",
+    "internal/store/config_schema.go",
+    "internal/store/startup.go",
+    "internal/registry/registry.go",
+    "internal/registry/budget_diag_test.go",
+    "internal/registry/diagchecks.go",
+    "internal/compact/watcher.go",
+    "internal/compact/watcher_test.go",
+    "internal/tools/consolidated_tools.go",
+    "internal/store/store.go"
+  ],
+  "open_threads": [
+    "T163 fix (deferral outcomes must durably accrue toward quarantine via RecordCompactionFailure) not yet implemented",
+    "T162 automatic compression backfill worker not yet started"
+  ],
+  "summary": "Filed bullseye target T163 (compactor deferrals don't accrue toward quarantine) and did extensive read-only exploration of compaction candidate selection, quarantine/RecordCompactionFailure logic, the watcher's non-payload-deferral test, and the per-row compression (T151/T152) backfill machinery, in preparation for implementing the T163 fix before tackling T162."
+}

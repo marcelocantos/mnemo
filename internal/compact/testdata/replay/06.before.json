@@ -1,0 +1,53 @@
+{
+  "targets": [
+    "T162",
+    "T163",
+    "T160",
+    "T151",
+    "T152",
+    "T156"
+  ],
+  "targets_active": [
+    "T161",
+    "T157"
+  ],
+  "targets_progressed": {},
+  "targets_next": "",
+  "decisions": [
+    {
+      "what": "README ships as-is for release; no blockers found",
+      "why": "essentials, licence link, quick-start, and T160 stdio-purge language all check out against agents-guide.md, CLAUDE.md, and shipped code"
+    }
+  ],
+  "files": [
+    "README.md",
+    "agents-guide.md",
+    "CLAUDE.md",
+    "LICENSE",
+    "internal/store/compress.go",
+    "internal/store/compress_auto.go",
+    "internal/store/compress_auto_test.go",
+    "internal/tools/surface.go",
+    "docs/design/text-compression.md",
+    "bullseye.yaml"
+  ],
+  "open_threads": [
+    "Optional pre-release README addition: a paragraph on T162 automatic compression backfill and mnemo_ops compress.backfill health check, ideally mirrored in agents-guide.md's mnemo_ops section",
+    "agents-guide.md's mnemo_ops description still emphasizes compress_gc without mentioning auto-backfill, risking agents assuming compress_gc is the primary path"
+  ],
+  "summary": "Audited mnemo's README.md against LICENSE, agents-guide.md, CLAUDE.md, and shipped work (T162 automatic compression backfill, T163 compactor deferral/quarantine fix, T160 stdio purge already in v0.93.0) ahead of a release, per explicit no-commit/no-push/no-PR instructions. Found no release blockers — essentials, licence link, quick-start, and MCP tool listing are all present and current — but flagged that the README (and agents-guide.md) don't yet mention the new automatic compression backfill (T162) or its compress.backfill doctor check as an optional freshness fix.",
+  "spans": [
+    {
+      "from": 3714030,
+      "to": 3714371,
+      "label": "mnemo README release audit",
+      "summary": "Investigated README.md, agents-guide.md, CLAUDE.md, LICENSE, and compression source files to check the README's release-readiness for T162/T163/T160; delivered a digest finding no blockers, with an optional suggestion to document T162 auto-backfill."
+    },
+    {
+      "from": 3714372,
+      "to": 3714381,
+      "label": "README and compression code contents",
+      "summary": "Raw tool-result data: full README.md text, LICENSE excerpt, and grep hits across compress.go/compress_auto.go/compress_auto_test.go/CLAUDE.md/agents-guide.md showing T162 auto-backfill implementation and its (currently README-absent) documentation in CLAUDE.md and agents-guide.md."
+    }
+  ]
+}

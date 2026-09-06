@@ -1,0 +1,37 @@
+{
+  "targets": [
+    "T114.1",
+    "T148"
+  ],
+  "targets_active": [
+    "T148.9"
+  ],
+  "targets_progressed": {
+    "T148.9": "context refreshed — confirmed extractMetaFromFile still on old bufio.Scanner path"
+  },
+  "files": [
+    "internal/store/store.go",
+    "internal/store/compress.go",
+    "internal/registry/registry.go",
+    "internal/store/docs.go",
+    "internal/store/vault_annotations.go",
+    "internal/tools/tools.go",
+    "internal/replay/store.go",
+    "internal/replay/seed_read.go"
+  ],
+  "open_threads": [
+    "Item 3: enumerate every worker in registry.go startWorkers/related helpers with read/write DB classification and guard status — not yet compiled into final list",
+    "Item 4: identify unguarded reads/writes of text_z/content_z/raw_z/*_m/compression_dicts/compression_gc/entries_v/messages_v/docs_v — not yet cross-checked against guard call sites",
+    "Item 5: full inventory of ordering-requirement comments (multiple 🎯T114.1 comments found in store.go, compress.go, registry.go) not yet consolidated into final report",
+    "Final deliverable (exhaustive file:line report per the 5 numbered asks) not yet produced"
+  ],
+  "summary": "Read-only investigation of mnemo's Go codebase to inventory startup-ordering guards (AwaitSchemaUpgrade, CompressionReady/codec.ready, entriesPackable) and their call sites in internal/store and internal/registry, and to locate schema-upgrade-related comments (🎯T114.1) and columns/tables (text_z, content_z, raw_z, *_m columns, compression_dicts, compression_gc, entries_v/messages_v/docs_v) that may be read/written without proper guarding. Investigation was mid-flight, reading registry.go's startWorkers and related helper functions, when the transcript ends.",
+  "spans": [
+    {
+      "from": 3611866,
+      "to": 3611912,
+      "label": "mnemo startup-ordering guard audit",
+      "summary": "User requested an exhaustive, read-only inventory of schema-upgrade/compression-readiness guards and unguarded new-column access in mnemo; assistant grepped for AwaitSchemaUpgrade/CompressionReady/entriesPackable and the new columns/tables, then read store.go's New/Close/AwaitSchemaUpgrade, compress.go's textCodec, and registry.go's ForUser/openUserStore/startWorkers/startStructuralRetirementBackfill/startStreamSegWatcher/startVaultWorkers to trace which background workers wait on the T114.1 schema-upgrade guard versus which run unguarded."
+    }
+  ]
+}

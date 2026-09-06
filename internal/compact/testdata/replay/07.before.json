@@ -1,0 +1,40 @@
+{
+  "targets": [
+    "T162",
+    "T163"
+  ],
+  "targets_active": [
+    "T162",
+    "T163"
+  ],
+  "targets_progressed": {
+    "T162": "audit in progress — checking agents-guide.md/README for compress.backfill, auto_backfill config coverage",
+    "T163": "audit in progress — checking docs for compactor quarantine/deferral staleness"
+  },
+  "files": [
+    "agents-guide.md",
+    "README.md",
+    "STABILITY.md",
+    "docs/design/text-compression.md",
+    "hygiene.yaml",
+    "internal/tools/tools.go",
+    "internal/tools/surface.go",
+    "internal/tools/consolidated_tools.go",
+    "internal/registry/diagchecks.go"
+  ],
+  "open_threads": [
+    "Audit not yet concluded in this span — no digest of gaps returned yet; need to check whether agents-guide.md documents T162 (compress.backfill health check, compression.auto_backfill config) and T163 (compactor deferrals/quarantine) changes",
+    "Need to verify README references the agent guide",
+    "Need to check MCP install steps (brew install, brew services start, grok mcp add, claude mcp add, generic JSON, restart session, lsof-based verification) for completeness/precision",
+    "Need to confirm no stale gotchas remain about compress_gc or compactor quarantine now fixed by this release"
+  ],
+  "summary": "Assistant is auditing the mnemo repo's agents-guide.md, README, and related docs/tool code ahead of a release shipping T162 (compression backfill) and T163 (compactor deferral/quarantine fix), searching for documentation gaps, stale gotchas, and MCP install-step precision, per explicit instruction not to commit/push/PR.",
+  "spans": [
+    {
+      "from": 3714027,
+      "to": 3714287,
+      "label": "release doc audit for T162/T163",
+      "summary": "Assistant investigates agents-guide.md, README.md, STABILITY.md, and tool/registry source files in the mnemo repo to find documentation gaps and stale gotchas ahead of the T162/T163 release, per a read-only audit request; findings digest not yet produced within this span."
+    }
+  ]
+}

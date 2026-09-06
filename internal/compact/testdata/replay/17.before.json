@@ -1,0 +1,21 @@
+{
+  "targets": [],
+  "targets_active": [],
+  "decisions": [],
+  "files": [
+    "main.go",
+    ".github/workflows/release.yml",
+    "installer/windows/mnemo.iss",
+    "docs/audit-log.md",
+    "internal/store/config_schema.go",
+    "agents-guide.md",
+    "CLAUDE.md",
+    "README.md",
+    "internal/upgrade/version.go"
+  ],
+  "open_threads": [
+    "Report not yet written: audit still gathering file:line evidence for the version-string locations (main.go:84 version const, installer/windows/mnemo.iss AppVersion default), and needs to confirm exhaustively whether any other file besides main.go:84 must be touched on a version bump (Makefile/ldflags injection appears absent — version is a hardcoded const, not build-injected via -ldflags -X)",
+    "Need to finish confirming --help behavior (flag.Usage prints to stderr on unknown flag / -h, not a dedicated --help flag) and finalize the digest table of existing vs missing flags (--version, --help-agent, --help-config all confirmed working; no explicit --help flag exists, only default flag.PrintDefaults via -h/error path)"
+  ],
+  "summary": "Investigation-only audit (no edits) of mnemo's CLI flags ahead of a release: confirmed --version, --help-agent, and --help-config all exist and work in main.go (lines 84, 245-287), traced that the version string is a hardcoded const with no ldflags build-injection, and located other version-bearing files (installer/windows/mnemo.iss AppVersion default, docs/audit-log.md history, release.yml build/homebrew steps) to determine what a version bump must touch."
+}

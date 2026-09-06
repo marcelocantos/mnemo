@@ -1,0 +1,222 @@
+[
+  {
+    "id": "01",
+    "file": "./5e53179e-6dbe-4950-83bd-6351bd3beda8.jsonl",
+    "ts": "2026-09-03T10:58:10.845Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 55156,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 1626
+  },
+  {
+    "id": "02",
+    "file": "./1da2c6dc-752b-49c9-80cd-c17d64815d88.jsonl",
+    "ts": "2026-09-03T10:42:01.578Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 58546,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 1478
+  },
+  {
+    "id": "03",
+    "file": "./ca47ff5a-ad4b-4d46-a064-8a5cdc6a1897.jsonl",
+    "ts": "2026-09-03T10:39:55.951Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 59823,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 653
+  },
+  {
+    "id": "04",
+    "file": "./4fbd385e-aa49-4fcd-9eee-46b4bbfc9135.jsonl",
+    "ts": "2026-09-03T10:39:00.670Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 42446,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 792
+  },
+  {
+    "id": "05",
+    "file": "./b6b77c9f-c52b-4774-b565-b9b26bff5ef6.jsonl",
+    "ts": "2026-09-03T10:38:48.628Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 38234,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 774
+  },
+  {
+    "id": "06",
+    "file": "./fbd9798a-aaec-46df-9361-4c8bf33fb94a.jsonl",
+    "ts": "2026-09-03T10:38:35.971Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 56668,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 898
+  },
+  {
+    "id": "07",
+    "file": "./9b48af07-8f7c-415c-97a9-5b38e3ba2bc2.jsonl",
+    "ts": "2026-09-03T10:38:22.570Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 35881,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 690
+  },
+  {
+    "id": "08",
+    "file": "./11532e42-24ab-4d32-aed2-4d27430bc9f9.jsonl",
+    "ts": "2026-09-03T10:38:09.912Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 35686,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 443
+  },
+  {
+    "id": "09",
+    "file": "./468e86b8-cd17-4aec-83d8-22a972583751.jsonl",
+    "ts": "2026-09-03T10:14:52.521Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 58661,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 581
+  },
+  {
+    "id": "10",
+    "file": "./38b563e5-1cda-46b5-a108-fef0c9e7e579.jsonl",
+    "ts": "2026-09-03T10:02:57.962Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 55347,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 852
+  },
+  {
+    "id": "11",
+    "file": "./0900eeca-e593-457f-80f8-eabf9c8f96b6.jsonl",
+    "ts": "2026-09-03T09:58:51.041Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 33589,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 403
+  },
+  {
+    "id": "12",
+    "file": "./ab89dacc-02a3-4001-94a9-b9d3804cd1a2.jsonl",
+    "ts": "2026-09-02T02:44:06.861Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 56905,
+    "cache_creation_5m": 0,
+    "cache_read": 11100,
+    "output": 870
+  },
+  {
+    "id": "13",
+    "file": "./a4f62a41-c161-47bc-85af-da0a51ecb62f.jsonl",
+    "ts": "2026-08-31T05:26:34.604Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 57238,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 764
+  },
+  {
+    "id": "14",
+    "file": "./a8b567e8-a518-4da6-bce5-88ba74e7f772.jsonl",
+    "ts": "2026-08-31T05:26:20.997Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 38641,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 517
+  },
+  {
+    "id": "15",
+    "file": "./59a35a17-946f-4579-84c9-083ffb860ba7.jsonl",
+    "ts": "2026-08-31T01:13:43.772Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 56254,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 870
+  },
+  {
+    "id": "16",
+    "file": "./d7fc3176-aef1-414c-8e56-7fc8bda47fb6.jsonl",
+    "ts": "2026-08-31T01:13:29.179Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 45819,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 1451
+  },
+  {
+    "id": "17",
+    "file": "./2f2c284e-6d0c-4d20-a7e7-28f057a38cb3.jsonl",
+    "ts": "2026-08-31T01:12:12.725Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 47625,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 547
+  },
+  {
+    "id": "18",
+    "file": "./d488d60e-0572-4ef0-b541-79093f39112c.jsonl",
+    "ts": "2026-08-31T01:12:01.275Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 45588,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 787
+  },
+  {
+    "id": "19",
+    "file": "./c76d21df-f570-4fcd-a5f0-4db0ea433269.jsonl",
+    "ts": "2026-08-29T23:41:29.278Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 53885,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 1024
+  },
+  {
+    "id": "20",
+    "file": "./3048f7d6-2bdb-446c-80b6-2918e276546e.jsonl",
+    "ts": "2026-08-29T23:40:30.715Z",
+    "model": "claude-sonnet-5",
+    "input": 2,
+    "cache_creation_1h": 53823,
+    "cache_creation_5m": 0,
+    "cache_read": 11096,
+    "output": 899
+  }
+]

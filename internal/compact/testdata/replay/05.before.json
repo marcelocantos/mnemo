@@ -1,0 +1,43 @@
+{
+  "targets": [
+    "T148.10"
+  ],
+  "targets_active": [
+    "T148.10"
+  ],
+  "targets_progressed": {
+    "T148.10": "context refreshed — third-party licence attribution audit for release scanned repo for vendored code, NOTICE coverage, and copyleft risk"
+  },
+  "targets_next": "T148.10",
+  "decisions": [],
+  "files": [
+    "NOTICE",
+    "LICENSE",
+    "go.mod",
+    "internal/zstdc/UPSTREAM.md",
+    "internal/zstdc/LICENSE.zstd",
+    "internal/zstdc/bridge.c",
+    "internal/store/ocr_darwin.h",
+    "internal/upgrade/notice.go",
+    "internal/upgrade/notice_test.go",
+    ".github/workflows/release.yml",
+    "installer/windows/mnemo.iss",
+    "hygiene.yaml",
+    "docs/audit-log.md",
+    "tools/embed-clip/embed.py"
+  ],
+  "open_threads": [
+    "Audit not yet concluded with a final OK/gaps-that-block-release digest to the user",
+    "Cross-repo NOTICES for sqlift and sqldeep dependencies inspected but not yet reconciled against mnemo's own NOTICE",
+    "Per-GOOS (darwin/linux/windows) Go module dependency closures listed but not yet cross-checked against NOTICE entries"
+  ],
+  "summary": "Investigated mnemo's third-party licence attribution posture ahead of a release: checked NOTICE/LICENSE files, searched for vendored code (vendor/, third_party/, go:embed, internal/zstdc vendored zstd, cgo usage), enumerated the Go build-dependency closure per GOOS, and reviewed sibling repos sqlift/sqldeep NOTICES and the release workflow/installer for licence-related steps. Explicitly instructed not to commit, push, or open a PR — investigation only.",
+  "spans": [
+    {
+      "from": 3714036,
+      "to": 3714426,
+      "label": "third-party licence attribution audit",
+      "summary": "Read-only investigation of mnemo repo for bundled/vendored third-party code (zstdc, cgo, go:embed), NOTICE/LICENSE completeness, per-platform Go dependency closures, and cross-repo (sqlift/sqldeep) NOTICES/attribution ahead of a release; no findings digest delivered within this span."
+    }
+  ]
+}

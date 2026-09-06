@@ -1,0 +1,100 @@
+{
+  "targets": [
+    "T162",
+    "T163",
+    "T160",
+    "T77",
+    "T151",
+    "T152",
+    "T158",
+    "T159",
+    "T156",
+    "T144",
+    "T143"
+  ],
+  "targets_active": [
+    "T162",
+    "T163"
+  ],
+  "targets_progressed": {
+    "T162": "achieved — StartCompressBackfill goLoop enqueues historical row packing automatically, compress.backfill doctor check added, v0.94.0 released",
+    "T163": "achieved — deferred compaction ticks no longer call RecordCompactionFailure, quarantine predicate ignores last_error=deferred, v0.94.0 released"
+  },
+  "targets_next": "T161",
+  "decisions": [
+    {
+      "what": "Version bumped to 0.94.0 (MINOR-only per hard rule)",
+      "why": "Two owner-reported targets (T162, T163) landed and shipped via /release"
+    },
+    {
+      "what": "Split the release into two commits — feature implementation, then release-prep (version bump, docs, audit-log, NOTICE packaging)",
+      "why": "Matches the repo's established release commit pattern seen in prior release-prep commits (c5746c2, etc.)"
+    },
+    {
+      "what": "Release archives (.tar.gz/.zip) and the Windows installer now bundle NOTICE alongside LICENSE",
+      "why": "Apache §4(d) attribution must travel with the binary, gap found during release audit"
+    },
+    {
+      "what": "VACUUM remains a manual operator step even with auto-backfill",
+      "why": "VACUUM needs free disk equal to the database and blocks writers; repacking empties legacy columns but doesn't reclaim filesystem space"
+    }
+  ],
+  "files": [
+    "main.go",
+    "agents-guide.md",
+    "README.md",
+    "STABILITY.md",
+    "docs/audit-log.md",
+    "docs/design/text-compression.md",
+    "bullseye.yaml",
+    ".github/workflows/release.yml",
+    "installer/windows/mnemo.iss",
+    "internal/store/compress.go",
+    "internal/store/compress_auto.go",
+    "internal/store/compress_auto_test.go",
+    "internal/store/config.go",
+    "internal/store/config_schema.go",
+    "internal/store/compactions.go",
+    "internal/store/compactions_test.go",
+    "internal/compact/compact.go",
+    "internal/compact/watcher.go",
+    "internal/compact/watcher_test.go",
+    "internal/registry/diagchecks.go",
+    "internal/registry/registry.go",
+    "internal/registry/startup_diag_test.go",
+    "CLAUDE.md"
+  ],
+  "open_threads": [
+    "Homebrew tap upgrade to v0.94.0 stalled — `brew upgrade` still showed 0.93.0 after tap refresh attempts, mid-troubleshooting when transcript ends",
+    "gh run watch on release.yml workflow (run 33746104826) was in progress, outcome not yet confirmed",
+    "scripts/win-validate.sh Windows VM validation was launched but result not shown before truncation",
+    "T161 (port-conflict holder identification) remains open as the declared residue from T160, next candidate to pick up"
+  ],
+  "summary": "Completed and shipped mnemo v0.94.0: implemented automatic background compression backfill (T162, no longer requiring manual op=compress_gc) and fixed compactor deferrals wrongly accruing toward session quarantine (T163), updated agents-guide/README/STABILITY docs and audit-log, added NOTICE to release archives, ran full test suite (all green), committed in two release-prep commits, drafted release notes, pushed to origin/master, created the GitHub release, and began post-release verification (Windows VM validation, release.yml CI watch, Homebrew tap upgrade) which was still in progress — the tap was stuck showing 0.93.0 — when the transcript ends.",
+  "spans": [
+    {
+      "from": 3714842,
+      "to": 3714920,
+      "label": "T162/T163 docs and version bump",
+      "summary": "Bumped version to 0.94.0 and rewrote agents-guide.md/README.md sections describing automatic compression backfill (T162) and deferred-compaction quarantine handling (T163); added NOTICE to release archives and the Windows installer; reviewed prior release commit style via git log/audit-log."
+    },
+    {
+      "from": 3714921,
+      "to": 3714986,
+      "label": "local test gate and release commits",
+      "summary": "Ran `make test` (all packages passed), added the v0.94.0 audit-log entry, and split the changes into two commits: one for the T162/T163 implementation and one for release-prep (version, docs, NOTICE)."
+    },
+    {
+      "from": 3715105,
+      "to": 3715419,
+      "label": "v0.94.0 release push and CI",
+      "summary": "Drafted release notes, pushed master to origin, created the GitHub release via gh, and began watching the release.yml CI workflow and Windows VM validation script."
+    },
+    {
+      "from": 3715420,
+      "to": 3715428,
+      "label": "Homebrew tap upgrade troubleshooting",
+      "summary": "Attempted to upgrade the local Homebrew mnemo install to v0.94.0; the tap formula still reported 0.93.0 despite `brew update`, prompting investigation into whether the tap repo had refreshed from GitHub."
+    }
+  ]
+}

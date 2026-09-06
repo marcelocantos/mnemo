@@ -1,0 +1,44 @@
+{
+  "targets": [
+    "T148",
+    "T156",
+    "T143.1"
+  ],
+  "targets_active": [
+    "T148"
+  ],
+  "targets_progressed": {
+    "T148": "README audit performed for release — five empty MCP-tool tables, stale tool count, and undocumented T156 features (file-only config, describe=true, zstd text compression, zstd backups) found and reported as follow-up work"
+  },
+  "targets_next": "T148.3",
+  "decisions": [
+    {
+      "what": "Licensing passes cleanly: Apache-2.0 LICENSE matches SPDX headers repo-wide, README link resolves, no NOTICE needed",
+      "why": "LICENSE file present, correct type, copyright filled in, no conflicting SPDX identifiers found"
+    }
+  ],
+  "files": [
+    "README.md",
+    "CLAUDE.md",
+    "agents-guide.md",
+    "LICENSE",
+    "internal/tools/surface.go",
+    "docs/design/backup-compression.md"
+  ],
+  "open_threads": [
+    "Fix five empty MCP-tool tables in README.md (Cross-project knowledge, Cross-session messaging, External source indexing, Vault, Runtime configuration) and the emptied producer code block",
+    "Delete or rewrite README's 'Cross-session messaging' section, which still documents the removed mnemo_note tool",
+    "Correct README.md:10 tool count (claims 27, ledger says 16)",
+    "Document release headline items in README: file-only config + mnemo --help-config, mnemo_query(describe=true) schema catalogue, per-row zstd text compression (with messages_v/docs_v read rule), zstd backups",
+    "mnemo_vault, mnemo_thread, mnemo_rework_history are undocumented anywhere in README's MCP Tools section"
+  ],
+  "summary": "Read-only audit of the mnemo repo's README and licensing ahead of a release: confirmed required README sections and licence exist, but found five MCP-tool tables reduced to empty header skeletons by a prior tool-surface-reduction commit, a stale tool count (27 vs actual 16), and no README coverage of the release's four headline features (file-only config, describe=true schema catalogue, zstd text compression, zstd backups). No files were modified per instructions.",
+  "spans": [
+    {
+      "from": 3634720,
+      "to": 3635235,
+      "label": "mnemo README/licence release audit",
+      "summary": "Investigated README.md, CLAUDE.md, agents-guide.md, LICENSE, and internal/tools/surface.go to audit release readiness; found structural README damage (empty tool tables, stale tool count, undocumented new features) but a clean Apache-2.0 licence, and delivered a prioritized digest with file:line references."
+    }
+  ]
+}

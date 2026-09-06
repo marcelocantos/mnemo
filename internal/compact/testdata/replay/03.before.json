@@ -1,0 +1,38 @@
+{
+  "targets": [
+    "T101",
+    "T148",
+    "T159"
+  ],
+  "targets_active": [
+    "T101"
+  ],
+  "targets_progressed": {
+    "T101": "context refreshed — auditing NOTICE/LICENSE completeness for release CI (code-signing target uses same release.yml)"
+  },
+  "files": [
+    "NOTICE",
+    "LICENSE",
+    "internal/zstdc/LICENSE.zstd",
+    "internal/zstdc/UPSTREAM.md",
+    "go.mod",
+    ".github/workflows/release.yml",
+    "internal/upgrade/notice.go",
+    "internal/upgrade/notice_test.go",
+    "docs/audit-log.md",
+    "hygiene.yaml"
+  ],
+  "open_threads": [
+    "Verify NOTICE's listed third-party modules match the actual go list -deps build closure across darwin/linux/windows GOOS targets (script run to diff notice_mods vs all_mods)",
+    "Confirm release.yml correctly stages LICENSE.txt and vendored zstd licensing for Windows installer"
+  ],
+  "summary": "Session audited mnemo's open-source licensing hygiene: cross-checked the NOTICE file's listed third-party Go modules against the actual build-closure dependency graph (via `go list -deps` across darwin/linux/windows), reviewed the vendored zstd C library's BSD-3-Clause licensing and UPSTREAM.md provenance notes, and inspected release.yml's staging of LICENSE.txt into the Windows installer build. Also incidentally surfaced code for the unrelated upgrade-notice tracker (internal/upgrade/notice.go) during a broader file search.",
+  "spans": [
+    {
+      "from": 3714439,
+      "to": 3714568,
+      "label": "NOTICE/license audit for mnemo release",
+      "summary": "Checked NOTICE against the real Go module build closure, reviewed vendored zstd BSD licensing, and inspected release.yml's Windows installer LICENSE staging as part of an open-source hygiene/licensing audit."
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "targets": [
+    "T148",
+    "T148.3"
+  ],
+  "targets_active": [
+    "T148.3",
+    "T148.1"
+  ],
+  "targets_progressed": {
+    "T148.3": "investigation in progress — checking whether tool-count/weight baselines in surface_test.go are stale after backup_status/backup.disk changes"
+  },
+  "targets_next": "T148.3",
+  "decisions": [],
+  "files": [
+    "internal/registry/diagchecks.go",
+    "internal/tools/surface.go",
+    "internal/tools/surface_test.go",
+    "internal/store/config_schema_test.go",
+    "internal/api/health_html_test.go",
+    "internal/registry/budget_diag_test.go",
+    "agents-guide.md",
+    "CLAUDE.md",
+    "README.md"
+  ],
+  "open_threads": [
+    "Awaiting output of backgrounded TestToolSurface run to determine current byte-weight measurement vs ~24917 baseline",
+    "Need to confirm no doc/test asserts a fixed health-check count now that backup.disk was added (no fixed-count assertion found yet in grep sweep)",
+    "Need to confirm config_schema_test.go ratchet passes and no undocumented new config field was added this release"
+  ],
+  "summary": "Read-only pre-release consistency investigation in the mnemo repo: searching for stale health-check counts/enumerations after the new `backup.disk` check was added, checking the mnemo_tools surface byte-weight ratchet test after backup_status changes, and verifying the config schema description ratchet. Investigation was mid-flight (tool surface test running in background, no findings yet compiled) when the transcript span ends."
+}

@@ -1,0 +1,34 @@
+{
+  "targets": [
+    "T158",
+    "T159"
+  ],
+  "targets_active": [
+    "T158"
+  ],
+  "targets_progressed": {
+    "T158": "release doc-accuracy audit for v0.92.0 in progress — investigating whether README/CLAUDE.md/agents-guide/backup-compression.md/STABILITY.md correctly describe CreateAndRetain, SweepOrphans, backup.disk health check, and uniqueDest"
+  },
+  "decisions": [],
+  "files": [
+    "README.md",
+    "CLAUDE.md",
+    "agents-guide.md",
+    "docs/design/backup-compression.md",
+    "STABILITY.md",
+    "internal/backup/backup.go",
+    "internal/backup/worker.go",
+    "internal/backup/sweep.go",
+    "internal/registry/diagchecks.go",
+    "internal/registry/registry.go",
+    "internal/store/store.go",
+    "internal/tools/backup.go"
+  ],
+  "open_threads": [
+    "Confirm whether backup.disk is listed in agents-guide.md's health-checks enumeration (agents-guide.md:620-628 currently omits it, only listing compactor.workdir/claude.path/ingest.roots/compactor.breaker/ingest.backfill/db.readable/images.embedder)",
+    "Determine whether STABILITY.md needs an entry for new exported internal/backup surface (CreateAndRetain, SweepOrphans, Usage, Decompress) — audit was reading STABILITY.md's treatment of internal packages when transcript ends",
+    "No Gotchas/caveats section found yet needing a stale-entry fix",
+    "Final digest with file:line references and must-fix vs nice-to-have recommendations not yet produced — investigation still in progress, report-only mandate (no commits/edits/PRs)"
+  ],
+  "summary": "Investigate-only documentation audit for mnemo's v0.92.0 release (🎯T158 backup retention/orphan-sweep work): read the full code and doc diffs since v0.91.0 across backup.go, worker.go, sweep.go, diagchecks.go, registry.go, store.go, tools/backup.go, and cross-checked README.md, CLAUDE.md, agents-guide.md, docs/design/backup-compression.md, and STABILITY.md for accuracy gaps, with the STABILITY.md internal-package-coverage check still underway at transcript end."
+}

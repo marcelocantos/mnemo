@@ -1,0 +1,66 @@
+{
+  "targets": [
+    "T162",
+    "T163",
+    "T154"
+  ],
+  "targets_active": [
+    "T162",
+    "T163"
+  ],
+  "targets_progressed": {
+    "T162": "achieved — daemon auto-starts compress backfill via StartCompressBackfill, compress.backfill doctor check added, tests pass",
+    "T163": "achieved — deferred compaction ticks no longer call RecordCompactionFailure; deferred quarantine rows cleared at watcher start; tests pass"
+  },
+  "targets_next": "T51",
+  "decisions": [
+    {
+      "what": "Deferred compactor ticks stop counting toward quarantine (RecordCompactionFailure no longer called for deferrals)",
+      "why": "three sessions were stuck at fail_count=88/last_error=deferred and could never be summarised again"
+    },
+    {
+      "what": "Compression backfill runs automatically as a daemon-started goroutine loop rather than requiring a manual mnemo_ops op=compress_gc call",
+      "why": "T151/T152 packer previously depended on an operator remembering to run it; doctor now reports phase and outstanding plain bytes"
+    },
+    {
+      "what": "compress_auto.go phase logic simplified to compute total outstanding bytes across families rather than tracking anyOutstanding/anyWork flags",
+      "why": "fixed a test failure where phase stayed 'running' after a finished pass instead of reporting 'complete'"
+    }
+  ],
+  "files": [
+    "internal/store/compress_auto.go",
+    "internal/store/compress_auto_test.go",
+    "internal/registry/startup_diag_test.go",
+    "internal/registry/diagchecks.go",
+    "internal/store/config_schema.go",
+    "docs/design/text-compression.md",
+    "CLAUDE.md",
+    "internal/compact/watcher.go",
+    "internal/compact/watcher_test.go",
+    "internal/store/compactions.go",
+    "internal/store/compactions_test.go",
+    "internal/store/config.go",
+    "internal/registry/registry.go",
+    "bullseye.yaml"
+  ],
+  "open_threads": [
+    "Release v0.94.0 prep in progress: discovery run (no freeze, gated-push), fan-out audits launched twice (CLI flags, agent guide, README freshness, licence attribution, bindings coverage) for T162/T163 release notes; `make test` gate running in background",
+    "Live daemon still on v0.93.0 — the T162/T163 fixes (deferred-quarantine clear, auto compression backfill) are not yet deployed to production",
+    "Version string / --version, agents-guide.md, README, NOTICE freshness checks against the T162/T163 changes not yet confirmed complete or fixed"
+  ],
+  "summary": "Fixed a failing test in mnemo's automatic compression-backfill phase-reporting logic (compress_auto.go), got the full internal/store, internal/compact, internal/registry, internal/tools suites green, and retired targets T162 (compression finishes itself) and T163 (compactor deferrals no longer accrue toward quarantine) via bullseye_commit with attestations. The session then began release prep for v0.94.0: ran release discovery, launched parallel explore-agent audits (CLI flags/version, agent guide, README freshness, licence/NOTICE attribution, language bindings) and started the local `make test` gate in the background while reviewing CLAUDE.md, README.md, and agents-guide.md for staleness against the shipped T162/T163 behavior.",
+  "spans": [
+    {
+      "from": 3712449,
+      "to": 3712624,
+      "label": "T162/T163 test fix and target retirement",
+      "summary": "Debugged and fixed a compress-backfill phase-reporting bug (test expected 'complete' after a finished pass but got 'running'), simplified compress_auto.go's outstanding-row tracking, reran focused and full package test suites (all green), updated CLAUDE.md and docs/design/text-compression.md, then retired T162 and T163 via bullseye_commit with detailed attestations."
+    },
+    {
+      "from": 3713990,
+      "to": 3714712,
+      "label": "v0.94.0 release prep kickoff",
+      "summary": "Started the /release flow for mnemo: ran discovery (no freeze, next version v0.94.0), fanned out five parallel explore-agent audits covering CLI flags/version string, agent-guide coverage, README freshness, third-party licence attribution, and language bindings, checked git/gate/workflow config, and launched `make test` in the background while inspecting CLAUDE.md/README.md/agents-guide.md sections relevant to the T162/T163 changes."
+    }
+  ]
+}
