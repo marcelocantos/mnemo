@@ -43,7 +43,7 @@ import (
 // two interfaces have the same shape; the type alias would create
 // an import cycle since reviewer can't import compact.
 type llmAdapter struct {
-	c *compact.ClaudiaCaller
+	c compact.LLMCaller
 }
 
 func (a llmAdapter) Call(ctx context.Context, sys, user string) (reviewer.LLMResult, error) {
@@ -692,7 +692,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
+			caller := compact.NewSummariserCaller(compact.ClaudiaCallerOpts{
 				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
 			})
 			compactor := compact.New(e.store, caller, compact.Config{})
@@ -706,13 +706,13 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			watcher.Run(r.baseCtx)
 		}()
 
-		// CLAUDE.md summary review worker (🎯T41). Same claudia.Task
-		// path as the compactor but a different cadence and trigger
+		// CLAUDE.md summary review worker (🎯T41). Same spawn path as
+		// the compactor but a different cadence and trigger
 		// (cheap-signal entry-count gate, see store.ShouldReview).
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
-			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
+			caller := compact.NewSummariserCaller(compact.ClaudiaCallerOpts{
 				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
 			})
 			rev := reviewer.New(e.store, llmAdapter{caller})
