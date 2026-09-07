@@ -16,7 +16,8 @@ bullseye:
 	 (echo "✗ gofmt issues:"; gofmt -l .; exit 1)
 	@go vet -tags "$(BUILD_TAGS)" ./... && echo "✓ vet"
 	@go build -tags "$(BUILD_TAGS)" -o bin/mnemo . && echo "✓ build"
-	@go test -tags "$(BUILD_TAGS)" ./... 2>&1 | tail -20 && echo "✓ tests"
+	@out=$$(go test -tags "$(BUILD_TAGS)" ./... 2>&1); rc=$$?; printf '%s\n' "$$out" | tail -20; \
+	if [ $$rc -ne 0 ]; then echo "✗ tests"; exit $$rc; fi; echo "✓ tests"
 	@if [ -z "$$(git status --porcelain | grep -vE 'bullseye\.yaml$$' || true)" ]; then \
 	  echo "✓ clean tree"; \
 	else \
