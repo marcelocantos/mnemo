@@ -387,10 +387,14 @@ func eventJSON(ev Event) string {
 // loadSampleSessions reads the extract: every session's substantive
 // messages, in id order, longest session first.
 //
-// It decodes messages.text_z itself rather than opening the extract as a
-// store, because the extract is two tables rather than a whole schema —
-// and because a harness that could open a mnemo database read-write is a
-// harness that could write to the production one.
+// The extract is its own two tables (sample_messages, sample_dicts), not
+// a mnemo schema, and its text column is deliberately not called
+// messages.text: this harness decodes the zstd frame itself rather than
+// through mnemo_text, because registering that SQL function means
+// opening a store, and a harness that can open a mnemo database
+// read-write is a harness that can write to the production one. The
+// 🎯T151 ratchet governs readers of mnemo's own tables; the decode here
+// is the same operation, spelled out.
 func loadSampleSessions(path string) ([]GoldSession, error) {
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
 	if err != nil {
@@ -398,7 +402,7 @@ func loadSampleSessions(path string) ([]GoldSession, error) {
 	}
 	defer db.Close()
 
-	dictRows, err := db.Query(`SELECT dict FROM compression_dicts`)
+	dictRows, err := db.Query(`SELECT dict FROM sample_dicts`)
 	if err != nil {
 		return nil, fmt.Errorf("dicts: %w", err)
 	}
@@ -423,8 +427,8 @@ func loadSampleSessions(path string) ([]GoldSession, error) {
 	defer dec.Close()
 
 	rows, err := db.Query(`
-		SELECT id, session_id, role, COALESCE(text, ''), COALESCE(timestamp, ''), text_z
-		FROM messages WHERE is_noise = 0 ORDER BY session_id, id`)
+		SELECT id, session_id, role, COALESCE(body, ''), COALESCE(timestamp, ''), body_z
+		FROM sample_messages WHERE is_noise = 0 ORDER BY session_id, id`)
 	if err != nil {
 		return nil, err
 	}
