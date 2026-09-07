@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -94,8 +95,14 @@ func (s *Store) maybeCheckpointWAL() {
 		return
 	}
 	if idle := time.Since(s.LastWriteAt()); idle < walQuiescence {
-		slog.Debug("wal: checkpoint deferred, writes still active",
+		// TRUNCATE needs a lull; PASSIVE does not (🎯T172). Deferring
+		// both meant nothing checkpointed at all during exactly the
+		// write bursts that grow the WAL fastest — and left the
+		// diagnostic with no progress signal to read. Copy what we can
+		// now and try the reset on a later, quieter tick.
+		slog.Debug("wal: truncate deferred, writes still active; passive checkpoint instead",
 			"wal_mb", size>>20, "idle", idle.Round(time.Second))
+		s.checkpointPassive("wal-maintenance (writes active)")
 		return
 	}
 
@@ -165,12 +172,56 @@ func (s *Store) checkpointPassive(reason string) {
 	if s.writeDB == nil {
 		return
 	}
+	s.walCkptAttemptUnix.Store(time.Now().Unix())
 	var busy, log, checkpointed int
 	row := s.writeDB.QueryRow("PRAGMA wal_checkpoint(PASSIVE)")
 	if err := row.Scan(&busy, &log, &checkpointed); err != nil {
 		slog.Debug("wal: passive checkpoint failed", "reason", reason, "err", err)
 		return
 	}
+	s.noteCheckpointResult(checkpointed)
 	slog.Debug("wal: passive checkpoint",
 		"reason", reason, "busy", busy, "frames", log, "checkpointed", checkpointed)
+}
+
+// noteCheckpointResult records that a checkpoint ran and whether it made
+// progress (🎯T172). Progress means frames were copied out of the WAL —
+// the thing a pinning reader prevents. Called by both checkpoint paths.
+func (s *Store) noteCheckpointResult(checkpointed int) {
+	if checkpointed > 0 {
+		s.walCkptStuckSinceUnix.Store(0)
+		return
+	}
+	s.walCkptStuckSinceUnix.CompareAndSwap(0, time.Now().Unix())
+}
+
+// WALCheckpointProgress reports when a checkpoint was last attempted, and
+// since when checkpoints have been copying nothing.
+//
+// A zero lastAttempt means none has run: absence of evidence, which the
+// caller must not read as a fault. A zero stuckSince means the most
+// recent checkpoint DID advance, which is positive evidence of health.
+func (s *Store) WALCheckpointProgress() (lastAttempt, stuckSince time.Time) {
+	if a := s.walCkptAttemptUnix.Load(); a > 0 {
+		lastAttempt = time.Unix(a, 0)
+	}
+	if a := s.walCkptStuckSinceUnix.Load(); a > 0 {
+		stuckSince = time.Unix(a, 0)
+	}
+	return lastAttempt, stuckSince
+}
+
+// SetWALCheckpointProgressForTest seeds the checkpoint-progress clocks so
+// a diagnostic test can drive the 🎯T172 boundary without waiting out a
+// real window. Tests only.
+func (s *Store) SetWALCheckpointProgressForTest(attempt, stuckSince time.Time) {
+	set := func(dst *atomic.Int64, t time.Time) {
+		if t.IsZero() {
+			dst.Store(0)
+			return
+		}
+		dst.Store(t.Unix())
+	}
+	set(&s.walCkptAttemptUnix, attempt)
+	set(&s.walCkptStuckSinceUnix, stuckSince)
 }

@@ -366,6 +366,20 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			size := fi.Size()
 			grew := s.NoteWALSize(size)
 			if size > warnAt && grew {
+				// Escalate ONLY on demonstrated inability to checkpoint
+				// (🎯T172). Size and growth cannot carry a fail on their
+				// own: a healthy backfill grows the WAL to gigabytes and
+				// resolves itself, and alerting on that shape would be a
+				// false positive on the most common heavy workload there
+				// is. What a pinned reader actually prevents is frames
+				// being copied out, so that is what we measure.
+				if detail, stuck := walStuckDetail(s, size, time.Now()); stuck {
+					return diag.Failure(detail,
+						"a reader has held the WAL open for longer than any of the daemon's own "+
+							"jobs run, so a transaction has most likely leaked. Restart the daemon "+
+							"(supervisorctl restart mnemo, or brew services restart mnemo); the WAL "+
+							"is checkpointed on a clean shutdown and no data is lost")
+				}
 				return diag.Warning(
 					fmt.Sprintf("WAL is %d MiB and still growing — a long-running reader is "+
 						"blocking checkpoints, or a writer is stuck", size>>20),
@@ -644,4 +658,48 @@ func compactionFailureRatioResult(hs compact.HealthSnapshot) (diag.CheckResult, 
 		return diag.Failure(detail, remediation), true
 	}
 	return diag.Warning(detail, remediation), true
+}
+
+// walStuckWindow is how long checkpoints must fail to advance before the
+// WAL is called stuck (🎯T172). Deliberately far longer than any reader
+// the daemon opens itself — wal.go names the worst at 5-11 minutes for
+// the backup's VACUUM INTO — because the alert fires an OS notification
+// and its whole value is that it means something.
+const walStuckWindow = 45 * time.Minute
+
+// walStuckDetail decides whether a growing WAL is stuck rather than busy.
+//
+// The discriminator is checkpoint PROGRESS, not size, growth, or elapsed
+// time. During a healthy backfill PASSIVE checkpoints keep copying frames
+// even as the file grows, so lastAdvance keeps moving and this returns
+// false however large the WAL gets. Only when checkpoints have been tried
+// and have copied nothing at all for the whole window is a reader
+// genuinely pinning the log.
+//
+// Three guards keep the false-positive rate near zero:
+//   - No attempts recorded → not stuck. Absence of evidence is not
+//     evidence; a daemon that has not tried to checkpoint has told us
+//     nothing about whether it could.
+//   - The most recent checkpoint advanced (stuckSince is zero) → not
+//     stuck, whatever the size or the growth.
+//   - Attempts must still be arriving. A daemon that stopped trying is a
+//     stalled checkpointer, not a pinned reader, and saying otherwise
+//     would send the reader chasing the wrong fault.
+//   - The window must have elapsed since checkpoints stopped advancing.
+func walStuckDetail(s *store.Store, size int64, now time.Time) (string, bool) {
+	lastAttempt, stuckSince := s.WALCheckpointProgress()
+	if lastAttempt.IsZero() || stuckSince.IsZero() {
+		return "", false
+	}
+	if now.Sub(lastAttempt) > walStuckWindow {
+		return "", false
+	}
+	blocked := now.Sub(stuckSince)
+	if blocked < walStuckWindow {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"WAL is %d MiB and growing, and no checkpoint has copied a single frame in %s — "+
+			"a reader is pinning the log and space cannot be reclaimed",
+		size>>20, blocked.Round(time.Minute)), true
 }

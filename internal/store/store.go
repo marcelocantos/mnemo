@@ -238,6 +238,18 @@ type Store struct {
 	// the check can report growth rather than raw size. Atomic: read from
 	// the diagnostic scheduler, not under any lock.
 	lastWALSize atomic.Int64
+
+	// Checkpoint progress (🎯T172). walCkptAttemptUnix is when a
+	// checkpoint was last ATTEMPTED; walCkptStuckSinceUnix is when
+	// checkpoints last STOPPED copying frames — set by the first attempt
+	// that advances nothing, and cleared by any attempt that does.
+	//
+	// Storing "stuck since" rather than "last advanced" is what lets the
+	// diagnostic judge a daemon that has never advanced a checkpoint at
+	// all: with only a last-advance clock, a zero value is
+	// indistinguishable from a fresh boot and the fault is invisible.
+	walCkptAttemptUnix    atomic.Int64
+	walCkptStuckSinceUnix atomic.Int64
 }
 
 // ReconcilerTracker returns the store's stream-pass tracker for the
@@ -1496,10 +1508,12 @@ func (s *Store) Checkpoint() (CheckpointResult, error) {
 	if s.writeDB == nil {
 		return r, nil
 	}
+	s.walCkptAttemptUnix.Store(time.Now().Unix())
 	row := s.writeDB.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)")
 	if err := row.Scan(&r.Busy, &r.Log, &r.Checkpointed); err != nil {
 		return r, fmt.Errorf("wal_checkpoint(TRUNCATE): %w", err)
 	}
+	s.noteCheckpointResult(r.Checkpointed)
 	return r, nil
 }
 
