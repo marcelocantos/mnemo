@@ -52,9 +52,9 @@ func driveSession(t *testing.T, n, drip, sealEvery int) int {
 
 		if start/sealEvery > openRef {
 			ref := fmt.Sprintf("s%d", openRef)
-			a.Apply([]Event{{Kind: EventOpen, Ref: ref, From: max(1, start-sealEvery), Label: "topic"}})
+			a.Apply([]Event{{Kind: EventOpen, Ref: ref, From: MsgID(max(1, start-sealEvery)), Label: "topic"}})
 			// Seal well behind the head so the lookahead is satisfied.
-			a.Apply([]Event{{Kind: EventSeal, Ref: ref, To: start - 1, Summary: "done"}})
+			a.Apply([]Event{{Kind: EventSeal, Ref: ref, To: MsgID(start - 1), Summary: "done"}})
 			a.SetRollingSummary("a summary that stands in for everything sealed so far")
 			openRef++
 		}

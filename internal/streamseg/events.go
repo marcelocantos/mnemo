@@ -20,6 +20,7 @@ package streamseg
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -45,6 +46,36 @@ const (
 	EventSupersede EventKind = "supersede"
 )
 
+// MsgID is a message id inside an event, accepted as a JSON number or
+// as a JSON string holding one.
+//
+// The prompt asks for `"from":<msg id>`, and a model that answers
+// `"from":"3762206"` has understood the question perfectly and answered
+// it in a type the parser used to discard. Silently: a quoted id failed
+// json.Unmarshal into int, the line was skipped as unparseable, and the
+// drip produced no span at all. Measured on the frozen replay sample,
+// that one detail was the difference between 20 of 20 drips emitting
+// events and 4 of 20 — the whole apparent quality gap between the two
+// spawn paths was this, not comprehension.
+type MsgID int
+
+func (m *MsgID) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" {
+		return nil
+	}
+	// A quoted id is unquoted and parsed as a number; anything else
+	// (an object, an array, a non-numeric string) is still an error, so
+	// a genuinely malformed event is still dropped by ParseEvents.
+	s = strings.Trim(s, `"`)
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return fmt.Errorf("message id %s: %w", b, err)
+	}
+	*m = MsgID(n)
+	return nil
+}
+
 // Event is one span transition emitted by the summariser, one per line
 // of JSONL.
 //
@@ -59,8 +90,8 @@ type Event struct {
 	// is local to the conversation with the model, not a durable id.
 	Ref string `json:"span"`
 	// From and To are message ids. From is set on open, To on seal.
-	From int `json:"from,omitempty"`
-	To   int `json:"to,omitempty"`
+	From MsgID `json:"from,omitempty"`
+	To   MsgID `json:"to,omitempty"`
 	// Label is a short topic name, set on open and refinable on seal.
 	Label string `json:"label,omitempty"`
 	// Summary is the span's content, set on seal.

@@ -130,10 +130,10 @@ func cuts(events []Event) map[int]bool {
 	out := map[int]bool{}
 	for _, ev := range events {
 		if ev.From > 0 {
-			out[ev.From] = true
+			out[int(ev.From)] = true
 		}
 		if ev.To > 0 {
-			out[ev.To] = true
+			out[int(ev.To)] = true
 		}
 	}
 	return out

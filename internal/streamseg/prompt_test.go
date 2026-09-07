@@ -53,3 +53,28 @@ func TestSystemPromptFramesTranscriptAsData(t *testing.T) {
 		}
 	}
 }
+
+// TestParseEventsAcceptsQuotedMsgIDs pins the one formatting difference
+// that made a whole spawn path look incompetent.
+//
+// The bare spawn returned `"from":"3762206"` on most drips: the right
+// span, the right boundary, the right label, quoted. The parser dropped
+// every one of those lines, so 16 of 20 frozen drips produced no span at
+// all and the arm scored 0.20 on boundary agreement against the 0.95 it
+// scores once the ids are read. Nothing about the segmentation was
+// wrong; the id was a string.
+func TestParseEventsAcceptsQuotedMsgIDs(t *testing.T) {
+	events := ParseEvents(`{"event":"open","span":"t1","from":"3762206","label":"quoted open"}
+{"event":"seal","span":"t1","to":3762245,"label":"plain seal","summary":"s"}
+{"event":"open","span":"t2","from":"not a number","label":"still rejected"}`)
+
+	if len(events) != 2 {
+		t.Fatalf("parsed %d events, want 2: %v", len(events), events)
+	}
+	if events[0].Kind != EventOpen || events[0].From != 3762206 {
+		t.Errorf("quoted from: got %+v", events[0])
+	}
+	if events[1].Kind != EventSeal || events[1].To != 3762245 {
+		t.Errorf("plain to: got %+v", events[1])
+	}
+}

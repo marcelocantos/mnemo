@@ -247,7 +247,7 @@ func (a *Automaton) Apply(events []Event) []Sealed {
 				continue // idempotent: re-opening an open span is a no-op
 			}
 			a.state.Open[ev.Ref] = &OpenSpan{
-				Ref: ev.Ref, From: ev.From, Label: ev.Label, LastMsg: ev.From,
+				Ref: ev.Ref, From: int(ev.From), Label: ev.Label, LastMsg: int(ev.From),
 			}
 
 		case EventSeal:
@@ -255,7 +255,7 @@ func (a *Automaton) Apply(events []Event) []Sealed {
 			if !ok {
 				continue // sealing an unknown span: nothing to close
 			}
-			if !a.lookaheadSatisfied(ev.To) {
+			if !a.lookaheadSatisfied(int(ev.To)) {
 				// Too early. Hold the span open rather than sealing a
 				// topic the conversation may still be inside; the next
 				// drip re-offers the seal with more evidence behind it.
@@ -266,12 +266,12 @@ func (a *Automaton) Apply(events []Event) []Sealed {
 				label = ev.Label
 			}
 			sealed = append(sealed, Sealed{
-				From: sp.From, To: ev.To, Label: label, Summary: ev.Summary,
+				From: sp.From, To: int(ev.To), Label: label, Summary: ev.Summary,
 			})
-			a.rememberSealedRef(ev.Ref, sp.From, ev.To)
+			a.rememberSealedRef(ev.Ref, sp.From, int(ev.To))
 			delete(a.state.Open, ev.Ref)
-			if ev.To > a.state.SealedThrough {
-				a.state.SealedThrough = ev.To
+			if int(ev.To) > a.state.SealedThrough {
+				a.state.SealedThrough = int(ev.To)
 			}
 			a.trimTail()
 
@@ -281,7 +281,7 @@ func (a *Automaton) Apply(events []Event) []Sealed {
 			// in the working set so subsequent seals extend it.
 			if _, exists := a.state.Open[ev.Ref]; !exists {
 				a.state.Open[ev.Ref] = &OpenSpan{
-					Ref: ev.Ref, From: ev.From, Label: ev.Label, LastMsg: ev.From,
+					Ref: ev.Ref, From: int(ev.From), Label: ev.Label, LastMsg: int(ev.From),
 				}
 			}
 
