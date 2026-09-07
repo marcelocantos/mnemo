@@ -45,3 +45,7 @@ func TestPrintBudgetHuman(t *testing.T) {
 		}
 	}
 }
+
+func TestVcheckGatePlantMustRedden(t *testing.T) {
+	t.Fatal("planted by gate audit")
+}
