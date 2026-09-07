@@ -93,6 +93,11 @@ type Store struct {
 	dbPath     string
 	projectDir string
 
+	// insertShapeModern caches whether the schema carries the columns the
+	// modern insert statements bind (🎯T170). See modernInsertShape.
+	insertShapeOnce   sync.Once
+	insertShapeModern bool
+
 	// codec packs large text columns for storage (🎯T151); backfill
 	// tracks the historical-row GC. Both have their own locking. bgCtx
 	// is cancelled by Close so background codec work (auto-train) stops
@@ -3773,7 +3778,27 @@ func (s *Store) newWriterState() (*writerState, error) {
 	if err != nil {
 		return nil, err
 	}
-	packed := s.codec.ready.Load()
+	// Statement shape follows the SCHEMA, not the codec (🎯T170).
+	//
+	// These statements differ in two ways: the modern pair binds the _z
+	// columns, and the modern entry insert materialises uuid_m. Only the
+	// first needs the codec — codec.pack returns the text unchanged with
+	// a nil frame when it is not ready, so the modern statements write
+	// plain rows perfectly well before then.
+	//
+	// Keying the choice on codec readiness therefore dropped uuid_m for
+	// every row ingested between store open and CapCodecReady, and that
+	// is the window duplicates entered through: once any row is packed
+	// its raw is NULL, so its generated uuid is NULL and it leaves
+	// idx_entries_session_uuid (partial, WHERE uuid IS NOT NULL). A
+	// legacy insert of the same entry then conflicts with neither index —
+	// uuid_m is NULL on both sides — and the AFTER INSERT trigger that
+	// would have set uuid_m is swallowed by the statement's own OR
+	// IGNORE. The row lands twice.
+	//
+	// The honest condition is whether the columns exist. Before they do,
+	// the legacy statements are not a fallback but the only valid SQL.
+	packed := s.modernInsertShape()
 	entrySQL := entryInsertSQL
 	if !packed {
 		entrySQL = entryInsertLegacySQL
@@ -8628,4 +8653,41 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 	}
 
 	return results, nil
+}
+
+// modernInsertShape reports whether the schema has the columns the
+// modern insert statements bind: entries.uuid_m and messages.text_z
+// (🎯T170). Asked of the schema itself rather than of a startup
+// capability, because the capability latch is about a migration having
+// run in THIS process — a store opened on an already-migrated database
+// has the columns whether or not that phase was observed, and a test
+// store has them with no phases at all.
+//
+// Probed once and cached: it cannot change under a running store, since
+// the migration that adds these columns runs before any writer exists.
+func (s *Store) modernInsertShape() bool {
+	s.insertShapeOnce.Do(func() {
+		var n int
+		err := s.readDB.QueryRow(`
+			SELECT (SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'uuid_m')
+			     * (SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'text_z')`).Scan(&n)
+		if err != nil {
+			// Unknown shape: the legacy statements are valid against both
+			// schemas, so they are the safe answer. The cost is a NULL
+			// uuid_m, which is the bug this function exists to prevent —
+			// so say so rather than failing silently.
+			slog.Warn("could not probe the entries/messages insert shape; "+
+				"falling back to the legacy statements, which do not set uuid_m", "err", err)
+			return
+		}
+		s.insertShapeModern = n > 0
+	})
+	return s.insertShapeModern
+}
+
+// forceLegacyInsertShapeForTest pins modernInsertShape to false so a test
+// can drive the pre-🎯T170 statement choice deliberately. Tests only.
+func (s *Store) forceLegacyInsertShapeForTest() {
+	s.insertShapeOnce.Do(func() {})
+	s.insertShapeModern = false
 }

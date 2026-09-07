@@ -115,6 +115,9 @@ var opsOps = opTable{
 		{name: "compress_status", desc: "Compression dictionaries and per-column compressed/plain accounting, plus backfill progress"},
 		{name: "compress_train", desc: "Train a new zstd dictionary for a column family from a random row sample and make it active for new rows", params: []string{"family"}},
 		{name: "compress_gc", desc: "Repack historical plain rows compressed, in resumable batches (background unless wait=true); VACUUM afterwards to reclaim space", params: []string{"family", "wait"}},
+		// 🎯T170: GC for entries duplicated while packing had disabled the
+		// (session_id, uuid) index. Destructive, so it dry-runs by default.
+		{name: "dedupe_entries", desc: "Remove surplus copies of entries sharing a (session_id, uuid) key, and their messages. Reports only unless apply=true", params: []string{"apply"}},
 	},
 }
 
@@ -134,6 +137,7 @@ Ops:`+opsOps.describe()),
 		mcp.WithString("repo", mcp.Description("op=agent_trees: repo filter")),
 		mcp.WithString("family", mcp.Description("op=compress_train / compress_gc: messages (default), docs, or entries")),
 		mcp.WithBoolean("wait", mcp.Description("op=compress_gc: run to completion in this call instead of in the background")),
+		mcp.WithBoolean("apply", mcp.Description("op=dedupe_entries: actually delete the surplus rows. Omitted or false reports what would go and changes nothing")),
 	)
 }
 
@@ -165,6 +169,8 @@ func (h *callHandler) opsDispatch(args map[string]any, resolveCompactor func(str
 		return h.compressTrain(args)
 	case "compress_gc":
 		return h.compressGC(args)
+	case "dedupe_entries":
+		return h.dedupeEntries(args)
 	}
 	return "mnemo_ops: op " + op + " has no handler", true, nil
 }
@@ -257,6 +263,7 @@ type textCompressor interface {
 	EntriesMaterialised() (bool, error)
 	TrainDictionary(ctx context.Context, family string) (uint32, error)
 	CompressBackfill(ctx context.Context, family string) (store.BackfillResult, error)
+	DedupeEntries(ctx context.Context, dryRun bool) (store.DedupeResult, error)
 }
 
 func (h *callHandler) compressor() (textCompressor, bool) {
@@ -392,4 +399,37 @@ func (h *callHandler) materialisation() (string, error) {
 		return "entries.fields: materialised (entries.raw may be compressed)", nil
 	}
 	return "entries.fields: boot-time materialisation still running; op=compress_gc family=entries is refused until it finishes", nil
+}
+
+// dedupeEntries removes entries duplicated by the 🎯T170 insert-path bug.
+//
+// Deleting rows from someone's memory index is not something to do on a
+// guessed parameter, so the default is a report: apply must be passed
+// explicitly. The survey is a window function over every keyed row and
+// takes a while on a large store, which is another reason to read the
+// dry-run numbers before committing to the deletes.
+func (h *callHandler) dedupeEntries(args map[string]any) (string, bool, error) {
+	c, ok := h.compressor()
+	if !ok {
+		return "dedupe_entries is not available on this backend", true, nil
+	}
+	apply, _ := args["apply"].(bool)
+	res, err := c.DedupeEntries(h.ctx, !apply)
+	if err != nil {
+		return fmt.Sprintf("dedupe_entries failed: %v", err), true, nil
+	}
+	if res.DuplicateGroups == 0 {
+		return "No duplicate entries: every (session_id, uuid) key holds one row.", false, nil
+	}
+	if !apply {
+		return fmt.Sprintf(
+			"Would remove %d surplus entries in %d duplicate groups, with %d messages hanging off them. "+
+				"Nothing was changed; pass apply=true to delete. Space returns to the filesystem only after a VACUUM.",
+			res.EntriesRemoved, res.DuplicateGroups, res.MessagesRemoved), false, nil
+	}
+	return fmt.Sprintf(
+		"Removed %d surplus entries in %d duplicate groups, and %d messages; "+
+			"repaired %d keys the collision had left unset. "+
+			"Space returns to the filesystem only after a VACUUM.",
+		res.EntriesRemoved, res.DuplicateGroups, res.MessagesRemoved, res.KeysRepaired), false, nil
 }

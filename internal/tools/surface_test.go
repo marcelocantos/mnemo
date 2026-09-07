@@ -164,6 +164,9 @@ func TestConsolidationPreservesCapabilities(t *testing.T) {
 			"compress_status": "(new: 🎯T151)",
 			"compress_train":  "(new: 🎯T151)",
 			"compress_gc":     "(new: 🎯T151)",
+			// 🎯T170: GC for entries duplicated while packing had disabled
+			// the (session_id, uuid) index. Deliberate new capability.
+			"dedupe_entries": "(new: 🎯T170)",
 		}},
 	}
 
