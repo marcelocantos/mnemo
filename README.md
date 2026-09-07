@@ -301,6 +301,17 @@ background (🎯T162). Watch `compress.backfill` in `mnemo_ops`
 (op=doctor) for phase and outstanding plain bytes. Repacking does not
 return space to the filesystem — VACUUM stays a manual operator step.
 
+The packer is built to stay out of the way: rows are compressed outside
+the write transaction, the pause between batches scales with what each
+batch cost, and the write-ahead log is checkpointed as it goes, so a
+multi-hour pack does not make the daemon unresponsive. A row that cannot
+be written is skipped and reported rather than stranding the rest.
+
+If the index ever holds duplicate copies of the same transcript entry,
+`mnemo_ops op=dedupe_entries` reports them and `apply=true` removes
+them; `mnemo dedupe-entries --apply` does the same offline with the
+daemon stopped. Both are idempotent.
+
 ### Auto-upgrade (opt-in)
 
 ```json

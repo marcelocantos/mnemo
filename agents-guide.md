@@ -336,6 +336,21 @@ Repacking empties the legacy columns; it does **not** reclaim disk.
 VACUUM stays a manual operator step. `op=compress_gc` is an explicit
 one-family override, not the only path.
 
+The packer yields (🎯T168): rows are compressed OUTSIDE the write
+transaction, which then holds SQLite's single writer only for the
+UPDATEs, and it pauses between batches in proportion to what each batch
+cost rather than by a fixed amount. It also spends a PASSIVE WAL
+checkpoint every 64 MiB, because the periodic TRUNCATE worker waits for
+a write lull that a multi-hour pack never provides. A pass takes longer
+in wall-clock and leaves the daemon answering.
+
+A row that cannot be written — a constraint violation, not a disk error
+— is skipped rather than aborting the family (🎯T169), and the reason is
+recorded on the family's cursor, so `op=compress_status` says why a
+family that reports done still carries a plain residue. Before this, one
+poison row froze the cursor and the family never reached done, which in
+turn gated VACUUM indefinitely.
+
 Content types in `content_type`: `text`, `tool_use`, `tool_result`, `thinking`.
 
 Example queries:
@@ -510,13 +525,13 @@ Parameters:
 ### mnemo_ops
 
 Operational surface, op-dispatched:
-`op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc`.
+`op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc|dedupe_entries`.
 
 `op=doctor` is the first thing to reach for when something looks wrong —
 a per-check health report (ok/warn/fail plus remediation) covering the
 summariser workdir, `claude` on PATH, configured roots, the compaction
-circuit-breaker, ingest and compression backfill, and database
-responsiveness. The same data backs `GET /health` and the dashboard.
+circuit-breaker AND its sustained failure ratio (🎯T167), ingest and
+compression backfill, and database responsiveness. The same data backs `GET /health` and the dashboard.
 
 `op=backup_status` reports the retained snapshots AND the total bytes in
 the backup directory. When those disagree, the difference is scratch
@@ -685,11 +700,19 @@ whether it is still growing — a long reader or a stuck writer).
 *Is compaction working?* — `compactor.workdir` (the summariser's working
 dir exists and is writable), `claude.path` (the `claude` binary is on
 the daemon's PATH), `compactor.breaker` (the compaction circuit-breaker
-has not tripped). Deferred ticks do not quarantine a session (🎯T163);
-`op=compactor` is the diagnostic.
+has not tripped, AND its lifetime failed/compacted ratio is within
+`compact.FailureRatioHealthy` — 🎯T167: a closed breaker only rules out
+the systemic case where every tick fails for one reason, so a steady
+drizzle of failures used to read as healthy; the check now warns past
+0.20 and fails past 0.50, once enough compactions have run to judge).
+Deferred ticks do not quarantine a session (🎯T163);
+`op=compactor` is the diagnostic, and prints the same threshold the
+check enforces.
 
 *Is historical compression finishing?* — `compress.backfill` (🎯T162 —
-phase plus outstanding plain bytes; 0 reclaimed / VACUUM is manual).
+phase plus outstanding plain bytes; 0 reclaimed / VACUUM is manual). A
+family that reports done with a plain residue left names the reason
+(🎯T169).
 
 *What is it costing?* — `budget.projection` (month-end projection
 against the cap, or "unpriced" with no rate card), `budget.throttle`
@@ -719,6 +742,18 @@ Three surfaces expose the same report:
 (There is also a one-shot `mnemo diagnose` CLI subcommand for a
 terminal health check.)
 
+**Duplicate entries (🎯T170).** Packing a row NULLs `raw`, which NULLs
+the generated `uuid` column and drops the row out of
+`idx_entries_session_uuid` — a partial index, `WHERE uuid IS NOT NULL`.
+An insert that did not bind `uuid_m` then conflicted with neither index
+and landed a second copy. The insert path now chooses its statements by
+schema shape rather than codec readiness, so `uuid_m` is always bound
+when the column exists. To clear rows already written:
+`mnemo_ops op=dedupe_entries` (add `apply=true`; it reports and changes
+nothing otherwise), or `mnemo dedupe-entries --apply` offline with the
+daemon stopped. Idempotent. Space returns to the filesystem only after
+a VACUUM.
+
 **Resilience (🎯T84).** A background task that fails repeatedly — the
 compaction watcher when every tick fails (a missing summariser cwd,
 `claude` off PATH), or a stream reconciler that keeps erroring — trips a
@@ -726,6 +761,12 @@ circuit-breaker and backs off for a cooldown instead of retrying hot.
 This stops one broken task from burning CPU and contending the SQLite
 writer, so it can never starve ingestion. A tripped breaker surfaces as
 a fail-severity `mnemo_ops` (op=doctor) check.
+
+The breaker only catches the systemic case — *every* tick failing for
+one reason. A sustained minority of failures never trips it, so
+`compactor.breaker` also judges the lifetime failed/compacted ratio
+(🎯T167). Both signals matter: the breaker for "everything is broken",
+the ratio for "a stubborn subset keeps failing and nothing said so".
 
 ## Index freshness
 

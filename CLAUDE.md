@@ -127,7 +127,7 @@ ignored**, so a wrong guess fails loudly.
 
 - `mnemo_vault` — Vault operations. `op=status|sync|gc|migration_doc|bridge_list|recluster|themes_inspect|themes_pin|themes_split|themes_merge`. Requires `vault_path`. `themes_split`/`themes_merge` remain stubs that record a `theme_overrides` row without applying live, and the description says so.
 - `mnemo_thread` — Thread navigation. `op=list|show|new|archive|go`. Same data as the daemon's `/api/thread/*` endpoints, which the menubar app uses.
-- `mnemo_ops` — Operational surface. `op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc`. `op=restore` is destructive and requires an explicit `session_id`. Note that `mnemo_status` and `mnemo_stats` are deliberately **not** folded in: they carry real traffic, and for a tool agents already find, a name beats an op.
+- `mnemo_ops` — Operational surface. `op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc|dedupe_entries`. `op=restore` is destructive and requires an explicit `session_id`. Note that `mnemo_status` and `mnemo_stats` are deliberately **not** folded in: they carry real traffic, and for a tool agents already find, a name beats an op.
 
 **Removed in 🎯T143.1** (no consumer in four months): `mnemo_plans`,
 `mnemo_ci`, `mnemo_define`, `mnemo_evaluate`, `mnemo_list_templates`,
@@ -180,8 +180,28 @@ repacked from bytes reclaimed — VACUUM stays manual. Dictionaries are trained
 from the corpus and versioned in
 `compression_dicts`; each frame names its dictionary, so a retrain never
 invalidates history. Open `mnemo.db` with `store.SQLiteDriverName` (the
-triggers call `mnemo_text`). Ops: `mnemo_ops op=compress_status |
+triggers call `mnemo_text`). The packer yields to foreground work
+(🎯T168): rows are encoded outside the write transaction, the pause
+between batches scales with what the batch cost, and a PASSIVE WAL
+checkpoint runs every 64 MiB — the TRUNCATE worker cannot help, because
+it waits for a write lull a long pack never gives it. A row that fails a
+constraint is skipped rather than stranding the family, with the reason
+recorded on the cursor (🎯T169). Ops: `mnemo_ops op=compress_status |
 compress_train | compress_gc`. Design: `docs/design/text-compression.md`.
+
+## Duplicate entries (🎯T170)
+
+Packing a row NULLs `raw`, so its generated `uuid` goes NULL and the row
+leaves `idx_entries_session_uuid` (partial, `WHERE uuid IS NOT NULL`).
+An insert that did not bind `uuid_m` then conflicted with neither index
+and landed a duplicate, and the `entries_materialise` AFTER INSERT
+trigger that would have set `uuid_m` was swallowed by the statement's own
+`OR IGNORE`. `writerState` now picks its statements by **schema shape**
+(`modernInsertShape`, a cached `pragma_table_info` probe), not codec
+readiness, so `uuid_m` is bound whenever the column exists. Rows already
+written are cleared by `mnemo_ops op=dedupe_entries apply=true` or
+`mnemo dedupe-entries --apply`; both are idempotent and dry-run by
+default, and neither reclaims disk without a VACUUM.
 
 ## Backups
 
