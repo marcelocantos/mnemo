@@ -333,10 +333,10 @@ jobs:
           update_readme_table: true
           formula_includes: |
             depends_on "gh"
-            depends_on "uv"
-            depends_on "tesseract"
-            depends_on "poppler"
             depends_on "mupdf"
+            depends_on "poppler"
+            depends_on "tesseract"
+            depends_on "uv"
 
             service do
               run [opt_bin/"mnemo"]
@@ -344,5 +344,16 @@ jobs:
               log_path var/"log/mnemo.log"
               error_log_path var/"log/mnemo.log"
               working_dir HOMEBREW_PREFIX
-              environment_variables PATH: "#{HOMEBREW_PREFIX}/bin:#{HOMEBREW_PREFIX}/sbin:#{ENV["HOME"]}/.cargo/bin:#{ENV["HOME"]}/.local/bin:#{ENV["HOME"]}/.py/bin:#{ENV["HOME"]}/go/bin:#{ENV["HOME"]}/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin"
+              # std_service_path_env FIRST. The compactor spawns `claude`,
+              # which Homebrew does not package and which lives in a per-user
+              # directory, so those two stay on the daemon's PATH — but behind
+              # the system path, or anything planted in a user-writable dir
+              # would win for a background service. Everything else mnemo
+              # spawns (uv, gh, tesseract, poppler, mupdf) is a declared
+              # dependency and resolves from HOMEBREW_PREFIX.
+              environment_variables PATH: [
+                std_service_path_env,
+                "#{Dir.home}/.local/bin",
+                "#{Dir.home}/.claude/local",
+              ].join(":")
             end
