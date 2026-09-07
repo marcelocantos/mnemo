@@ -12,6 +12,8 @@ BUILD_TAGS := sqlite_fts5
 SCALE_TAGS := sqlite_fts5 scale
 
 bullseye:
+	@./scripts/check-sqldeep-pin.sh >/dev/null && echo "✓ sqldeep pin" || \
+	 (echo "✗ sqldeep pins disagree:"; ./scripts/check-sqldeep-pin.sh; exit 1)
 	@test -z "$$(gofmt -l .)" && echo "✓ fmt" || \
 	 (echo "✗ gofmt issues:"; gofmt -l .; exit 1)
 	@go vet -tags "$(BUILD_TAGS)" ./... && echo "✓ vet"

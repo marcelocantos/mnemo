@@ -31,10 +31,16 @@ jobs:
         with:
           path: mnemo
 
+      # go.mod is the one authority for the sqldeep version; this fails
+      # if any workflow ref or the Windows-VM gate default drifts from it.
+      - name: Check sqldeep pin agreement
+        working-directory: mnemo
+        run: scripts/check-sqldeep-pin.sh
+
       - uses: actions/checkout@v6
         with:
           repository: marcelocantos/sqldeep
-          ref: v0.22.0
+          ref: v0.23.0
           path: sqldeep
           submodules: recursive
 

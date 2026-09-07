@@ -8,11 +8,11 @@
 # commit + sqldeep, build libsqldeep.a with clang, `go test -tags
 # sqlite_fts5` on windows/arm64). Exit 0 = Windows is green.
 #
-# Config: WINCI_VM (default hms-vm), WINCI_SQLDEEP_REF (default v0.22.0).
+# Config: WINCI_VM (default hms-vm), WINCI_SQLDEEP_REF (default v0.23.0).
 set -uo pipefail
 
 VM="${WINCI_VM:-hms-vm}"
-SQLDEEP_REF="${WINCI_SQLDEEP_REF:-v0.22.0}"
+SQLDEEP_REF="${WINCI_SQLDEEP_REF:-v0.23.0}"
 REMOTE_PS="C:/Users/marcelo/win-validate.ps1"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
