@@ -53,6 +53,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/edgeproxy"
 	"github.com/marcelocantos/mnemo/internal/endpoint"
 	"github.com/marcelocantos/mnemo/internal/federation"
+	"github.com/marcelocantos/mnemo/internal/httpguard"
 	"github.com/marcelocantos/mnemo/internal/mcpconfig"
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/registry"
@@ -69,9 +70,26 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.94.0"
-	defaultAddr          = "localhost:19419"
-	defaultFederatedAddr = ":19420"
+	version     = "0.94.0"
+	defaultAddr = "localhost:19419"
+	// federatedPort is the port the mTLS federated MCP endpoint uses.
+	// Peers are told this number by print-federated-addr, so it is one
+	// constant rather than a literal repeated at each site.
+	federatedPort = "19420"
+
+	// defaultFederatedAddr binds federation to loopback, NOT to every
+	// interface. Federation is opt-in — it is useless until a peer
+	// certificate has been placed in ~/.mnemo/peers/ — so a user who has
+	// never paired anything should not be carrying a listener onto every
+	// café and hotel network they join. Exposing it is still one flag:
+	// `mnemo --federated-addr :19420` restores the old behaviour, and
+	// `--federated-addr ""` disables the listener entirely.
+	defaultFederatedAddr = "127.0.0.1:" + federatedPort
+
+	// advertisedFederatedAddr is the host-less form print-federated-addr
+	// starts from: the port is this daemon's, but the host a peer must
+	// dial is the machine's name, not the loopback address it binds.
+	advertisedFederatedAddr = ":" + federatedPort
 
 	// drainIntakeGrace bounds the *courtesy* half of shutdown: letting
 	// in-flight HTTP requests finish before the listener is torn down
@@ -373,7 +391,7 @@ func cmdPingPeer(args []string) {
 // listens on a non-default port or the public name differs).
 func cmdPrintFederatedAddr(args []string) {
 	fs := flag.NewFlagSet("print-federated-addr", flag.ExitOnError)
-	addrFlag := fs.String("addr", defaultFederatedAddr,
+	addrFlag := fs.String("addr", advertisedFederatedAddr,
 		"federated listen address — port portion is used as-is, host portion defaults to os.Hostname()")
 	_ = fs.Parse(args)
 
@@ -781,6 +799,34 @@ func openDefaultLoopbackListeners(port string) (*localListenerSet, error) {
 	}
 	set.displayAddr = strings.Join(addrs, ", ")
 	return set, nil
+}
+
+// loopbackPort returns the port every listener in the set is bound to,
+// and whether they are all bound to loopback addresses.
+//
+// It gates the Host/Origin guard. A loopback bind is the case the guard
+// exists for: unauthenticated because only this machine can reach it,
+// and therefore reachable by DNS rebinding from a page the user visits.
+// A deliberate non-loopback bind (`mnemo --addr :19419`, documented) is
+// the operator asking to be reached by other names, so the guard would
+// only break what they asked for.
+func (s *localListenerSet) loopbackPort() (string, bool) {
+	port := ""
+	for _, l := range s.listeners {
+		host, p, err := net.SplitHostPort(l.addr)
+		if err != nil {
+			return "", false
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return "", false
+		}
+		if port != "" && p != port {
+			return "", false
+		}
+		port = p
+	}
+	return port, port != ""
 }
 
 func (s *localListenerSet) serve(handler http.Handler) ([]*http.Server, <-chan error) {
@@ -1531,7 +1577,14 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	// Listen BEFORE eager store open: pre-migration backup can take
 	// minutes on a multi-GB mnemo.db. /health must answer throughout
 	// and report the boot phase (startup.ready).
-	httpServers, errCh := localListeners.serve(mux)
+	// A loopback bind alone does not keep a web page the user visits out
+	// (DNS rebinding), so when we are loopback-only, check that each
+	// request was actually addressed here.
+	var localHandler http.Handler = mux
+	if port, ok := localListeners.loopbackPort(); ok {
+		localHandler = httpguard.New(&httpguard.Args{Port: port}, mux)
+	}
+	httpServers, errCh := localListeners.serve(localHandler)
 	boot.Set(boot.PhaseListening, "HTTP listener up on "+localListeners.displayAddr+"; opening default-user store")
 
 	// Always supervise the multi-purpose shim when Mnemo.app is present.

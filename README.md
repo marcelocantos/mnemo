@@ -494,6 +494,10 @@ On each host:
    # → https://<hostname>:19420/mcp
    ```
 
+   The federated listener binds loopback by default, so this URL is
+   not reachable until the daemon is started with
+   `--federated-addr :19420` (or another non-loopback address).
+
 4. On each peer, declare the link in `~/.mnemo/config.json`:
 
    ```json

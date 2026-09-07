@@ -183,7 +183,9 @@ URLs + per-peer pinned certs. New CLI subcommands: `print-endpoint`
 (emit local cert.pem for paste-distribution), `print-federated-addr`
 (emit URL peers paste into their config), `ping-peer <name>`
 (invoke `mnemo_stats` on a configured peer). New flag
-`--federated-addr` (default `:19420`; empty disables). When
+`--federated-addr` (default `127.0.0.1:19420` — loopback, so an
+unpaired host carries no listener onto untrusted networks; pass
+`--federated-addr :19420` to accept peers, empty to disable). When
 `linked_instances` is non-empty, the read-shaped tools (mnemo_search,
 mnemo_sessions, mnemo_recent_activity, mnemo_read_session, mnemo_repos,
 mnemo_query, mnemo_stats, mnemo_status, mnemo_usage) wrap their response in a `FanoutEnvelope`
@@ -306,7 +308,7 @@ session-binding, compaction anchoring, and chain detection.
 | Flag | Type | Default | Stability |
 |---|---|---|---|
 | `--addr` | string | `localhost:19419` | Stable |
-| `--federated-addr` | string | `:19420` | Needs review |
+| `--federated-addr` | string | `127.0.0.1:19420` | Needs review |
 | `--version` | bool | false | Stable |
 | `--help-agent` | bool | false | Stable |
 | `--help-config` | bool | false | Needs review |

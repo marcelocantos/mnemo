@@ -7,7 +7,8 @@
 // mark3labs/mcp-go streamable HTTP server.
 //
 // The federated server is a separate http.Server bound to its own
-// listen address (default :19420), distinct from the local
+// listen address (default 127.0.0.1:19420 — reaching peers takes an
+// explicit --federated-addr :19420), distinct from the local
 // :19419 endpoint that local Claude Code instances use. Only tools
 // in tools.FederatedToolNames are registered, so write- or
 // control-shaped tools cannot be invoked over federation regardless

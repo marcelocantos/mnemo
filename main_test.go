@@ -242,3 +242,64 @@ func TestSummariserWorkDir(t *testing.T) {
 		t.Errorf("non-idempotent: %q != %q", again, dir)
 	}
 }
+
+// TestDefaultFederatedAddrIsLoopback pins the fix for the fleet-exposure
+// finding that mnemo was the only tool on this machine binding a
+// non-loopback port by default. Federation is opt-in; an unpaired user
+// should have no listener on every network they join.
+func TestDefaultFederatedAddrIsLoopback(t *testing.T) {
+	host, port, err := net.SplitHostPort(defaultFederatedAddr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", defaultFederatedAddr, err)
+	}
+	if port != federatedPort {
+		t.Errorf("defaultFederatedAddr port = %q, want %q", port, federatedPort)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		t.Errorf("defaultFederatedAddr host = %q, want a loopback literal", host)
+	}
+}
+
+// TestLoopbackPortReportsBoundPort drives the Host/Origin guard: the
+// middleware is wired only when every listener is loopback, and it needs
+// the port that clients must have addressed.
+func TestLoopbackPortReportsBoundPort(t *testing.T) {
+	// Both loopback families must land on the SAME port, so port 0 (a
+	// different ephemeral port per family) will not do: pick one free
+	// port first and ask for it explicitly, as the daemon does.
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	_, want, err := net.SplitHostPort(probe.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", probe.Addr().String(), err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatalf("probe close: %v", err)
+	}
+	set, err := openDefaultLoopbackListeners(want)
+	if err != nil {
+		t.Fatalf("openDefaultLoopbackListeners: %v", err)
+	}
+	defer set.close()
+	got, ok := set.loopbackPort()
+	if !ok {
+		t.Fatal("loopbackPort() reported not-loopback for the default loopback listeners")
+	}
+	if got != want {
+		t.Errorf("loopbackPort() = %q, want %q", got, want)
+	}
+}
+
+func TestLoopbackPortDeclinesWildcardBind(t *testing.T) {
+	set, err := openLocalListeners("0.0.0.0:0", false)
+	if err != nil {
+		t.Fatalf("openLocalListeners: %v", err)
+	}
+	defer set.close()
+	if port, ok := set.loopbackPort(); ok {
+		t.Errorf("loopbackPort() = %q, true for a wildcard bind; want false", port)
+	}
+}
