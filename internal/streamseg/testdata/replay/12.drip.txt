@@ -1,0 +1,707 @@
+Spans you have open:
+  t1 from #3826596 (24 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826640 assistant: 
+#3826641 user: 2150→      "duration": 5.2
+    },
+    {
+      "text": "won't have a uh a band saw yet no big",
+      "start": 963.68,
+      "duration": 5.0
+    },
+    {
+      "text": "deal cut it out with a jigsaw it doesn't",
+      "start": 966.88,
+2160→      "duration": 3.0
+    },
+    {
+      "text": "really matter what it looks like doesn't",
+      "start": 968.68,
+      "duration": 2.88
+    },
+    {
+      "text": "matter how ugly it is but you can",
+      "start": 969.88,
+2170→      "duration": 4.439
+    },
+    {
+      "text": "actually still do a good job um and what",
+      "start": 971.56,
+      "duration": 4.48
+    },
+    {
+      "text": "whatever is not perfect you can just",
+      "start": 974.319,
+2180→      "duration": 5.44
+    },
+    {
+      "text": "sand and I am going to use uh a sander",
+      "start": 976.04,
+      "duration": 5.52
+    },
+    {
+      "text": "like a belt sander for it this rigid",
+      "start": 979.759,
+2190→      "duration": 3.721
+    },
+    {
+      "text": "oscillating spindle sander but if you",
+      "start": 981.56,
+      "duration": 3.6
+    },
+    {
+      "text": "don't have one of these no big deal just",
+      "start": 983.48,
+2200→      "duration": 3.24
+    },
+    {
+      "text": "use a belt sander if you don't have a",
+      "start": 985.16,
+      "duration": 3.679
+    },
+    {
+      "text": "belt sander just put some cor Grit on",
+      "start": 986.72,
+2210→      "duration": 4.039
+    },
+    {
+      "text": "whatever sander you have and just take a",
+      "start": 988.839,
+      "duration": 3.641
+    },
+    {
+      "text": "few minutes and sand it nice and smooth",
+      "start": 990.759,
+2220→      "duration": 3.88
+    },
+    {
+      "text": "get the curves looking nice but it's",
+      "start": 992.48,
+      "duration": 4.159
+    },
+    {
+      "text": "just for looks it doesn't really matter",
+      "start": 994.639,
+2230→      "duration": 3.56
+    },
+    {
+      "text": "if they're absolutely perfect okay we're",
+…
+ether I can screw them",
+      "start": 1099.52,
+      "duration": 5.12
+    },
+    {
+      "text": "together when we for the times we don't",
+      "start": 1102.64,
+2470→      "duration": 4.519
+    },
+    {
+      "text": "want it",
+      "start": 1104.64,
+      "duration": 4.64
+    },
+    {
+      "text": "separated and I've measured that to be",
+      "start": 1107.159,
+2480→      "duration": 3.561
+    },
+    {
+      "text": "right in the dead center so you could",
+      "start": 1109.28,
+      "duration": 4.36
+    },
+    {
+      "text": "flip it either way and I am drilling out",
+      "start": 1110.72,
+2490→      "duration": 7.839
+    },
+    {
+      "text": "the holes now for the zero clearance",
+      "start": 1113.64,
+      "duration": 4.919
+    },
+    {
+      "text": "insert I just took my time I measured",
+      "start": 1118.799,
+2500→      "duration": 5.401
+    },
+    {
+      "text": "those holes",
+      "start": 1121.72,
+      "duration": 4.6
+    },
+    {
+      "text": "accurately and you can do that as well",
+      "start": 1124.2,
+2510→      "duration": 3.959
+    },
+    {
+      "text": "you could get the templates if you need",
+      "start": 1126.32,
+      "duration": 3.12
+    },
+    {
+      "text": "of course you could always buy the sled",
+      "start": 1128.159,
+2520→      "duration": 3.041
+    },
+    {
+      "text": "if you prefer",
+      "start": 1129.44,
+      "duration": 5.0
+    },
+    {
+      "text": "that or you can just copy this video um",
+      "start": 1131.2,
+2530→      "duration": 4.359
+    },
+    {
+      "text": "I make it pretty straightforward it's a",
+      "start": 1134.44,
+      "duration": 3.08
+    },
+    {
+      "text": "long video and there's going to be",
+      "start": 1135.559,
+2540→      "duration": 4.641
+    },
+    {
+      "text": "another part to it I'm going to try to",
+      "start": 1137.52,
+      "duration": 4.76
+    },
+    {
+      "text": "um make this as as easy as possible to",
+      "start": 1140.2,
+#3826642 assistant: Continue reading.
+#3826643 assistant: 
+#3826645 user: 2540→      "duration": 4.641
+    },
+    {
+      "text": "another part to it I'm going to try to",
+      "start": 1137.52,
+      "duration": 4.76
+    },
+    {
+      "text": "um make this as as easy as possible to",
+      "start": 1140.2,
+2550→      "duration": 3.92
+    },
+    {
+      "text": "follow so that you you don't have to",
+      "start": 1142.28,
+      "duration": 5.32
+    },
+    {
+      "text": "spend any money at all if you don't want",
+      "start": 1144.12,
+2560→      "duration": 3.48
+    },
+    {
+      "text": "to you see the advantage of that fence",
+      "start": 1147.799,
+      "duration": 3.921
+    },
+    {
+      "text": "back there is that once I have that",
+      "start": 1150.12,
+2570→      "duration": 3.88
+    },
+    {
+      "text": "lined up I can just move this left and",
+      "start": 1151.72,
+      "duration": 4.04
+    },
+    {
+      "text": "right then I can flip it around and move",
+      "start": 1154.0,
+2580→      "duration": 3.88
+    },
+    {
+      "text": "it left to right uh because these the",
+      "start": 1155.76,
+      "duration": 3.64
+    },
+    {
+      "text": "the holes are the same distance off of",
+      "start": 1157.88,
+2590→      "duration": 3.279
+    },
+    {
+      "text": "either side I've made everything in this",
+      "start": 1159.4,
+      "duration": 3.56
+    },
+    {
+      "text": "project that way where the holes are the",
+      "start": 1161.159,
+2600→      "duration": 3.88
+    },
+    {
+      "text": "same distance off of either side so you",
+      "start": 1162.96,
+      "duration": 3.719
+    },
+    {
+      "text": "just get that fence set up once and it's",
+      "start": 1165.039,
+2610→      "duration": 3.921
+    },
+    {
+      "text": "good for the whole project",
+      "start": 1166.679,
+      "duration": 3.841
+    },
+    {
+      "text": "that's kind of convenient and then I'm",
+      "start": 1168.96,
+2620→      "duration": 3.04
+    },
+    {
+      "text": "going to switch to this bit an
+…
+now just if you get it threaded",
+      "start": 1276.36,
+      "duration": 4.799
+    },
+    {
+      "text": "at least about halfway",
+      "start": 1279.0,
+2860→      "duration": 6.48
+    },
+    {
+      "text": "down then you can hit on the head of the",
+      "start": 1281.159,
+      "duration": 6.52
+    },
+    {
+      "text": "screw and it'll continue driving that",
+      "start": 1285.48,
+2870→      "duration": 4.28
+    },
+    {
+      "text": "blind down until it's seated and the",
+      "start": 1287.679,
+      "duration": 4.681
+    },
+    {
+      "text": "screw will come right back",
+      "start": 1289.76,
+2880→      "duration": 4.88
+    },
+    {
+      "text": "out they're both strong steel it won't",
+      "start": 1292.36,
+      "duration": 3.319
+    },
+    {
+      "text": "damage a",
+      "start": 1294.64,
+2890→      "duration": 3.32
+    },
+    {
+      "text": "thing and then we want to check and make",
+      "start": 1295.679,
+      "duration": 3.88
+    },
+    {
+      "text": "sure that it's actually below the",
+      "start": 1297.96,
+2900→      "duration": 2.959
+    },
+    {
+      "text": "surface so it doesn't interfere with",
+      "start": 1299.559,
+      "duration": 3.881
+    },
+    {
+      "text": "anything and it is and then I like to",
+      "start": 1300.919,
+2910→      "duration": 4.561
+    },
+    {
+      "text": "put a few drops of CA glue somewhere",
+      "start": 1303.44,
+      "duration": 3.76
+    },
+    {
+      "text": "around the perimeter maybe in these",
+      "start": 1305.48,
+2920→      "duration": 3.439
+    },
+    {
+      "text": "little slot sections where the wings",
+      "start": 1307.2,
+      "duration": 4.52
+    },
+    {
+      "text": "were folded up and freeze those and",
+      "start": 1308.919,
+2930→      "duration": 4.12
+    },
+    {
+      "text": "that's going to prevent that blind nut",
+      "start": 1311.72,
+      "duration": 4.12
+    },
+    {
+      "text": "from ever coming",
+      "start": 1313.039,
+#3826646 assistant: Continue reading.
+#3826647 assistant: 
+#3826650 user: 2930→      "duration": 4.12
+    },
+    {
+      "text": "that's going to prevent that blind nut",
+      "start": 1311.72,
+      "duration": 4.12
+    },
+    {
+      "text": "from ever coming",
+      "start": 1313.039,
+2940→      "duration": 2.801
+    },
+    {
+      "text": "out now you might notice that the blind",
+      "start": 1315.88,
+      "duration": 4.919
+    },
+    {
+      "text": "nut sticking through here is a little",
+      "start": 1318.159,
+2950→      "duration": 4.241
+    },
+    {
+      "text": "bit of a problem I can't quite focus",
+      "start": 1320.799,
+      "duration": 3.401
+    },
+    {
+      "text": "there we go uh we don't want that",
+      "start": 1322.4,
+2960→      "duration": 4.159
+    },
+    {
+      "text": "sticking out proud because uh we've got",
+      "start": 1324.2,
+      "duration": 4.04
+    },
+    {
+      "text": "to put our removable section of fence in",
+      "start": 1326.559,
+2970→      "duration": 2.801
+    },
+    {
+      "text": "there and it rubs and that's really a",
+      "start": 1328.24,
+      "duration": 3.559
+    },
+    {
+      "text": "pain in the butt so you just take a",
+      "start": 1329.36,
+2980→      "duration": 5.6
+    },
+    {
+      "text": "file and I don't know 50 50 swipes with",
+      "start": 1331.799,
+      "duration": 5.88
+    },
+    {
+      "text": "the file and that just uh stands that",
+      "start": 1334.96,
+2990→      "duration": 4.28
+    },
+    {
+      "text": "flat so that's no problem and then the",
+      "start": 1337.679,
+      "duration": 4.441
+    },
+    {
+      "text": "fence will go back together nicely no",
+      "start": 1339.24,
+3000→      "duration": 4.12
+    },
+    {
+      "text": "problem at",
+      "start": 1342.12,
+      "duration": 3.679
+    },
+    {
+      "text": "all right now I'm going to show you how",
+      "start": 1343.36,
+3010→      "duration": 5.319
+    },
+    {
+      "text": "to make these uh",
+      "start": 1345.799,
+      "duration": 4.641
+    },
+
+…
+ "camera angle but you'll be able to see",
+      "start": 1458.559,
+      "duration": 2.48
+    },
+    {
+      "text": "it in a",
+      "start": 1459.88,
+3250→      "duration": 3.84
+    },
+    {
+      "text": "moment and I'm going to trace that so",
+      "start": 1461.039,
+      "duration": 5.161
+    },
+    {
+      "text": "this is going to be like the width of",
+      "start": 1463.72,
+3260→      "duration": 4.4
+    },
+    {
+      "text": "this drill bit I'm going to trace on",
+      "start": 1466.2,
+      "duration": 2.719
+    },
+    {
+      "text": "both",
+      "start": 1468.12,
+3270→      "duration": 4.36
+    },
+    {
+      "text": "sides that's a slot that we have to plow",
+      "start": 1468.919,
+      "duration": 5.201
+    },
+    {
+      "text": "out or you know drill out all the way",
+      "start": 1472.48,
+3280→      "duration": 3.48
+    },
+    {
+      "text": "across now I'm going to put the bit back",
+      "start": 1474.12,
+      "duration": 3.159
+    },
+    {
+      "text": "in place and I'm going to use that bit",
+      "start": 1475.96,
+3290→      "duration": 4.24
+    },
+    {
+      "text": "to actually draw the uh the",
+      "start": 1477.279,
+      "duration": 5.201
+    },
+    {
+      "text": "curve around there so we're using the",
+      "start": 1480.2,
+3300→      "duration": 4.68
+    },
+    {
+      "text": "tools themselves that are they're going",
+      "start": 1482.48,
+      "duration": 5.04
+    },
+    {
+      "text": "to drill this out to help us mark it now",
+      "start": 1484.88,
+3310→      "duration": 4.48
+    },
+    {
+      "text": "I'm going to go with the bigger bit now",
+      "start": 1487.52,
+      "duration": 4.44
+    },
+    {
+      "text": "this bigger bit represents a shelf the",
+      "start": 1489.36,
+3320→      "duration": 4.0
+    },
+    {
+      "text": "head of the",
+      "start": 1491.96,
+      "duration": 3.839
+    },
+    {
+      "text": "screw goes inside of there and rests on",
+      "start": 1493.36,
+#3826651 assistant: Continue reading.
+#3826652 assistant: 
+#3826655 user: 3320→      "duration": 4.0
+    },
+    {
+      "text": "head of the",
+      "start": 1491.96,
+      "duration": 3.839
+    },
+    {
+      "text": "screw goes inside of there and rests on",
+      "start": 1493.36,
+3330→      "duration": 4.439
+    },
+    {
+      "text": "the Shelf whereas the screw the threaded",
+      "start": 1495.799,
+      "duration": 3.401
+    },
+    {
+      "text": "shaft of the screw itself goes all the",
+      "start": 1497.799,
+3340→      "duration": 3.281
+    },
+    {
+      "text": "way through to go into the blind nut the",
+      "start": 1499.2,
+      "duration": 3.56
+    },
+    {
+      "text": "head has to rest on a shelf now you can",
+      "start": 1501.08,
+3350→      "duration": 4.199
+    },
+    {
+      "text": "see how that that those have made",
+      "start": 1502.76,
+      "duration": 5.039
+    },
+    {
+      "text": "indentations on the wood and we're going",
+      "start": 1505.279,
+3360→      "duration": 5.841
+    },
+    {
+      "text": "to draw that on both sides get out to",
+      "start": 1507.799,
+      "duration": 6.641
+    },
+    {
+      "text": "where that indentation is and draw that",
+      "start": 1511.12,
+3370→      "duration": 4.4
+    },
+    {
+      "text": "and we're going to do the same thing I'm",
+      "start": 1514.44,
+      "duration": 3.28
+    },
+    {
+      "text": "going to put that",
+      "start": 1515.52,
+3380→      "duration": 5.8
+    },
+    {
+      "text": "uh that bigger forcer bit back in and",
+      "start": 1517.72,
+      "duration": 5.4
+    },
+    {
+      "text": "just kind of twist it",
+      "start": 1521.32,
+3390→      "duration": 3.719
+    },
+    {
+      "text": "around you can watch me here I'm",
+      "start": 1523.12,
+      "duration": 6.559
+    },
+    {
+      "text": "twisting it around um to make a curve",
+      "start": 1525.039,
+3400→      "duration": 4.64
+    },
+    {
+      "text": "so real",
+      "start": 1529.84,
+      "duration": 4.439
+    },
+    {
+      "text": "si
+…
+: "chisels made and they're really not a",
+      "start": 1627.399,
+3640→      "duration": 5.241
+    },
+    {
+      "text": "bad price you can get them from tailor",
+      "start": 1630.88,
+      "duration": 3.399
+    },
+    {
+      "text": "toolworks I'm going to put a link in the",
+      "start": 1632.64,
+3650→      "duration": 4.12
+    },
+    {
+      "text": "description for them and even if you're",
+      "start": 1634.279,
+      "duration": 4.801
+    },
+    {
+      "text": "a power tool woodworker you need a set",
+      "start": 1636.76,
+3660→      "duration": 4.12
+    },
+    {
+      "text": "of chisels if you don't have the budget",
+      "start": 1639.08,
+      "duration": 3.76
+    },
+    {
+      "text": "right now no problem just go get any",
+      "start": 1640.88,
+3670→      "duration": 3.799
+    },
+    {
+      "text": "cheap chisel sharpen it up and you can",
+      "start": 1642.84,
+      "duration": 3.959
+    },
+    {
+      "text": "do this but if you haven't bought a set",
+      "start": 1644.679,
+3680→      "duration": 4.081
+    },
+    {
+      "text": "of chisels yet and you have the money",
+      "start": 1646.799,
+      "duration": 3.521
+    },
+    {
+      "text": "get a set of chisels get something like",
+      "start": 1648.76,
+3690→      "duration": 4.159
+    },
+    {
+      "text": "this NX it's a killer set really good",
+      "start": 1650.32,
+      "duration": 4.839
+    },
+    {
+      "text": "starter set and it rated number one out",
+      "start": 1652.919,
+3700→      "duration": 4.64
+    },
+    {
+      "text": "of like 50 or 60 different sets so it's",
+      "start": 1655.159,
+      "duration": 4.76
+    },
+    {
+      "text": "a it's a good set of chisels it's in the",
+      "start": 1657.559,
+3710→      "duration": 4.281
+    },
+    {
+      "text": "hundred something dollar range I don't",
+      "start": 1659.919,
+      "duration": 4.48
+    },
+    {
+      "text": "recall the exact price uh but it's a",
+      "start": 1661.84,
+#3826656 assistant: Continue reading.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

@@ -1,0 +1,708 @@
+Spans you have open:
+  t1 from #3826596 (36 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826657 assistant: 
+#3826662 user: 3710→      "duration": 4.281
+    },
+    {
+      "text": "hundred something dollar range I don't",
+      "start": 1659.919,
+      "duration": 4.48
+    },
+    {
+      "text": "recall the exact price uh but it's a",
+      "start": 1661.84,
+3720→      "duration": 5.04
+    },
+    {
+      "text": "really good value all right so Ed the",
+      "start": 1664.399,
+      "duration": 4.601
+    },
+    {
+      "text": "Chisel to get it close and then I'm just",
+      "start": 1666.88,
+3730→      "duration": 3.76
+    },
+    {
+      "text": "going to take something like a popsicle",
+      "start": 1669.0,
+      "duration": 3.72
+    },
+    {
+      "text": "stick or a tongue depressor and wrap a",
+      "start": 1670.64,
+3740→      "duration": 4.68
+    },
+    {
+      "text": "piece of 120 grit paper around it or",
+      "start": 1672.72,
+      "duration": 4.799
+    },
+    {
+      "text": "corser and we're just going to kind of s",
+      "start": 1675.32,
+3750→      "duration": 4.68
+    },
+    {
+      "text": "sand that for a moment and it's actually",
+      "start": 1677.519,
+      "duration": 5.441
+    },
+    {
+      "text": "pretty easy to sand those those Peaks",
+      "start": 1680.0,
+3760→      "duration": 5.12
+    },
+    {
+      "text": "smooth if you're really skilled at the",
+      "start": 1682.96,
+      "duration": 4.719
+    },
+    {
+      "text": "Chisel which I'm not I really don't uh",
+      "start": 1685.12,
+3770→      "duration": 4.439
+    },
+    {
+      "text": "spend much time with it although I do",
+      "start": 1687.679,
+      "duration": 3.401
+    },
+    {
+      "text": "have to use it everybody has to use",
+      "start": 1689.559,
+3780→      "duration": 3.401
+    },
+    {
+      "text": "chisels um if you're really skilled you",
+      "start": 1691.08,
+      "duration": 3.24
+    },
+    {
+      "text": "may get it perfect right off the bat a",
+      "start": 1692.96,
+3790→      "duration": 3.16
+    },
+    {
+      "text": "little tougher with p
+…
+.12,
+      "duration": 5.159
+    },
+    {
+      "text": "now if you have a DAT Blade Set up uh",
+      "start": 1800.64,
+4030→      "duration": 5.6
+    },
+    {
+      "text": "for your saw you want to get it out and",
+      "start": 1803.279,
+      "duration": 5.041
+    },
+    {
+      "text": "cut a dado in this",
+      "start": 1806.24,
+4040→      "duration": 3.84
+    },
+    {
+      "text": "centerpiece the measurements are there",
+      "start": 1808.32,
+      "duration": 3.88
+    },
+    {
+      "text": "in the plans it gets a DAT on both sides",
+      "start": 1810.08,
+4050→      "duration": 3.68
+    },
+    {
+      "text": "it's just a really shallow dat because",
+      "start": 1812.2,
+      "duration": 4.24
+    },
+    {
+      "text": "it's going to hold the",
+      "start": 1813.76,
+4060→      "duration": 5.88
+    },
+    {
+      "text": "uh uh the TR trck but it's not um going",
+      "start": 1816.44,
+      "duration": 4.839
+    },
+    {
+      "text": "to be cut the whole depth because You'",
+      "start": 1819.64,
+4070→      "duration": 3.279
+    },
+    {
+      "text": "got a piece of another piece of 38 in",
+      "start": 1821.279,
+      "duration": 3.76
+    },
+    {
+      "text": "plywood on top and I'll show you what I",
+      "start": 1822.919,
+4080→      "duration": 6.041
+    },
+    {
+      "text": "mean in just a second",
+      "start": 1825.039,
+      "duration": 5.88
+    },
+    {
+      "text": "so it was that easy and you if you don't",
+      "start": 1828.96,
+4090→      "duration": 3.559
+    },
+    {
+      "text": "have a dado don't worry about it we can",
+      "start": 1830.919,
+      "duration": 3.441
+    },
+    {
+      "text": "do this without without cutting any dado",
+      "start": 1832.519,
+4100→      "duration": 3.921
+    },
+    {
+      "text": "Cuts so that goes in the dato cut then",
+      "start": 1834.36,
+      "duration": 5.08
+    },
+    {
+      "text": "when the top board goes on you see that",
+      "start": 1836.44,
+#3826663 assistant: Continue reading.
+#3826664 assistant: 
+#3826668 user: 4100→      "duration": 3.921
+    },
+    {
+      "text": "Cuts so that goes in the dato cut then",
+      "start": 1834.36,
+      "duration": 5.08
+    },
+    {
+      "text": "when the top board goes on you see that",
+      "start": 1836.44,
+4110→      "duration": 4.959
+    },
+    {
+      "text": "the t trck is now a little bit below the",
+      "start": 1839.44,
+      "duration": 4.2
+    },
+    {
+      "text": "top board and that's what you want you",
+      "start": 1841.399,
+4120→      "duration": 3.841
+    },
+    {
+      "text": "can either be flush with it or a tiny",
+      "start": 1843.64,
+      "duration": 3.84
+    },
+    {
+      "text": "bit below no problem but you don't want",
+      "start": 1845.24,
+4130→      "duration": 4.84
+    },
+    {
+      "text": "the TR trck",
+      "start": 1847.48,
+      "duration": 2.6
+    },
+    {
+      "text": "higher there's another mag switch tool",
+      "start": 1850.159,
+4140→      "duration": 4.841
+    },
+    {
+      "text": "that holds that wood down when you're",
+      "start": 1853.32,
+      "duration": 3.719
+    },
+    {
+      "text": "cutting those Doos so it doesn't rise up",
+      "start": 1855.0,
+4150→      "duration": 3.76
+    },
+    {
+      "text": "in in the middle that way the data was",
+      "start": 1857.039,
+      "duration": 4.24
+    },
+    {
+      "text": "uniformly cut all the way through all",
+      "start": 1858.76,
+4160→      "duration": 5.36
+    },
+    {
+      "text": "right so I have drilled some holes in it",
+      "start": 1861.279,
+      "duration": 4.601
+    },
+    {
+      "text": "and now I'm ready to go ahead and",
+      "start": 1864.12,
+4170→      "duration": 3.76
+    },
+    {
+      "text": "install the te",
+      "start": 1865.88,
+      "duration": 4.799
+    },
+    {
+      "text": "trck so I did make a little mistake here",
+      "start": 1867.88,
+4180→      "duration": 5.08
+    },
+    {
+      "text": "um I actually meant to cut the te trck",
+      "start": 1870.679,
+     
+…
+e",
+      "start": 1969.24,
+      "duration": 5.679
+    },
+    {
+      "text": "other top inside board and then our two",
+      "start": 1971.84,
+4420→      "duration": 4.76
+    },
+    {
+      "text": "pieces of zero clearance insert will go",
+      "start": 1974.919,
+      "duration": 4.36
+    },
+    {
+      "text": "there that's the entire sled that's",
+      "start": 1976.6,
+4430→      "duration": 5.28
+    },
+    {
+      "text": "exactly how the sled goes together it's",
+      "start": 1979.279,
+      "duration": 4.201
+    },
+    {
+      "text": "really",
+      "start": 1981.88,
+4440→      "duration": 4.279
+    },
+    {
+      "text": "simple and if you have this",
+      "start": 1983.48,
+      "duration": 4.919
+    },
+    {
+      "text": "setup on your table",
+      "start": 1986.159,
+4450→      "duration": 4.841
+    },
+    {
+      "text": "saw or any flat surface like an assembly",
+      "start": 1988.399,
+      "duration": 4.961
+    },
+    {
+      "text": "table or whatever you can assemble this",
+      "start": 1991.0,
+4460→      "duration": 4.6
+    },
+    {
+      "text": "thing in about 5 to 10 minutes real",
+      "start": 1993.36,
+      "duration": 4.319
+    },
+    {
+      "text": "simple let's take a look at it from the",
+      "start": 1995.6,
+4470→      "duration": 4.199
+    },
+    {
+      "text": "front and see you can see how the thing",
+      "start": 1997.679,
+      "duration": 4.72
+    },
+    {
+      "text": "is hollow on the bottom on both sides so",
+      "start": 1999.799,
+4480→      "duration": 4.441
+    },
+    {
+      "text": "we've illuminated all that weight those",
+      "start": 2002.399,
+      "duration": 3.961
+    },
+    {
+      "text": "outside Runners keep it stable and flat",
+      "start": 2004.24,
+4490→      "duration": 5.039
+    },
+    {
+      "text": "and running on the T table",
+      "start": 2006.36,
+      "duration": 2.919
+    },
+    {
+      "text": "saw and that's what it looks like so",
+      "start": 2010.12,
+#3826669 assistant: Continue reading.
+#3826670 assistant: 
+#3826672 user: 4490→      "duration": 5.039
+    },
+    {
+      "text": "and running on the T table",
+      "start": 2006.36,
+      "duration": 2.919
+    },
+    {
+      "text": "saw and that's what it looks like so",
+      "start": 2010.12,
+4500→      "duration": 4.679
+    },
+    {
+      "text": "that's the nice thing about this sled is",
+      "start": 2013.44,
+      "duration": 3.959
+    },
+    {
+      "text": "it's very lightweight so the pieces are",
+      "start": 2014.799,
+4510→      "duration": 4.801
+    },
+    {
+      "text": "stamped if you decide to buy the sled",
+      "start": 2017.399,
+      "duration": 4.561
+    },
+    {
+      "text": "and you have to do any preassembly um",
+      "start": 2019.6,
+4520→      "duration": 4.16
+    },
+    {
+      "text": "before you made it to your",
+      "start": 2021.96,
+      "duration": 3.959
+    },
+    {
+      "text": "saw and you'll know exactly what pieces",
+      "start": 2023.76,
+4530→      "duration": 3.56
+    },
+    {
+      "text": "is what I only have two stamped there",
+      "start": 2025.919,
+      "duration": 3.281
+    },
+    {
+      "text": "but they're all stamped actually we're",
+      "start": 2027.32,
+4540→      "duration": 4.28
+    },
+    {
+      "text": "going to use uh the quick setting glue",
+      "start": 2029.2,
+      "duration": 5.479
+    },
+    {
+      "text": "here as well the speed set and let's go",
+      "start": 2031.6,
+4550→      "duration": 4.959
+    },
+    {
+      "text": "ahead and assemble this piece and see",
+      "start": 2034.679,
+      "duration": 3.24
+    },
+    {
+      "text": "how it goes",
+      "start": 2036.559,
+4560→      "duration": 2.84
+    },
+    {
+      "text": "we're just going to do this in real time",
+      "start": 2037.919,
+      "duration": 2.441
+    },
+    {
+      "text": "it's just going to take a couple of",
+      "start": 2039.399,
+4570→      "duration": 3.481
+    },
+    {
+      "text": "minutes you'll see so we'll put that",
+      "start": 2040.36,
+    
+…
+  "duration": 3.0
+    },
+    {
+      "text": "trck just like",
+      "start": 2148.76,
+      "duration": 7.04
+    },
+    {
+      "text": "that and one for the other",
+      "start": 2152.2,
+4810→      "duration": 6.6
+    },
+    {
+      "text": "side",
+      "start": 2155.8,
+      "duration": 3.0
+    },
+    {
+      "text": "just like that and the space that's left",
+      "start": 2164.48,
+4820→      "duration": 4.56
+    },
+    {
+      "text": "in the middle is the space for our zero",
+      "start": 2166.359,
+      "duration": 3.841
+    },
+    {
+      "text": "clearance",
+      "start": 2169.04,
+4830→      "duration": 3.4
+    },
+    {
+      "text": "inserts we haven't cut the sled apart",
+      "start": 2170.2,
+      "duration": 3.28
+    },
+    {
+      "text": "yet we don't want to cut that apart",
+      "start": 2172.44,
+4840→      "duration": 3.52
+    },
+    {
+      "text": "until later of course let dry for a",
+      "start": 2173.48,
+      "duration": 4.96
+    },
+    {
+      "text": "couple of minutes and then we'll scrape",
+      "start": 2175.96,
+4850→      "duration": 4.72
+    },
+    {
+      "text": "some of this excess stuff off and then",
+      "start": 2178.44,
+      "duration": 4.32
+    },
+    {
+      "text": "when it's fully dry we can sand",
+      "start": 2180.68,
+4860→      "duration": 4.2
+    },
+    {
+      "text": "it but you see how we've lined",
+      "start": 2182.76,
+      "duration": 4.4
+    },
+    {
+      "text": "everything up perfectly that's important",
+      "start": 2184.88,
+4870→      "duration": 5.16
+    },
+    {
+      "text": "since all the pieces are cut to",
+      "start": 2187.16,
+      "duration": 6.0
+    },
+    {
+      "text": "size so we'll scrape what we",
+      "start": 2190.04,
+4880→      "duration": 5.24
+    },
+    {
+      "text": "can and we're going to use these really",
+      "start": 2193.16,
+      "duration": 4.76
+    },
+    {
+      "text": "nice gravity clamps to hold everything",
+      "start": 2195.28,
+#3826673 assistant: Continue reading.
+#3826674 assistant: 
+#3826675 user: 4880→      "duration": 5.24
+    },
+    {
+      "text": "can and we're going to use these really",
+      "start": 2193.16,
+      "duration": 4.76
+    },
+    {
+      "text": "nice gravity clamps to hold everything",
+      "start": 2195.28,
+4890→      "duration": 5.319
+    },
+    {
+      "text": "in place anything Works gallon jugs",
+      "start": 2197.92,
+      "duration": 4.28
+    },
+    {
+      "text": "whatever you got but you do want it held",
+      "start": 2200.599,
+4900→      "duration": 4.0
+    },
+    {
+      "text": "nice and flat and tight giant nut like",
+      "start": 2202.2,
+      "duration": 4.6
+    },
+    {
+      "text": "that that works",
+      "start": 2204.599,
+4910→      "duration": 4.52
+    },
+    {
+      "text": "fine and that's what it looks like from",
+      "start": 2206.8,
+      "duration": 3.44
+    },
+    {
+      "text": "the",
+      "start": 2209.119,
+4920→      "duration": 3.401
+    },
+    {
+      "text": "front ah at this point either side could",
+      "start": 2210.24,
+      "duration": 4.119
+    },
+    {
+      "text": "be the front cuz it's symmetrical all",
+      "start": 2212.52,
+4930→      "duration": 3.44
+    },
+    {
+      "text": "right over here I've got some plywood",
+      "start": 2214.359,
+      "duration": 4.0
+    },
+    {
+      "text": "and there's our CNC it's over there",
+      "start": 2215.96,
+4940→      "duration": 4.76
+    },
+    {
+      "text": "cutting out zero clearance inserts and",
+      "start": 2218.359,
+      "duration": 3.76
+    },
+    {
+      "text": "it looks like the bits dull cuz it's",
+      "start": 2220.72,
+4950→      "duration": 3.2
+    },
+    {
+      "text": "starting to shred the wood fortunately",
+      "start": 2222.119,
+      "duration": 4.841
+    },
+    {
+      "text": "that Sands off very nicely very",
+      "start": 2223.92,
+4960→      "duration": 6.24
+    },
+    {
+      "text": "easy and here we go so that is all set",
+      "start": 2226.96,
+      "duration": 4.6
+    },
+ 
+…
+     "text": "I'm trying to do is smooth it out uh get",
+      "start": 2335.24,
+5200→      "duration": 3.52
+    },
+    {
+      "text": "the little bit of uh dust flaking or",
+      "start": 2337.24,
+      "duration": 4.119
+    },
+    {
+      "text": "chipping off of the sides and gets it",
+      "start": 2338.76,
+5210→      "duration": 4.48
+    },
+    {
+      "text": "nice and smooth and gets it clean and",
+      "start": 2341.359,
+      "duration": 3.081
+    },
+    {
+      "text": "we're going to go ahead and wax it this",
+      "start": 2343.24,
+5220→      "duration": 2.48
+    },
+    {
+      "text": "is going to be the first of a couple of",
+      "start": 2344.44,
+      "duration": 4.04
+    },
+    {
+      "text": "coats of wax I like to put a couple of",
+      "start": 2345.72,
+5230→      "duration": 4.08
+    },
+    {
+      "text": "coats on the bottom just to make sure",
+      "start": 2348.48,
+      "duration": 3.44
+    },
+    {
+      "text": "this thing slides well I'm not going to",
+      "start": 2349.8,
+5240→      "duration": 4.88
+    },
+    {
+      "text": "put a finish or Lac or anything first I",
+      "start": 2351.92,
+      "duration": 4.56
+    },
+    {
+      "text": "like to start with wax I want the wax to",
+      "start": 2354.68,
+5250→      "duration": 4.6
+    },
+    {
+      "text": "penetrate the wood and uh give us a good",
+      "start": 2356.48,
+      "duration": 5.48
+    },
+    {
+      "text": "coat and a sealant that way okay if you",
+      "start": 2359.28,
+5260→      "duration": 4.36
+    },
+    {
+      "text": "remember I said that this project you do",
+      "start": 2361.96,
+      "duration": 4.72
+    },
+    {
+      "text": "not actually have to uh cut a dat if you",
+      "start": 2363.64,
+5270→      "duration": 4.12
+    },
+    {
+      "text": "don't want to or you don't have that",
+      "start": 2366.68,
+      "duration": 2.919
+    },
+    {
+      "text": "ability and I'm going to show you what",
+      "start": 2367.76,
+#3826676 assistant: Continue reading.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

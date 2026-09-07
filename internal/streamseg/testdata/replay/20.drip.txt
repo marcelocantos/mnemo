@@ -1,0 +1,835 @@
+Spans you have open:
+  t1 from #3829550 (24 messages ago) — Synopsis for Basten Tesla News video 6jaYiWhnrzo
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3829586 assistant: 
+#3829592 user: 5050→      "duration": 1.832
+    },
+    {
+      "text": "overall",
+      "start": 1309.806,
+      "duration": 1.64
+    },
+    {
+      "text": "domestic",
+      "start": 1310.478,
+5060→      "duration": 2.248
+    },
+    {
+      "text": "car sales for July and August.  And Tesla has been the",
+      "start": 1311.758,
+      "duration": 2.184
+    },
+    {
+      "text": "number one brand",
+      "start": 1312.974,
+5070→      "duration": 2.077
+    },
+    {
+      "text": "among imported",
+      "start": 1314.083,
+      "duration": 1.919
+    },
+    {
+      "text": "cars for",
+      "start": 1315.033,
+5080→      "duration": 2.236
+    },
+    {
+      "text": "seven consecutive months.",
+      "start": 1316.301,
+      "duration": 2.236
+    },
+    {
+      "text": "So that's not bad either.",
+      "start": 1317.637,
+5090→      "duration": 2.737
+    },
+    {
+      "text": "Now let's",
+      "start": 1319.405,
+      "duration": 1.788
+    },
+    {
+      "text": "squeeze the latest",
+      "start": 1320.225,
+5100→      "duration": 1.977
+    },
+    {
+      "text": "news into this",
+      "start": 1321.233,
+      "duration": 2.104
+    },
+    {
+      "text": "new show.  Yes, time for a",
+      "start": 1322.368,
+5110→      "duration": 2.371
+    },
+    {
+      "text": "quick",
+      "start": 1323.775,
+      "duration": 2.24
+    },
+    {
+      "text": "Tesla news update.  And speaking of",
+      "start": 1325.052,
+5120→      "duration": 1.875
+    },
+    {
+      "text": "demand for Tesla: the company",
+      "start": 1325.951,
+      "duration": 1.944
+    },
+    {
+      "text": "also announced that for",
+      "start": 1326.919,
+5130→      "duration": 1.895
+    },
+    {
+      "text": "the first time in history,",
+      "start": 1327.839,
+      "duration": 1.798
+    },
+    {
+      "text": "electric vehicles",
+      "start": 1329.121,
+5140→      "duration": 1.629
+    },
+    {
+      "text": "have surpassed",
+      "start": 1329.774,
+      "duration": 1.654
+    },
+    {
+  
+…
+ "integrated.",
+      "start": 1537.707,
+      "duration": 2.387
+    },
+    {
+      "text": "BYD's revenue from overseas",
+      "start": 1539.127,
+5960→      "duration": 2.09
+    },
+    {
+      "text": "operations exceeded domestic revenue for the first time",
+      "start": 1540.25,
+      "duration": 1.958
+    },
+    {
+      "text": ", illustrating why",
+      "start": 1542.53,
+5970→      "duration": 2.09
+    },
+    {
+      "text": "Chinese",
+      "start": 1543.653,
+      "duration": 1.595
+    },
+    {
+      "text": "automakers",
+      "start": 1544.281,
+5980→      "duration": 2.024
+    },
+    {
+      "text": "have no choice",
+      "start": 1545.338,
+      "duration": 2.222
+    },
+    {
+      "text": "but to seek their fortunes",
+      "start": 1546.593,
+5990→      "duration": 2.288
+    },
+    {
+      "text": "outside of China.",
+      "start": 1547.914,
+      "duration": 1.959
+    },
+    {
+      "text": "Overseas sales in the",
+      "start": 1548.973,
+6000→      "duration": 2.568
+    },
+    {
+      "text": "first half of the year",
+      "start": 1550.581,
+      "duration": 2.246
+    },
+    {
+      "text": "increased by 34%, accounting for",
+      "start": 1551.867,
+6010→      "duration": 2.488
+    },
+    {
+      "text": "53% of the",
+      "start": 1553.395,
+      "duration": 2.207
+    },
+    {
+      "text": "total, while in",
+      "start": 1554.642,
+6020→      "duration": 2.206
+    },
+    {
+      "text": "Greater China they",
+      "start": 1555.888,
+      "duration": 2.448
+    },
+    {
+      "text": "decreased by 31%.  Yes",
+      "start": 1557.376,
+6030→      "duration": 2.576
+    },
+    {
+      "text": ", it's funny how many",
+      "start": 1558.952,
+      "duration": 2.102
+    },
+    {
+      "text": "Tesla critics in the",
+      "start": 1560.086,
+6040→      "duration": 1.787
+    },
+    {
+      "text": "mainstream media",
+      "start": 1560.905,
+      "duration": 2.102
+    },
+    {
+      "text": "talk about",
+      "start": 1562.039,
+#3829593 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+#3829594 assistant: 
+#3829595 user: 6040→      "duration": 1.787
+    },
+    {
+      "text": "mainstream media",
+      "start": 1560.905,
+      "duration": 2.102
+    },
+    {
+      "text": "talk about",
+      "start": 1562.039,
+6050→      "duration": 2.071
+    },
+    {
+      "text": "Tesla's sales in China",
+      "start": 1563.141,
+      "duration": 2.072
+    },
+    {
+      "text": "collapsing, but",
+      "start": 1564.244,
+6060→      "duration": 1.882
+    },
+    {
+      "text": "forget to mention that the",
+      "start": 1565.158,
+      "duration": 2.228
+    },
+    {
+      "text": "entire auto",
+      "start": 1566.418,
+6070→      "duration": 1.976
+    },
+    {
+      "text": "industry in China is",
+      "start": 1567.426,
+      "duration": 2.165
+    },
+    {
+      "text": "in decline this year.  But just like",
+      "start": 1568.623,
+6080→      "duration": 2.187
+    },
+    {
+      "text": "Tesla,",
+      "start": 1569.839,
+      "duration": 1.896
+    },
+    {
+      "text": "the Chinese are simply",
+      "start": 1570.763,
+6090→      "duration": 1.781
+    },
+    {
+      "text": "exporting their",
+      "start": 1571.572,
+      "duration": 1.896
+    },
+    {
+      "text": "products to other",
+      "start": 1572.497,
+6100→      "duration": 1.867
+    },
+    {
+      "text": "countries around the world and",
+      "start": 1573.393,
+      "duration": 1.809
+    },
+    {
+      "text": "building up",
+      "start": 1574.231,
+6110→      "duration": 1.896
+    },
+    {
+      "text": "market share, earning even",
+      "start": 1575.155,
+      "duration": 2.07
+    },
+    {
+      "text": "more from",
+      "start": 1576.253,
+6120→      "duration": 1.492
+    },
+    {
+      "text": "international sales of",
+      "start": 1576.774,
+      "duration": 2.126
+    },
+    {
+      "text": "their",
+      "start": 1577.929,
+6130→      "duration": 1.983
+    },
+    {
+      "text": "Chinese-made cars.",
+      "start": 1578.941,
+      "duration": 2.127
+    },
+    {
+      "text": "Something that",
+     
+…
+1
+    },
+    {
+      "text": "ground.  Tesla still",
+      "start": 1771.201,
+      "duration": 2.834
+    },
+    {
+      "text": "has one of the best-",
+      "start": 1773.069,
+6950→      "duration": 2.209
+    },
+    {
+      "text": "selling",
+      "start": 1774.313,
+      "duration": 2.209
+    },
+    {
+      "text": "car models in the country, but",
+      "start": 1775.557,
+6960→      "duration": 2.105
+    },
+    {
+      "text": "China",
+      "start": 1776.697,
+      "duration": 1.863
+    },
+    {
+      "text": "will eventually break into the",
+      "start": 1777.595,
+6970→      "duration": 2.244
+    },
+    {
+      "text": "U.S. market, and Tesla",
+      "start": 1778.873,
+      "duration": 2.002
+    },
+    {
+      "text": "increasingly looks like the",
+      "start": 1779.909,
+6980→      "duration": 2.175
+    },
+    {
+      "text": "only company that",
+      "start": 1781.119,
+      "duration": 2.347
+    },
+    {
+      "text": "can withstand",
+      "start": 1782.5,
+6990→      "duration": 2.244
+    },
+    {
+      "text": "Chinese",
+      "start": 1783.779,
+      "duration": 1.69
+    },
+    {
+      "text": "expansion.  And",
+      "start": 1784.504,
+7000→      "duration": 3.139
+    },
+    {
+      "text": "NASA head Jared Isaacman",
+      "start": 1786.69,
+      "duration": 2.614
+    },
+    {
+      "text": "said that SpaceX plans to",
+      "start": 1788.351,
+7010→      "duration": 2.804
+    },
+    {
+      "text": "launch Starship",
+      "start": 1790.203,
+      "duration": 2.281
+    },
+    {
+      "text": "every week in 2027.",
+      "start": 1791.532,
+7020→      "duration": 2.519
+    },
+    {
+      "text": "SpaceX is preparing for",
+      "start": 1793.151,
+      "duration": 1.958
+    },
+    {
+      "text": "launch within",
+      "start": 1794.14,
+7030→      "duration": 1.99
+    },
+    {
+      "text": "weeks.  I think",
+      "start": 1795.162,
+      "duration": 2.366
+    },
+    {
+      "text": "you'll start seeing",
+      "start": 1796.528,
+#3829596 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+#3829597 assistant: 
+#3829598 user: 7030→      "duration": 1.99
+    },
+    {
+      "text": "weeks.  I think",
+      "start": 1795.162,
+      "duration": 2.366
+    },
+    {
+      "text": "you'll start seeing",
+      "start": 1796.528,
+7040→      "duration": 2.263
+    },
+    {
+      "text": "Starship launches almost",
+      "start": 1797.828,
+      "duration": 2.263
+    },
+    {
+      "text": "weekly as we",
+      "start": 1799.128,
+7050→      "duration": 1.557
+    },
+    {
+      "text": "approach",
+      "start": 1799.722,
+      "duration": 2.263
+    },
+    {
+      "text": "2027.  This is how you'll",
+      "start": 1801.022,
+7060→      "duration": 2.047
+    },
+    {
+      "text": "measure progress and",
+      "start": 1802.09,
+      "duration": 1.803
+    },
+    {
+      "text": "know that we're on",
+      "start": 1802.914,
+7070→      "duration": 1.719
+    },
+    {
+      "text": "track",
+      "start": 1803.654,
+      "duration": 1.718
+    },
+    {
+      "text": "to get those",
+      "start": 1804.393,
+7080→      "duration": 1.676
+    },
+    {
+      "text": "astronauts to the",
+      "start": 1805.09,
+      "duration": 1.571
+    },
+    {
+      "text": "moon.",
+      "start": 1805.682,
+7090→      "duration": 1.275
+    },
+    {
+      "text": "Great public-",
+      "start": 1806.057,
+      "duration": 1.646
+    },
+    {
+      "text": "private relations, and",
+      "start": 1806.703,
+7100→      "duration": 1.841
+    },
+    {
+      "text": "they put the",
+      "start": 1807.565,
+      "duration": 1.582
+    },
+    {
+      "text": "right person at the",
+      "start": 1808.169,
+7110→      "duration": 1.776
+    },
+    {
+      "text": "helm.  Jared",
+      "start": 1808.967,
+      "duration": 1.636
+    },
+    {
+      "text": "Isaacman,",
+      "start": 1809.627,
+7120→      "duration": 1.685
+    },
+    {
+      "text": "thank you very much for",
+      "start": 1810.337,
+      "duration": 1.489
+    },
+    {
+      "text": "joining us.    A",
+      "start": 1810.85,
+7130→      "duration": 1.8
+…
+ucture.  If you haven't already",
+      "start": 1984.402,
+7930→      "duration": 1.845
+    },
+    {
+      "text": ",",
+      "start": 1985.27,
+      "duration": 1.682
+    },
+    {
+      "text": "you can",
+      "start": 1985.975,
+7940→      "duration": 1.235
+    },
+    {
+      "text": "use",
+      "start": 1986.234,
+      "duration": 1.705
+    },
+    {
+      "text": "battery",
+      "start": 1986.962,
+7950→      "duration": 1.564
+    },
+    {
+      "text": "cells as",
+      "start": 1987.55,
+      "duration": 1.493
+    },
+    {
+      "text": "honeycombs to",
+      "start": 1988.067,
+7960→      "duration": 1.587
+    },
+    {
+      "text": "transfer shear",
+      "start": 1988.678,
+      "duration": 1.775
+    },
+    {
+      "text": "force between",
+      "start": 1989.477,
+7970→      "duration": 1.493
+    },
+    {
+      "text": "glued sheets of",
+      "start": 1989.994,
+      "duration": 1.775
+    },
+    {
+      "text": "carbon fiber.",
+      "start": 1990.793,
+7980→      "duration": 1.893
+    },
+    {
+      "text": "Yes, Elon has long",
+      "start": 1991.786,
+      "duration": 1.682
+    },
+    {
+      "text": "said that he would like to",
+      "start": 1992.493,
+7990→      "duration": 1.91
+    },
+    {
+      "text": "create a",
+      "start": 1993.429,
+      "duration": 1.682
+    },
+    {
+      "text": "vertical takeoff",
+      "start": 1994.136,
+8000→      "duration": 1.986
+    },
+    {
+      "text": "and landing aircraft, so",
+      "start": 1995.148,
+      "duration": 1.809
+    },
+    {
+      "text": "he probably has",
+      "start": 1995.982,
+8010→      "duration": 1.733
+    },
+    {
+      "text": "a lot of thoughts on the",
+      "start": 1996.74,
+      "duration": 1.986
+    },
+    {
+      "text": "subject.  And before",
+      "start": 1997.751,
+8020→      "duration": 2.064
+    },
+    {
+      "text": "we end on a",
+      "start": 1998.843,
+      "duration": 1.919
+    },
+    {
+      "text": "happy note, I want to",
+      "start": 1999.79,
+#3829599 assistant: Almost done - I need the last part of the transcript.
+#3829600 assistant: 
+#3829601 user: 8020→      "duration": 2.064
+    },
+    {
+      "text": "we end on a",
+      "start": 1998.843,
+      "duration": 1.919
+    },
+    {
+      "text": "happy note, I want to",
+      "start": 1999.79,
+8030→      "duration": 2.003
+    },
+    {
+      "text": "quickly thank",
+      "start": 2000.821,
+      "duration": 1.919
+    },
+    {
+      "text": "my new",
+      "start": 2001.768,
+8040→      "duration": 1.585
+    },
+    {
+      "text": "sponsors of this",
+      "start": 2002.381,
+      "duration": 1.808
+    },
+    {
+      "text": "channel.  My new YouTube",
+      "start": 2003.216,
+8050→      "duration": 5.225
+    },
+    {
+      "text": "members: Kalahari Kids, J.J.",
+      "start": 2007.441,
+      "duration": 3.414
+    },
+    {
+      "text": "Klein, Patriotic American, Bernie Yanko",
+      "start": 2009.92,
+8060→      "duration": 3.546
+    },
+    {
+      "text": ", Granny Tesla, Jim Mathery, Robert Elf",
+      "start": 2012.466,
+      "duration": 3.545
+    },
+    {
+      "text": "Wolf, Robin McCann, Israel De la Cruz,",
+      "start": 2015.076,
+8070→      "duration": 3.48
+    },
+    {
+      "text": "Dave Key, Robert Roberts, Ed van Herk,",
+      "start": 2017.621,
+      "duration": 3.48
+    },
+    {
+      "text": "Wolfgang Eisenbüdel, William Hayes",
+      "start": 2020.166,
+8080→      "duration": 3.284
+    },
+    {
+      "text": "and Tom Leg.  Thank you very much",
+      "start": 2022.515,
+      "duration": 5.602
+    },
+    {
+      "text": "for your support",
+      "start": 2027.152,
+8090→      "duration": 2.354
+    },
+    {
+      "text": ".  I do this all",
+      "start": 2028.506,
+      "duration": 2.529
+    },
+    {
+      "text": "by myself, but you",
+      "start": 2030.07,
+8100→      "duration": 2.319
+    },
+    {
+      "text": "are all producers of this",
+      "start": 2031.423,
+      "duration": 2.25
+    },
+    {
+      "text": "show.  Thank you.  Now",
+      "start": 2032.708,
+8110→      "duration": 3.667
+    },
+    {
+      "text": "let's 
+…
+ion": 2.502
+    },
+    {
+      "text": "donation option is below or",
+      "start": 2120.729,
+8450→      "duration": 2.521
+    },
+    {
+      "text": "on my website",
+      "start": 2122.291,
+      "duration": 2.069
+    },
+    {
+      "text": "bestintesla.com.  You",
+      "start": 2123.401,
+8460→      "duration": 2.176
+    },
+    {
+      "text": "can also become an",
+      "start": 2124.605,
+      "duration": 1.641
+    },
+    {
+      "text": "executive",
+      "start": 2125.274,
+8470→      "duration": 1.558
+    },
+    {
+      "text": "producer and",
+      "start": 2125.86,
+      "duration": 1.641
+    },
+    {
+      "text": "receive news",
+      "start": 2126.529,
+8480→      "duration": 1.976
+    },
+    {
+      "text": "articles, exclusive",
+      "start": 2127.533,
+      "duration": 2.004
+    },
+    {
+      "text": "videos, behind-the-",
+      "start": 2128.565,
+8490→      "duration": 2.032
+    },
+    {
+      "text": "scenes material, and",
+      "start": 2129.624,
+      "duration": 2.032
+    },
+    {
+      "text": "access to all my",
+      "start": 2130.684,
+8500→      "duration": 1.976
+    },
+    {
+      "text": "research",
+      "start": 2131.688,
+      "duration": 1.725
+    },
+    {
+      "text": "graphs and tables on",
+      "start": 2132.441,
+8510→      "duration": 2.088
+    },
+    {
+      "text": "bestintesla.com.  Thank you",
+      "start": 2133.557,
+      "duration": 2.419
+    },
+    {
+      "text": "for watching.  Until",
+      "start": 2135.014,
+8520→      "duration": 3.101
+    },
+    {
+      "text": "next time,",
+      "start": 2137.15,
+      "duration": 2.25
+    },
+    {
+      "text": "take care and",
+      "start": 2138.435,
+8530→      "duration": 1.972
+    },
+    {
+      "text": "all the best.",
+      "start": 2139.442,
+      "duration": 2.181
+    },
+    {
+      "text": "Woohoo!",
+      "start": 2204.656,
+8540→      "duration": 1.487
+    },
+    {
+      "text": "M-hm.",
+      "start": 2221.111,
+      "duration": 1.663
+    }
+  ]
+}
+
+#3829607 assistant: I have the full transcript. This is episode 343 of "Basten Tesla News" (likely "Best in Tesla News" given the website bestintesla.com). Let me also check if there are existing synopses in the knowledg...# best-in-tesla-news-episode-343-uber-optimus-cybercab
+
+Source: https://www.youtube.com/watch?v=6jaYiWhnrzo
+
+**TL;DR**: In this Tesla-focused news roundup, the host covers Uber's robotaxi push, Tesla's Optimus humanoid robot 2026 production numbers, and the September 2026 Cybercab robotaxi fleet launch in Austin, framing Tesla as the clear leader in autonomous vehicles and EV sales.
+
+**Caveat**: ⚠️ Tesla news roundup; treat all claims as opinion from a fan channel.
+
+## Synopsis
+
+This episode of Best in Tesla News 343 opens with a discussion of Uber's robotaxi strategy. The company is feeling pressure from Tesla's autonomous vehicle developments, with Uber planning to launch robotaxis in Austin and other cities. The host notes that Uber has been testing robotaxis for years and is now accelerating its timeline.
+
+Next, the video shifts to Tesla's 2026 production outlook for Optimus, the humanoid robot. The speaker presents real numbers showing significant progress, with Tesla planning to ramp up production and sales of Optimus units. This segment emphasizes Tesla's leadership in robotics and AI.
+
+The centerpiece is Tesla's Cybercab robotaxi launch. On September 3, 202 6, Tesla officially unveiled its Cybercab to the public in Austin, Texas. The host describes a "Cybertruck storm" of robotaxis driving around the city, with 45 Cybercabs already registered with the Texas DMV. The fleet has grown from 314 to 420 registered units, still with 45 Cybercabs. The speaker mentions a form for purchasing fleets of Cybercabs and highlights the vehicle's design without steering wheel or pedals.
+
+The host compares Cybercab to competitors, citing influencer data showing Tesla's robotaxi at $1 million versus Waymo's $1 million, with 56 Cybercabs versus 8 6th-gen Waymos in Austin. He claims Cybercab is 45-57% cheaper than Uber rides in Austin and 2-3x cheaper to operate than Waymo. The video also covers Uber cutting 3,300 jobs, partly attributed to robotaxi competition.
+
+Volkswagen's recent restructuring is discussed next — the company announced 100,000 people leaving and closing four plants, described as the largest restructuring in automotive history, bigger than GM's 2009 bankruptcy. The speaker contrasts VW's high production costs and labor inefficiencies with China's lower costs, using data from a tweet by "Greg.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

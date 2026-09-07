@@ -1,0 +1,547 @@
+No spans open.
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826596 user: Read the transcript at /Users/marcelo/think/knowledge/youtube/n2jiuCYc3_s/.transcript/transcript.json (YouTube video: "Flagship Table Saw Sled! Crosscut, Miter, Bevel, Dado, Picture Frames & More!", https://www.youtube.com/watch?v=n2jiuCYc3_s). The file is ytt's public JSON transcript: a JSON object with video_id, language, language_code, is_generated, and a snippets array of {text, start, duration}. Join snippet text in order for the prose; you may cite [mm:ss] timestamps (from snippet.start) in Key Takeaways when a moment is worth pinning to.
+
+Produce a detailed synopsis and key takeaways for this video, following the output format defined below. Fill "<video title>" with "Flagship Table Saw Sled! Crosscut, Miter, Bevel, Dado, Picture Frames & More!" and "<youtube URL>" with https://www.youtube.com/watch?v=n2jiuCYc3_s.
+
+Do not write any files. Do not run shell commands. Reply with exactly:
+1. A single line: the filename slug (kebab-case.md) per the contract.
+2. A blank line.
+3. The full markdown file contents.
+
+Nothing else.
+
+-----8<----- output format contract -----8<-----
+<!--
+  SINGLE SOURCE OF TRUTH for the YouTube-synopsis output format.
+
+  Three parties depend on this file; none of them may restate the format
+  in their own words:
+    - ingest-one.sh  / `ytt synopsis` read this file at runtime and
+                     append it to the Claudia Task prompt (the scheduled
+                     path; ladder grok → claude → codex).
+    - the /ytt skill instructs the interactive agent to read this file
+                     before composing a synopsis (the manual path).
+    - `ytt build-index` (index.go) parses the artifacts this format
+                     produces; its expectations are pinned in the
+                     "Machine contract" section below so a format change
+                     and a parser change land in the same diff.
+
+  Edit the format in ONE place: here.
+-->
+
+# Synopsis output format
+
+Write one Markdown file per video with exactly this struct
+…
+ant. Then one bullet per disputed claim, counterpoint attached:>
+
+- **Claim**: <what the video asserts.> **Counter**: <why it is wrong,
+  overstated, or contested — the strongest concrete evidence, not vague
+  doubt.>
+
+## Key Takeaways
+
+<Bulleted list of the most important, actionable, or surprising points
+that survived the critique — uncontroversial material only. Anything
+disputed belongs in Critique with its counterpoint, not here. Each
+bullet stands alone as a distinct insight, not a mechanical restatement
+of the synopsis. You may cite [mm:ss] timestamps when a moment is worth
+pinning to.>
+```
+
+## Filename slug
+
+The file is named `<slug>.md`, one synopsis file per video directory:
+
+- 2–6 words, kebab-case, lowercase ASCII, ending in `.md`.
+- Describes the actual subject matter — not the literal video title
+  (titles are often clickbaity). Reads like a useful node label in an
+  Obsidian graph view; the slug alone should hint at the topic.
+- Favour the substantive topic over personalities/sensationalism.
+- Must NOT begin with `transcript` (reserved for the raw transcript).
+
+## Machine contract (do not drift without updating `ytt build-index`)
+
+- The TL;DR line is prefixed **exactly** with `**TL;DR**: ` and lives on
+  a single line. `ytt build-index` extracts the first such line; a
+  missing line falls back to the first sentence of the `## Synopsis`
+  section.
+- The Caveat line, when present, is prefixed **exactly** with
+  `**Caveat**: ` and lives on a single line. The remainder starts with
+  ⚠️ and/or 👎 (caution first when both apply). `ytt build-index`
+  extracts the first such line and renders it under the TL;DR. If the
+  remainder already begins with ⚠️ or 👎, the markers are kept as
+  written; a legacy unmarked line is prefixed 👎. A missing line
+  renders nothing.
+- The synopsis file is the single `*.md` in the video directory whose
+  name does not start with `transcript`. `ytt build-index` and
+  `ingest-one.sh` both locate it that way.
+#3826598 assistant: The user wants me to read a YouTube transcript and produce a detailed synopsis following a specific format. Let me:
+
+#3826600 assistant: I'll read the transcript and the synopsis format, then write the markdown in the exact contract shape.
+#3826601 assistant: 
+#3826602 assistant: 
+#3826603 user: 1→---
+name: ytt
+description: Fetch a YouTube video's transcript and ingest it into ~/think/knowledge/youtube/ as a synopsis with key takeaways. Updates the knowledge-base index and commits.
+user-invocable: true
+---
+
+# ytt
+
+Fetch a YouTube video's transcript via the `ytt` CLI, write a detailed
+10→synopsis to `~/think/knowledge/youtube/<id>/`, regenerate the
+knowledge-base index, and commit. The user may suppress ingest with a
+natural-language qualifier (e.g. "but don't ingest", "just summarise",
+"in chat only") — in which case present the synopsis inline and stop.
+
+## Arguments
+
+- `/ytt <url_or_video_id>` — required. A YouTube URL or bare video ID.
+
+If no argument is given, ask the user for the URL and stop.
+20→
+## Steps
+
+### 1. Fetch the transcript
+
+Run `ytt '<url_or_video_id>'` via Bash.
+
+- **Always single-quote the URL.** zsh treats `?` as a glob and errors
+  with `no matches found` on unquoted YouTube URLs (e.g. the `?v=...`
+  query string).
+30→- Do **not** use `WebFetch` on YouTube URLs — it only returns YouTube's
+  footer chrome, not the transcript.
+
+If `ytt` fails (no transcript available, video private, network error),
+report the error and stop. Do not fabricate a synopsis.
+
+### 2. Read and analyse
+
+Read the transcript output end-to-end. Identify:
+
+40→- The video's core topic and thesis.
+- The narrative arc — how the argument or content progresses.
+- Concrete claims, examples, data points, and recommendations.
+- Any caveats, counterpoints, or nuances the speaker raises.
+
+### 3. Compose the synopsis
+
+The output format (structure, TL;DR line, slug rules, and the machine
+contract `ytt build-index` parses) is defined in one place — read it and
+follow it verbatim:
+50→
+```
+~/work/github.com/marcelocantos/ytt/scripts/playlist-ingest/synopsis-contract.md
+```
+
+This is the same contract the scheduled `ingest` path feeds to its
+synopsis agent, so the interactive and automated paths stay identical.
+In chat-only mode, skip the `# <title>` and `Source
+…
+emory-retrieval-shapes.md`), not
+   the video title. One synopsis file per directory.
+4. **Register the ID** in the scheduler's dedup record:
+   ```bash
+   echo '<id>' >> ~/think/knowledge/youtube/.processed
+   ```
+   Not optional: `.processed` is the authoritative record of successful
+   ingest. The scheduled nightly run wipes any video directory whose ID
+   is missing from it (orphan healing for crashed runs) — an
+   unregistered manual ingest gets deleted and re-ingested with a
+90→   machine synopsis. Stage `.processed` with the ingest commit.
+5. **Regenerate the index:**
+   ```bash
+   ytt build-index
+   ```
+   This rewrites `~/think/knowledge/youtube/youtube-knowledge-base.md`
+   from all `meta.json` + synopsis pairs, sorted newest-first.
+6. **Commit** from `~/think/`:
+   - First commit: `Ingest <channel>'s "<short-title>" video on <topic>`
+     — stage `knowledge/youtube/<id>/`.
+100→   - Second commit: `Regenerate youtube knowledge-base index` — stage
+     `knowledge/youtube/youtube-knowledge-base.md`.
+
+### 5. Present a brief summary in chat
+
+After ingest, give the user a one-line confirmation plus a 2–3 sentence
+recap of the video's thesis. Do not paste the full synopsis back into
+chat — they can read the file.
+
+In chat-only mode, present the full synopsis and key takeaways in the
+110→response.
+
+## Notes
+
+- Length scales with the video. A 10-minute talk may need ~300 words;
+  a 90-minute lecture may warrant ~1000+. Don't pad, but don't truncate
+  substance to fit an arbitrary budget.
+- Quote memorable lines sparingly — only when the exact phrasing
+  carries weight the paraphrase loses.
+- The directory name is always the 11-character YouTube video ID.
+120→  The `.md` filename is a topic slug, not the title.
+- Output structure, the TL;DR line format, and slug rules live in
+  `synopsis-contract.md` (see step 3) — the single source of truth
+  shared with the scheduled `ingest` path and the `ytt build-index`
+  parser. Don't restate them here.
+
+#3826604 user: 1→{
+  "video_id": "n2jiuCYc3_s",
+  "language": "English (auto-generated)",
+  "language_code": "en",
+  "is_generated": true,
+  "snippets": [
+    {
+      "text": "[Music]",
+      "start": 0.65,
+10→      "duration": 12.069
+    },
+    {
+      "text": "hi my name is James today I'm going to",
+      "start": 11.04,
+      "duration": 3.479
+    },
+    {
+      "text": "show you our new flagship table sawce",
+      "start": 12.719,
+20→      "duration": 3.921
+    },
+    {
+      "text": "sled and all the things that it can",
+      "start": 14.519,
+      "duration": 5.001
+    },
+    {
+      "text": "do like all cross cut sleds of course it",
+      "start": 16.64,
+30→      "duration": 5.12
+    },
+    {
+      "text": "does cross Cuts very",
+      "start": 19.52,
+      "duration": 5.079
+    },
+    {
+      "text": "well but this table saw sled is unique",
+      "start": 21.76,
+40→      "duration": 4.96
+    },
+    {
+      "text": "it's not just a Crosscut sled it's",
+      "start": 24.599,
+      "duration": 3.561
+    },
+    {
+      "text": "something we've been working on for a",
+      "start": 26.72,
+50→      "duration": 3.36
+    },
+    {
+      "text": "little over a year and has a lot of",
+      "start": 28.16,
+      "duration": 4.8
+    },
+    {
+      "text": "amazing design features and abilities",
+      "start": 30.08,
+60→      "duration": 5.68
+    },
+    {
+      "text": "for example it will make picture",
+      "start": 32.96,
+      "duration": 5.2
+    },
+    {
+      "text": "frames and you're not limited by size",
+      "start": 35.76,
+70→      "duration": 4.0
+    },
+    {
+      "text": "the front fence has a quick disconnect",
+      "start": 38.16,
+      "duration": 3.36
+    },
+    {
+      "text": "feature so you can make picture frames",
+      "start": 39.76,
+80→      "duration": 5.0
+    },
+    {
+      "text": "with the sides to it as big as you",
+      "start": 41.52,
+      "duration": 5.64
+    },
+    {
+      "text": "like and it's extremely accurate the",
+
+…
+that it's",
+      "start": 56.52,
+      "duration": 5.039
+    },
+    {
+      "text": "perfect",
+      "start": 58.92,
+120→      "duration": 4.4
+    },
+    {
+      "text": "the resulting angles that this cuts are",
+      "start": 61.559,
+      "duration": 4.6
+    },
+    {
+      "text": "not accurate to a degree or a tenth of a",
+      "start": 63.32,
+130→      "duration": 5.04
+    },
+    {
+      "text": "degree or 100th of a degree they're",
+      "start": 66.159,
+      "duration": 6.441
+    },
+    {
+      "text": "absolutely perfect they're spoton",
+      "start": 68.36,
+140→      "duration": 6.56
+    },
+    {
+      "text": "45° so if you're designing or building",
+      "start": 72.6,
+      "duration": 4.879
+    },
+    {
+      "text": "an elaborate picture frame then perfect",
+      "start": 74.92,
+150→      "duration": 6.36
+    },
+    {
+      "text": "for the angles is exactly what you",
+      "start": 77.479,
+      "duration": 3.801
+    },
+    {
+      "text": "want another feature this usually",
+      "start": 82.28,
+160→      "duration": 4.44
+    },
+    {
+      "text": "reserved for dedicated miter sleds that",
+      "start": 84.6,
+      "duration": 3.8
+    },
+    {
+      "text": "we've incorporated into our Crosscut",
+      "start": 86.72,
+170→      "duration": 3.84
+    },
+    {
+      "text": "sled is the ability to cut",
+      "start": 88.4,
+      "duration": 4.64
+    },
+    {
+      "text": "miters uh this incorporates a digital",
+      "start": 90.56,
+180→      "duration": 5.519
+    },
+    {
+      "text": "angle finder and it cuts also perfect it",
+      "start": 93.04,
+      "duration": 4.359
+    },
+    {
+      "text": "cuts to the accuracy of the digital",
+      "start": 96.079,
+190→      "duration": 3.08
+    },
+    {
+      "text": "angle finder which is about to the 100th",
+      "start": 97.399,
+      "duration": 4.321
+    },
+    {
+      "text": "of a degree and you can see we checked",
+      "start": 99.159,
+200→      "duration": 6.481
+#3826605 assistant: I need to read the full transcript. Let me continue reading it in chunks.
+#3826612 assistant: The file is long; I'll keep reading the rest of the snippets so the synopsis covers the whole video.
+#3826613 assistant: 
+#3826617 user: 200→      "duration": 6.481
+    },
+    {
+      "text": "this here against a kex stainless",
+      "start": 101.72,
+      "duration": 7.24
+    },
+    {
+      "text": "steel 45° Square this little square is",
+      "start": 105.64,
+210→      "duration": 4.88
+    },
+    {
+      "text": "accurate to the thousandth of an inch",
+      "start": 108.96,
+      "duration": 3.72
+    },
+    {
+      "text": "and it felt spot on but sometimes you",
+      "start": 110.52,
+220→      "duration": 3.959
+    },
+    {
+      "text": "want to cut a miter that's considerably",
+      "start": 112.68,
+      "duration": 4.359
+    },
+    {
+      "text": "larger uh than something short no",
+      "start": 114.479,
+230→      "duration": 4.361
+    },
+    {
+      "text": "problem here because the quick",
+      "start": 117.039,
+      "duration": 4.76
+    },
+    {
+      "text": "disconnect front fist fence comes off",
+      "start": 118.84,
+240→      "duration": 4.76
+    },
+    {
+      "text": "and this removable section of The Back",
+      "start": 121.799,
+      "duration": 4.24
+    },
+    {
+      "text": "Fence comes off and you're not limited",
+      "start": 123.6,
+250→      "duration": 4.199
+    },
+    {
+      "text": "by length you can cut a board just as",
+      "start": 126.039,
+      "duration": 3.521
+    },
+    {
+      "text": "big as you want to pick up and set down",
+      "start": 127.799,
+260→      "duration": 4.241
+    },
+    {
+      "text": "on top of your table saw you can use the",
+      "start": 129.56,
+      "duration": 4.64
+    },
+    {
+      "text": "clamping system to clamp the board down",
+      "start": 132.04,
+270→      "duration": 5.04
+    },
+    {
+      "text": "before you cross cut it and we have the",
+      "start": 134.2,
+      "duration": 5.399
+    },
+    {
+      "text": "exact same accuracy here we're going to",
+      "start": 137.08,
+280→      "duration": 5.4
+    },
+    {
+      "text": "cut a 45° here and we'll mate these up",
+      "start": 13
+…
+to buy a commercial one cuz you might",
+      "start": 242.599,
+      "duration": 4.241
+    },
+    {
+      "text": "notice you don't even need top track on",
+      "start": 244.959,
+520→      "duration": 4.881
+    },
+    {
+      "text": "a sled like this you build your own stop",
+      "start": 246.84,
+      "duration": 4.599
+    },
+    {
+      "text": "and you don't need top top track and",
+      "start": 249.84,
+530→      "duration": 4.56
+    },
+    {
+      "text": "you've saved like 75 or 80",
+      "start": 251.439,
+      "duration": 5.281
+    },
+    {
+      "text": "bucks and there you go so we've cut a",
+      "start": 254.4,
+540→      "duration": 4.079
+    },
+    {
+      "text": "tentin in all the way around and the",
+      "start": 256.72,
+      "duration": 4.4
+    },
+    {
+      "text": "cool thing about this is the shoulders",
+      "start": 258.479,
+550→      "duration": 5.361
+    },
+    {
+      "text": "are perfect the shoulders are all",
+      "start": 261.12,
+      "duration": 5.16
+    },
+    {
+      "text": "exactly in the same plane so it's going",
+      "start": 263.84,
+560→      "duration": 4.76
+    },
+    {
+      "text": "to come perfect against your",
+      "start": 266.28,
+      "duration": 3.84
+    },
+    {
+      "text": "leg",
+      "start": 268.6,
+570→      "duration": 2.599
+    },
+    {
+      "text": "and then when you're all done with that",
+      "start": 270.12,
+      "duration": 3.16
+    },
+    {
+      "text": "of course it just takes a minute or so",
+      "start": 271.199,
+580→      "duration": 5.161
+    },
+    {
+      "text": "to put the table sawce sled back",
+      "start": 273.28,
+      "duration": 6.759
+    },
+    {
+      "text": "together you just readjust the uh zero",
+      "start": 276.36,
+590→      "duration": 6.96
+    },
+    {
+      "text": "clearance inserts clean it off and",
+      "start": 280.039,
+      "duration": 4.561
+    },
+    {
+      "text": "you're back to taable sawce sled",
+      "start": 283.32,
+#3826619 assistant: Continue reading the rest of the transcript.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

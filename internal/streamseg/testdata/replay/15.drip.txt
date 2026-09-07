@@ -1,0 +1,720 @@
+Spans you have open:
+  t1 from #3826596 (60 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826691 assistant: 
+#3826693 user: 6830→      "duration": 5.28
+    },
+    {
+      "text": "believe it was invented by William ing",
+      "start": 3084.72,
+      "duration": 4.119
+    },
+    {
+      "text": "he's a YouTube woodworker he has a",
+      "start": 3087.28,
+6840→      "duration": 4.279
+    },
+    {
+      "text": "school he's he's a brilliant woodworker",
+      "start": 3088.839,
+      "duration": 4.681
+    },
+    {
+      "text": "he has fantastic",
+      "start": 3091.559,
+6850→      "duration": 4.081
+    },
+    {
+      "text": "ideas and so follow along here I've",
+      "start": 3093.52,
+      "duration": 4.36
+    },
+    {
+      "text": "Marked One and I've rotated it clockwise",
+      "start": 3095.64,
+6860→      "duration": 4.24
+    },
+    {
+      "text": "then two then three then four and",
+      "start": 3097.88,
+      "duration": 4.239
+    },
+    {
+      "text": "finally five this is going to be the",
+      "start": 3099.88,
+6870→      "duration": 5.6
+    },
+    {
+      "text": "final cut so what we're going to",
+      "start": 3102.119,
+      "duration": 5.881
+    },
+    {
+      "text": "do is we're going to just trim a little",
+      "start": 3105.48,
+6880→      "duration": 5.52
+    },
+    {
+      "text": "bit off with each",
+      "start": 3108.0,
+      "duration": 3.0
+    },
+    {
+      "text": "cut so that's the first cut on number",
+      "start": 3111.92,
+6890→      "duration": 5.04
+    },
+    {
+      "text": "one the I'm going to rotate this piece",
+      "start": 3114.52,
+      "duration": 5.079
+    },
+    {
+      "text": "clockwise so that number two is facing",
+      "start": 3116.96,
+6900→      "duration": 5.159
+    },
+    {
+      "text": "the blade and I'll take a little slice",
+      "start": 3119.599,
+      "duration": 4.681
+    },
+    {
+      "text": "off of",
+      "start": 3122.119,
+6910→      "duration": 4.761
+    },
+    {
+      "text": "that and we'll rotate it clockwise so",
+      "start": 3124.28,
+      "duration": 5.36
+    },
+    {
+      "tex
+…
+
+      "text": "inch of our table slce sled all right so",
+      "start": 3246.96,
+      "duration": 6.639
+    },
+    {
+      "text": "the data we had if you remember",
+      "start": 3249.839,
+7150→      "duration": 7.081
+    },
+    {
+      "text": "a was 1.",
+      "start": 3253.599,
+      "duration": 5.281
+    },
+    {
+      "text": "6295 hopefully you can see the nine",
+      "start": 3256.92,
+7160→      "duration": 7.159
+    },
+    {
+      "text": "there and B was 1",
+      "start": 3258.88,
+      "duration": 6.76
+    },
+    {
+      "text": "620",
+      "start": 3264.079,
+7170→      "duration": 3.201
+    },
+    {
+      "text": "make that nine a little more legible I'm",
+      "start": 3265.64,
+      "duration": 2.959
+    },
+    {
+      "text": "going to take a photograph of this board",
+      "start": 3267.28,
+7180→      "duration": 2.68
+    },
+    {
+      "text": "at the end so if you want you can get a",
+      "start": 3268.599,
+      "duration": 2.841
+    },
+    {
+      "text": "screenshot of it so you can apply this",
+      "start": 3269.96,
+7190→      "duration": 4.399
+    },
+    {
+      "text": "five cut method to uh to anything that",
+      "start": 3271.44,
+      "duration": 5.76
+    },
+    {
+      "text": "you do works for any type of sled all",
+      "start": 3274.359,
+7200→      "duration": 4.681
+    },
+    {
+      "text": "right so the error per inch is going to",
+      "start": 3277.2,
+      "duration": 3.08
+    },
+    {
+      "text": "be simply I'm going to do this one",
+      "start": 3279.04,
+7210→      "duration": 4.0
+    },
+    {
+      "text": "little piece at a time a minus B of",
+      "start": 3280.28,
+      "duration": 8.559
+    },
+    {
+      "text": "course which is 1. 6295 minus",
+      "start": 3283.04,
+7220→      "duration": 5.799
+    },
+    {
+      "text": "1.020 that's going to get divided by",
+      "start": 3292.799,
+      "duration": 7.32
+    },
+    {
+      "text": "the number of cuts of",
+      "start": 3297.079,
+#3826694 assistant: Continue reading.
+#3826695 assistant: 
+#3826697 user: 7220→      "duration": 5.799
+    },
+    {
+      "text": "1.020 that's going to get divided by",
+      "start": 3292.799,
+      "duration": 7.32
+    },
+    {
+      "text": "the number of cuts of",
+      "start": 3297.079,
+7230→      "duration": 3.04
+    },
+    {
+      "text": "course and I'm just going to do the top",
+      "start": 3301.48,
+      "duration": 3.599
+    },
+    {
+      "text": "part here",
+      "start": 3303.68,
+7240→      "duration": 4.76
+    },
+    {
+      "text": "first use the",
+      "start": 3305.079,
+      "duration": 3.361
+    },
+    {
+      "text": "calculator and",
+      "start": 3315.16,
+7250→      "duration": 4.76
+    },
+    {
+      "text": "0275 so",
+      "start": 3316.96,
+      "duration": 6.44
+    },
+    {
+      "text": "0.0275 that's the difference",
+      "start": 3319.92,
+7260→      "duration": 5.679
+    },
+    {
+      "text": "0.0275 so it's",
+      "start": 3323.4,
+      "duration": 4.159
+    },
+    {
+      "text": "2.7",
+      "start": 3325.599,
+7270→      "duration": 4.161
+    },
+    {
+      "text": "hundreds of an inch difference in those",
+      "start": 3327.559,
+      "duration": 4.24
+    },
+    {
+      "text": "two pieces after being cut around that",
+      "start": 3329.76,
+7280→      "duration": 3.64
+    },
+    {
+      "text": "Circle five times or four times I'm",
+      "start": 3331.799,
+      "duration": 4.56
+    },
+    {
+      "text": "sorry and so we divide that by",
+      "start": 3333.4,
+7290→      "duration": 5.159
+    },
+    {
+      "text": "four that's the magic of the five cut",
+      "start": 3336.359,
+      "duration": 3.96
+    },
+    {
+      "text": "method is it magnifies the error to make",
+      "start": 3338.559,
+7300→      "duration": 4.321
+    },
+    {
+      "text": "it easier for us to see if we just made",
+      "start": 3340.319,
+      "duration": 4.361
+    },
+    {
+      "text": "a single cut it would be very hard to",
+      "start": 3342.88,
+7310→      "duration": 4.199
+    },
+
+…
+  {
+      "text": "can all right so that's the number that",
+      "start": 3458.2,
+      "duration": 3.879
+    },
+    {
+      "text": "we are off and we multiply that times",
+      "start": 3460.359,
+7540→      "duration": 4.841
+    },
+    {
+      "text": "the length of the fence over that whole",
+      "start": 3462.079,
+      "duration": 4.601
+    },
+    {
+      "text": "length of",
+      "start": 3465.2,
+7550→      "duration": 4.399
+    },
+    {
+      "text": "fence we're off by a larger amount let's",
+      "start": 3466.68,
+      "duration": 5.72
+    },
+    {
+      "text": "see what that amount",
+      "start": 3469.599,
+7560→      "duration": 5.641
+    },
+    {
+      "text": "is multiply that times 27 and the link",
+      "start": 3472.4,
+      "duration": 4.76
+    },
+    {
+      "text": "between the two screws on the fence",
+      "start": 3475.24,
+7570→      "duration": 5.52
+    },
+    {
+      "text": "basically and that's",
+      "start": 3477.16,
+      "duration": 3.6
+    },
+    {
+      "text": "0.015 so we're 15,000 off so if that",
+      "start": 3480.799,
+7580→      "duration": 7.081
+    },
+    {
+      "text": "fence was moved 15,000 of an inch",
+      "start": 3484.88,
+      "duration": 6.6
+    },
+    {
+      "text": "everything would be dead on",
+      "start": 3487.88,
+7590→      "duration": 3.6
+    },
+    {
+      "text": "zero so now we have to wonder do we move",
+      "start": 3492.48,
+      "duration": 4.04
+    },
+    {
+      "text": "the fence forward or do we move the",
+      "start": 3494.76,
+7600→      "duration": 4.24
+    },
+    {
+      "text": "fence",
+      "start": 3496.52,
+      "duration": 2.48
+    },
+    {
+      "text": "backwards and I'm going to write a note",
+      "start": 3499.2,
+7610→      "duration": 8.32
+    },
+    {
+      "text": "here to explain it or to uh for you to",
+      "start": 3501.799,
+      "duration": 5.721
+    },
+    {
+      "text": "remember if the number is positive of",
+      "start": 3508.839,
+#3826698 assistant: Continue reading.
+#3826699 assistant: 
+#3826706 user: 7610→      "duration": 8.32
+    },
+    {
+      "text": "here to explain it or to uh for you to",
+      "start": 3501.799,
+      "duration": 5.721
+    },
+    {
+      "text": "remember if the number is positive of",
+      "start": 3508.839,
+7620→      "duration": 4.041
+    },
+    {
+      "text": "course my my camera fell off the bottom",
+      "start": 3511.24,
+      "duration": 3.319
+    },
+    {
+      "text": "there if the number is positive that",
+      "start": 3512.88,
+7630→      "duration": 4.88
+    },
+    {
+      "text": "number there if it's a positive",
+      "start": 3514.559,
+      "duration": 3.201
+    },
+    {
+      "text": "number then you have to move the fence",
+      "start": 3519.92,
+7640→      "duration": 5.48
+    },
+    {
+      "text": "backwards towards you towards the",
+      "start": 3522.0,
+      "duration": 3.4
+    },
+    {
+      "text": "operator in order to get it correct if",
+      "start": 3530.28,
+7650→      "duration": 4.72
+    },
+    {
+      "text": "the number is negative you can probably",
+      "start": 3533.0,
+      "duration": 4.28
+    },
+    {
+      "text": "already",
+      "start": 3535.0,
+7660→      "duration": 2.28
+    },
+    {
+      "text": "guess you have to move the fence",
+      "start": 3541.119,
+      "duration": 3.881
+    },
+    {
+      "text": "forward the opposite",
+      "start": 3545.799,
+7670→      "duration": 5.52
+    },
+    {
+      "text": "direction in my last video I kind of",
+      "start": 3548.92,
+      "duration": 4.679
+    },
+    {
+      "text": "explained the mechanism behind why but",
+      "start": 3551.319,
+7680→      "duration": 4.161
+    },
+    {
+      "text": "this video is already so darn long I",
+      "start": 3553.599,
+      "duration": 3.52
+    },
+    {
+      "text": "didn't really want to bore you guys but",
+      "start": 3555.48,
+7690→      "duration": 4.8
+    },
+    {
+      "text": "that's it that's the five cut",
+      "start": 3557.119,
+      "duration": 3.161
+    },
+    
+…
+t": 3665.96,
+      "duration": 4.24
+    },
+    {
+      "text": "all these holes no problem you can uh",
+      "start": 3668.559,
+7930→      "duration": 3.081
+    },
+    {
+      "text": "Drive some toothpicks and some glue in",
+      "start": 3670.2,
+      "duration": 3.48
+    },
+    {
+      "text": "and drill a new set no big deal if you",
+      "start": 3671.64,
+7940→      "duration": 5.28
+    },
+    {
+      "text": "have to move your fence two or three",
+      "start": 3673.68,
+      "duration": 3.24
+    },
+    {
+      "text": "times that's it I held it nice and",
+      "start": 3678.319,
+7950→      "duration": 4.121
+    },
+    {
+      "text": "snug had to move that clamp to get one",
+      "start": 3682.72,
+      "duration": 3.8
+    },
+    {
+      "text": "more hole here watch where you're",
+      "start": 3685.119,
+7960→      "duration": 2.561
+    },
+    {
+      "text": "putting these holes too right you don't",
+      "start": 3686.52,
+      "duration": 2.2
+    },
+    {
+      "text": "want to drill one through your zero",
+      "start": 3687.68,
+7970→      "duration": 3.48
+    },
+    {
+      "text": "clearance insert that has to",
+      "start": 3688.72,
+      "duration": 6.0
+    },
+    {
+      "text": "move that wouldn't be",
+      "start": 3691.16,
+7980→      "duration": 5.72
+    },
+    {
+      "text": "good I guess you'd find out in a hurry",
+      "start": 3694.72,
+      "duration": 3.319
+    },
+    {
+      "text": "and then you'd have to move it and",
+      "start": 3696.88,
+7990→      "duration": 3.52
+    },
+    {
+      "text": "change it but there we go and we can see",
+      "start": 3698.039,
+      "duration": 5.121
+    },
+    {
+      "text": "that our our 15,000 there is nice and",
+      "start": 3700.4,
+8000→      "duration": 5.8
+    },
+    {
+      "text": "snug and tight there just like it should",
+      "start": 3703.16,
+      "duration": 5.399
+    },
+    {
+      "text": "be and we have successfully moved the",
+      "start": 3706.2,
+#3826707 assistant: Continue reading.
+#3826708 assistant: 
+#3826725 user: 8000→      "duration": 5.8
+    },
+    {
+      "text": "snug and tight there just like it should",
+      "start": 3703.16,
+      "duration": 5.399
+    },
+    {
+      "text": "be and we have successfully moved the",
+      "start": 3706.2,
+8010→      "duration": 5.079
+    },
+    {
+      "text": "fence back by that amount so now it",
+      "start": 3708.559,
+      "duration": 5.441
+    },
+    {
+      "text": "should be dead square and I did go ahead",
+      "start": 3711.279,
+8020→      "duration": 4.961
+    },
+    {
+      "text": "and run run one more check on it and it",
+      "start": 3714.0,
+      "duration": 5.559
+    },
+    {
+      "text": "was um I think it was about one uh",
+      "start": 3716.24,
+8030→      "duration": 5.039
+    },
+    {
+      "text": "10,000th off or something like that but",
+      "start": 3719.559,
+      "duration": 3.56
+    },
+    {
+      "text": "it the it was so insignificant that it's",
+      "start": 3721.279,
+8040→      "duration": 4.04
+    },
+    {
+      "text": "not not even worth",
+      "start": 3723.119,
+      "duration": 4.081
+    },
+    {
+      "text": "mentioning but you should check it a",
+      "start": 3725.319,
+8050→      "duration": 4.321
+    },
+    {
+      "text": "second time in case you made an error",
+      "start": 3727.2,
+      "duration": 3.68
+    },
+    {
+      "text": "all right now I'm going to put this on",
+      "start": 3729.64,
+8060→      "duration": 3.959
+    },
+    {
+      "text": "this is a little safety block so that uh",
+      "start": 3730.88,
+      "duration": 4.32
+    },
+    {
+      "text": "when the table saw blade comes through",
+      "start": 3733.599,
+8070→      "duration": 4.281
+    },
+    {
+      "text": "the back it doesn't uh it doesn't get",
+      "start": 3735.2,
+      "duration": 4.599
+    },
+    {
+      "text": "your hand it'll come into here first and",
+      "start": 3737.88,
+8080→      "duration": 3.399
+    },
+    {
+      "text": "it's got plastic on the top so you c
+…
+duration": 4.52
+    },
+    {
+      "text": "fine and there we",
+      "start": 3865.599,
+8320→      "duration": 3.52
+    },
+    {
+      "text": "go so the last thing we want to do and",
+      "start": 3871.599,
+      "duration": 4.841
+    },
+    {
+      "text": "that will wrap up this half of the video",
+      "start": 3874.079,
+8330→      "duration": 4.641
+    },
+    {
+      "text": "is to go ahead and set the zero",
+      "start": 3876.44,
+      "duration": 4.76
+    },
+    {
+      "text": "clearance insert to the blade so I've",
+      "start": 3878.72,
+8340→      "duration": 4.839
+    },
+    {
+      "text": "got a 1/8 in uh piece of wood that I've",
+      "start": 3881.2,
+      "duration": 4.359
+    },
+    {
+      "text": "cut there a little shim and I can put",
+      "start": 3883.559,
+8350→      "duration": 3.361
+    },
+    {
+      "text": "that in one side and the blade in the",
+      "start": 3885.559,
+      "duration": 3.0
+    },
+    {
+      "text": "other if I don't want to cut a shim I",
+      "start": 3886.92,
+8360→      "duration": 4.08
+    },
+    {
+      "text": "can just move the sled forward and and",
+      "start": 3888.559,
+      "duration": 5.201
+    },
+    {
+      "text": "measure it to the blade on both sides",
+      "start": 3891.0,
+8370→      "duration": 4.359
+    },
+    {
+      "text": "and we'll do do the same thing with the",
+      "start": 3893.76,
+      "duration": 3.72
+    },
+    {
+      "text": "zero clearance insert at the back use",
+      "start": 3895.359,
+8380→      "duration": 4.361
+    },
+    {
+      "text": "the shim or I can simply move the uh",
+      "start": 3897.48,
+      "duration": 5.559
+    },
+    {
+      "text": "sled forward so the blad's in that spot",
+      "start": 3899.72,
+8390→      "duration": 5.28
+    },
+    {
+      "text": "and do that we'll tighten these up at",
+      "start": 3903.039,
+      "duration": 3.76
+    },
+    {
+      "text": "the back as well we want to put these",
+      "start": 3905.0,
+#3826726 assistant: Continue reading to the end.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

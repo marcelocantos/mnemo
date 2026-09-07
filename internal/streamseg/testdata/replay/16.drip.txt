@@ -1,0 +1,202 @@
+Spans you have open:
+  t1 from #3826596 (72 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826727 assistant: 
+#3826730 user: 8390→      "duration": 5.28
+    },
+    {
+      "text": "and do that we'll tighten these up at",
+      "start": 3903.039,
+      "duration": 3.76
+    },
+    {
+      "text": "the back as well we want to put these",
+      "start": 3905.0,
+8400→      "duration": 3.4
+    },
+    {
+      "text": "all in hand tight we don't want to use",
+      "start": 3906.799,
+      "duration": 3.04
+    },
+    {
+      "text": "any Machinery to drive these down",
+      "start": 3908.4,
+8410→      "duration": 3.879
+    },
+    {
+      "text": "because they'll put a dent in that shelf",
+      "start": 3909.839,
+      "duration": 5.041
+    },
+    {
+      "text": "and that's not",
+      "start": 3912.279,
+8420→      "duration": 2.601
+    },
+    {
+      "text": "good so there we",
+      "start": 3916.599,
+      "duration": 3.52
+    },
+    {
+      "text": "go that's all set",
+      "start": 3922.44,
+8430→      "duration": 5.04
+    },
+    {
+      "text": "and there's the sled so I have another",
+      "start": 3924.64,
+      "duration": 4.199
+    },
+    {
+      "text": "half to this video coming out where I'm",
+      "start": 3927.48,
+8440→      "duration": 4.76
+    },
+    {
+      "text": "going to show you how to make all of the",
+      "start": 3928.839,
+      "duration": 8.121
+    },
+    {
+      "text": "fancy parts that turn this sled into a",
+      "start": 3932.24,
+8450→      "duration": 8.48
+    },
+    {
+      "text": "miter sled and a dato sled and a picture",
+      "start": 3936.96,
+      "duration": 5.399
+    },
+    {
+      "text": "frame sled and all those other things so",
+      "start": 3940.72,
+8460→      "duration": 3.72
+    },
+    {
+      "text": "hopefully you'll stay tuned that's uh",
+      "start": 3942.359,
+      "duration": 3.44
+    },
+    {
+      "text": "that's going to come out tomorrow and if",
+      "start": 3944.44,
+8470→      "duration": 2.56
+    },
+    {
+      "text": "uh this has already been out for a while",
+      "start": 3945.799,
+      "duration": 3.0
+    },
+    {
+      "text": "then it's just the next video in the",
+      "start": 3947.0,
+8480→      "duration": 4.2
+    },
+    {
+      "text": "sequence it's a two-parter and it's a",
+      "start": 3948.799,
+      "duration": 4.48
+    },
+    {
+      "text": "long video but it shows you detail step",
+      "start": 3951.2,
+8490→      "duration": 5.079
+    },
+    {
+      "text": "by step exactly how to get it done so",
+      "start": 3953.279,
+      "duration": 4.721
+    },
+    {
+      "text": "just a quick recap of all the things it",
+      "start": 3956.279,
+8500→      "duration": 6.601
+    },
+    {
+      "text": "can do and that's about it thanks for",
+      "start": 3958.0,
+      "duration": 4.88
+    },
+    {
+      "text": "[Music]",
+      "start": 3962.97,
+8510→      "duration": 21.81
+    },
+    {
+      "text": "watching",
+      "start": 3983.0,
+      "duration": 28.909
+    },
+    {
+      "text": "[Music]",
+      "start": 3984.78,
+8520→      "duration": 27.129
+    },
+    {
+      "text": "oh",
+      "start": 4013.0,
+      "duration": 3.0
+    },
+    {
+      "text": "[Music]",
+      "start": 4017.54,
+8530→      "duration": 23.0
+    },
+    {
+      "text": "[Music]",
+      "start": 4042.9,
+      "duration": 41.319
+    },
+    {
+      "text": "[Music]",
+      "start": 4086.53,
+8540→      "duration": 137.51
+    },
+    {
+      "text": "oh",
+      "start": 4222.64,
+      "duration": 19.68
+    },
+    {
+      "text": "[Music]",
+      "start": 4224.04,
+8550→      "duration": 21.28
+    },
+    {
+      "text": "sh",
+      "start": 4242.32,
+      "duration": 3.0
+    }
+  ]
+}
+
+#3826734 assistant: I have the full transcript. Let me also check if there's any existing synopsis or meta in the directory, and maybe look at other synopses for style reference. The user said "Do not write any files. Do...# flagships-table-saw-sled
+
+Source: https://www.youtube.com/watch?v=n2jiuCYc3_s
+
+**TL;DR**: James demonstrates a flagship table saw sled that handles crosscuts, miters, bevels, dados, and picture frames with precision, using MagSwitch and comparisons to 5000-series INCRA systems.
+
+**Caveat**: ⚠️ Product pitch; treat the claims as marketing.
+
+## Synopsis
+
+James presents his new flagship table saw sled, designed to replace multiple specialized tools and jigs. The sled supports crosscutting, mitering, beveling, dadoing, and picture frame construction with a lightweight, hollow construction using Baltic birch plywood.
+
+The sled features removable fences that can be adjusted for different operations. It includes zero-clearance inserts for clean cuts and uses MagSwitch for quick fence positioning. The design emphasizes portability and versatility, with the sled being lightweight enough to be moved around the shop.
+#3826735 assistant: Checking a sibling synopsis for tone, then I'll write this one to the contract.
+#3826736 assistant: 
+#3826737 assistant: 
+#3826738 user: {"type":"ListDir","Content":{"content":"- /Users/marcelo/think/knowledge/youtube/n2jiuCYc3_s/\n  - meta.json","absolute_root_path":"/Users/marcelo/think/knowledge/youtube/n2jiuCYc3_s"}}
+#3826740 user: {"type":"ListDir","Content":{"content":"- /Users/marcelo/think/knowledge/youtube/\n  - --r6aWpwwH8/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -01ZCTt-CJw/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -0HRzXk8vlk/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -0MD3Jn60fw/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -1A1uuKaryc/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -3SgDTOg1GA/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -7tmFGyQgoI/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -9qMeRWy_0g/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -9Rt2TzRcRg/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -a0ecQMq-rM/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -AgwE_4_slM/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -AI3ka9D6nU/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -AXVveJYpVU/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -bArT2o9rEE/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -BhcQURVjJg/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -bQcWs1Z9a0/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -cOUxHM9B1Q/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -de10seTPf0/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -dJ9WrTG6zQ/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -dVz2jd_y3c/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -DyrBDsKA5s/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -ESQZM9CF10/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -FhtPUkXKO4/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -fu03F-Iah8/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -g1yKRo5XtY/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -gekVfUAS7c/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -Gj0-EIyx6g/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -IWMl-GvWd0/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -joUMTAMKrs/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -M8-FBmWHQY/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - -mXaU3N9e8Y/\n    [2 files in subtree: 1 *.json, 1 *.
+…
+ *.json, 1 *.md]\n  - 1zBrQFpbK1U/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 1Zocl7n98xY/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2--R_xEUfi8/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2-QCqbMsPDc/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 21EYKqUsPfg/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 23BtT8P7rCA/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 23HrbREVNvo/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 248lJDeS7aY/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 253pP2IkpnA/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 27z6kIspKE0/\n    [1 file in subtree: 1 *.json]\n  - 28z6OjsNsUk/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2A8ngVvKa1U/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2aD8Kx3gAog/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2APXsUgqNaQ/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2bYPsQvdfe0/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2c8o65JiPQY/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2dFeJnzFGjk/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2EXyj_fHU48/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2F3MYqKqaqg/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2foBihpq_4E/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2g2jodg9FBI/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2g63UXaynaA/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2IwZB9PdJVw/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2JiMmye2ezg/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2jJeSgO_MGo/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2JLhCYtfg-U/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2kxanBYTAaY/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2n1qqC7QfdE/\n    [2 files in subtree: 1 *.json, 1 *.md]\n  - 2nX7Y8ZwShg/\n    [2 files in subtree: 1 *.json, 1 *.md]\n    ...\n\nNote: this directory is too large to list fully. Try list_dir on a narrower path, or use grep / run_terminal_command.","absolute_root_path":"/Users/marcelo/think/knowledge/youtube"}}
+#3826742 assistant: Let me look at a similar woodworking synopsis if any exists, and also read meta.json for this video for title/channel confirmation. Also look at one existing synopsis for style.
+#3826743 assistant: 
+#3826744 assistant: 
+#3826745 assistant: 
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

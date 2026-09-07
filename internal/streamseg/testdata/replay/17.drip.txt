@@ -1,0 +1,186 @@
+Spans you have open:
+  t1 from #3826596 (83 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826746 user: 1→{
+  "id": "n2jiuCYc3_s",
+  "title": "Flagship Table Saw Sled! Crosscut, Miter, Bevel, Dado, Picture Frames & More!",
+  "uploader": "Kings Fine Woodworking",
+  "channel": "Kings Fine Woodworking",
+  "channel_id": "UCm8CRHDTfYNd1MemitETdbA",
+  "upload_date": "20231008",
+  "duration": 4243,
+  "view_count": 2215806,
+10→  "description": "FLAGSHIP CROSSCUT SLED Does it all! It cuts miters, bevels, compound angles, Dadoes, Rabbets, Picture Frames and More! Features both bottom and back fence- removable zero clearance inserts! Plus it works for both left & right tilting saws with no modifications!\n\nPLANS FOR THIS SLED (both metric and standard) This is All you Need Templates are Not Necessary: https://kingsfinewoodworking.com/products/flagship-table-saw-sled-plans?_pos=2&_sid=5b4a07886&_ss=r\n\nSLED PLANS WITH PAPER TEMPLATES: https://kingsfinewoodworking.com/products/flagship-table-saw-sled-plans-with-paper-templates?_pos=3&_sid=c1870ae4f&_ss=r\n\n(these make it quicker and easier to lay out holes, but they are definitely not needed. It will help guarantee accuracy if you are concerned) note: Templates are NOT sold separately, they are only sold with plans)\n\nBuy the whole SLED!:  https://kingsfinewoodworking.com/products/flagship-table-saw-sled-delivered-in-a-box?_pos=1&_sid=89c1586c2&_ss=r\n\nBuy the Hardware Kit: https://kingsfinewoodworking.com/products/complete-hardware-package-for-the-flagship-table-saw-sled?_pos=1&_sid=1879c7c2b&_ss=r\n\n\nSince we replaced our Grizzly table saw with the Saw Stop we have been in need of a new crosscut sled. We thought about building our Extreme Crosscut Table Saw Sled but realized that it could use a few improvements. Don’t get me wrong, it is an excellent table saw sled and is a very popular tool. However, one issue we have had with it, is its weight. It is just too heavy.\n \nSo, we decided to design a new sled that would function just as well as the old one but would also be HALF THE WEIGHT! \n\nWe liked that we could 
+…
+he same thing. \nThe movable zero clearance inserts can also be moved to allow the blade to be tilted to cut bevels. And, it accommodates both left and right tilting saws. \n\n\n\nUsed for this build\n\nPOWERTEC T-Track (2-Pack), 24\"   https://amzn.to/3ZUVGFG\nPOWERTEC 18” Aluminum miter bar https://amzn.to/3ZUWfj9\nDigital Angle Finder   https://amzn.to/48QZQTd\nAluminum round bar ¼” diameter https://amzn.to/46rEzOe\nAluminum hold down clamps   https://amzn.to/45xYERQ\nToggle Clamp   https://amzn.to/48NyOfz\nStar knobs   https://amzn.to/3QhrvFS\nStar knob with stud   https://amzn.to/3twhdsr\n1/4-20 x 3/8\" Button Socket Screws   https://amzn.to/3ZPkkYB\n1/4-20 x 3/4\" Button Socket Screws    https://amzn.to/3S3iW2m\nT-bolts ¼”-20x3-1/2”   https://amzn.to/45vbfFB\n3/8-16 x 3/4\" Hex Head Bolts    https://amzn.to/45xj6lM\n1/4-20 x 3-1/2\" Hex Bolts   https://amzn.to/3QfJa0C\n1/4\"-20x5/16 T-Nut   https://amzn.to/3rLp9FH\n10-32x1/2 socket set screw   https://amzn.to/3Qdr7XJ\n#5x3/8” countersink wood screws https://amzn.to/3rOYTu0\n#8x1/2\" countersink wood screws https://amzn.to/3Ff9yRS\n¼” flat washers   https://amzn.to/45nhlYo\n36” x 1/8” thick aluminum ruler    https://amzn.to/46sFiPh\n¼” thick cast acrylic sheet   https://amzn.to/46QzoHL",
+  "webpage_url": "https://www.youtube.com/watch?v=n2jiuCYc3_s",
+  "tags": [
+    "ultimate table saw sled",
+    "best table saw sled",
+    "crosscut sled",
+    "dado sled",
+    "removable insert",
+    "table saw sled",
+    "perfect crosscut",
+20→    "crosscut jig",
+    "woodworking table saw sled",
+    "woodworking cross-cut sled",
+    "build a table saw sled",
+    "crosscut",
+    "cross cut sled",
+    "miter sled",
+    "how to make a cross cut sled",
+    "how to make a cross-cut sled",
+    "table saw sled plans",
+30→    "5 cut squaring method",
+    "sled",
+    "small table saw sled",
+    "zero clearance insert",
+    "cross-cut sled",
+    "table saw",
+    "sierra de mesa trineo",
+    "5 cut"
+  ]
+}
+40→
+#3826747 user: found 3 matches
+#3826748 assistant: Let me look at one of those similar synopses for style, especially the Kings Fine Woodworking one if any, and the adjustable table saw sled one.
+#3826749 assistant: 
+#3826750 assistant: 
+#3826751 assistant: 
+#3826752 user: 1→# Precision Saw Sled
+
+Source: https://www.youtube.com/watch?v=ThHQFVD00w4
+
+**TL;DR**: A well-designed table saw sled improves crosscut control by carrying the workpiece past the blade, with accuracy depending on a stable base, properly fitted runners, and a calibrated fence. This tutorial explains how to choose and combine features—including an adjustable fence, repeatable square setting, micro-adjustable length stop, blade guard, and auxiliary support—to suit your woodworking.
+
+## Synopsis
+
+### Choosing the sled’s capabilities
+10→
+The presenter begins with the limitation of a conventional miter gauge: it pushes a board across the saw table, and the resulting drag can make accurate alignment difficult, especially with long stock. A sled carries the workpiece on a moving platform, reducing this source of disturbance. The video presents a collection of design choices rather than insisting on one universal sled.
+
+Double-sided sleds straddle the blade, support both portions of the workpiece, and normally use two runners plus leading and trailing fences to connect the halves. Their advantages are support and stability. A single-sided sled occupies only one side of the blade and uses one runner and one fence. It is less bulky, and its fence can pivot through a broad range of angles. The presenter prefers this versatility and concentrates on single-sided designs, while noting that many features also apply to double-sided sleds.
+
+### Building a stable base and adjustable runner
+
+The base must start flat and remain flat. The presenter recommends MDF or Baltic birch plywood, with a thickness no greater than about ½ inch or 13 mm to avoid sacrificing too much cutting depth. His examples measure approximately 18 by 24 inches, but the appropriate footprint depends on the workpieces being handled.
+
+Moisture control is part of maintaining accuracy. He recommends finishing both faces of the base equally to slow moisture exchange and reduce uneven movement. As an exampl
+…
+ closes with a storage cart that protects the sled and holds its auxiliary support and miter gauge. Plans for the demonstrated equipment are offered through the presenter’s store.
+
+## Key Takeaways
+
+- **Choose the sled around the work.** Double-sided designs favour support and stability; single-sided designs offer less bulk and greater freedom to pivot the fence. [01:20]
+- **Precision depends on maintaining geometry over time.** Base flatness, fence stability, runner wear, and moisture movement all matter after the initial calibration.
+- **Build adjustment into parts that need a close fit.** The demonstrated UHMW runner uses countersunk screw heads as small wedges, allowing looseness to be corrected without replacing the runner. [06:19]
+- **Establish references from actual cuts.** Trimming the base after fitting the runner ties its reference edge to the saw’s cutting path; the cut-and-flip test then checks the fence through the result it produces. [12:03]
+- **An adjustable fence benefits from a repeatable square stop.** Calibrate square once, set a locking contact screw, and use that reference when returning from angled cuts. [16:49]
+70→- **Sawdust can become a dimensional error.** A pointed length stop gives debris an escape path instead of letting it accumulate at the workpiece’s reference surface. [18:08]
+- **Screw pitch provides predictable fine movement.** A quarter-turn of the demonstrated 10-32 screw moves 1/128 inch; a quarter-turn of the 0.5 mm-pitch metric screw moves 0.125 mm. These describe adjustment increments, not independently measured cutting accuracy. [18:26]
+- **Guarding and offcut support belong in the sled design.** The video addresses both the blade exposure near the fence and the unsupported workpiece portion created by a single-sided base. [21:35] [23:00]
+- **A measuring scale needs calibration to the installed cutting setup.** Register it against a known-length cut and recheck when changing to a blade of different thickness. [23:51]
+
+#3826753 user: 1→# Build the 360 Table Saw Sled, FAST with the New and Improved ZeroPlay 360 Sled Kit!
+
+Source: https://www.youtube.com/watch?v=BHZVqRkGA-s
+
+**TL;DR**: This build combines an adjustable ZeroPlay miter bar with a grid of MATCHFIT dovetail grooves to create a table saw sled with a movable, rotating fence. The walkthrough covers routing the base, fitting the runner, and constructing the fence; placing its two mounting screws in perpendicular grooves enables fence settings through 360 degrees.
+
+**Caveat**: ⚠️ Manufacturer build demonstration; the accuracy and versatility claims are promotional and are not independently tested in the video.
+
+## Synopsis
+10→
+Microjig presents its 360 sled as a versatile cutting fixture built around two complementary systems: the ZeroPlay miter bar guides the base through the saw’s miter slot, while MATCHFIT dovetail grooves provide adjustable attachment points for the fence and accessories. The video follows the construction from a plywood or MDF blank through runner adjustment and fence assembly, ending with an explanation of the available fence positions.
+
+The base begins as a 16-by-20-inch rectangle of good-quality plywood or MDF. A leftover strip approximately six inches wide is saved for the fence. With the saw’s rip fence positioned just over the blade opening, the builder squares the base against it and marks the miter slot’s center at the front and back edges. Connecting those marks establishes the runner’s mounting line. The presenter emphasizes laying out all major features before machining: the dovetail grooves normally fall at four-inch intervals in both directions, but their positions may need adjustment to avoid the runner’s mounting and adjustment holes.
+
+The groove grid is routed in two stages. First, a quarter-inch straight bit set to an 11/32-inch cutting depth makes relief grooves. Setting the router-table fence four inches from the bit’s center and rotating the panel produces the four outer grooves
+…
+multiple passes. The wider face receives a dovetail groove 1¼ inches from the reference edge, using the same relief-cut and dovetail-cut sequence as the sled base. The pieces form an L-shaped fence, with the slotted portion extending away from the face. Corners are rounded and edges eased.
+
+Two supplied 1½-inch track screws and wing nuts secure the fence to the sled. In parallel grooves, they allow the fence to move across the base and cover a broad range of angles. In perpendicular grooves, they allow settings through a full 360 degrees. Additional kit hardware can support custom stops and hold-downs. The fence has no preset angle stops, so the presenter recommends setting the required angle with a precision gauge.
+
+## Key Takeaways
+
+- **Lay out the runner holes and groove grid together before cutting.** The saw’s miter-slot position can create conflicts with an otherwise regular four-inch grid. [01:01]
+- **The dovetail tracks use a two-stage routing process.** A straight-bit relief cut precedes the finished dovetail profile; the demonstrated depths are 11/32 inch and 3/8 inch respectively. [01:33]
+- **Runner fit and base alignment are separate adjustments.** First establish smooth travel without sideways movement, then align and secure the base using the rip fence as a reference. [04:21]
+30→- **A router table is optional.** The presenter offers a handheld router and straightedge as an alternative for cutting the base’s grooves. [02:25]
+- **Full-angle adjustment comes from choosing different mounting tracks.** Moving the two fence screws from parallel grooves into perpendicular grooves expands the available fence orientations to 360 degrees. [07:22]
+- **Angle flexibility does not provide automatic indexing.** With no preset stops, accurate fence settings depend on an external precision gauge. [08:05]
+- **The groove system also supports accessories.** Extra hardware allows the builder to add task-specific stops and hold-downs beyond the basic fence. [07:57]
+
+#3826754 user: found 0 matches
+#3826809 assistant: I have a thorough understanding of the video. This is a ~70 minute (4243 seconds = 70:43) build video from Kings Fine Woodworking (James) covering Part 1 of a two-part series on their "flagship" table...flagship-crosscut-sled-build.md
+
+# Flagship Table Saw Sled! Crosscut, Miter, Bevel, Dado, Picture Frames & More!
+
+Source: https://www.youtube.com/watch?v=n2jiuCYc3_s
+
+**TL;DR**: James from Kings Fine Woodworking builds 70-minute Part 1 of his flagship multi-function table saw sled, featuring a lightweight hollow-core design with sliding zero-clearance inserts for crosscut, miter, bevel, dado, and picture-frame cuts.
+
+**Caveat**: ⚠️ Product pitch - he sells plans, templates, hardware, and the assembled sled 1-2 weeks after launch.
+
+## Synopsis
+
+James opens by demonstrating the sled's versatility on a 24×32-inch table saw. He shows crosscutting a 2×4 at 90°, mitering a 45° picture frame, beveling a 45° chamfer, and cutting dados and rabb ets. The sled's bidirectional zero-clearance inserts (ZCIs) allow flush cuts on both sides, and a homemade stop eliminates the need for a top track.
+
+Construction begins with 3/8-inch plywood for the base. James cuts a 24×32-inch sled with a 1/8-inch hollow underside to reduce weight to less than half that of previous models. He laminates three layers of Baltic birch plywood for the runners and back fence, creating a 3/4-inch thick core that mimics solid sled weight but weighs far less.
+
+Zero-clearance inserts are hand-cut with a jigsaw, taking the longest part of 70 minutes. James uses 1/4-20 screws and CA glue for secure attachment. He also installs a dado track for T-track or sandpaper inserts and a removable back fence section for quick disconnect.
+
+Assembly involves precise miter bar placement using a 3/4-inch spacer and Teflon tape for smooth sliding. 45° Kinex squares ensure perfect geometry. James emphasizes symmetry in hole placement so the fence can be set once and adjusted with feeler gauges.
+
+The five-cut squaring method, attributed to William Ng, is demonstrated in detail. James calculates error corrections using a calculator, showing how to achieve 1/10,000 of an inch accuracy. He recommends temporary screws during the process and toothpicks for hole maintenance.
+
+James compares his sled to the Incra Miter 5000, noting it offers more functions at lower cost and without needing a top track. He sells paper templates for $9.95 and mentions MagSwitch as an unofficial sponsor.
+
+The video ends with a safety box setup and a teaser for Part 2, which will cover accessories like picture frames and dado inserts.
+
+## Key Takeaways
+
+- The sled uses a hollow-core construction with 3/8-inch plywood top and runners, achieving less than half the weight of previous sleds [06:52]
+- Bidirectional zero-clearance inserts in both base and back fence allow bevel cuts in both directions  [02:49]
+- Five-cut squaring method achieves 1/10,000-inch accuracy with calculated fence adjustments  [51:15]
+- Homemade stop saves $75-80 compared to commercial options and eliminates need for top T-track [04:00]
+- Miter bars require precise set screw adjustment with Teflon tape to eliminate wiggle while maintaining smooth sliding [45:49]
+- Baltic birch plywood is preferred for runners; half-sheet HD subfloor works well at $15 [15:08]
+- 1/4-20 screws with ball hex drivers are used for ZCIs; hand-tight only to avoid denting [22:27]
+- Front fence uses quick-release star knobs; back fence has removable center section for versatility [42:25]
+- Safety block with clear plastic top protects glue-up area above Z [62:10]
+- Paper templates available for $9.
+#3826865 assistant: hollow-core-crosscut-sled.md
+
+# Flagship Table Saw Sled! Crosscut, Miter, Bevel, Dado, Picture Frames & More!
+
+Source: https://www.youtube.com/watch?v=n2jiuCYc3_s
+
+**TL;DR**: James of Kings Fine Woodworking builds a hollow-core 24×32-inch table-saw sled from ⅜-inch plywood, with sliding zero-clearance inserts in the base and back fence so one jig can crosscut, miter, bevel, dado, and cut tenons. This first half of a two-part series covers construction, miter-bar fit, and the five-cut squaring method; the miter, picture-frame, and dado attachments are reserved for part two.
+
+**Caveat**: ⚠️ Product pitch — he sells plans, optional paper templates, a hardware kit, and a flat-pack Baltic-birch sled, and names MagSwitch as unofficial sponsor.
+
+## Synopsis
+
+### What the sled is meant to do
+
+James opens by framing this as the shop’s new flagship table-saw sled after about a year of development: a conventional crosscut sled plus functions usually split across dedicated jigs. A quick-disconnect front fence (the far side, away from the operator) lets picture-frame stock hang off the sled without a size cap. A triangular picture-frame guide is presented as a geometry-derived 45°, not a tape-and-square layout, and he checks a 45° miter against a Kinex stainless square specified to a thousandth of an inch. Miters themselves use a digital angle finder; he claims the cut follows that tool’s resolution, on the order of a hundredth of a degree. Removing the front fence and a removable back-fence section lets long boards be clamped and mitered; with very long stock he says the practical range is about 0–46°.
+
+Bevels are the feature he says he uses a lot. Sliding zero-clearance inserts in the base (and later the back fence) move both ways, so a left- or right-tilt saw can cut bevels without permanently kerfing the sled. Spreading the same inserts opens a slot for dados, rabbets, and tenons. He cuts a four-sided tenon against a homemade length stop, arguing that a sho
+…
+nce track.** James argues you do not need top T-track on this sled and that a homemade stop saves on the order of $75–80. [04:00]
+- **Glue fence laminations on a known-flat surface, oppose bows, and keep squeeze-out modest** — parts are already at finished size, so gaps and ridges become squaring problems. [07:20]
+- **Chamfer the bottom of the back fence as a dust channel** so chips cannot hold the workpiece off the reference face. [17:14]
+- **Hand-cut insert slots are the slow step and do not need to be perfect.** Oversize Forstner slots, a halfway shelf for the screw head, and built-in play are enough; eight slots at five to ten minutes each. [22:29] [25:43]
+- **No dado stack required for T-track.** Sand about 0.4 mm off the track underside, then use the ¾-inch miter bar as a spacer so the track sits ¾ inch from the edge and flush or slightly below the top skin. [39:24] [40:34]
+- **Miter-bar set screws with Teflon tape, adjusted to zero side play while still sliding, are the condition for a sled that squares and stays square.** He calls this the most critical few minutes in the build. [47:12]
+- **Center the first kerf.** A rip-fence setting of 15⅞ inches is what splits this 32-inch-class sled into equal halves. [48:43]
+- **Five-cut squaring (credited here to William Ng) magnifies fence error into a feeler-gauge move.** Error per inch is (A − B) / 4 / board length; a positive result means pull the operator-side fence end back. His worked example was a 0.015-inch correction over a 27-inch screw span. [51:18] [58:01]
+- **Drill new fence holes after a correction** — reuse pulls the fence back — and plug spent holes with toothpicks and glue if you have to move it again. [61:00]
+- **Wax the sled (two coats, no lacquer first) and finish every surface** so it slides and so moisture exchange stays even; re-wax on a months-scale interval. [39:03] [50:32]
+- **This video is only the base.** Miter, dado, and picture-frame attachments are the next episode. [65:27]
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

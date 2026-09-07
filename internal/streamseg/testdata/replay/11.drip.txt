@@ -1,0 +1,711 @@
+Spans you have open:
+  t1 from #3826596 (12 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826620 assistant: 
+#3826625 user: 590→      "duration": 6.96
+    },
+    {
+      "text": "clearance inserts clean it off and",
+      "start": 280.039,
+      "duration": 4.561
+    },
+    {
+      "text": "you're back to taable sawce sled",
+      "start": 283.32,
+600→      "duration": 2.48
+    },
+    {
+      "text": "operation and you can do your cross",
+      "start": 284.6,
+      "duration": 3.52
+    },
+    {
+      "text": "cutting",
+      "start": 285.8,
+610→      "duration": 2.32
+    },
+    {
+      "text": "again all right let me show you how this",
+      "start": 288.68,
+      "duration": 4.16
+    },
+    {
+      "text": "Beast is",
+      "start": 290.84,
+620→      "duration": 4.6
+    },
+    {
+      "text": "made it's really pretty straightforward",
+      "start": 292.84,
+      "duration": 5.72
+    },
+    {
+      "text": "and what I have done is used 3/8 in",
+      "start": 295.44,
+630→      "duration": 6.16
+    },
+    {
+      "text": "plywood and you can check Home Depot and",
+      "start": 298.56,
+      "duration": 6.8
+    },
+    {
+      "text": "you can actually buy 3/8 inch subfloor",
+      "start": 301.6,
+640→      "duration": 6.2
+    },
+    {
+      "text": "plywood which is reasonably good quality",
+      "start": 305.36,
+      "duration": 4.52
+    },
+    {
+      "text": "it's not too bad it's not the best of",
+      "start": 307.8,
+650→      "duration": 4.32
+    },
+    {
+      "text": "course I've used Baltic Birch here which",
+      "start": 309.88,
+      "duration": 4.64
+    },
+    {
+      "text": "is absolutely the best but you can get a",
+      "start": 312.12,
+660→      "duration": 4.44
+    },
+    {
+      "text": "little bit cheaper uh plywood there in",
+      "start": 314.52,
+      "duration": 3.239
+    },
+    {
+      "text": "fact it's really cheap I think it's",
+      "start": 316.56,
+670→      "duration": 4.68
+    },
+    {
+      "text": "about $30 a sheet uh for a 4ft x 8T",
+      "start": 317.759,
+      "duration": 6.0
+    },
+    {
+      "text": "sheet um you can 
+…
+    "duration": 5.88
+    },
+    {
+      "text": "together this ends up getting glued onto",
+      "start": 422.879,
+910→      "duration": 4.6
+    },
+    {
+      "text": "the back of The Back Fence it's got a",
+      "start": 425.84,
+      "duration": 3.28
+    },
+    {
+      "text": "little clear plastic",
+      "start": 427.479,
+920→      "duration": 3.881
+    },
+    {
+      "text": "top and that's where the blade will pass",
+      "start": 429.12,
+      "duration": 4.44
+    },
+    {
+      "text": "through and as you notice a lot of this",
+      "start": 431.36,
+930→      "duration": 4.239
+    },
+    {
+      "text": "plywood of course will have minor warps",
+      "start": 433.56,
+      "duration": 3.319
+    },
+    {
+      "text": "especially if you get the cheaper stuff",
+      "start": 435.599,
+940→      "duration": 3.401
+    },
+    {
+      "text": "from Home Depot but it really doesn't",
+      "start": 436.879,
+      "duration": 3.88
+    },
+    {
+      "text": "make any difference because the magic",
+      "start": 439.0,
+950→      "duration": 4.0
+    },
+    {
+      "text": "about something like this is that once",
+      "start": 440.759,
+      "duration": 3.761
+    },
+    {
+      "text": "you glue these things together and I",
+      "start": 443.0,
+960→      "duration": 3.28
+    },
+    {
+      "text": "kind of put the warps opposing to each",
+      "start": 444.52,
+      "duration": 3.56
+    },
+    {
+      "text": "other to kind of help flatten it out but",
+      "start": 446.28,
+970→      "duration": 3.56
+    },
+    {
+      "text": "the act of gluing it together and gluing",
+      "start": 448.08,
+      "duration": 3.839
+    },
+    {
+      "text": "it to a flat surface like I'm doing here",
+      "start": 449.84,
+980→      "duration": 4.44
+    },
+    {
+      "text": "to my assembly table you can also glue",
+      "start": 451.919,
+      "duration": 6.12
+    },
+    {
+      "text": "it together on your um on your table saw",
+      "start": 454.28,
+#3826626 assistant: Continue reading the rest of the transcript.
+#3826627 assistant: 
+#3826630 user: 980→      "duration": 4.44
+    },
+    {
+      "text": "to my assembly table you can also glue",
+      "start": 451.919,
+      "duration": 6.12
+    },
+    {
+      "text": "it together on your um on your table saw",
+      "start": 454.28,
+990→      "duration": 5.4
+    },
+    {
+      "text": "your table saw has an extremely flat",
+      "start": 458.039,
+      "duration": 3.481
+    },
+    {
+      "text": "surface but you see I'm clamping it to",
+      "start": 459.68,
+1000→      "duration": 4.04
+    },
+    {
+      "text": "my assembly table here and that's",
+      "start": 461.52,
+      "duration": 5.16
+    },
+    {
+      "text": "ensuring that this piece dries dead",
+      "start": 463.72,
+1010→      "duration": 6.56
+    },
+    {
+      "text": "flat so I have cut the pieces to size so",
+      "start": 466.68,
+      "duration": 5.0
+    },
+    {
+      "text": "we do want to make sure that we take the",
+      "start": 470.28,
+1020→      "duration": 3.319
+    },
+    {
+      "text": "time to get them glued up together",
+      "start": 471.68,
+      "duration": 4.0
+    },
+    {
+      "text": "evenly so I've got clamps holding them",
+      "start": 473.599,
+1030→      "duration": 4.681
+    },
+    {
+      "text": "side by side and end to end and that was",
+      "start": 475.68,
+      "duration": 4.32
+    },
+    {
+      "text": "the front fence",
+      "start": 478.28,
+1040→      "duration": 3.199
+    },
+    {
+      "text": "now I'm going to cut or I'm sorry I'm",
+      "start": 480.0,
+      "duration": 3.639
+    },
+    {
+      "text": "going to glue together The Back Fence",
+      "start": 481.479,
+1050→      "duration": 4.241
+    },
+    {
+      "text": "The Back Fence is segmented as you can",
+      "start": 483.639,
+      "duration": 4.68
+    },
+    {
+      "text": "see here and it comes apart in portions",
+      "start": 485.72,
+1060→      "duration": 4.039
+    },
+    {
+      "text": "I'm just going to quickly put these",
+      "start": 488.319,
+      "d
+…
+on": 3.96
+    },
+    {
+      "text": "the sled that we provide to you will",
+      "start": 584.839,
+1300→      "duration": 3.44
+    },
+    {
+      "text": "need a little bit of assembly to come",
+      "start": 586.56,
+      "duration": 3.68
+    },
+    {
+      "text": "together uh because it does get flat",
+      "start": 588.279,
+1310→      "duration": 4.601
+    },
+    {
+      "text": "packed out to you but basically you'll",
+      "start": 590.24,
+      "duration": 4.32
+    },
+    {
+      "text": "assemble what needs to be assembled and",
+      "start": 592.88,
+1320→      "duration": 3.8
+    },
+    {
+      "text": "then you'll made it to your table saw",
+      "start": 594.56,
+      "duration": 4.279
+    },
+    {
+      "text": "and I'll show you exactly how to do that",
+      "start": 596.68,
+1330→      "duration": 3.8
+    },
+    {
+      "text": "and that can be done in about 10 minutes",
+      "start": 598.839,
+      "duration": 4.44
+    },
+    {
+      "text": "so it's not a big extensive project um",
+      "start": 600.48,
+1340→      "duration": 4.84
+    },
+    {
+      "text": "all of the important things will be cut",
+      "start": 603.279,
+      "duration": 4.321
+    },
+    {
+      "text": "on either laser or CNC machine so",
+      "start": 605.32,
+1350→      "duration": 4.639
+    },
+    {
+      "text": "they're going to be exactly perfect it",
+      "start": 607.6,
+      "duration": 4.64
+    },
+    {
+      "text": "will come with Baltic birch plywood of",
+      "start": 609.959,
+1360→      "duration": 4.56
+    },
+    {
+      "text": "course all the hardware every piece of",
+      "start": 612.24,
+      "duration": 4.08
+    },
+    {
+      "text": "Hardware that you see on the sled will",
+      "start": 614.519,
+1370→      "duration": 3.481
+    },
+    {
+      "text": "come with the sled and I'll talk about",
+      "start": 616.32,
+      "duration": 4.0
+    },
+    {
+      "text": "that as the time goes on and it actually",
+      "start": 618.0,
+#3826631 assistant: Continue reading the rest of the transcript.
+#3826632 assistant: 
+#3826633 user: 1370→      "duration": 3.481
+    },
+    {
+      "text": "come with the sled and I'll talk about",
+      "start": 616.32,
+      "duration": 4.0
+    },
+    {
+      "text": "that as the time goes on and it actually",
+      "start": 618.0,
+1380→      "duration": 4.16
+    },
+    {
+      "text": "be on sale for the first couple weeks",
+      "start": 620.32,
+      "duration": 4.48
+    },
+    {
+      "text": "after I release the video so if you want",
+      "start": 622.16,
+1390→      "duration": 4.16
+    },
+    {
+      "text": "a table saw sled and you don't want to",
+      "start": 624.8,
+      "duration": 3.36
+    },
+    {
+      "text": "build it you can consider buying this",
+      "start": 626.32,
+1400→      "duration": 4.04
+    },
+    {
+      "text": "one it's going to be priced quite a bit",
+      "start": 628.16,
+      "duration": 3.88
+    },
+    {
+      "text": "less than something like the incor miter",
+      "start": 630.36,
+1410→      "duration": 3.84
+    },
+    {
+      "text": "5000 but it does quite a few more",
+      "start": 632.04,
+      "duration": 4.08
+    },
+    {
+      "text": "functions uh than",
+      "start": 634.2,
+1420→      "duration": 4.319
+    },
+    {
+      "text": "that so you see how I've kind of clamped",
+      "start": 636.12,
+      "duration": 5.159
+    },
+    {
+      "text": "this thing so front to back there and we",
+      "start": 638.519,
+1430→      "duration": 5.281
+    },
+    {
+      "text": "clamped it flat to the table as",
+      "start": 641.279,
+      "duration": 5.401
+    },
+    {
+      "text": "well and that makes",
+      "start": 643.8,
+1440→      "duration": 7.039
+    },
+    {
+      "text": "sure uh that that uh it's all made it up",
+      "start": 646.68,
+      "duration": 6.64
+    },
+    {
+      "text": "nicely and this is the little removable",
+      "start": 650.839,
+1450→      "duration": 5.961
+    },
+    {
+      "text": "portion so I'll glue this up next and I",
+      "start": 653.32,
+      "duration"
+…
+"text": "fence sorry and you can trace that",
+      "start": 751.16,
+      "duration": 5.08
+    },
+    {
+      "text": "out and if you hold the fence up on end",
+      "start": 753.519,
+1690→      "duration": 5.081
+    },
+    {
+      "text": "this is a this quick disconnect feature",
+      "start": 756.24,
+      "duration": 4.32
+    },
+    {
+      "text": "of this fence means I'll need a couple",
+      "start": 758.6,
+1700→      "duration": 3.76
+    },
+    {
+      "text": "of holes that go all the way through it",
+      "start": 760.56,
+      "duration": 3.399
+    },
+    {
+      "text": "for the",
+      "start": 762.36,
+1710→      "duration": 4.159
+    },
+    {
+      "text": "bolts and the star",
+      "start": 763.959,
+      "duration": 5.44
+    },
+    {
+      "text": "knobs and you can use this to line up",
+      "start": 766.519,
+1720→      "duration": 5.721
+    },
+    {
+      "text": "your holes you can measure it just as",
+      "start": 769.399,
+      "duration": 4.88
+    },
+    {
+      "text": "easy um but if you use this to line up",
+      "start": 772.24,
+1730→      "duration": 3.88
+    },
+    {
+      "text": "the holes you just get that M it up",
+      "start": 774.279,
+      "duration": 4.68
+    },
+    {
+      "text": "perfectly to the fence and you just",
+      "start": 776.12,
+1740→      "duration": 5.04
+    },
+    {
+      "text": "center punch it right there but I'm",
+      "start": 778.959,
+      "duration": 3.88
+    },
+    {
+      "text": "going to measure this one and I'm going",
+      "start": 781.16,
+1750→      "duration": 4.4
+    },
+    {
+      "text": "to show you a technique for measuring it",
+      "start": 782.839,
+      "duration": 4.641
+    },
+    {
+      "text": "and then once we measure it we'll line",
+      "start": 785.56,
+1760→      "duration": 3.44
+    },
+    {
+      "text": "up that paper and make sure they both",
+      "start": 787.48,
+      "duration": 3.88
+    },
+    {
+      "text": "are the",
+      "start": 789.0,
+#3826634 assistant: Continue reading.
+#3826635 assistant: 
+#3826638 user: 1760→      "duration": 3.44
+    },
+    {
+      "text": "up that paper and make sure they both",
+      "start": 787.48,
+      "duration": 3.88
+    },
+    {
+      "text": "are the",
+      "start": 789.0,
+1770→      "duration": 2.36
+    },
+    {
+      "text": "same so we've got 9 and 3/4 in",
+      "start": 791.68,
+      "duration": 5.8
+    },
+    {
+      "text": "there and we'll just use this uh double",
+      "start": 794.839,
+1780→      "duration": 4.921
+    },
+    {
+      "text": "square to make it perfect you can use",
+      "start": 797.48,
+      "duration": 4.32
+    },
+    {
+      "text": "any kind of a square there make it",
+      "start": 799.76,
+1790→      "duration": 4.4
+    },
+    {
+      "text": "across the whole section and then I like",
+      "start": 801.8,
+      "duration": 4.76
+    },
+    {
+      "text": "to double check the measurement and make",
+      "start": 804.16,
+1800→      "duration": 5.32
+    },
+    {
+      "text": "sure that it crossed uh AC cross the",
+      "start": 806.56,
+      "duration": 4.959
+    },
+    {
+      "text": "line perfectly then I'm G to get a",
+      "start": 809.48,
+1810→      "duration": 4.56
+    },
+    {
+      "text": "thickness of this piece because I want",
+      "start": 811.519,
+      "duration": 4.56
+    },
+    {
+      "text": "to go to the center of the",
+      "start": 814.04,
+1820→      "duration": 5.159
+    },
+    {
+      "text": "thickness and the piece came in at 720",
+      "start": 816.079,
+      "duration": 5.681
+    },
+    {
+      "text": "for both pieces divide that by two and",
+      "start": 819.199,
+1830→      "duration": 5.041
+    },
+    {
+      "text": "it's 36 so I'm going to set my calipers",
+      "start": 821.76,
+      "duration": 6.439
+    },
+    {
+      "text": "for 36 360 there you go and lock those",
+      "start": 824.24,
+1840→      "duration": 5.36
+    },
+    {
+      "text": "down right",
+      "start": 828.199,
+      "duration": 3.681
+    },
+    {
+      "text": "there an
+…
+  "duration": 6.079
+    },
+    {
+      "text": "shop uh the shop a safer place and an",
+      "start": 933.199,
+2080→      "duration": 4.601
+    },
+    {
+      "text": "easier place to get your stuff done all",
+      "start": 935.319,
+      "duration": 3.32
+    },
+    {
+      "text": "right so I'm going to go ahead and use",
+      "start": 937.8,
+2090→      "duration": 2.399
+    },
+    {
+      "text": "the template here instead of measuring",
+      "start": 938.639,
+      "duration": 3.961
+    },
+    {
+      "text": "since I have one and I am going to cut",
+      "start": 940.199,
+2100→      "duration": 5.721
+    },
+    {
+      "text": "the shape of the front fence",
+      "start": 942.6,
+      "duration": 3.32
+    },
+    {
+      "text": "out so I'm going to use a band saw I'm",
+      "start": 946.12,
+2110→      "duration": 4.12
+    },
+    {
+      "text": "sure a lot of you have probably seen my",
+      "start": 948.8,
+      "duration": 4.279
+    },
+    {
+      "text": "Adera chair videos and you can very very",
+      "start": 950.24,
+2120→      "duration": 5.079
+    },
+    {
+      "text": "easily cut this out with a jigsaw I",
+      "start": 953.079,
+      "duration": 3.721
+    },
+    {
+      "text": "realized that a table saw fence is",
+      "start": 955.319,
+2130→      "duration": 3.44
+    },
+    {
+      "text": "something that every new woodworker",
+      "start": 956.8,
+      "duration": 3.2
+    },
+    {
+      "text": "needs to have it's probably one of the",
+      "start": 958.759,
+2140→      "duration": 2.921
+    },
+    {
+      "text": "first uh jigs or tools that you need to",
+      "start": 960.0,
+      "duration": 3.68
+    },
+    {
+      "text": "build and so a lot of you guys probably",
+      "start": 961.68,
+2150→      "duration": 5.2
+    },
+    {
+      "text": "won't have a uh a band saw yet no big",
+      "start": 963.68,
+      "duration": 5.0
+    },
+    {
+      "text": "deal cut it out with a jigsaw it doesn't",
+      "start": 966.88,
+#3826639 assistant: Continue reading.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

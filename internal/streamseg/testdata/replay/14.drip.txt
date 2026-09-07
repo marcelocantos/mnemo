@@ -1,0 +1,711 @@
+Spans you have open:
+  t1 from #3826596 (48 messages ago) — Synopsize table saw sled YouTube video via /ytt
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3826677 assistant: 
+#3826679 user: 5270→      "duration": 4.12
+    },
+    {
+      "text": "don't want to or you don't have that",
+      "start": 2366.68,
+      "duration": 2.919
+    },
+    {
+      "text": "ability and I'm going to show you what",
+      "start": 2367.76,
+5280→      "duration": 3.48
+    },
+    {
+      "text": "I'm talking about we have a sled mockup",
+      "start": 2369.599,
+      "duration": 3.641
+    },
+    {
+      "text": "here this is this is a sled half that we",
+      "start": 2371.24,
+5290→      "duration": 4.079
+    },
+    {
+      "text": "mocked up for doing some calibration",
+      "start": 2373.24,
+      "duration": 4.68
+    },
+    {
+      "text": "work and you can see that the t trck is",
+      "start": 2375.319,
+5300→      "duration": 5.441
+    },
+    {
+      "text": "actually taller than the plywood itself",
+      "start": 2377.92,
+      "duration": 4.52
+    },
+    {
+      "text": "no big deal it's actually point4",
+      "start": 2380.76,
+5310→      "duration": 3.559
+    },
+    {
+      "text": "millimet taller I'm just going to take",
+      "start": 2382.44,
+      "duration": 4.36
+    },
+    {
+      "text": "some rough sandpaper 40 grit Works",
+      "start": 2384.319,
+5320→      "duration": 4.481
+    },
+    {
+      "text": "fantastic for this we'll take the t-",
+      "start": 2386.8,
+      "duration": 3.72
+    },
+    {
+      "text": "trck flip it upside down we want to do",
+      "start": 2388.8,
+5330→      "duration": 3.48
+    },
+    {
+      "text": "the bottom side of the TR track and",
+      "start": 2390.52,
+      "duration": 3.92
+    },
+    {
+      "text": "we're going to sand it it just takes",
+      "start": 2392.28,
+5340→      "duration": 4.88
+    },
+    {
+      "text": "about 2 3 minutes uh maybe 5 minutes at",
+      "start": 2394.44,
+      "duration": 5.639
+    },
+    {
+      "text": "most to sand off 4/10 of a millimeter",
+      "start": 2397.16,
+5350→      "duration": 4.199
+    },
+    {
+      "text": "you just want to sand the whole thing
+…
+ one hole in the middle first put a",
+      "start": 2498.92,
+      "duration": 4.12
+    },
+    {
+      "text": "screw in and that gives us a nice firm",
+      "start": 2500.319,
+5590→      "duration": 5.04
+    },
+    {
+      "text": "hold and we can drill the remainder of",
+      "start": 2503.04,
+      "duration": 4.4
+    },
+    {
+      "text": "the holes and then install the remainder",
+      "start": 2505.359,
+5600→      "duration": 4.401
+    },
+    {
+      "text": "of the",
+      "start": 2507.44,
+      "duration": 2.32
+    },
+    {
+      "text": "screws and then once we're done with one",
+      "start": 2512.0,
+5610→      "duration": 3.599
+    },
+    {
+      "text": "side we will flip the board around",
+      "start": 2514.04,
+      "duration": 3.96
+    },
+    {
+      "text": "because of course it's symmetrical uh",
+      "start": 2515.599,
+5620→      "duration": 3.72
+    },
+    {
+      "text": "just double check it there and it's",
+      "start": 2518.0,
+      "duration": 3.04
+    },
+    {
+      "text": "perfect still good we'll flip the board",
+      "start": 2519.319,
+5630→      "duration": 3.881
+    },
+    {
+      "text": "around and we'll do the exact same thing",
+      "start": 2521.04,
+      "duration": 4.799
+    },
+    {
+      "text": "to the other",
+      "start": 2523.2,
+5640→      "duration": 2.639
+    },
+    {
+      "text": "side all right so once we have our sled",
+      "start": 2532.92,
+      "duration": 5.08
+    },
+    {
+      "text": "put",
+      "start": 2536.96,
+5650→      "duration": 4.32
+    },
+    {
+      "text": "together we can insert or put the uh",
+      "start": 2538.0,
+      "duration": 6.24
+    },
+    {
+      "text": "zero clearance inserts in and these are",
+      "start": 2541.28,
+5660→      "duration": 6.88
+    },
+    {
+      "text": "the screws for it it's qu x 20 and 7/16",
+      "start": 2544.24,
+      "duration": 6.8
+    },
+    {
+      "text": "inch long you can use a socket head cap",
+      "start": 2548.16,
+#3826680 assistant: Continue reading.
+#3826681 assistant: 
+#3826683 user: 5660→      "duration": 6.88
+    },
+    {
+      "text": "the screws for it it's qu x 20 and 7/16",
+      "start": 2544.24,
+      "duration": 6.8
+    },
+    {
+      "text": "inch long you can use a socket head cap",
+      "start": 2548.16,
+5670→      "duration": 4.8
+    },
+    {
+      "text": "screw which I kind of prefer over",
+      "start": 2551.04,
+      "duration": 4.2
+    },
+    {
+      "text": "Phillips uh or you can get Phillips",
+      "start": 2552.96,
+5680→      "duration": 3.48
+    },
+    {
+      "text": "sometimes sometimes it's you can only",
+      "start": 2555.24,
+      "duration": 3.64
+    },
+    {
+      "text": "find one or the other and I just I like",
+      "start": 2556.44,
+5690→      "duration": 4.8
+    },
+    {
+      "text": "these ball hex drivers um I'll put a",
+      "start": 2558.88,
+      "duration": 4.479
+    },
+    {
+      "text": "link to these in the in the description",
+      "start": 2561.24,
+5700→      "duration": 3.64
+    },
+    {
+      "text": "a lot of people ask me about these it's",
+      "start": 2563.359,
+      "duration": 2.841
+    },
+    {
+      "text": "just really nice to use a screwdriver",
+      "start": 2564.88,
+5710→      "duration": 3.12
+    },
+    {
+      "text": "here instead of an actual allen wrench",
+      "start": 2566.2,
+      "duration": 2.96
+    },
+    {
+      "text": "they don't have to be straight up and",
+      "start": 2568.0,
+5720→      "duration": 4.68
+    },
+    {
+      "text": "down in there but this is how they",
+      "start": 2569.16,
+      "duration": 5.32
+    },
+    {
+      "text": "operate pretty",
+      "start": 2572.68,
+5730→      "duration": 3.76
+    },
+    {
+      "text": "straightforward got a lot of space in",
+      "start": 2574.48,
+      "duration": 3.44
+    },
+    {
+      "text": "the middle there so you can put D or",
+      "start": 2576.44,
+5740→      "duration": 3.44
+    },
+    {
+      "text": "whatever all right looks like now we're",
+      "start": 2577.92,
+      
+…
+",
+      "start": 2686.24,
+      "duration": 4.359
+    },
+    {
+      "text": "and down perpendicular to the uh to the",
+      "start": 2687.72,
+5980→      "duration": 4.2
+    },
+    {
+      "text": "sled base and we want to make sure that",
+      "start": 2690.599,
+      "duration": 3.161
+    },
+    {
+      "text": "it's flush with the outside here for",
+      "start": 2691.92,
+5990→      "duration": 4.04
+    },
+    {
+      "text": "starters and once everything is all set",
+      "start": 2693.76,
+      "duration": 3.44
+    },
+    {
+      "text": "set then we can clamp these down a",
+      "start": 2695.96,
+6000→      "duration": 3.599
+    },
+    {
+      "text": "little bit",
+      "start": 2697.2,
+      "duration": 2.359
+    },
+    {
+      "text": "tighter and then we can start with some",
+      "start": 2705.28,
+6010→      "duration": 4.799
+    },
+    {
+      "text": "screws so we got to get this screw in a",
+      "start": 2707.48,
+      "duration": 4.96
+    },
+    {
+      "text": "little bit past that um removable",
+      "start": 2710.079,
+6020→      "duration": 4.121
+    },
+    {
+      "text": "section and this is going to be the",
+      "start": 2712.44,
+      "duration": 3.6
+    },
+    {
+      "text": "screw on the far right side remember",
+      "start": 2714.2,
+6030→      "duration": 3.28
+    },
+    {
+      "text": "this Back Fence has screw on the far",
+      "start": 2716.04,
+      "duration": 2.92
+    },
+    {
+      "text": "right side and we're going to put a",
+      "start": 2717.48,
+6040→      "duration": 3.92
+    },
+    {
+      "text": "screw in on the far left side but you",
+      "start": 2718.96,
+      "duration": 5.92
+    },
+    {
+      "text": "know a couple inches away from that",
+      "start": 2721.4,
+6050→      "duration": 6.199
+    },
+    {
+      "text": "side so I've pre-drilled",
+      "start": 2724.88,
+      "duration": 5.719
+    },
+    {
+      "text": "them and now we're installing the screws",
+      "start": 2727.599,
+#3826684 assistant: Continue reading.
+#3826685 assistant: 
+#3826686 user: 6050→      "duration": 6.199
+    },
+    {
+      "text": "side so I've pre-drilled",
+      "start": 2724.88,
+      "duration": 5.719
+    },
+    {
+      "text": "them and now we're installing the screws",
+      "start": 2727.599,
+6060→      "duration": 4.281
+    },
+    {
+      "text": "and that's it we're just going to start",
+      "start": 2730.599,
+      "duration": 3.561
+    },
+    {
+      "text": "with two screws because we're going to",
+      "start": 2731.88,
+6070→      "duration": 4.64
+    },
+    {
+      "text": "apply the five cup method to square this",
+      "start": 2734.16,
+      "duration": 4.959
+    },
+    {
+      "text": "fence to the table saw",
+      "start": 2736.52,
+6080→      "duration": 6.28
+    },
+    {
+      "text": "blade and once we check and get a proper",
+      "start": 2739.119,
+      "duration": 6.24
+    },
+    {
+      "text": "Square we're going to need to remove",
+      "start": 2742.8,
+6090→      "duration": 4.0
+    },
+    {
+      "text": "that screw on the",
+      "start": 2745.359,
+      "duration": 4.24
+    },
+    {
+      "text": "left and adjust the fence to get it",
+      "start": 2746.8,
+6100→      "duration": 4.559
+    },
+    {
+      "text": "perfect and here's how we're going to",
+      "start": 2749.599,
+      "duration": 4.081
+    },
+    {
+      "text": "set the miter bars I have a specific",
+      "start": 2751.359,
+6110→      "duration": 5.24
+    },
+    {
+      "text": "distance for the fence I don't remember",
+      "start": 2753.68,
+      "duration": 4.28
+    },
+    {
+      "text": "it now but I'll I'll remember it a",
+      "start": 2756.599,
+6120→      "duration": 3.361
+    },
+    {
+      "text": "minute and I'll call it out for you but",
+      "start": 2757.96,
+      "duration": 3.56
+    },
+    {
+      "text": "it has to be a specific distance from",
+      "start": 2759.96,
+6130→      "duration": 3.04
+    },
+    {
+      "text": "the fence this is how you will install",
+      "start": 2761.52,
+      "d
+…
+   {
+      "text": "small um uh thing but it's really really",
+      "start": 2868.0,
+6370→      "duration": 6.0
+    },
+    {
+      "text": "critical it probably takes four or 5",
+      "start": 2871.16,
+      "duration": 5.64
+    },
+    {
+      "text": "minutes to set these up you know 2 or 3",
+      "start": 2874.0,
+6380→      "duration": 5.16
+    },
+    {
+      "text": "minutes each not not that long at all",
+      "start": 2876.8,
+      "duration": 4.16
+    },
+    {
+      "text": "but it's very important and here we go",
+      "start": 2879.16,
+6390→      "duration": 3.28
+    },
+    {
+      "text": "so I've got it fitting perfectly and",
+      "start": 2880.96,
+      "duration": 4.04
+    },
+    {
+      "text": "there's exactly no wiggle no movement",
+      "start": 2882.44,
+6400→      "duration": 4.28
+    },
+    {
+      "text": "you can feel it very easy you would hear",
+      "start": 2885.0,
+      "duration": 3.28
+    },
+    {
+      "text": "the rattle if it moved and it slides",
+      "start": 2886.72,
+6410→      "duration": 4.0
+    },
+    {
+      "text": "nicely you have to do that to both of",
+      "start": 2888.28,
+      "duration": 5.64
+    },
+    {
+      "text": "these all right once that's done uh for",
+      "start": 2890.72,
+6420→      "duration": 4.839
+    },
+    {
+      "text": "my table saw the depth there I've got to",
+      "start": 2893.92,
+      "duration": 4.399
+    },
+    {
+      "text": "put a penny and a dime together because",
+      "start": 2895.559,
+6430→      "duration": 4.121
+    },
+    {
+      "text": "I want that to stick a little bit above",
+      "start": 2898.319,
+      "duration": 4.8
+    },
+    {
+      "text": "the top now I like to use a miter bar",
+      "start": 2899.68,
+6440→      "duration": 4.879
+    },
+    {
+      "text": "that's just a little bit shorter than my",
+      "start": 2903.119,
+      "duration": 2.841
+    },
+    {
+      "text": "sled this a couple inches shorter than",
+      "start": 2904.559,
+#3826687 assistant: Continue reading.
+#3826688 assistant: 
+#3826689 user: 6440→      "duration": 4.879
+    },
+    {
+      "text": "that's just a little bit shorter than my",
+      "start": 2903.119,
+      "duration": 2.841
+    },
+    {
+      "text": "sled this a couple inches shorter than",
+      "start": 2904.559,
+6450→      "duration": 4.28
+    },
+    {
+      "text": "the sled on each side that wa never gets",
+      "start": 2905.96,
+      "duration": 5.24
+    },
+    {
+      "text": "in the way when I stack it and store it",
+      "start": 2908.839,
+6460→      "duration": 3.76
+    },
+    {
+      "text": "some people like them a little bit",
+      "start": 2911.2,
+      "duration": 3.24
+    },
+    {
+      "text": "longer but this is just what's uh",
+      "start": 2912.599,
+6470→      "duration": 4.561
+    },
+    {
+      "text": "convenient for me so I've measured it on",
+      "start": 2914.44,
+      "duration": 5.32
+    },
+    {
+      "text": "both sides",
+      "start": 2917.16,
+6480→      "duration": 2.6
+    },
+    {
+      "text": "there I have my fence set exactly here",
+      "start": 2920.359,
+      "duration": 6.561
+    },
+    {
+      "text": "we go there it is at 15 and 7/8 that's",
+      "start": 2923.359,
+6490→      "duration": 5.841
+    },
+    {
+      "text": "the dead center that's so that curve",
+      "start": 2926.92,
+      "duration": 6.12
+    },
+    {
+      "text": "slices this uh sled exactly in half with",
+      "start": 2929.2,
+6500→      "duration": 8.24
+    },
+    {
+      "text": "two equal portions on each side",
+      "start": 2933.04,
+      "duration": 5.92
+    },
+    {
+      "text": "that's important all right now we'll put",
+      "start": 2937.44,
+6510→      "duration": 3.08
+    },
+    {
+      "text": "a few drops of",
+      "start": 2938.96,
+      "duration": 4.639
+    },
+    {
+      "text": "this CA glue",
+      "start": 2940.52,
+6520→      "duration": 5.12
+    },
+    {
+      "text": "on not too much cuz it's going to get",
+      "start": 2943.599,
+      "duration": 2.96
+    },
+    {
+     
+…
+9
+    },
+    {
+      "text": "it",
+      "start": 3048.72,
+      "duration": 3.32
+    },
+    {
+      "text": "again uh it doesn't really need waxed in",
+      "start": 3049.559,
+6760→      "duration": 4.401
+    },
+    {
+      "text": "here because it doesn't slide on the",
+      "start": 3052.04,
+      "duration": 4.6
+    },
+    {
+      "text": "table saw but we do do have to put it so",
+      "start": 3053.96,
+6770→      "duration": 5.96
+    },
+    {
+      "text": "that it uh it it you know lets moisture",
+      "start": 3056.64,
+      "duration": 5.04
+    },
+    {
+      "text": "in and out equally you want to finish",
+      "start": 3059.92,
+6780→      "duration": 3.08
+    },
+    {
+      "text": "every part of it equally that's",
+      "start": 3061.68,
+      "duration": 3.48
+    },
+    {
+      "text": "important and you saw the sled slides",
+      "start": 3063.0,
+6790→      "duration": 3.799
+    },
+    {
+      "text": "perfectly so we're going to go ahead and",
+      "start": 3065.16,
+      "duration": 3.919
+    },
+    {
+      "text": "make our first cut all the way through",
+      "start": 3066.799,
+6800→      "duration": 3.441
+    },
+    {
+      "text": "the",
+      "start": 3069.079,
+      "duration": 5.321
+    },
+    {
+      "text": "sled and there it is",
+      "start": 3070.24,
+6810→      "duration": 4.16
+    },
+    {
+      "text": "nice and now it is time to square the",
+      "start": 3075.319,
+      "duration": 4.881
+    },
+    {
+      "text": "taable sawce Leed we're going to use the",
+      "start": 3077.96,
+6820→      "duration": 4.04
+    },
+    {
+      "text": "five cut",
+      "start": 3080.2,
+      "duration": 4.52
+    },
+    {
+      "text": "method it's a very popular method I",
+      "start": 3082.0,
+6830→      "duration": 5.28
+    },
+    {
+      "text": "believe it was invented by William ing",
+      "start": 3084.72,
+      "duration": 4.119
+    },
+    {
+      "text": "he's a YouTube woodworker he has a",
+      "start": 3087.28,
+#3826690 assistant: Continue reading.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

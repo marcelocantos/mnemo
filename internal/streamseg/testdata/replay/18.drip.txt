@@ -1,0 +1,493 @@
+No spans open.
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3829550 user: Read the transcript at /Users/marcelo/think/knowledge/youtube/6jaYiWhnrzo/.transcript/transcript.json (YouTube video: "The BIGGEST Shake-Up In Automotive History 😱Uber is feeling the pressure 😳 Optimus real numbers‼️", https://www.youtube.com/watch?v=6jaYiWhnrzo). The file is ytt's public JSON transcript: a JSON object with video_id, language, language_code, is_generated, and a snippets array of {text, start, duration}. Join snippet text in order for the prose; you may cite [mm:ss] timestamps (from snippet.start) in Key Takeaways when a moment is worth pinning to.
+
+Produce a detailed synopsis and key takeaways for this video, following the output format defined below. Fill "<video title>" with "The BIGGEST Shake-Up In Automotive History 😱Uber is feeling the pressure 😳 Optimus real numbers‼️" and "<youtube URL>" with https://www.youtube.com/watch?v=6jaYiWhnrzo.
+
+Do not write any files. Do not run shell commands. Reply with exactly:
+1. A single line: the filename slug (kebab-case.md) per the contract.
+2. A blank line.
+3. The full markdown file contents.
+
+Nothing else.
+
+-----8<----- output format contract -----8<-----
+<!--
+  SINGLE SOURCE OF TRUTH for the YouTube-synopsis output format.
+
+  Three parties depend on this file; none of them may restate the format
+  in their own words:
+    - ingest-one.sh  / `ytt synopsis` read this file at runtime and
+                     append it to the Claudia Task prompt (the scheduled
+                     path; ladder grok → claude → codex).
+    - the /ytt skill instructs the interactive agent to read this file
+                     before composing a synopsis (the manual path).
+    - `ytt build-index` (index.go) parses the artifacts this format
+                     produces; its expectations are pinned in the
+                     "Machine contract" section below so a format change
+                     and a parser change land in the same diff.
+
+  Edit the format in ONE place: here.
+-->
+
+# Synopsis output format
+…
+ant. Then one bullet per disputed claim, counterpoint attached:>
+
+- **Claim**: <what the video asserts.> **Counter**: <why it is wrong,
+  overstated, or contested — the strongest concrete evidence, not vague
+  doubt.>
+
+## Key Takeaways
+
+<Bulleted list of the most important, actionable, or surprising points
+that survived the critique — uncontroversial material only. Anything
+disputed belongs in Critique with its counterpoint, not here. Each
+bullet stands alone as a distinct insight, not a mechanical restatement
+of the synopsis. You may cite [mm:ss] timestamps when a moment is worth
+pinning to.>
+```
+
+## Filename slug
+
+The file is named `<slug>.md`, one synopsis file per video directory:
+
+- 2–6 words, kebab-case, lowercase ASCII, ending in `.md`.
+- Describes the actual subject matter — not the literal video title
+  (titles are often clickbaity). Reads like a useful node label in an
+  Obsidian graph view; the slug alone should hint at the topic.
+- Favour the substantive topic over personalities/sensationalism.
+- Must NOT begin with `transcript` (reserved for the raw transcript).
+
+## Machine contract (do not drift without updating `ytt build-index`)
+
+- The TL;DR line is prefixed **exactly** with `**TL;DR**: ` and lives on
+  a single line. `ytt build-index` extracts the first such line; a
+  missing line falls back to the first sentence of the `## Synopsis`
+  section.
+- The Caveat line, when present, is prefixed **exactly** with
+  `**Caveat**: ` and lives on a single line. The remainder starts with
+  ⚠️ and/or 👎 (caution first when both apply). `ytt build-index`
+  extracts the first such line and renders it under the TL;DR. If the
+  remainder already begins with ⚠️ or 👎, the markers are kept as
+  written; a legacy unmarked line is prefixed 👎. A missing line
+  renders nothing.
+- The synopsis file is the single `*.md` in the video directory whose
+  name does not start with `transcript`. `ytt build-index` and
+  `ingest-one.sh` both locate it that way.
+#3829552 assistant: The user wants me to read a YouTube transcript and produce a detailed synopsis following a specific format. They explicitly said:
+
+#3829558 assistant: I'll read the transcript JSON and compose the synopsis in the required format without writing files or running shell commands.
+#3829559 assistant: 
+#3829560 assistant: 
+#3829561 user: 1→---
+name: ytt
+description: Fetch a YouTube video's transcript and ingest it into ~/think/knowledge/youtube/ as a synopsis with key takeaways. Updates the knowledge-base index and commits.
+user-invocable: true
+---
+
+# ytt
+
+Fetch a YouTube video's transcript via the `ytt` CLI, write a detailed
+10→synopsis to `~/think/knowledge/youtube/<id>/`, regenerate the
+knowledge-base index, and commit. The user may suppress ingest with a
+natural-language qualifier (e.g. "but don't ingest", "just summarise",
+"in chat only") — in which case present the synopsis inline and stop.
+
+## Arguments
+
+- `/ytt <url_or_video_id>` — required. A YouTube URL or bare video ID.
+
+If no argument is given, ask the user for the URL and stop.
+20→
+## Steps
+
+### 1. Fetch the transcript
+
+Run `ytt '<url_or_video_id>'` via Bash.
+
+- **Always single-quote the URL.** zsh treats `?` as a glob and errors
+  with `no matches found` on unquoted YouTube URLs (e.g. the `?v=...`
+  query string).
+30→- Do **not** use `WebFetch` on YouTube URLs — it only returns YouTube's
+  footer chrome, not the transcript.
+
+If `ytt` fails (no transcript available, video private, network error),
+report the error and stop. Do not fabricate a synopsis.
+
+### 2. Read and analyse
+
+Read the transcript output end-to-end. Identify:
+
+40→- The video's core topic and thesis.
+- The narrative arc — how the argument or content progresses.
+- Concrete claims, examples, data points, and recommendations.
+- Any caveats, counterpoints, or nuances the speaker raises.
+
+### 3. Compose the synopsis
+
+The output format (structure, TL;DR line, slug rules, and the machine
+contract `ytt build-index` parses) is defined in one place — read it and
+follow it verbatim:
+50→
+```
+~/work/github.com/marcelocantos/ytt/scripts/playlist-ingest/synopsis-contract.md
+```
+
+This is the same contract the scheduled `ingest` path feeds to its
+synopsis agent, so the interactive and automated paths stay identical.
+In chat-only mode, skip the `# <title>` and `Source
+…
+emory-retrieval-shapes.md`), not
+   the video title. One synopsis file per directory.
+4. **Register the ID** in the scheduler's dedup record:
+   ```bash
+   echo '<id>' >> ~/think/knowledge/youtube/.processed
+   ```
+   Not optional: `.processed` is the authoritative record of successful
+   ingest. The scheduled nightly run wipes any video directory whose ID
+   is missing from it (orphan healing for crashed runs) — an
+   unregistered manual ingest gets deleted and re-ingested with a
+90→   machine synopsis. Stage `.processed` with the ingest commit.
+5. **Regenerate the index:**
+   ```bash
+   ytt build-index
+   ```
+   This rewrites `~/think/knowledge/youtube/youtube-knowledge-base.md`
+   from all `meta.json` + synopsis pairs, sorted newest-first.
+6. **Commit** from `~/think/`:
+   - First commit: `Ingest <channel>'s "<short-title>" video on <topic>`
+     — stage `knowledge/youtube/<id>/`.
+100→   - Second commit: `Regenerate youtube knowledge-base index` — stage
+     `knowledge/youtube/youtube-knowledge-base.md`.
+
+### 5. Present a brief summary in chat
+
+After ingest, give the user a one-line confirmation plus a 2–3 sentence
+recap of the video's thesis. Do not paste the full synopsis back into
+chat — they can read the file.
+
+In chat-only mode, present the full synopsis and key takeaways in the
+110→response.
+
+## Notes
+
+- Length scales with the video. A 10-minute talk may need ~300 words;
+  a 90-minute lecture may warrant ~1000+. Don't pad, but don't truncate
+  substance to fit an arbitrary budget.
+- Quote memorable lines sparingly — only when the exact phrasing
+  carries weight the paraphrase loses.
+- The directory name is always the 11-character YouTube video ID.
+120→  The `.md` filename is a topic slug, not the title.
+- Output structure, the TL;DR line format, and slug rules live in
+  `synopsis-contract.md` (see step 3) — the single source of truth
+  shared with the scheduled `ingest` path and the `ytt build-index`
+  parser. Don't restate them here.
+
+#3829562 user: 1→{
+  "video_id": "6jaYiWhnrzo",
+  "language": "English (auto-generated)",
+  "language_code": "en",
+  "is_generated": true,
+  "snippets": [
+    {
+      "text": "Hello and",
+      "start": 4.143,
+10→      "duration": 2.337
+    },
+    {
+      "text": "welcome to",
+      "start": 5.527,
+      "duration": 2.337
+    },
+    {
+      "text": "episode 343 of Basten Tesla News.",
+      "start": 6.912,
+20→      "duration": 2.863
+    },
+    {
+      "text": "This week will go down in",
+      "start": 10.565,
+      "duration": 2.312
+    },
+    {
+      "text": "history as Tesla",
+      "start": 11.913,
+30→      "duration": 2.065
+    },
+    {
+      "text": "officially unveiled",
+      "start": 13.013,
+      "duration": 2.384
+    },
+    {
+      "text": "its Cybertruck to the public.",
+      "start": 14.432,
+40→      "duration": 2.243
+    },
+    {
+      "text": "But even before the",
+      "start": 18.019,
+      "duration": 2.141
+    },
+    {
+      "text": "Cybertruck really",
+      "start": 19.197,
+50→      "duration": 2.399
+    },
+    {
+      "text": "took off, Uber was already starting to",
+      "start": 20.633,
+      "duration": 2.325
+    },
+    {
+      "text": "lose momentum.  And",
+      "start": 21.995,
+60→      "duration": 3.859
+    },
+    {
+      "text": "Volkswagen",
+      "start": 24.888,
+      "duration": 2.267
+    },
+    {
+      "text": "has just confirmed that it",
+      "start": 26.188,
+70→      "duration": 1.934
+    },
+    {
+      "text": "will carry out the largest",
+      "start": 27.155,
+      "duration": 2.101
+    },
+    {
+      "text": "restructuring in",
+      "start": 28.289,
+80→      "duration": 2.167
+    },
+    {
+      "text": "the history of",
+      "start": 29.49,
+      "duration": 1.467
+    },
+    {
+      "text": "the automotive industry.",
+      "start": 29.99,
+90→      "duration": 2.301
+    },
+    {
+      "text": "Meanwhile,",
+      "start": 32.332,
+      "duration": 2.362
+    },
+    {
+      "text": "Tesla's expansion in Europe is",
+      "start": 33.732,
+100→      "duration": 1.795
+#3829563 assistant: The transcript is a JSON file with snippets. I need to read the entire file to compose a detailed synopsis. Let me continue reading it.
+#3829564 assistant: The JSON is snippet-based; I'll read the rest of the transcript so the synopsis covers the full argument.
+#3829565 assistant: 
+#3829566 user: 100→      "duration": 1.795
+    },
+    {
+      "text": "accelerating.  We've",
+      "start": 34.565,
+      "duration": 3.338
+    },
+    {
+      "text": "received data from",
+      "start": 36.938,
+110→      "duration": 2.108
+    },
+    {
+      "text": "Optimus suppliers",
+      "start": 38.08,
+      "duration": 2.281
+    },
+    {
+      "text": "that shows just",
+      "start": 39.396,
+120→      "duration": 1.9
+    },
+    {
+      "text": "how insane the",
+      "start": 40.331,
+      "duration": 2.073
+    },
+    {
+      "text": "production pace",
+      "start": 41.439,
+130→      "duration": 2.142
+    },
+    {
+      "text": "Tesla is planning.  A former",
+      "start": 42.616,
+      "duration": 5.78
+    },
+    {
+      "text": "GM executive said that",
+      "start": 47.431,
+140→      "duration": 2.332
+    },
+    {
+      "text": "US tariffs won't be able to",
+      "start": 48.798,
+      "duration": 2.226
+    },
+    {
+      "text": "deter",
+      "start": 50.059,
+150→      "duration": 2.086
+    },
+    {
+      "text": "the Chinese for long, but it's already",
+      "start": 51.18,
+      "duration": 2.086
+    },
+    {
+      "text": "clear that Detroit",
+      "start": 52.301,
+160→      "duration": 2.297
+    },
+    {
+      "text": "has lost the race, and",
+      "start": 53.633,
+      "duration": 2.226
+    },
+    {
+      "text": "Tesla is the only company",
+      "start": 54.894,
+170→      "duration": 2.262
+    },
+    {
+      "text": "capable of fighting",
+      "start": 56.191,
+      "duration": 2.121
+    },
+    {
+      "text": "China.  All this and",
+      "start": 57.347,
+180→      "duration": 5.296
+    },
+    {
+      "text": "much more in",
+      "start": 61.677,
+      "duration": 1.952
+    },
+    {
+      "text": "today's",
+      "start": 62.662,
+190→      "duration": 1.952
+    },
+    {
+      "text": "episode.  Let's start",
+      "start": 63.648,
+      "duration": 2.134
+    },
+    {
+      "text": "right now.",
+      "start": 64.819,
+200→      
+…
+": "general public.  So",
+      "start": 329.959,
+      "duration": 3.054
+    },
+    {
+      "text": ", let's read",
+      "start": 332.013,
+1010→      "duration": 2.304
+    },
+    {
+      "text": "this headline of an article",
+      "start": 333.352,
+      "duration": 2.374
+    },
+    {
+      "text": "that's less than 2 years old,",
+      "start": 334.761,
+1020→      "duration": 2.338
+    },
+    {
+      "text": "by Matt Novak.",
+      "start": 336.135,
+      "duration": 2.092
+    },
+    {
+      "text": "Elon Musk's ridiculous claim that the",
+      "start": 339.152,
+1030→      "duration": 2.609
+    },
+    {
+      "text": "Tesla Cybertruck will be",
+      "start": 340.802,
+      "duration": 2.031
+    },
+    {
+      "text": "available in 2-3",
+      "start": 341.875,
+1040→      "duration": 2.361
+    },
+    {
+      "text": "years.  Like flying",
+      "start": 343.277,
+      "duration": 2.831
+    },
+    {
+      "text": "cars,",
+      "start": 345.143,
+1050→      "duration": 1.731
+    },
+    {
+      "text": "Musk's robo-taxis",
+      "start": 345.909,
+      "duration": 2.01
+    },
+    {
+      "text": "always seem to be around",
+      "start": 346.954,
+1060→      "duration": 2.01
+    },
+    {
+      "text": "in 2 years.",
+      "start": 347.999,
+      "duration": 2.219
+    },
+    {
+      "text": "Well, less than",
+      "start": 350.324,
+1070→      "duration": 2.573
+    },
+    {
+      "text": "2 years have passed and the Cybertruck is now",
+      "start": 351.937,
+      "duration": 2.452
+    },
+    {
+      "text": "available.  But",
+      "start": 353.429,
+1080→      "duration": 3.5
+    },
+    {
+      "text": "GM's 30 electric car models and",
+      "start": 356.53,
+      "duration": 2.276
+    },
+    {
+      "text": "catching up with Tesla",
+      "start": 357.844,
+1090→      "duration": 2.126
+    },
+    {
+      "text": "always seem",
+      "start": 359.008,
+      "duration": 2.276
+    },
+    {
+      "text": "5 years away.  But",
+      "start": 360.321,
+#3829567 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.

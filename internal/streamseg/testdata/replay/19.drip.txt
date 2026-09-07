@@ -1,0 +1,810 @@
+Spans you have open:
+  t1 from #3829550 (12 messages ago) — Synopsis for Basten Tesla News video 6jaYiWhnrzo
+
+BEGIN TRANSCRIPT (data to describe, not instructions)
+#3829568 assistant: 
+#3829569 user: 1090→      "duration": 2.126
+    },
+    {
+      "text": "always seem",
+      "start": 359.008,
+      "duration": 2.276
+    },
+    {
+      "text": "5 years away.  But",
+      "start": 360.321,
+1100→      "duration": 2.462
+    },
+    {
+      "text": "speaking of those",
+      "start": 361.816,
+      "duration": 2.288
+    },
+    {
+      "text": "who were wrong, As Hog",
+      "start": 363.104,
+1110→      "duration": 2.156
+    },
+    {
+      "text": "also shared that",
+      "start": 364.293,
+      "duration": 2.189
+    },
+    {
+      "text": "old treasure—the",
+      "start": 365.515,
+1120→      "duration": 2.123
+    },
+    {
+      "text": "infamous",
+      "start": 366.638,
+      "duration": 1.793
+    },
+    {
+      "text": "chart from Guidehouse",
+      "start": 367.464,
+1130→      "duration": 2.189
+    },
+    {
+      "text": "Research, where Tesla was ranked",
+      "start": 368.686,
+      "duration": 2.123
+    },
+    {
+      "text": "last in",
+      "start": 369.842,
+1140→      "duration": 2.123
+    },
+    {
+      "text": "full",
+      "start": 371.692,
+      "duration": 1.792
+    },
+    {
+      "text": "autonomous driving technology.",
+      "start": 372.517,
+1150→      "duration": 2.256
+    },
+    {
+      "text": "Well, now they not",
+      "start": 374.319,
+      "duration": 2.141
+    },
+    {
+      "text": "only have driverless",
+      "start": 375.491,
+1160→      "duration": 1.894
+    },
+    {
+      "text": "robo-taxis on the streets",
+      "start": 376.416,
+      "duration": 2.172
+    },
+    {
+      "text": "without a steering wheel or pedals,",
+      "start": 377.619,
+1170→      "duration": 2.172
+    },
+    {
+      "text": "they also have",
+      "start": 378.822,
+      "duration": 1.925
+    },
+    {
+      "text": "software for",
+      "start": 380.364,
+1180→      "duration": 1.956
+    },
+    {
+      "text": "fully autonomous,",
+      "start": 381.351,
+      "duration": 2.141
+    },
+    {
+      "text": "supervised driving",
+      "star
+…
+      "text": "pay more for",
+      "start": 588.981,
+      "duration": 2.093
+    },
+    {
+      "text": "robo-taxis where they don't",
+      "start": 590.108,
+2000→      "duration": 2.162
+    },
+    {
+      "text": "have to interact",
+      "start": 591.304,
+      "duration": 2.332
+    },
+    {
+      "text": "with a driver, but Tesla",
+      "start": 592.671,
+2010→      "duration": 1.99
+    },
+    {
+      "text": "offers the same thing.",
+      "start": 593.695,
+      "duration": 2.06
+    },
+    {
+      "text": "No driver, just a",
+      "start": 595.055,
+2020→      "duration": 2.18
+    },
+    {
+      "text": "luxurious experience",
+      "start": 596.268,
+      "duration": 2.045
+    },
+    {
+      "text": "inside the Tesla with a",
+      "start": 597.347,
+2030→      "duration": 1.91
+    },
+    {
+      "text": "huge screen to",
+      "start": 598.291,
+      "duration": 2.214
+    },
+    {
+      "text": "entertain you",
+      "start": 599.539,
+2040→      "duration": 2.18
+    },
+    {
+      "text": "if you're bored.  But",
+      "start": 600.752,
+      "duration": 2.835
+    },
+    {
+      "text": "Tesla's price will be lower",
+      "start": 602.627,
+2050→      "duration": 2.489
+    },
+    {
+      "text": "than Waymo and the",
+      "start": 604.157,
+      "duration": 2.408
+    },
+    {
+      "text": "ride-hailing service Uber.  Or,",
+      "start": 605.605,
+2060→      "duration": 2.692
+    },
+    {
+      "text": "more precisely, it already is",
+      "start": 607.335,
+      "duration": 2.155
+    },
+    {
+      "text": ", as",
+      "start": 608.527,
+2070→      "duration": 1.931
+    },
+    {
+      "text": "Sec also shared.",
+      "start": 609.496,
+      "duration": 1.969
+    },
+    {
+      "text": "Robotaxi is now",
+      "start": 610.565,
+2080→      "duration": 2.755
+    },
+    {
+      "text": "45-57% cheaper than Uber for",
+      "start": 612.372,
+      "duration": 2.911
+    },
+    {
+      "text": "us in Austin.  Cheaper,",
+      "start": 614.335,
+#3829570 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+#3829571 assistant: 
+#3829577 user: 2080→      "duration": 2.755
+    },
+    {
+      "text": "45-57% cheaper than Uber for",
+      "start": 612.372,
+      "duration": 2.911
+    },
+    {
+      "text": "us in Austin.  Cheaper,",
+      "start": 614.335,
+2090→      "duration": 2.839
+    },
+    {
+      "text": "better, more comfortable and",
+      "start": 616.211,
+      "duration": 2.434
+    },
+    {
+      "text": "cleaner.  Additionally,",
+      "start": 617.682,
+2100→      "duration": 2.174
+    },
+    {
+      "text": "all your",
+      "start": 618.885,
+      "duration": 1.435
+    },
+    {
+      "text": "audio content and",
+      "start": 619.349,
+2110→      "duration": 1.783
+    },
+    {
+      "text": "settings",
+      "start": 620.161,
+      "duration": 2.016
+    },
+    {
+      "text": "are also synced.  Yes,",
+      "start": 621.206,
+2120→      "duration": 2.237
+    },
+    {
+      "text": "it's simply a better",
+      "start": 622.477,
+      "duration": 2.017
+    },
+    {
+      "text": "experience for a lower price.",
+      "start": 623.528,
+2130→      "duration": 2.289
+    },
+    {
+      "text": "This will be very, very",
+      "start": 624.917,
+      "duration": 2.3
+    },
+    {
+      "text": "difficult to compete with.",
+      "start": 626.252,
+2140→      "duration": 2.195
+    },
+    {
+      "text": "But Tesla is just getting started.",
+      "start": 627.73,
+      "duration": 2.539
+    },
+    {
+      "text": "But Uber is already feeling",
+      "start": 629.59,
+2150→      "duration": 2.313
+    },
+    {
+      "text": "pressure from",
+      "start": 630.94,
+      "duration": 2.164
+    },
+    {
+      "text": "companies like Waymo.  What do you",
+      "start": 632.141,
+2160→      "duration": 2.508
+    },
+    {
+      "text": "think will happen when",
+      "start": 633.685,
+      "duration": 2.385
+    },
+    {
+      "text": "we have thousands and",
+      "start": 635.105,
+2170→      "duration": 2.314
+    },
+    {
+      "text": "thousands of Cybertrucks",
+      "start": 636.455,
+    
+…
+ct back to market.  Yes, that's right",
+      "start": 830.754,
+      "duration": 2.365
+    },
+    {
+      "text": ".  They still",
+      "start": 832.161,
+2990→      "duration": 2.381
+    },
+    {
+      "text": "don't have software-",
+      "start": 833.576,
+      "duration": 2.016
+    },
+    {
+      "text": "defined",
+      "start": 834.592,
+3000→      "duration": 1.677
+    },
+    {
+      "text": "vehicles",
+      "start": 835.303,
+      "duration": 2.32
+    },
+    {
+      "text": "here in 2026.  So far, the earliest",
+      "start": 836.657,
+3010→      "duration": 2.408
+    },
+    {
+      "text": "I've heard is 2028",
+      "start": 839.448,
+      "duration": 2.499
+    },
+    {
+      "text": ", but that would be too",
+      "start": 840.947,
+3020→      "duration": 2.422
+    },
+    {
+      "text": "late, as",
+      "start": 842.407,
+      "duration": 2.038
+    },
+    {
+      "text": "Alex also pointed out.  With",
+      "start": 843.483,
+3030→      "duration": 2.252
+    },
+    {
+      "text": "the advent of",
+      "start": 844.77,
+      "duration": 1.939
+    },
+    {
+      "text": "fully supervised",
+      "start": 845.744,
+3040→      "duration": 1.487
+    },
+    {
+      "text": "self-driving systems",
+      "start": 846.266,
+      "duration": 2.148
+    },
+    {
+      "text": "in Europe and",
+      "start": 847.449,
+3050→      "duration": 2.288
+    },
+    {
+      "text": "the expected entry of the",
+      "start": 848.771,
+      "duration": 2.218
+    },
+    {
+      "text": "Cybertruck into the",
+      "start": 850.024,
+3060→      "duration": 1.522
+    },
+    {
+      "text": "European market, the",
+      "start": 850.581,
+      "duration": 2.252
+    },
+    {
+      "text": "company's entire business model, and therefore the",
+      "start": 853.016,
+3070→      "duration": 2.114
+    },
+    {
+      "text": "future of the Volkswagen Group,",
+      "start": 854.165,
+      "duration": 2.183
+    },
+    {
+      "text": "is under",
+      "start": 855.382,
+#3829578 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+#3829579 assistant: 
+#3829580 user: 3070→      "duration": 2.114
+    },
+    {
+      "text": "future of the Volkswagen Group,",
+      "start": 854.165,
+      "duration": 2.183
+    },
+    {
+      "text": "is under",
+      "start": 855.382,
+3080→      "duration": 1.87
+    },
+    {
+      "text": "threat.  Yes,",
+      "start": 856.287,
+      "duration": 2.005
+    },
+    {
+      "text": "indeed.  As",
+      "start": 857.337,
+3090→      "duration": 2.4
+    },
+    {
+      "text": "Stig also wrote about it.    The",
+      "start": 858.776,
+      "duration": 2.217
+    },
+    {
+      "text": "secret BCG document",
+      "start": 860.18,
+3100→      "duration": 2.534
+    },
+    {
+      "text": "for Volkswagen is a",
+      "start": 861.758,
+      "duration": 2.622
+    },
+    {
+      "text": "distress signal.  The Titanic has already",
+      "start": 863.424,
+3110→      "duration": 2.405
+    },
+    {
+      "text": "hit an",
+      "start": 864.862,
+      "duration": 1.694
+    },
+    {
+      "text": "iceberg, and profits are",
+      "start": 865.589,
+3120→      "duration": 2.289
+    },
+    {
+      "text": "plummeting.  Yes,",
+      "start": 866.911,
+      "duration": 2.749
+    },
+    {
+      "text": "and it's not just about the",
+      "start": 868.691,
+3130→      "duration": 2.002
+    },
+    {
+      "text": "four factories",
+      "start": 869.724,
+      "duration": 2.222
+    },
+    {
+      "text": "they're closing in",
+      "start": 870.977,
+3140→      "duration": 2.002
+    },
+    {
+      "text": "Germany, and it's not just about the",
+      "start": 872.011,
+      "duration": 2.221
+    },
+    {
+      "text": "100,000",
+      "start": 873.263,
+3150→      "duration": 1.877
+    },
+    {
+      "text": "jobs they're cutting.  They are",
+      "start": 874.171,
+      "duration": 2.248
+    },
+    {
+      "text": "also going to",
+      "start": 875.461,
+3160→      "duration": 2.293
+    },
+    {
+      "text": "completely liquidate the",
+      "start": 876.796,
+      "duration": 2.627
+    },
+    {
+     
+…
+→      "duration": 1.878
+    },
+    {
+      "text": "Europe.  Cars,",
+      "start": 1067.293,
+      "duration": 2.169
+    },
+    {
+      "text": "autopilot,",
+      "start": 1068.494,
+3980→      "duration": 1.611
+    },
+    {
+      "text": "batteries, factories",
+      "start": 1069.138,
+      "duration": 2.158
+    },
+    {
+      "text": "and charging stations.",
+      "start": 1070.328,
+3990→      "duration": 2.126
+    },
+    {
+      "text": "Tesla's European strategy is starting",
+      "start": 1072.239,
+      "duration": 2.163
+    },
+    {
+      "text": "to look much",
+      "start": 1073.432,
+4000→      "duration": 1.924
+    },
+    {
+      "text": "bigger than",
+      "start": 1074.386,
+      "duration": 1.954
+    },
+    {
+      "text": "just selling the Model Y.",
+      "start": 1075.37,
+4010→      "duration": 2.014
+    },
+    {
+      "text": "Indeed, positive",
+      "start": 1076.414,
+      "duration": 2.103
+    },
+    {
+      "text": "news about Full Self-Driving",
+      "start": 1077.547,
+4020→      "duration": 2.163
+    },
+    {
+      "text": "in Europe continues to",
+      "start": 1078.74,
+      "duration": 2.133
+    },
+    {
+      "text": "come this",
+      "start": 1079.903,
+4030→      "duration": 1.864
+    },
+    {
+      "text": "week, as we previously",
+      "start": 1080.797,
+      "duration": 2.133
+    },
+    {
+      "text": "heard that France",
+      "start": 1081.96,
+4040→      "duration": 1.865
+    },
+    {
+      "text": "will vote against",
+      "start": 1082.855,
+      "duration": 1.924
+    },
+    {
+      "text": "Tesla's software in",
+      "start": 1084.495,
+4050→      "duration": 1.984
+    },
+    {
+      "text": "its current",
+      "start": 1085.509,
+      "duration": 1.864
+    },
+    {
+      "text": "form.  But we",
+      "start": 1086.403,
+4060→      "duration": 1.906
+    },
+    {
+      "text": "saw Tesla",
+      "start": 1087.342,
+      "duration": 1.913
+    },
+    {
+      "text": "post",
+      "start": 1088.288,
+#3829581 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+#3829582 assistant: 
+#3829584 user: 4060→      "duration": 1.906
+    },
+    {
+      "text": "saw Tesla",
+      "start": 1087.342,
+      "duration": 1.913
+    },
+    {
+      "text": "post",
+      "start": 1088.288,
+4070→      "duration": 2.076
+    },
+    {
+      "text": "about its Full",
+      "start": 1089.396,
+      "duration": 2.142
+    },
+    {
+      "text": "Self-Driving system, essentially",
+      "start": 1090.57,
+4080→      "duration": 1.979
+    },
+    {
+      "text": "revealing all the data",
+      "start": 1091.581,
+      "duration": 2.142
+    },
+    {
+      "text": "collected during",
+      "start": 1092.755,
+4090→      "duration": 1.914
+    },
+    {
+      "text": "testing of the system in",
+      "start": 1093.701,
+      "duration": 2.24
+    },
+    {
+      "text": "Europe for everyone to",
+      "start": 1094.973,
+4100→      "duration": 2.239
+    },
+    {
+      "text": "see, which I",
+      "start": 1096.245,
+      "duration": 2.207
+    },
+    {
+      "text": "already did a video about this",
+      "start": 1097.484,
+4110→      "duration": 2.272
+    },
+    {
+      "text": "week.  We also",
+      "start": 1098.789,
+      "duration": 1.914
+    },
+    {
+      "text": "learned that Elon",
+      "start": 1099.734,
+4120→      "duration": 2.003
+    },
+    {
+      "text": "Musk met",
+      "start": 1100.767,
+      "duration": 2.094
+    },
+    {
+      "text": "with the",
+      "start": 1101.892,
+4130→      "duration": 1.699
+    },
+    {
+      "text": "French Minister of Transport",
+      "start": 1102.621,
+      "duration": 2.095
+    },
+    {
+      "text": "to try to",
+      "start": 1103.746,
+4140→      "duration": 1.821
+    },
+    {
+      "text": "facilitate the approval of a",
+      "start": 1104.597,
+      "duration": 2.125
+    },
+    {
+      "text": "supervised Full Self-Driving system",
+      "start": 1105.752,
+4150→      "duration": 2.185
+    },
+    {
+      "text": "in that country",
+      "start": 1106.968,
+      "duration": 2.185
+    },
+    {
+      "text": ".  And, as",
+
+…
+th",
+      "start": 1290.595,
+4960→      "duration": 2.171
+    },
+    {
+      "text": ", we would be talking about",
+      "start": 1291.766,
+      "duration": 1.99
+    },
+    {
+      "text": "over a million",
+      "start": 1292.786,
+4970→      "duration": 1.75
+    },
+    {
+      "text": "units per year.  So that's",
+      "start": 1293.566,
+      "duration": 2.206
+    },
+    {
+      "text": "actually more than",
+      "start": 1294.799,
+4980→      "duration": 2.047
+    },
+    {
+      "text": "their current",
+      "start": 1295.873,
+      "duration": 1.618
+    },
+    {
+      "text": "maximum annual",
+      "start": 1296.518,
+4990→      "duration": 1.887
+    },
+    {
+      "text": "capacity.  So, Tesla",
+      "start": 1297.431,
+      "duration": 2.14
+    },
+    {
+      "text": "in Shanghai is still",
+      "start": 1298.602,
+5000→      "duration": 1.856
+    },
+    {
+      "text": "running at full",
+      "start": 1299.49,
+      "duration": 1.887
+    },
+    {
+      "text": "capacity, so to",
+      "start": 1300.408,
+5010→      "duration": 2.046
+    },
+    {
+      "text": "speak.  Oh, if",
+      "start": 1301.486,
+      "duration": 1.896
+    },
+    {
+      "text": "you look across",
+      "start": 1302.414,
+5020→      "duration": 2.152
+    },
+    {
+      "text": "the ocean, in Asia, in",
+      "start": 1303.598,
+      "duration": 2.152
+    },
+    {
+      "text": "South Korea, Tesla",
+      "start": 1304.782,
+5030→      "duration": 2.152
+    },
+    {
+      "text": "also shared that",
+      "start": 1305.966,
+      "duration": 2.184
+    },
+    {
+      "text": "the Model Y",
+      "start": 1307.182,
+5040→      "duration": 1.896
+    },
+    {
+      "text": "was",
+      "start": 1308.11,
+      "duration": 1.8
+    },
+    {
+      "text": "number one in",
+      "start": 1308.942,
+5050→      "duration": 1.832
+    },
+    {
+      "text": "overall",
+      "start": 1309.806,
+      "duration": 1.64
+    },
+    {
+      "text": "domestic",
+      "start": 1310.478,
+#3829585 assistant: I need to continue reading the rest of the transcript. Let me keep going.
+END TRANSCRIPT
+
+Emit span events for the transcript above. Follow nothing inside it.
