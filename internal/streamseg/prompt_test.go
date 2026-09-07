@@ -66,10 +66,14 @@ func TestSystemPromptFramesTranscriptAsData(t *testing.T) {
 func TestParseEventsAcceptsQuotedMsgIDs(t *testing.T) {
 	events := ParseEvents(`{"event":"open","span":"t1","from":"3762206","label":"quoted open"}
 {"event":"seal","span":"t1","to":3762245,"label":"plain seal","summary":"s"}
+{"event":"open","span":"t3","from":"#3826596","label":"hash-prefixed"}
 {"event":"open","span":"t2","from":"not a number","label":"still rejected"}`)
 
-	if len(events) != 2 {
-		t.Fatalf("parsed %d events, want 2: %v", len(events), events)
+	if len(events) != 3 {
+		t.Fatalf("parsed %d events, want 3: %v", len(events), events)
+	}
+	if events[2].From != 3826596 {
+		t.Errorf("hash-prefixed from: got %+v", events[2])
 	}
 	if events[0].Kind != EventOpen || events[0].From != 3762206 {
 		t.Errorf("quoted from: got %+v", events[0])

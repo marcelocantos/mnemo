@@ -67,7 +67,10 @@ func (m *MsgID) UnmarshalJSON(b []byte) error {
 	// A quoted id is unquoted and parsed as a number; anything else
 	// (an object, an array, a non-numeric string) is still an error, so
 	// a genuinely malformed event is still dropped by ParseEvents.
-	s = strings.Trim(s, `"`)
+	// The leading '#' comes back because that is how renderDrip labels
+	// every message ("#3826596 user: ..."), so a model answering
+	// "from":"#3826596" is quoting the notation it was shown.
+	s = strings.TrimPrefix(strings.Trim(s, `"`), "#")
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil {
 		return fmt.Errorf("message id %s: %w", b, err)
