@@ -49,6 +49,39 @@ func TestParseCollapsesRepeatsAndDropsProcSuffix(t *testing.T) {
 	}
 }
 
+// A benchmark's samples are reduced to their floor, not their middle:
+// competing load only ever makes a run slower, so the fastest sample is
+// the closest thing to an uncontended one. Allocation counts, which do
+// not move with load, keep the median.
+func TestDurationsReduceToTheirFloor(t *testing.T) {
+	r, err := parse(strings.NewReader(sampleBase))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := r["BenchmarkSearch/messages"]
+	if got := reduce("ns/op", m["ns/op"]); got != 900000 {
+		t.Fatalf("ns/op reduced to %v, want the minimum 900000", got)
+	}
+	if got := reduce("allocs/op", m["allocs/op"]); got != 400 {
+		t.Fatalf("allocs/op reduced to %v, want 400", got)
+	}
+	// A run whose slowest sample doubled but whose floor held is a
+	// contended machine, not a regression.
+	contended := strings.Replace(sampleBase, "1100000 ns/op", "9100000 ns/op", 1)
+	if s := statuses(t, sampleBase, contended, false)["BenchmarkSearch/messages ns/op"]; s != "ok" {
+		t.Fatalf("one contended sample: status %q", s)
+	}
+	// A floor that moved is a real change, in either direction.
+	slower := strings.NewReplacer(
+		"1000000 ns/op", "2000000 ns/op",
+		"1100000 ns/op", "2100000 ns/op",
+		"900000 ns/op", "1900000 ns/op",
+	).Replace(sampleBase)
+	if s := statuses(t, sampleBase, slower, false)["BenchmarkSearch/messages ns/op"]; s != "REGRESSION" {
+		t.Fatalf("floor doubled: status %q", s)
+	}
+}
+
 // A stray background read inflates a per-iteration average by a
 // fraction; a real extra statement adds a whole one. The gate must tell
 // them apart, or it fails on noise and gets switched off.

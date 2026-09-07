@@ -35,20 +35,36 @@ Those are identical on any machine, and `TestPerfRatchet` locks a
 subset of them exactly, in both directions, in every `go test ./...`.
 `make bench-gate` locks all of them against `docs/perf/baseline.txt`.
 
-`ns/op`, `B/op` and `allocs/op` are not machine-independent, and the
-**timing half of this baseline was recorded on a machine under load
-average ~100** — a forty-agent fan-out was running throughout. Repeated
-runs of the same benchmark varied by up to ±50%. So:
+`ns/op`, `B/op` and `allocs/op` are not machine-independent, so
+`make bench-gate` holds them only against a baseline recorded on the
+same machine, and CI compares with `-scope exact` — allocation counts
+differ between operating systems because the code paths under them do.
 
-- `make bench-gate` defaults to `-scope exact`, which compares only the
-  machine-independent metrics. That gate is meaningful today.
-- The timing numbers are in `baseline.txt` for reference, and
-  `BENCH_GATE_FLAGS="-scope all"` compares them. **Re-lock on an idle
-  machine (`make bench-lock`) before turning that on**, or it will fail
-  on scheduler noise, and a gate that fails on noise gets switched off.
-- CI compares with `-scope exact` for the same reason plus one more:
-  allocation counts differ between operating systems because the code
-  paths under them do.
+Timing is nonetheless gated, because **benchgate reduces a benchmark's
+samples to their floor rather than their middle**. Competing load can
+only ever make a run slower, so the fastest of ten samples is the
+closest thing to an uncontended measurement, and a same-machine
+comparison should be held to the floor. The evidence for that choice:
+two ten-sample runs of this package, one taken under load average ~100
+and one under 5 to 67, agreed on the floor within 5% for eight of the
+twelve benchmarks and within 25% for ten of them, while their means
+differed by up to 66%.
+
+What the floor does not survive is a change in the machine's *sustained*
+state. Two experiments, both with `-scope all`:
+
+- Two ten-sample runs taken back to back under the same load: **every
+  metric within tolerance**, timings included.
+- A baseline taken under load 5-to-67 against a run taken hours later
+  under sustained heavy load: **six of twelve floors 26% to 67% high**.
+
+So the timing lock is real but conditional, and the gate's default scope
+is therefore the machine-independent metrics.
+`BENCH_GATE_FLAGS="-scope all"` compares timings and is worth running
+when the machine is in the same state the baseline was recorded in.
+Give any gate run as many samples as the baseline has — a floor over two
+samples sits well above a floor over ten, which is why `BENCH_COUNT`
+defaults to ten for the gate as well as the lock.
 
 ## Reference machine
 
@@ -56,13 +72,30 @@ runs of the same benchmark varied by up to ±50%. So:
 |---|---|
 | Machine | Apple M4 Max, macOS 26.6.2, arm64 |
 | Go | go1.26.4 |
-| Recorded | 2026-09-06, `-count=10 -benchtime=1s` |
-| Load during the run | load average ~100 (see above) |
+| Recorded | 2026-09-07, `-count=10 -benchtime=1s` |
+| Load during the run | load average 60 to 90 throughout — a large agent fan-out. The floors are what the gate compares, and they held (see above); the means are not usable. |
 
 ## Locked numbers
 
 `docs/perf/baseline.txt` holds the raw `go test -bench` output. The
-machine-independent metrics it locks:
+timings it locks, as floors over ten samples:
+
+| Benchmark | ns/op floor |
+|---|---|
+| `Search/messages` | 35.12 ms |
+| `Search/messages_repo_filter` | 31.75 ms |
+| `Search/unified_default` | 39.81 ms |
+| `Search/unified_all` | 38.89 ms |
+| `RecentActivity/7d` | 1.23 ms |
+| `RecentActivity/30d` | 1.23 ms |
+| `Usage/day` | 189.54 ms |
+| `Usage/model` | 175.34 ms |
+| `Usage/repo` | 182.85 ms |
+| `Usage/session` | 186.17 ms |
+| `Usage/block` | 160.52 ms |
+| `IngestTranscript` | 11.10 ms |
+
+And the machine-independent metrics:
 
 | Benchmark | selects/op | payload-bytes | rows or hits |
 |---|---|---|---|
@@ -72,11 +105,11 @@ machine-independent metrics it locks:
 | `Search/unified_all` | 74 | — | — |
 | `RecentActivity/7d` | 1 | 162,391 | 300 rows |
 | `RecentActivity/30d` | 1 | 162,391 | 300 rows |
-| `Usage/day` | 5 | — | 2 rows |
+| `Usage/day` | 5 | — | — |
 | `Usage/model` | 5 | 850 | 1 row |
 | `Usage/repo` | 5 | 86,013 | 300 rows |
 | `Usage/session` | 5 | 168,537 | 500 rows |
-| `Usage/block` | 3 | — | 5 rows |
+| `Usage/block` | 3 | — | — |
 
 `Usage/session` shows the row cap doing its job: the 1,200-session
 corpus produces 1,200 groups and the answer carries 500 of them plus
@@ -96,7 +129,10 @@ on its own:
   hit count is stable and is what search locks.
 - **`Usage/day` and `Usage/block`.** Their period buckets are relative
   to the wall clock, so the corpus falls into different buckets as it
-  ages and the digits of each bucket's summed cost change with it.
+  ages. That moves the row count as well as the payload — a corpus
+  spanning a day boundary produces two day rows and one otherwise,
+  which is exactly how the gate first caught it — so those two
+  groupings report statements issued and nothing else.
 
 ## What moved, and by what mechanism
 
@@ -124,4 +160,9 @@ were the read pool's lock, taken 841 times by one tool call.
   the dedup GROUP BY. A covering index over the twins would make the
   CTE index-only, but it would be a very wide index on the largest
   table in a multi-gigabyte database, and that trade was not taken.
-- The timing half of this baseline needs re-locking on an idle machine.
+- The machine never went idle; every run behind this baseline was taken
+  with a large agent fan-out running. Gating on floors makes that
+  survivable within one machine state but not across two, which is the
+  measured limit above. A re-lock on a genuinely idle machine would
+  lower every floor here and is worth doing before anyone treats these
+  absolute timings as mnemo's true cost.

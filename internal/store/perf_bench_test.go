@@ -138,10 +138,12 @@ func BenchmarkRecentActivity(b *testing.B) {
 }
 
 // timeBucketedUsage names the groupings whose answer depends on the wall
-// clock: their period buckets, and therefore the digits of each bucket's
-// summed cost, shift as the corpus ages relative to now. Their payload
-// size is not stable between runs, so they report rows and statements
-// and leave payload-bytes to the groupings that are stable.
+// clock: their period buckets shift as the corpus ages relative to now,
+// which moves both the row count (a corpus spanning a day boundary
+// produces two day rows, one otherwise) and the digits of each bucket's
+// summed cost. Neither number is stable between runs, so these
+// groupings report statements issued and nothing else, and payload and
+// row counts are left to the groupings that are stable.
 var timeBucketedUsage = map[string]bool{"day": true, "block": true}
 
 func BenchmarkUsage(b *testing.B) {
@@ -162,8 +164,8 @@ func BenchmarkUsage(b *testing.B) {
 				}
 			}
 			perfSelects(b, before)
-			b.ReportMetric(float64(rows), "rows/op")
 			if !timeBucketedUsage[groupBy] {
+				b.ReportMetric(float64(rows), "rows/op")
 				b.ReportMetric(float64(bytes), "payload-bytes")
 			}
 		})

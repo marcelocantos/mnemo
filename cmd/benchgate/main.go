@@ -41,6 +41,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,19 +128,31 @@ func median(xs []float64) float64 {
 }
 
 // reduce collapses one metric's repeated runs to the value the gate
-// compares: the floored minimum for an exact metric (see exactMetrics),
-// the median for everything else.
+// compares.
+//
+//   - An exact metric (see exactMetrics) reduces to its floored minimum.
+//   - A duration reduces to its MINIMUM, not its median. Competing load
+//     can only ever make a benchmark slower, so the fastest sample is
+//     the closest thing to an uncontended measurement, and the floor is
+//     what a same-machine comparison should be held to. Two runs of this
+//     package taken under load averages of 100 and of 5 agreed on the
+//     floor within 5% for eight of twelve benchmarks while their means
+//     differed by up to 66%.
+//   - MB/s reduces to its MAXIMUM for the same reason, since it runs the
+//     other way round.
+//   - Everything else — allocation counts, bytes per op — reduces to its
+//     median. Those do not vary with load.
 func reduce(metric string, xs []float64) float64 {
-	if !exactMetrics[metric] {
+	switch {
+	case exactMetrics[metric]:
+		return math.Floor(slices.Min(xs))
+	case metric == "ns/op":
+		return slices.Min(xs)
+	case metric == "MB/s":
+		return slices.Max(xs)
+	default:
 		return median(xs)
 	}
-	lo := xs[0]
-	for _, x := range xs[1:] {
-		if x < lo {
-			lo = x
-		}
-	}
-	return math.Floor(lo)
 }
 
 // verdict is one row of the comparison.

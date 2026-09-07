@@ -70,16 +70,24 @@ vet:
 #                    the code and must be re-locked in the same commit
 #   make bench-lock  run them and make the result the new baseline
 #
-# The gate defaults to the machine-independent metrics — payload bytes,
-# statements issued, rows and hits returned — because those are the ones
-# the committed baseline can honestly hold anyone to. Timing and
-# allocation counts are in the baseline file and are compared by
-# BENCH_GATE_FLAGS="-scope all", which is worth turning on once the
-# baseline has been re-locked on an idle machine; docs/perf/baseline.md
-# records why this one was not.
+# benchgate reduces a benchmark's samples to their FLOOR rather than
+# their middle, because competing load only ever makes a run slower and
+# the fastest sample is the closest thing to an uncontended one. That
+# makes timing comparison meaningful on an otherwise-busy machine — but
+# only to a point, and the point was measured: with a large agent
+# fan-out running, six of twelve floors still came in 26% to 67% above a
+# baseline recorded hours earlier. So the gate's default scope is the
+# machine-independent metrics, and BENCH_GATE_FLAGS="-scope all" turns
+# timing on for a machine that is actually idle. docs/perf/baseline.md
+# has the numbers behind that.
+#
+# BENCH_COUNT matters to the gate as much as to the lock: a floor over
+# two samples sits well above a floor over ten, so a gate run with fewer
+# samples than the baseline reports regressions that are not there. Both
+# default to ten.
 BENCH_PKG   := ./internal/store/
 BENCH_RE    := ^(BenchmarkSearch|BenchmarkRecentActivity|BenchmarkUsage|BenchmarkIngestTranscript)$$
-BENCH_COUNT ?= 6
+BENCH_COUNT ?= 10
 BENCH_OUT   ?= bin/bench.txt
 BENCH_GATE_FLAGS ?= -scope exact
 
