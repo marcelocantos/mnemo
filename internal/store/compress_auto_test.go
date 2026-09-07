@@ -30,10 +30,19 @@ func TestAutoBackfillPacksPlainRowsWithoutAnOpsCall(t *testing.T) {
 	s.StartCompressBackfill()
 	waitOutstanding(t, s, FamilyMessagesText, 0)
 
+	// Outstanding reaching zero is not the end of the cycle: the worker
+	// still has to finish its paced pass and publish a phase (🎯T168 made
+	// that window wide enough to lose the race reliably). Poll for the
+	// settled phase rather than sampling it once.
 	snap := s.CompressWorkerStatus()
-	if snap.Phase != CompressPhaseComplete && snap.Phase != CompressPhaseIdle {
-		t.Fatalf("phase=%s reason=%s, want complete after packing", snap.Phase, snap.Reason)
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		if snap = s.CompressWorkerStatus(); snap.Phase == CompressPhaseComplete || snap.Phase == CompressPhaseIdle {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	t.Fatalf("phase=%s reason=%s, want complete after packing", snap.Phase, snap.Reason)
 }
 
 func TestAutoBackfillRestartsWhenPlainRowsReappear(t *testing.T) {
@@ -133,7 +142,10 @@ func seedLegacyMessages(t *testing.T, s *Store, n int) {
 
 func waitOutstanding(t *testing.T, s *Store, family string, want int64) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// Generous because the auto worker paces itself against a duty cycle
+	// now (🎯T168): a pass deliberately costs about twice its busy time,
+	// and this has to hold on a loaded machine running the full suite.
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		st, err := s.CompressionStatus()
 		if err != nil {

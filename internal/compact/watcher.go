@@ -244,6 +244,14 @@ type HealthSnapshot struct {
 	AddendaBudgetTokens   int64
 	MaxCompactionsPerScan int
 	MaxTokenRatio         float64
+	// FailureRatioHealthy and FailureRatioMinSample travel with the
+	// snapshot (🎯T167) so the mnemo_ops report can print the very
+	// thresholds compactor.breaker enforces without importing this
+	// package — the tools mirror of this struct exists to keep that
+	// import direction clean, and a second copy of the numbers there
+	// would be free to drift.
+	FailureRatioHealthy   float64
+	FailureRatioMinSample int64
 }
 
 // Health returns a snapshot of the watcher's runtime state.
@@ -268,6 +276,8 @@ func (w *Watcher) Health() HealthSnapshot {
 		AddendaBudgetTokens:   w.cfg.addendaBudgetTokens(),
 		MaxCompactionsPerScan: w.cfg.maxCompactionsPerScan(),
 		MaxTokenRatio:         w.compactor.MaxTokenRatio(),
+		FailureRatioHealthy:   FailureRatioHealthy,
+		FailureRatioMinSample: FailureRatioMinSample,
 	}
 }
 
@@ -548,6 +558,39 @@ const (
 	// breaker trips before allowing a single trial scan.
 	systemicFailureCooldown = 10 * time.Minute
 )
+
+const (
+	// FailureRatioHealthy is the highest failed/compacted ratio a healthy
+	// compactor sustains (🎯T72). A steady state keeps hard failures well
+	// below one in five compactions; past that, poison sessions are being
+	// retried faster than good ones are being summarised.
+	//
+	// The mnemo_ops op=compactor report prints this value and the
+	// compactor.breaker health check enforces it, so the documented
+	// threshold and the enforced one cannot diverge (🎯T167).
+	FailureRatioHealthy = 0.20
+	// FailureRatioSevere is the ratio at which failures dominate the
+	// watcher's work rather than dogging it, and the check escalates from
+	// warn to fail.
+	FailureRatioSevere = 0.50
+	// FailureRatioMinSample is how many compactions must have succeeded
+	// before the ratio is worth judging. Below it a single early failure
+	// swamps the quotient and would warn on a daemon that is merely young.
+	FailureRatioMinSample = 20
+)
+
+// FailureRatio reports hard failures per successful compaction over the
+// watcher's lifetime. ok is false when too few compactions have happened
+// for the ratio to mean anything (see FailureRatioMinSample), in which
+// case callers should say nothing rather than report a noisy quotient.
+func (h HealthSnapshot) FailureRatio() (ratio float64, sample int64, ok bool) {
+	compacted := h.Counts[string(outcomeCompacted)]
+	if compacted <= 0 {
+		return 0, compacted, false
+	}
+	return float64(h.Counts[string(outcomeFailed)]) / float64(compacted),
+		compacted, compacted >= FailureRatioMinSample
+}
 
 // recordOutcome bumps the lifetime counter for outcome and records
 // the most recent tick state. Safe to call concurrently.

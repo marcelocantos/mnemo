@@ -76,6 +76,25 @@ const (
 	// backfillBatchRows bounds one GC transaction.
 	backfillBatchRows = 2000
 
+	// backfillCheckpointBytes is how much compressed data the auto
+	// backfill writes before spending a PASSIVE WAL checkpoint (🎯T168).
+	// The periodic TRUNCATE worker cannot help here: it waits for writes
+	// to go quiet, and a pack over millions of rows never does.
+	backfillCheckpointBytes = 64 << 20 // 64 MiB
+
+	// backfillDutyCycle is the fraction of wall time the auto backfill
+	// is allowed to spend working. The remainder is handed back to
+	// foreground work (🎯T168). At 0.5 the packer takes about twice as
+	// long and leaves the daemon responsive throughout; a background
+	// task that finishes in an hour instead of half an hour, without
+	// taking /health down, is the better trade.
+	backfillDutyCycle = 0.5
+
+	// backfillMaxPause caps a single inter-batch pause so an unusually
+	// slow batch — a lock wait, a stalled disk — cannot park the packer
+	// for minutes.
+	backfillMaxPause = 5 * time.Second
+
 	// decoderMaxMemory bounds a single frame's declared size; the largest
 	// tool result mnemo has ingested is well under this.
 	decoderMaxMemory = 512 << 20
@@ -769,7 +788,14 @@ type BackfillResult struct {
 	Rows       int64 // rows visited this run
 	Compressed int64 // rows rewritten compressed this run
 	Saved      int64 // bytes saved this run
+	Skipped    int64 // rows left plain because the row itself is unwritable (🎯T169)
 	Done       bool  // cursor reached the end of the table
+
+	// skipErr is the most recent per-row write failure, recorded against
+	// the cursor once the pass ends. It cannot be written as it happens:
+	// every batch's saveBackfillCursor clears last_error, so a note
+	// written mid-pass is erased by the next batch.
+	skipErr error
 }
 
 // CompressBackfill is the phase-3 GC: it walks family's table in id
@@ -801,6 +827,13 @@ func (s *Store) CompressBackfill(ctx context.Context, family string) (BackfillRe
 	res := BackfillResult{Family: family}
 	err = s.compressBackfill(ctx, fs, family, &res)
 	s.backfill.finish(family, err)
+	if res.Skipped > 0 {
+		// Durable, so op=compress_status can say why a family that
+		// reports done still carries a plain residue. Written after the
+		// pass because each batch's cursor save clears last_error
+		// (🎯T169).
+		s.noteBackfillSkip(family, res.Skipped, res.skipErr)
+	}
 	return res, err
 }
 
@@ -825,6 +858,7 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 		fs.table, fs.plainCol, fs.zCol, fs.sentinel, extra)
 	maxSQL := fmt.Sprintf(`SELECT COALESCE(MAX(id), 0) FROM %s`, fs.table)
 	enc := s.codec.encoder(family)
+	var walDirty int64 // compressed bytes written since the last checkpoint
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -863,18 +897,29 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 			return s.saveBackfillCursor(family, maxID+1, 0, true)
 		}
 
-		tx, err := s.writeDB.BeginTx(ctx, nil)
-		if err != nil {
-			return err
+		// Encode and verify OUTSIDE the write transaction (🎯T168).
+		// zstd on 2,000 rows — entries.raw rows especially — is the bulk
+		// of a batch's wall time, and doing it between BeginTx and Commit
+		// held SQLite's single writer for all of it. Every foreground
+		// write (ingest, compaction, stream reconcile) queued behind that
+		// lock, which is how a background packer took /health down with
+		// it. The transaction below now contains only the UPDATEs.
+		type packed struct {
+			id    int64
+			z     []byte
+			saved int64
 		}
-		stmt, err := tx.PrepareContext(ctx, updateSQL)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-		var saved int64
-		var compressed int64
+		var (
+			toWrite   []packed
+			saved     int64
+			zBytes    int64
+			encodeDur time.Duration
+		)
+		encodeStart := time.Now()
 		for _, r := range batch {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if len(r.text) < compressMinBytes {
 				continue
 			}
@@ -884,35 +929,90 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 			}
 			back, err := dictRegistry.decode(z)
 			if err != nil || string(back) != r.text {
-				stmt.Close()
-				tx.Rollback()
 				return fmt.Errorf("%s id %d: round-trip mismatch (%v); backfill halted", fs.table, r.id, err)
 			}
-			if _, err := stmt.ExecContext(ctx, z, r.id); err != nil {
-				stmt.Close()
+			d := int64(len(r.text) - len(z))
+			toWrite = append(toWrite, packed{id: r.id, z: z, saved: d})
+			saved += d
+			zBytes += int64(len(z))
+		}
+		encodeDur = time.Since(encodeStart)
+
+		writeStart := time.Now()
+		var skipped int64
+		var lastSkipErr error
+		if len(toWrite) > 0 {
+			tx, err := s.writeDB.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			stmt, err := tx.PrepareContext(ctx, updateSQL)
+			if err != nil {
 				tx.Rollback()
 				return err
 			}
-			saved += int64(len(r.text) - len(z))
-			compressed++
+			for _, w := range toWrite {
+				if _, err := stmt.ExecContext(ctx, w.z, w.id); err != nil {
+					// One unwritable row must not strand the family
+					// (🎯T169). entries.raw carries materialised twins in
+					// extraSet, and writing them can collide with the
+					// unique index when a duplicate row was ingested while
+					// the twin was still NULL. Aborting the pass on that
+					// row meant the same poison batch was retried every
+					// two minutes forever, so the remaining millions of
+					// rows were never packed and the backfill never
+					// reported done — which is what gates VACUUM.
+					//
+					// SQLite's default conflict action is ABORT, which
+					// rolls back the failing statement and leaves the
+					// transaction usable, so the rest of the batch still
+					// commits. The row stays plain and is reported.
+					if isRowLevelWriteError(err) {
+						slog.Warn("compress backfill skipped an unwritable row",
+							"table", fs.table, "id", w.id, "err", err)
+						skipped++
+						lastSkipErr = err
+						continue
+					}
+					stmt.Close()
+					tx.Rollback()
+					return err
+				}
+			}
+			stmt.Close()
+			if err := tx.Commit(); err != nil {
+				return err
+			}
 		}
-		stmt.Close()
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+		writeDur := time.Since(writeStart)
+
 		res.Rows += int64(len(batch))
-		res.Compressed += compressed
+		res.Compressed += int64(len(toWrite)) - skipped
 		res.Saved += saved
+		res.Skipped += skipped
+		if lastSkipErr != nil {
+			res.skipErr = lastSkipErr
+		}
 		next = batch[len(batch)-1].id + 1
 		if err := s.saveBackfillCursor(family, next, saved, false); err != nil {
 			return err
 		}
-		if d := s.backfill.getYield(); d > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(d):
+
+		// Keep the WAL bounded during the run (🎯T168). The maintenance
+		// worker defers while writes are active, and a multi-hour pack is
+		// never quiet, so on 0.94.0 the WAL climbed from 64 MiB to 1,215
+		// MiB before anything reclaimed it. A PASSIVE checkpoint blocks
+		// neither readers nor writers: it copies what it can and returns.
+		if s.backfill.getYield() > 0 {
+			walDirty += zBytes
+			if walDirty >= backfillCheckpointBytes {
+				walDirty = 0
+				s.checkpointPassive("compress-backfill")
 			}
+		}
+
+		if err := s.pauseAfterBatch(ctx, encodeDur+writeDur); err != nil {
+			return err
 		}
 	}
 }
@@ -1060,5 +1160,62 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 		if err := s.saveBackfillCursor(entriesFieldsFamily, next, 0, false); err != nil {
 			return err
 		}
+	}
+}
+
+// pauseAfterBatch hands wall time back to foreground work between
+// backfill batches (🎯T168).
+//
+// The original fixed 10ms pause was duty-cycle blind: a batch that took
+// two seconds of writer time was followed by ten milliseconds of relief,
+// so the packer still held the writer 99.5% of the time and everything
+// else — /health, stream reconcilers, the compactor — queued behind it.
+// Pausing in proportion to the batch's own cost is what actually bounds
+// the packer's share, whatever the row sizes turn out to be.
+//
+// A zero yield means the caller is an explicit, user-triggered
+// compress_gc: that one is meant to go as fast as the disk allows, and
+// the user is waiting on it.
+func (s *Store) pauseAfterBatch(ctx context.Context, busy time.Duration) error {
+	yield := s.backfill.getYield()
+	if yield <= 0 {
+		return nil
+	}
+	pause := time.Duration(float64(busy) * (1/backfillDutyCycle - 1))
+	if pause < yield {
+		pause = yield
+	}
+	if pause > backfillMaxPause {
+		pause = backfillMaxPause
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(pause):
+		return nil
+	}
+}
+
+// isRowLevelWriteError reports whether err is a fault of the individual
+// row rather than of the database or the pass (🎯T169). Constraint
+// violations qualify: the row cannot be written as-is, and no amount of
+// retrying the batch changes that. Anything else — a disk error, a
+// corrupt page, a cancelled context — is a reason to stop.
+func isRowLevelWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "constraint failed") ||
+		strings.Contains(msg, "constraint violation")
+}
+
+// noteBackfillSkip records the most recent skip against the family's
+// cursor row so it survives a restart and shows up in op=compress_status.
+func (s *Store) noteBackfillSkip(family string, skipped int64, cause error) {
+	detail := fmt.Sprintf("skipped %d unwritable row(s): %v", skipped, cause)
+	if _, err := s.writeDB.Exec(
+		`UPDATE compression_gc SET last_error = ? WHERE family = ?`, detail, family); err != nil {
+		slog.Debug("compress backfill: could not record skip", "family", family, "err", err)
 	}
 }

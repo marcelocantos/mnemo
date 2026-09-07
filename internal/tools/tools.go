@@ -88,6 +88,8 @@ type CompactorHealth struct {
 	AddendaBudgetTokens   int64
 	MaxCompactionsPerScan int
 	MaxTokenRatio         float64
+	FailureRatioHealthy   float64
+	FailureRatioMinSample int64
 }
 
 // ConfigController is the read-only view of mnemo's runtime configuration
@@ -1523,8 +1525,13 @@ func (h *callHandler) compactorStatus(resolve func(username string) CompactorHea
 	// compactions are rare and durable. A healthy steady state keeps
 	// failed well below compacted (target ≤ 1:5).
 	if comp := hs.Counts["compacted"]; comp > 0 {
-		fmt.Fprintf(&b, "  %-20s %.2f (failed/compacted; healthy ≤ 0.20)\n",
-			"failure_ratio:", float64(hs.Counts["failed"])/float64(comp))
+		note := ""
+		if comp < hs.FailureRatioMinSample {
+			note = fmt.Sprintf("; too few compactions to judge, need %d", hs.FailureRatioMinSample)
+		}
+		fmt.Fprintf(&b, "  %-20s %.2f (failed/compacted; healthy ≤ %.2f%s)\n",
+			"failure_ratio:", float64(hs.Counts["failed"])/float64(comp),
+			hs.FailureRatioHealthy, note)
 	}
 
 	b.WriteString("\nConfiguration:\n")

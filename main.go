@@ -1857,6 +1857,8 @@ func (a compactorAdapter) Health() tools.CompactorHealth {
 		AddendaBudgetTokens:   hs.AddendaBudgetTokens,
 		MaxCompactionsPerScan: hs.MaxCompactionsPerScan,
 		MaxTokenRatio:         hs.MaxTokenRatio,
+		FailureRatioHealthy:   hs.FailureRatioHealthy,
+		FailureRatioMinSample: hs.FailureRatioMinSample,
 	}
 }
 

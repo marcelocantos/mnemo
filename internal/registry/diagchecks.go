@@ -299,6 +299,14 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					fmt.Sprintf("compaction circuit-breaker tripped after repeated systemic failures: %s", snap.LastError),
 					"every compaction is failing for the same reason — check compactor.workdir and claude.path; the watcher retries after a cooldown")
 			}
+			// A closed breaker only rules out the systemic case: every
+			// tick failing for one reason. A steady drizzle of failures
+			// against a working compactor never trips it, so judge the
+			// lifetime ratio too (🎯T167) — otherwise a watcher failing
+			// four ticks in five reports as healthy.
+			if res, unhealthy := compactionFailureRatioResult(w.Health()); unhealthy {
+				return res
+			}
 			return diag.Healthy("compaction watcher healthy")
 		}},
 
@@ -610,4 +618,30 @@ func formatIEC(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// compactionFailureRatioResult judges the compactor's lifetime
+// failed/compacted ratio (🎯T167). unhealthy is false when the ratio is
+// within FailureRatioHealthy or when too few compactions have run to
+// judge it, in which case the returned result is meaningless and the
+// caller should fall through to its own healthy answer.
+//
+// Split out from the compactor.breaker check body so the severity
+// decision is testable from a plain HealthSnapshot, without standing up
+// a watcher and driving real ticks through it.
+func compactionFailureRatioResult(hs compact.HealthSnapshot) (diag.CheckResult, bool) {
+	ratio, sample, ok := hs.FailureRatio()
+	if !ok || ratio <= compact.FailureRatioHealthy {
+		return diag.CheckResult{}, false
+	}
+	detail := fmt.Sprintf(
+		"compaction failure ratio %.2f over %d compactions (healthy ≤ %.2f)",
+		ratio, sample, compact.FailureRatioHealthy)
+	remediation := "inspect mnemo_ops op=compactor for the outcome tallies and the daemon log " +
+		"for the failing sessions; sessions that fail repeatedly are quarantined (🎯T77) " +
+		"and stop being summarised entirely"
+	if ratio > compact.FailureRatioSevere {
+		return diag.Failure(detail, remediation), true
+	}
+	return diag.Warning(detail, remediation), true
 }

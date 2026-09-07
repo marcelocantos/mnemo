@@ -149,3 +149,28 @@ func (s *Store) walSize() (int64, error) {
 	}
 	return fi.Size(), nil
 }
+
+// checkpointPassive copies WAL frames back into the main database
+// without waiting for anything (🎯T168). Unlike the TRUNCATE checkpoint
+// above it blocks neither readers nor writers and never fails on a busy
+// database: it copies as far as the oldest active reader allows and
+// returns. That makes it safe to call from inside a long background pass,
+// which is the one place the periodic TRUNCATE worker cannot reach — it
+// requires a write lull, and a pass over millions of rows never gives it
+// one.
+//
+// Errors are logged rather than returned: a checkpoint that could not run
+// is a missed reclamation, not a failure of the work in progress.
+func (s *Store) checkpointPassive(reason string) {
+	if s.writeDB == nil {
+		return
+	}
+	var busy, log, checkpointed int
+	row := s.writeDB.QueryRow("PRAGMA wal_checkpoint(PASSIVE)")
+	if err := row.Scan(&busy, &log, &checkpointed); err != nil {
+		slog.Debug("wal: passive checkpoint failed", "reason", reason, "err", err)
+		return
+	}
+	slog.Debug("wal: passive checkpoint",
+		"reason", reason, "busy", busy, "frames", log, "checkpointed", checkpointed)
+}
