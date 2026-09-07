@@ -340,8 +340,10 @@ The packer yields (🎯T168): rows are compressed OUTSIDE the write
 transaction, which then holds SQLite's single writer only for the
 UPDATEs, and it pauses between batches in proportion to what each batch
 cost rather than by a fixed amount. It also spends a PASSIVE WAL
-checkpoint every 64 MiB, because the periodic TRUNCATE worker waits for
-a write lull that a multi-hour pack never provides. A pass takes longer
+checkpoint every 64 MiB. The maintenance worker now attempts a PASSIVE
+checkpoint on every tick too (🎯T172) — only TRUNCATE waits for a write
+lull, since PASSIVE blocks neither readers nor writers — so frames keep
+being copied during exactly the bursts that grow the WAL fastest. A pass takes longer
 in wall-clock and leaves the daemon answering.
 
 A row that cannot be written — a constraint violation, not a disk error
@@ -694,8 +696,16 @@ pending or in progress), `upgrade.available` (a newer release exists),
 `streams.overdue` (a convergence stream is behind), `watch.fds` (open
 descriptors against the vnode budget).
 
-*Is the database healthy?* — `db.readable`, `db.wal` (WAL size, and
-whether it is still growing — a long reader or a stuck writer).
+*Is the database healthy?* — `db.readable`, `db.wal`. A large WAL is not
+a fault: SQLite grows it, checkpoints it, and reuses it from offset zero,
+and `journal_size_limit` bounds it at rest. So the check warns only when
+the WAL is over its threshold AND still growing, and **fails** only when
+checkpoints have demonstrably stopped advancing — no frames copied for 45
+minutes while attempts continue (🎯T172), which means a reader is pinning
+the log. A backfill that grows the WAL to gigabytes while checkpoints
+keep copying frames is healthy and says so. The fail remediation is to
+restart the daemon; the WAL is checkpointed on a clean shutdown, so
+nothing is lost.
 
 *Is compaction working?* — `compactor.workdir` (the summariser's working
 dir exists and is writable), `claude.path` (the `claude` binary is on

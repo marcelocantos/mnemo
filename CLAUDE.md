@@ -183,8 +183,13 @@ invalidates history. Open `mnemo.db` with `store.SQLiteDriverName` (the
 triggers call `mnemo_text`). The packer yields to foreground work
 (🎯T168): rows are encoded outside the write transaction, the pause
 between batches scales with what the batch cost, and a PASSIVE WAL
-checkpoint runs every 64 MiB — the TRUNCATE worker cannot help, because
-it waits for a write lull a long pack never gives it. A row that fails a
+checkpoint runs every 64 MiB. The maintenance worker attempts PASSIVE on
+every tick as well (🎯T172); only TRUNCATE waits for a write lull, since
+PASSIVE blocks neither readers nor writers. `db.wal` treats WAL SIZE as
+normal — SQLite grows and reuses the buffer — and escalates to fail only
+when checkpoints have copied nothing for 45 minutes while still being
+attempted, which means a reader is pinning the log rather than the daemon
+being busy. A row that fails a
 constraint is skipped rather than stranding the family, with the reason
 recorded on the cursor (🎯T169). Ops: `mnemo_ops op=compress_status |
 compress_train | compress_gc`. Design: `docs/design/text-compression.md`.
