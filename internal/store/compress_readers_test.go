@@ -120,14 +120,17 @@ func bareColumnReads(s string) []string {
 	// cursor, existence checks) are fine on the base table.
 	// A literal pinning an idx_entries_*_m index is a deliberate base-table
 	// read of the materialised columns (a view cannot take INDEXED BY).
-	if entriesReadRe.MatchString(s) && entriesHotColsRe.MatchString(s) && !entriesDeleteRe.MatchString(s) &&
+	// Hot token paths read *_m on the base table so covering indexes work;
+	// leftover probes use length(raw) on z-NULL rows only (not the payload).
+	stripped := stripSafeEntries(s)
+	if entriesReadRe.MatchString(s) && entriesHotColsRe.MatchString(stripped) && !entriesDeleteRe.MatchString(s) &&
 		!strings.Contains(s, "INDEXED BY idx_entries_") {
 		out = append(out, "entries (use entries_v)")
 	}
 	return out
 }
 
-var safeTextRe = regexp.MustCompile(`(?i)mnemo_text\(\s*(\w+\.)?text\s*,\s*(\w+\.)?text_z\s*\)|\btext_z\b|\btext_\w+|\w+_text\b|'[^']*'|content_type\s*=\s*'text'|messages_fts\b|\btext\s*:|\bAS\s+text\b`)
+var safeTextRe = regexp.MustCompile(`(?i)mnemo_text\(\s*(\w+\.)?text\s*,\s*(\w+\.)?text_z\s*\)|length\(\s*(\w+\.)?text\s*\)|\btext_z\b|\btext_\w+|\w+_text\b|'[^']*'|content_type\s*=\s*'text'|messages_fts\b|\btext\s*:|\bAS\s+text\b`)
 
 // aliasedTextRe matches a qualified reference such as ex.text, which is a
 // read of a subquery alias, not of the base column, when the literal
@@ -145,7 +148,29 @@ func stripSafeText(s string) string {
 	return s
 }
 
-var safeContentRe = regexp.MustCompile(`(?i)mnemo_text\(\s*(\w+\.)?content\s*,\s*(\w+\.)?content_z\s*\)|\bcontent_z\b|\bcontent_\w+|\w+_content\b|'[^']*'|docs_fts\b`)
+var safeContentRe = regexp.MustCompile(`(?i)mnemo_text\(\s*(\w+\.)?content\s*,\s*(\w+\.)?content_z\s*\)|length\(\s*(\w+\.)?content\s*\)|\bcontent_z\b|\bcontent_\w+|\w+_content\b|'[^']*'|docs_fts\b`)
+
+var safeEntriesRe = regexp.MustCompile(`(?i)mnemo_raw\(\s*(\w+\.)?raw\s*,\s*(\w+\.)?raw_z\s*\)|length\(\s*(\w+\.)?raw\s*\)|\braw_z\b|\b\w+_m\b|\bAS\s+(raw|uuid|model|stop_reason|input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|agent_id|version|slug|is_sidechain|data_type|data_command|data_hook_event|top_tool_use_id|parent_tool_use_id)\b`)
+
+// cteAliasHotRe is e.<generated> as a CTE / subquery projection, not a
+// read of the base table's VIRTUAL columns. Used when the same literal
+// also contains FROM entries (the inner *_m scan) and FROM billable or
+// a ") e ON" join back to that projection.
+var cteAliasHotRe = regexp.MustCompile(`(?i)\be\.(raw|uuid|model|stop_reason|input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|agent_id|version|slug|is_sidechain|data_type|data_command|data_hook_event|top_tool_use_id|parent_tool_use_id)\b`)
+
+func stripSafeEntries(s string) string {
+	s = safeEntriesRe.ReplaceAllString(s, " ")
+	// The inner scan is FROM entries … *_m. Everything after FROM billable
+	// (or after the subquery is closed as ") e ON") names the projection,
+	// not the base table's VIRTUAL columns.
+	if i := strings.Index(s, "FROM billable"); i >= 0 {
+		s = s[:i]
+	}
+	if strings.Contains(s, "FROM entries") && strings.Contains(s, ") e ON") {
+		s = cteAliasHotRe.ReplaceAllString(s, " ")
+	}
+	return s
+}
 
 func stripSafeContent(s string) string { return safeContentRe.ReplaceAllString(s, " ") }
 

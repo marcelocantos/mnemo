@@ -444,7 +444,7 @@ func TestEntriesRawCompressedAndFieldsMaterialised(t *testing.T) {
 		t.Fatalf("entries_v: uuid=%s model=%s in=%d out=%d cr=%d cc=%d side=%d rawUUID=%s", uuid, model, in, out, cr, cc, side, rawUUID)
 	}
 
-	// Usage analytics ride on entries_v's materialised columns.
+	// Usage analytics ride on the base table's materialised columns.
 	usage, err := s.Usage(UsageParams{GroupBy: "model", Since: "2026-01-01T00:00:00Z", Until: "2026-12-31T00:00:00Z"})
 	if err != nil {
 		t.Fatal(err)

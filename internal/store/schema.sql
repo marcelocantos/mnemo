@@ -248,7 +248,17 @@ CREATE TABLE entries (
 			-- 🎯T152: zstd frame of the JSON line when compressed; raw is
 			-- then NULL (an empty string would make the generated columns
 			-- raise "malformed JSON"). Read through mnemo_raw(raw, raw_z).
-			raw_z BLOB
+			raw_z BLOB,
+			-- Dedup identity, cache-write TTL split, and agent-tree
+			-- parentage — materialised so Usage / context / dbstats /
+			-- AgentTrees never decode raw on the hot path.
+			message_id_m TEXT,
+			request_id_m TEXT,
+			cache_write_5m_m INTEGER,
+			cache_write_1h_m INTEGER,
+			src_uuid_m TEXT,
+			attribution_skill_m TEXT,
+			attribution_agent_m TEXT
 		);
 
 CREATE TABLE git_commits (
@@ -895,6 +905,11 @@ CREATE INDEX idx_decisions_timestamp ON decisions(timestamp);
 
 CREATE INDEX idx_doc_tree_refs_tree ON doc_tree_refs(tree_id);
 
+-- Leftover-membership (z IS NULL): CompressionStatus / packer / auto-backfill
+-- count through these instead of SUM(length(blob)), which pulled overflow
+-- pages and made compress.backfill ~22s on a packed multi-GB store.
+CREATE INDEX idx_docs_plain ON docs(id) WHERE content_z IS NULL;
+
 CREATE INDEX idx_docs_repo ON docs(repo);
 
 CREATE INDEX idx_docs_taxonomy ON docs(taxonomy) WHERE taxonomy != '';
@@ -931,6 +946,8 @@ CREATE INDEX idx_entries_data_type ON entries(data_type) WHERE data_type IS NOT 
 CREATE INDEX idx_entries_model ON entries(model) WHERE model IS NOT NULL;
 
 CREATE INDEX idx_entries_parent_tool_use_id ON entries(parent_tool_use_id) WHERE parent_tool_use_id IS NOT NULL;
+
+CREATE INDEX idx_entries_plain ON entries(id) WHERE raw_z IS NULL;
 
 CREATE INDEX idx_entries_project ON entries(project);
 
@@ -1007,6 +1024,8 @@ CREATE INDEX idx_messages_content_type ON messages(content_type);
 CREATE INDEX idx_messages_entry_id ON messages(entry_id) WHERE entry_id IS NOT NULL;
 
 CREATE INDEX idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
+
+CREATE INDEX idx_messages_plain ON messages(id) WHERE text_z IS NULL;
 
 CREATE INDEX idx_messages_project ON messages(project);
 
@@ -1333,7 +1352,14 @@ CREATE TRIGGER entries_materialise AFTER INSERT ON entries
 				data_command_m = data_command,
 				data_hook_event_m = data_hook_event,
 				top_tool_use_id_m = top_tool_use_id,
-				parent_tool_use_id_m = parent_tool_use_id
+				parent_tool_use_id_m = parent_tool_use_id,
+				message_id_m = json_extract(new.raw, '$.message.id'),
+				request_id_m = new.raw->>'$.requestId',
+				cache_write_5m_m = json_extract(new.raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'),
+				cache_write_1h_m = json_extract(new.raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'),
+				src_uuid_m = new.raw->>'$.sourceToolAssistantUUID',
+				attribution_skill_m = new.raw->>'$.attributionSkill',
+				attribution_agent_m = new.raw->>'$.attributionAgent'
 			WHERE id = new.id;
 		END;
 
@@ -1726,5 +1752,12 @@ CREATE VIEW entries_v AS
 			COALESCE(data_command_m, data_command) AS data_command,
 			COALESCE(data_hook_event_m, data_hook_event) AS data_hook_event,
 			COALESCE(top_tool_use_id_m, top_tool_use_id) AS top_tool_use_id,
-			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id
+			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id,
+			message_id_m AS message_id,
+			request_id_m AS request_id,
+			cache_write_5m_m AS cache_write_5m,
+			cache_write_1h_m AS cache_write_1h,
+			src_uuid_m AS src_uuid,
+			attribution_skill_m AS attribution_skill,
+			attribution_agent_m AS attribution_agent
 		FROM entries;

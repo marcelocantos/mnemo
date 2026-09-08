@@ -498,8 +498,8 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				outstanding += f.Outstanding
 				saved += f.BackfillSaved
 				if f.Outstanding > 0 || f.Running {
-					parts = append(parts, fmt.Sprintf("%s %s plain / %s packed",
-						f.Family, formatIEC(f.Outstanding), formatIEC(f.PackedBytes)))
+					parts = append(parts, fmt.Sprintf("%s %d leftover / %d packed",
+						f.Family, f.Outstanding, f.Compressed))
 				}
 			}
 			detail := snap.Phase

@@ -52,9 +52,9 @@ func TestAutoBackfillRestartsWhenPlainRowsReappear(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitOutstanding(t, s, FamilyMessagesText, 0)
-	if err := s.saveBackfillCursor(FamilyMessagesText, 1<<20, 0, true); err != nil {
-		t.Fatal(err)
-	}
+	// Leave the done cursor at max(id)+1 from the packer. Re-seeded
+	// rows must land at or past that id so the since-cursor probe
+	// (not a full-table blob scan) sees them.
 
 	seedLegacyMessages(t, s, 25)
 	st, err := s.CompressionStatus()

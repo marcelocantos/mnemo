@@ -297,8 +297,8 @@ func (h *callHandler) compressStatus() (string, bool, error) {
 	}
 	b.WriteString("\nFamilies:\n")
 	for _, f := range st.Families {
-		fmt.Fprintf(&b, "  %-16s rows=%d compressed=%d plain=%s packed=%s",
-			f.Family, f.Rows, f.Compressed, humanSize(f.PlainBytes), humanSize(f.PackedBytes))
+		fmt.Fprintf(&b, "  %-16s rows=%d compressed=%d leftover=%d",
+			f.Family, f.Rows, f.Compressed, f.Outstanding)
 		switch {
 		case f.Running:
 			fmt.Fprintf(&b, "  backfill: running (next id %d, saved %s)", f.BackfillNext, humanSize(f.BackfillSaved))

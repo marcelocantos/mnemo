@@ -420,9 +420,10 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  -- fully-caught-up Claude session legitimately sums to zero past
 		  -- its cursor, and switching THAT to a message count would make
 		  -- every compacted session owed again, forever.
-		  AND (CASE WHEN s.sess_tokens > 0 THEN COALESCE((
-		        SELECT SUM(e.output_tokens + e.cache_creation_tokens)
-		        FROM entries_v e
+	          AND (CASE WHEN s.sess_tokens > 0 THEN COALESCE((
+		        SELECT SUM(e.output_tokens_m + e.cache_creation_tokens_m)
+		        FROM entries e
+		        INDEXED BY idx_entries_addenda_m
 		        WHERE e.session_id = s.session_id
 		          AND e.type = 'assistant'
 		          AND e.id > COALESCE((

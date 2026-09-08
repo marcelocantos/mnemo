@@ -60,6 +60,21 @@ func TestPanicBecomesFail(t *testing.T) {
 	}
 }
 
+func TestRunRecordsDurationMS(t *testing.T) {
+	r := NewRegistry()
+	r.Register(Check{Name: "slowish", Tier: Fast, Run: func(context.Context) CheckResult {
+		time.Sleep(5 * time.Millisecond)
+		return Healthy("ok")
+	}})
+	rep := r.Run(context.Background(), true, now)
+	if len(rep.Results) != 1 {
+		t.Fatalf("results: %+v", rep)
+	}
+	if rep.Results[0].DurationMS < 5 {
+		t.Fatalf("duration_ms=%d, want >= 5", rep.Results[0].DurationMS)
+	}
+}
+
 func TestSeverityAndTierStrings(t *testing.T) {
 	if OK.String() != "ok" || Warn.String() != "warn" || Fail.String() != "fail" {
 		t.Error("severity strings")

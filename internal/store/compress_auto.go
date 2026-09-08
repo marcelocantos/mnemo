@@ -82,7 +82,7 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 				return
 			}
 		}
-		outstanding, err := s.familyOutstanding(fs)
+		outstanding, done, err := s.familyOutstandingForAuto(family, fs)
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("compress backfill outstanding probe failed", "family", family, "err", err)
@@ -90,11 +90,15 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 			continue
 		}
 		if outstanding == 0 {
+			// done=true and nothing past the cursor: do not re-scan the
+			// historical leftover (short rows stay z-NULL forever).
 			continue
 		}
-		if err := s.reopenIfMarkedDone(family); err != nil {
-			slog.Warn("compress backfill reopen failed", "family", family, "err", err)
-			continue
+		if done {
+			if err := s.reopenBackfill(family); err != nil {
+				slog.Warn("compress backfill reopen failed", "family", family, "err", err)
+				continue
+			}
 		}
 		s.backfill.setPhase(CompressPhaseRunning, family)
 		s.backfill.setYield(compressAutoYield)
@@ -135,26 +139,13 @@ func (s *Store) totalOutstanding() (int64, error) {
 		if err != nil {
 			continue
 		}
-		n, err := s.familyOutstanding(fs)
+		n, _, err := s.familyOutstandingForAuto(family, fs)
 		if err != nil {
 			return 0, err
 		}
 		sum += n
 	}
 	return sum, nil
-}
-
-func (s *Store) reopenIfMarkedDone(family string) error {
-	var done int
-	err := s.readDB.QueryRow(`SELECT done FROM compression_gc WHERE family = ?`, family).Scan(&done)
-	if err != nil {
-		// No cursor yet: CompressBackfill will create one.
-		return nil
-	}
-	if done != 1 {
-		return nil
-	}
-	return s.reopenBackfill(family)
 }
 
 func (s *Store) autoBackfillEnabled() bool {

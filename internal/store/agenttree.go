@@ -148,20 +148,21 @@ func (s *Store) AgentTrees(p AgentTreeParams) ([]AgentTree, error) {
 			SELECT
 				e.session_id AS session_id,
 				e.timestamp AS timestamp,
-				COALESCE(e.model, '') AS model,
-				COALESCE(e.is_sidechain, 0) AS sidechain,
-				COALESCE(e.agent_id, '') AS agent_id,
-				COALESCE(e.raw->>'$.uuid', '') AS uuid,
-				COALESCE(e.raw->>'$.sourceToolAssistantUUID', '') AS src_uuid,
-				COALESCE(e.raw->>'$.attributionSkill', '') AS skill,
-				COALESCE(e.raw->>'$.attributionAgent', '') AS agent_type,
-				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
-				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
-				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
-				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
+				COALESCE(e.model_m, '') AS model,
+				COALESCE(e.is_sidechain_m, 0) AS sidechain,
+				COALESCE(e.agent_id_m, '') AS agent_id,
+				COALESCE(e.uuid_m, '') AS uuid,
+				COALESCE(e.src_uuid_m, '') AS src_uuid,
+				COALESCE(e.attribution_skill_m, '') AS skill,
+				COALESCE(e.attribution_agent_m, '') AS agent_type,
+				MAX(COALESCE(e.input_tokens_m, 0))          AS input_tokens,
+				MAX(COALESCE(e.output_tokens_m, 0))         AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens_m, 0))     AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens_m, 0)) AS cache_creation_tokens,
 				MAX(COALESCE(%s, 0)) AS cw5m,
 				MAX(COALESCE(%s, 0)) AS cw1h
-			FROM entries_v e
+			FROM entries e
+			INDEXED BY idx_entries_assistant_usage_m
 			LEFT JOIN session_meta sm ON sm.session_id = e.session_id
 			WHERE %s
 			GROUP BY %s

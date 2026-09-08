@@ -265,10 +265,11 @@ func (h *Handler) context(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN (
 			SELECT
 				session_id,
-				model,
-				MAX(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0)) AS peak_input
-			FROM entries_v
-			WHERE input_tokens IS NOT NULL
+				model_m AS model,
+				MAX(COALESCE(input_tokens_m, 0) + COALESCE(cache_read_tokens_m, 0)) AS peak_input
+			FROM entries
+			INDEXED BY idx_entries_assistant_usage_m
+			WHERE type = 'assistant' AND input_tokens_m IS NOT NULL
 			GROUP BY session_id
 		) e ON e.session_id = s.session_id
 		WHERE s.last_msg >= datetime('now', '-' || ? || ' days')
@@ -523,14 +524,15 @@ func (h *Handler) dbstats(w http.ResponseWriter, r *http.Request) {
 	// Per-model token totals for accurate cost estimation.
 	costRows, err := mem.Query(`
 		SELECT
-			COALESCE(model, '') AS model,
-			COALESCE(SUM(input_tokens), 0)          AS input_tokens,
-			COALESCE(SUM(output_tokens), 0)         AS output_tokens,
-			COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
-			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
-		FROM entries_v
-		WHERE input_tokens IS NOT NULL
-		GROUP BY model
+			COALESCE(model_m, '') AS model,
+			COALESCE(SUM(input_tokens_m), 0)          AS input_tokens,
+			COALESCE(SUM(output_tokens_m), 0)         AS output_tokens,
+			COALESCE(SUM(cache_read_tokens_m), 0)     AS cache_read_tokens,
+			COALESCE(SUM(cache_creation_tokens_m), 0) AS cache_creation_tokens
+		FROM entries
+		INDEXED BY idx_entries_assistant_usage_m
+		WHERE type = 'assistant' AND input_tokens_m IS NOT NULL
+		GROUP BY model_m
 	`)
 	if err != nil {
 		slog.Warn("api/dbstats: cost query failed", "err", err)

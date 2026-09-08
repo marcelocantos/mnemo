@@ -105,6 +105,7 @@ type Result struct {
 	Tier        string `json:"tier"`
 	Detail      string `json:"detail,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
+	DurationMS  int64  `json:"duration_ms"`
 }
 
 // Report is the outcome of running a set of checks at a point in time.
@@ -203,8 +204,10 @@ func (r *Registry) Run(ctx context.Context, full bool, now time.Time) Report {
 
 // runOne runs a single check with panic recovery and maps it to a Result.
 func runOne(ctx context.Context, c Check) (res Result) {
+	start := time.Now()
 	res = Result{Name: c.Name, Tier: c.Tier.String(), Severity: Fail.String()}
 	defer func() {
+		res.DurationMS = time.Since(start).Milliseconds()
 		if r := recover(); r != nil {
 			res.Severity = Fail.String()
 			res.Detail = "check panicked"
@@ -218,5 +221,6 @@ func runOne(ctx context.Context, c Check) (res Result) {
 		Severity:    cr.Severity.String(),
 		Detail:      cr.Detail,
 		Remediation: cr.Remediation,
+		DurationMS:  time.Since(start).Milliseconds(),
 	}
 }

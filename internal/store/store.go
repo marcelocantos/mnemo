@@ -97,6 +97,7 @@ type Store struct {
 	// modern insert statements bind (🎯T170). See modernInsertShape.
 	insertShapeOnce   sync.Once
 	insertShapeModern bool
+	insertShapeUsage  bool // message_id_m and siblings exist (this release)
 
 	// codec packs large text columns for storage (🎯T151); backfill
 	// tracks the historical-row GC. Both have their own locking. bgCtx
@@ -738,27 +739,20 @@ type UncountedVolume struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 }
 
-// The billable-call identity and the cache-write TTL split, extracted
-// inline from the raw JSON (🎯T135).
+// The billable-call identity and the cache-write TTL split (🎯T135).
 //
-// These were originally added as GENERATED columns on `entries`, which is
-// the obvious place for them and does not work. sqlift plans a full table
-// REBUILD to add a column to an existing table, and the append-only schema
-// policy forbids rebuilds — so the migration could never be applied to any
-// existing installation. The whole test suite stayed green regardless,
-// because every test store is created fresh and is therefore already on
-// the current schema. It surfaced only when the migration was planned
-// against a copy of a real database.
-//
-// Extracting inline costs nothing over the column form. SQLite's generated
-// columns here are VIRTUAL, meaning computed on read rather than stored —
-// so `json_extract(raw, ...)` in the query and a virtual column reading
-// the same path do identical work. The column was only ever notation.
+// These started as inline json_extract(e.raw, …) because GENERATED
+// columns on an existing table force a sqlift REBUILD, which AllowNone
+// refuses. After raw is compressed, that extract goes through
+// entries_v → mnemo_raw and reads overflow pages — the 18–30s dashboard
+// cost. The values are now stored in nullable append-only *_m columns
+// (filled at ingest and by MaterialiseUsageFields), so the hot SELECT
+// never decodes raw.
 const (
-	sqlMessageID    = `json_extract(e.raw, '$.message.id')`
-	sqlRequestID    = `e.raw->>'$.requestId'`
-	sqlCacheWrite5m = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')`
-	sqlCacheWrite1h = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')`
+	sqlMessageID    = `e.message_id_m`
+	sqlRequestID    = `e.request_id_m`
+	sqlCacheWrite5m = `e.cache_write_5m_m`
+	sqlCacheWrite1h = `e.cache_write_1h_m`
 )
 
 // effectiveDedupKey reads the configured deduplication key, falling back
@@ -1414,6 +1408,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 			}
 			s.codec.entriesPackable.Store(true)
 			slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
+			if ures, uerr := s.MaterialiseUsageFields(ctx); uerr != nil {
+				slog.Warn("entries usage fields materialise failed", "err", uerr)
+			} else if ures.Rows > 0 {
+				slog.Info("entries usage fields materialised", "rows", ures.Rows, "updated", ures.Compressed)
+			}
 			return nil
 		},
 	})
@@ -3742,6 +3741,41 @@ const (
 		 uuid_m, model_m, stop_reason_m, input_tokens_m, output_tokens_m,
 		 cache_read_tokens_m, cache_creation_tokens_m, agent_id_m, version_m, slug_m,
 		 is_sidechain_m, data_type_m, data_command_m, data_hook_event_m,
+		 top_tool_use_id_m, parent_tool_use_id_m,
+		 message_id_m, request_id_m, cache_write_5m_m, cache_write_1h_m,
+		 src_uuid_m, attribution_skill_m, attribution_agent_m)
+		VALUES (?1, ?2, ?3, ?4, CASE WHEN ?6 IS NULL THEN jsonb(?5) END, ?6,
+		 COALESCE(?5->>'$.uuid', ?5->>'$.messageId'),
+		 ?5->>'$.message.model',
+		 ?5->>'$.message.stop_reason',
+		 json_extract(?5, '$.message.usage.input_tokens'),
+		 json_extract(?5, '$.message.usage.output_tokens'),
+		 json_extract(?5, '$.message.usage.cache_read_input_tokens'),
+		 json_extract(?5, '$.message.usage.cache_creation_input_tokens'),
+		 ?5->>'$.agentId',
+		 ?5->>'$.version',
+		 ?5->>'$.slug',
+		 CASE WHEN json_extract(?5, '$.isSidechain') THEN 1 ELSE 0 END,
+		 ?5->>'$.data.type',
+		 ?5->>'$.data.command',
+		 ?5->>'$.data.hookEvent',
+		 ?5->>'$.toolUseID',
+		 ?5->>'$.parentToolUseID',
+		 ?5->>'$.message.id',
+		 ?5->>'$.requestId',
+		 json_extract(?5, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'),
+		 json_extract(?5, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'),
+		 ?5->>'$.sourceToolAssistantUUID',
+		 ?5->>'$.attributionSkill',
+		 ?5->>'$.attributionAgent')`
+	// entryInsertT152SQL is the modern insert before the usage-identity
+	// columns landed. Used while a deferred upgrade has added uuid_m
+	// but not yet message_id_m — the T170 window must still bind uuid_m.
+	entryInsertT152SQL = `INSERT OR IGNORE INTO entries
+		(session_id, project, type, timestamp, raw, raw_z,
+		 uuid_m, model_m, stop_reason_m, input_tokens_m, output_tokens_m,
+		 cache_read_tokens_m, cache_creation_tokens_m, agent_id_m, version_m, slug_m,
+		 is_sidechain_m, data_type_m, data_command_m, data_hook_event_m,
 		 top_tool_use_id_m, parent_tool_use_id_m)
 		VALUES (?1, ?2, ?3, ?4, CASE WHEN ?6 IS NULL THEN jsonb(?5) END, ?6,
 		 COALESCE(?5->>'$.uuid', ?5->>'$.messageId'),
@@ -3814,8 +3848,11 @@ func (s *Store) newWriterState() (*writerState, error) {
 	// the legacy statements are not a fallback but the only valid SQL.
 	packed := s.modernInsertShape()
 	entrySQL := entryInsertSQL
-	if !packed {
+	switch {
+	case !packed:
 		entrySQL = entryInsertLegacySQL
+	case !s.usageInsertShape():
+		entrySQL = entryInsertT152SQL
 	}
 	entryStmt, err := tx.Prepare(entrySQL)
 	if err != nil {
@@ -5259,7 +5296,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		args = append(args, pattern, pattern)
 	}
 	if p.Model != "" {
-		where = append(where, "e.model LIKE ?")
+		where = append(where, "e.model_m LIKE ?")
 		args = append(args, p.Model+"%")
 	}
 
@@ -5312,18 +5349,19 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		WITH billable AS (
 			SELECT
 				e.timestamp AS timestamp,
-				e.model AS model,
+				e.model_m AS model,
 				e.session_id AS session_id,
 				COALESCE(sm.source, 'unknown') AS source,
 				MAX(CASE WHEN COALESCE(sm.repo, '') != '' THEN sm.repo ELSE COALESCE(sm.cwd, '') END) AS repo_key,
 				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
-				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
-				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
-				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
-				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
+				MAX(COALESCE(e.input_tokens_m, 0))          AS input_tokens,
+				MAX(COALESCE(e.output_tokens_m, 0))         AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens_m, 0))     AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens_m, 0)) AS cache_creation_tokens,
 				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
 				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
-			FROM entries_v e
+			FROM entries e
+			INDEXED BY idx_entries_assistant_usage_m
 			%s
 			WHERE %s
 			GROUP BY %s
@@ -5604,16 +5642,17 @@ func (s *Store) usageByBlock(
 		WITH billable AS (
 			SELECT
 				e.timestamp AS timestamp,
-				COALESCE(e.model, '') AS model,
+				COALESCE(e.model_m, '') AS model,
 				COALESCE(sm.source, 'unknown') AS source,
 				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
-				MAX(COALESCE(e.input_tokens, 0))             AS input_tokens,
-				MAX(COALESCE(e.output_tokens, 0))            AS output_tokens,
-				MAX(COALESCE(e.cache_read_tokens, 0))        AS cache_read_tokens,
-				MAX(COALESCE(e.cache_creation_tokens, 0))    AS cache_creation_tokens,
+				MAX(COALESCE(e.input_tokens_m, 0))             AS input_tokens,
+				MAX(COALESCE(e.output_tokens_m, 0))            AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens_m, 0))        AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens_m, 0))    AS cache_creation_tokens,
 				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
 				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
-			FROM entries_v e
+			FROM entries e
+			INDEXED BY idx_entries_assistant_usage_m
 			%s
 			WHERE %s
 			GROUP BY %s
@@ -5804,7 +5843,7 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 		args = append(args, pattern, pattern)
 	}
 	if model != "" {
-		where = append(where, "e.model LIKE ?")
+		where = append(where, "e.model_m LIKE ?")
 		args = append(args, model+"%")
 	}
 
@@ -5815,7 +5854,8 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 
 	q := fmt.Sprintf(`
 		SELECT e.session_id, e.timestamp
-		FROM entries_v e
+		FROM entries e
+		INDEXED BY idx_entries_assistant_usage_m
 		%s
 		WHERE %s
 		ORDER BY e.session_id, e.timestamp
@@ -5880,7 +5920,7 @@ func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float6
 		args = append(args, pattern, pattern)
 	}
 	if model != "" {
-		where = append(where, "e.model LIKE ?")
+		where = append(where, "e.model_m LIKE ?")
 		args = append(args, model+"%")
 	}
 
@@ -5891,7 +5931,8 @@ func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float6
 
 	q := fmt.Sprintf(`
 		SELECT e.session_id, e.timestamp
-		FROM entries_v e
+		FROM entries e
+		INDEXED BY idx_entries_assistant_usage_m
 		%s
 		WHERE %s
 		ORDER BY e.session_id, e.timestamp
@@ -8695,8 +8736,21 @@ func (s *Store) modernInsertShape() bool {
 			return
 		}
 		s.insertShapeModern = n > 0
+		var u int
+		if err := s.readDB.QueryRow(`
+			SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'message_id_m'`).Scan(&u); err == nil {
+			s.insertShapeUsage = u > 0
+		}
 	})
 	return s.insertShapeModern
+}
+
+// usageInsertShape reports whether the usage-identity *_m columns exist.
+// False during a deferred upgrade from a T152 schema: the modern insert
+// must still bind uuid_m (🎯T170) but cannot name message_id_m yet.
+func (s *Store) usageInsertShape() bool {
+	s.modernInsertShape()
+	return s.insertShapeUsage
 }
 
 // forceLegacyInsertShapeForTest pins modernInsertShape to false so a test

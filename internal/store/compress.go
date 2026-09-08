@@ -396,13 +396,18 @@ type CompressionStatus struct {
 }
 
 // FamilyStatus is one compressed column's row accounting.
+//
+// Byte totals are not live-scanned: SUM(length(blob)) pulled overflow
+// pages and made compress.backfill ~22s on a packed multi-GB store.
+// Rows / Compressed / Outstanding are membership counts (z IS NULL via
+// the leftover indexes). BackfillSaved is the durable byte counter.
 type FamilyStatus struct {
 	Family        string
 	Rows          int64
 	Compressed    int64
-	PlainBytes    int64 // bytes still held in the legacy column
-	PackedBytes   int64 // bytes held in the *_z column
-	Outstanding   int64 // compressible plain bytes (length ≥ compressMinBytes, z-col NULL)
+	PlainBytes    int64 // retained for compress_status; not live-scanned (always 0)
+	PackedBytes   int64 // retained for compress_status; not live-scanned (always 0)
+	Outstanding   int64 // leftover rows (z IS NULL); compressible subset when a done cursor exists
 	BackfillDone  bool
 	BackfillNext  int64 // next row id the backfill will visit
 	BackfillSaved int64 // bytes saved so far by the backfill
@@ -457,7 +462,14 @@ const entriesMaterialiseSet = `uuid_m = COALESCE(uuid_m, uuid),
 	data_command_m = COALESCE(data_command_m, data_command),
 	data_hook_event_m = COALESCE(data_hook_event_m, data_hook_event),
 	top_tool_use_id_m = COALESCE(top_tool_use_id_m, top_tool_use_id),
-	parent_tool_use_id_m = COALESCE(parent_tool_use_id_m, parent_tool_use_id)`
+	parent_tool_use_id_m = COALESCE(parent_tool_use_id_m, parent_tool_use_id),
+	message_id_m = COALESCE(message_id_m, json_extract(raw, '$.message.id')),
+	request_id_m = COALESCE(request_id_m, raw->>'$.requestId'),
+	cache_write_5m_m = COALESCE(cache_write_5m_m, json_extract(raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')),
+	cache_write_1h_m = COALESCE(cache_write_1h_m, json_extract(raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')),
+	src_uuid_m = COALESCE(src_uuid_m, raw->>'$.sourceToolAssistantUUID'),
+	attribution_skill_m = COALESCE(attribution_skill_m, raw->>'$.attributionSkill'),
+	attribution_agent_m = COALESCE(attribution_agent_m, raw->>'$.attributionAgent')`
 
 var familySpecs = map[string]familySpec{
 	FamilyMessagesText: {table: "messages", plainCol: "text", zCol: "text_z",
@@ -507,18 +519,18 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		fs := familySpecs[family]
 		var f FamilyStatus
 		f.Family = family
-		// Table and column names come from familySpecs, not the caller.
-		q := fmt.Sprintf(`
-			SELECT COUNT(*),
-			       COALESCE(SUM(%[2]s IS NOT NULL), 0),
-			       COALESCE(SUM(length(%[3]s)), 0),
-			       COALESCE(SUM(length(%[2]s)), 0)
-			FROM %[1]s`, fs.table, fs.zCol, fs.plainCol)
-		if err := s.readDB.QueryRow(q).Scan(&f.Rows, &f.Compressed, &f.PlainBytes, &f.PackedBytes); err != nil {
+		// Membership only: COUNT(*) uses the PK; leftover uses the
+		// partial z-IS-NULL index. Neither follows overflow pointers.
+		if err := s.readDB.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, fs.table)).Scan(&f.Rows); err != nil {
 			return st, err
 		}
+		leftover, err := s.familyLeftoverCount(fs, 0)
+		if err != nil {
+			return st, err
+		}
+		f.Compressed = f.Rows - leftover
 		var done int
-		err := s.readDB.QueryRow(`
+		err = s.readDB.QueryRow(`
 			SELECT done, next_id, saved_bytes, updated_at, COALESCE(last_error, '')
 			FROM compression_gc
 			WHERE family = ?`, family).Scan(&done, &f.BackfillNext, &f.BackfillSaved, &f.BackfillAt, &f.LastError)
@@ -527,27 +539,71 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		}
 		f.BackfillDone = done == 1
 		f.Running = s.backfill.running(family)
-		if n, err := s.familyOutstanding(fs); err != nil {
-			return st, err
+		if f.BackfillDone {
+			// Past the done cursor only: length() touches new leftovers,
+			// never the packed historical mass.
+			if n, err := s.familyOutstandingSince(fs, f.BackfillNext); err != nil {
+				return st, err
+			} else {
+				f.Outstanding = n
+			}
 		} else {
-			f.Outstanding = n
+			f.Outstanding = leftover
 		}
 		st.Families = append(st.Families, f)
 	}
 	return st, nil
 }
 
-// familyOutstanding is the compressible residue: plain rows that would
-// pay to pack. Short rows and already-packed sentinels are excluded so
-// a finished family does not look unfinished forever.
-func (s *Store) familyOutstanding(fs familySpec) (int64, error) {
-	q := fmt.Sprintf(`
-		SELECT COALESCE(SUM(length(%[2]s)), 0)
-		FROM %[1]s
-		WHERE %[3]s IS NULL AND length(%[2]s) >= ?`, fs.table, fs.plainCol, fs.zCol)
+// familyLeftoverCount is leftover membership: rows whose z column is
+// still NULL, optionally at or past minID. Index-only via idx_*_plain.
+func (s *Store) familyLeftoverCount(fs familySpec, minID int64) (int64, error) {
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s IS NULL AND id >= ?`, fs.table, fs.zCol)
 	var n int64
-	err := s.readDB.QueryRow(q, compressMinBytes).Scan(&n)
+	err := s.readDB.QueryRow(q, minID).Scan(&n)
 	return n, err
+}
+
+// familyOutstandingSince is the compressible residue past minID: plain
+// rows that would pay to pack. length() runs only on this (usually
+// empty) set — never SUM over packed overflow pages.
+func (s *Store) familyOutstandingSince(fs familySpec, minID int64) (int64, error) {
+	q := fmt.Sprintf(`
+		SELECT COUNT(*) FROM %s
+		WHERE id >= ? AND %s IS NULL AND length(%s) >= ?`,
+		fs.table, fs.zCol, fs.plainCol)
+	var n int64
+	err := s.readDB.QueryRow(q, minID, compressMinBytes).Scan(&n)
+	return n, err
+}
+
+// familyCursor reads the persisted backfill cursor. Missing row is
+// next=0, done=false — the packer has not started.
+func (s *Store) familyCursor(family string) (next int64, done bool, err error) {
+	var d int
+	err = s.readDB.QueryRow(`SELECT next_id, done FROM compression_gc WHERE family = ?`, family).Scan(&next, &d)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return next, d == 1, err
+}
+
+// familyOutstandingForAuto is the auto-backfill probe: when the family
+// is marked done, only new rows past the cursor are counted (and the
+// 64-byte threshold applies so short ingest does not reopen the walk).
+// Otherwise leftover membership is enough — the packer is already going
+// to visit those rows.
+func (s *Store) familyOutstandingForAuto(family string, fs familySpec) (n int64, done bool, err error) {
+	next, done, err := s.familyCursor(family)
+	if err != nil {
+		return 0, false, err
+	}
+	if done {
+		n, err = s.familyOutstandingSince(fs, next)
+		return n, true, err
+	}
+	n, err = s.familyLeftoverCount(fs, 0)
+	return n, false, err
 }
 
 // reopenBackfill clears the completion marker so a newly-detected
@@ -1158,6 +1214,85 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 		res.Compressed += n
 		next = hi.Int64 + 1
 		if err := s.saveBackfillCursor(entriesFieldsFamily, next, 0, false); err != nil {
+			return err
+		}
+	}
+}
+
+// entriesUsageFieldsFamily is the cursor for filling message_id_m /
+// request_id_m / cache-write / agent-tree columns on historical rows.
+// Independent of entries.fields so a packed store can backfill these
+// without reopening the T152 pass (which would block entries.raw packing).
+const entriesUsageFieldsFamily = "entries.usage_fields"
+
+// MaterialiseUsageFields copies usage/tree identity out of each entry's
+// JSON (plain or compressed) into the dedicated *_m columns. Idempotent
+// and resumable. New ingest writes the columns itself; this pass exists
+// for rows packed before those columns existed.
+func (s *Store) MaterialiseUsageFields(ctx context.Context) (BackfillResult, error) {
+	res := BackfillResult{Family: entriesUsageFieldsFamily}
+	if !s.CompressionReady() {
+		return res, errors.New("compression schema not ready (deferred upgrade still running?)")
+	}
+	if !s.backfill.start(entriesUsageFieldsFamily) {
+		return res, fmt.Errorf("%s: already running", entriesUsageFieldsFamily)
+	}
+	err := s.materialiseUsageFields(ctx, &res)
+	s.backfill.finish(entriesUsageFieldsFamily, err)
+	return res, err
+}
+
+func (s *Store) materialiseUsageFields(ctx context.Context, res *BackfillResult) error {
+	var next int64
+	var done int
+	err := s.readDB.QueryRow(`SELECT next_id, done FROM compression_gc WHERE family = ?`, entriesUsageFieldsFamily).Scan(&next, &done)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if done == 1 {
+		res.Done = true
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var lo, hi sql.NullInt64
+		var count int64
+		err := s.readDB.QueryRowContext(ctx, `
+			SELECT MIN(id), MAX(id), COUNT(*) FROM (
+				SELECT id FROM entries WHERE id >= ? ORDER BY id LIMIT ?)`,
+			next, backfillBatchRows).Scan(&lo, &hi, &count)
+		if err != nil {
+			return err
+		}
+		if !hi.Valid {
+			res.Done = true
+			return s.saveBackfillCursor(entriesUsageFieldsFamily, next, 0, true)
+		}
+		// One mnemo_raw per row; the UPDATE FROM subquery is the decode.
+		r, err := s.writeDB.ExecContext(ctx, `
+			UPDATE entries SET
+				message_id_m = COALESCE(entries.message_id_m, json_extract(d.decoded, '$.message.id'), ''),
+				request_id_m = COALESCE(entries.request_id_m, json_extract(d.decoded, '$.requestId'), ''),
+				cache_write_5m_m = COALESCE(entries.cache_write_5m_m, json_extract(d.decoded, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')),
+				cache_write_1h_m = COALESCE(entries.cache_write_1h_m, json_extract(d.decoded, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')),
+				src_uuid_m = COALESCE(entries.src_uuid_m, json_extract(d.decoded, '$.sourceToolAssistantUUID'), ''),
+				attribution_skill_m = COALESCE(entries.attribution_skill_m, json_extract(d.decoded, '$.attributionSkill'), ''),
+				attribution_agent_m = COALESCE(entries.attribution_agent_m, json_extract(d.decoded, '$.attributionAgent'), '')
+			FROM (
+				SELECT id, mnemo_raw(raw, raw_z) AS decoded FROM entries
+				WHERE id BETWEEN ? AND ?
+			) d
+			WHERE entries.id = d.id`, lo.Int64, hi.Int64)
+		if err != nil {
+			return err
+		}
+		n, _ := r.RowsAffected()
+		res.Rows += count
+		res.Compressed += n
+		next = hi.Int64 + 1
+		if err := s.saveBackfillCursor(entriesUsageFieldsFamily, next, 0, false); err != nil {
 			return err
 		}
 	}
