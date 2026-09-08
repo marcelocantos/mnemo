@@ -1393,24 +1393,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		name:     "entries-materialise",
 		requires: []Capability{CapCodecReady},
 		provides: []Capability{CapEntriesMaterialised},
-		run: func(ctx context.Context) error {
-			if ok, err := s.EntriesMaterialised(); err == nil && ok {
-				s.codec.entriesPackable.Store(true)
-				return nil
-			}
-			res, err := s.MaterialiseEntries(ctx)
-			if err != nil {
-				return err
-			}
-			s.codec.entriesPackable.Store(true)
-			slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
-			if ures, uerr := s.MaterialiseUsageFields(ctx); uerr != nil {
-				return uerr
-			} else if ures.Rows > 0 {
-				slog.Info("entries usage fields materialised", "rows", ures.Rows, "updated", ures.Compressed)
-			}
-			return nil
-		},
+		run:      s.runEntriesMaterialisePhase,
 	})
 
 	return s, nil
@@ -3767,7 +3750,10 @@ const (
 		 ?5->>'$.attributionAgent',
 		 ?5->>'$.toolUseResult.agentId',
 		 ?5->>'$.message.content[0].tool_use_id',
-		 length(?5), length(?6))`
+		 -- BYTES, not characters: length() counts characters on TEXT, and
+		 -- every other writer of plain_len (Go's len(), fillLengths) means
+		 -- bytes. z_len needs no cast — ?6 is already a BLOB.
+		 length(CAST(?5 AS BLOB)), length(?6))`
 	// entryInsertLegacySQL is used while a deferred schema upgrade has
 	// not yet added the *_m columns (🎯T114.1 serves on the old schema).
 	entryInsertLegacySQL = `INSERT OR IGNORE INTO entries
@@ -8730,4 +8716,38 @@ func (s *Store) modernInsertShape() bool {
 func (s *Store) forceLegacyInsertShapeForTest() {
 	s.insertShapeOnce.Do(func() {})
 	s.insertShapeModern = false
+}
+
+// runEntriesMaterialisePhase is the entries-materialise startup phase.
+//
+// Named rather than inlined so a test can drive the real wiring
+// (🎯T174). The bug this replaced was invisible to a test that called
+// MaterialiseUsageFields directly: the pass worked perfectly and was
+// simply never reached.
+//
+// The two passes have INDEPENDENT cursors and are gated independently.
+// entries.fields is done=1 on every store that upgraded from 0.94+, so
+// nesting the usage pass under its "still needs running" branch meant the
+// usage twins were never filled on exactly the installations they exist
+// for. The hot paths read those columns with no COALESCE fallback, so a
+// NULL message_id_m does not error — it makes dedupGroupSQL fall back to
+// a per-row key, silently disabling deduplication for all history.
+func (s *Store) runEntriesMaterialisePhase(ctx context.Context) error {
+	if ok, err := s.EntriesMaterialised(); err != nil || !ok {
+		res, merr := s.MaterialiseEntries(ctx)
+		if merr != nil {
+			return merr
+		}
+		slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
+	}
+	s.codec.entriesPackable.Store(true)
+
+	ures, err := s.MaterialiseUsageFields(ctx)
+	if err != nil {
+		return err
+	}
+	if ures.Rows > 0 {
+		slog.Info("entries usage fields materialised", "rows", ures.Rows, "updated", ures.Compressed)
+	}
+	return nil
 }

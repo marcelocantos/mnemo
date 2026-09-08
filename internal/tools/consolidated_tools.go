@@ -299,6 +299,12 @@ func (h *callHandler) compressStatus() (string, bool, error) {
 	for _, f := range st.Families {
 		fmt.Fprintf(&b, "  %-16s rows=%d compressed=%d plain=%s packed=%s",
 			f.Family, f.Rows, f.Compressed, humanSize(f.PlainBytes), humanSize(f.PackedBytes))
+		if f.LengthsPending > 0 {
+			// Say the byte totals are provisional rather than letting a
+			// reader take an understated number as settled (🎯T173).
+			fmt.Fprintf(&b, " (%d rows unmeasured — byte totals understate until the background pass finishes)",
+				f.LengthsPending)
+		}
 		switch {
 		case f.Running:
 			fmt.Fprintf(&b, "  backfill: running (next id %d, saved %s)", f.BackfillNext, humanSize(f.BackfillSaved))

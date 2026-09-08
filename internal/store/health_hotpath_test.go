@@ -5,11 +5,52 @@ package store
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// tokenColRe matches the billable columns whose generated forms are NULL
+// on packed rows. A query selecting these from entries_v defeats the
+// covering indexes the health-latency work exists to reach.
+var tokenColRe = regexp.MustCompile(`\b(input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|cache_write_5m|cache_write_1h)\b`)
+
+// sqlLiterals returns the string literals of a Go file, so a ratchet can
+// judge one query at a time instead of the whole file at once.
+func sqlLiterals(t *testing.T, path string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		bl, ok := n.(*ast.BasicLit)
+		if !ok || bl.Kind != token.STRING {
+			return true
+		}
+		if v, err := strconv.Unquote(bl.Value); err == nil {
+			out = append(out, v)
+		}
+		return true
+	})
+	return out
+}
+
+func firstLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
+}
 
 // TestLeftoverMembershipIndexesExist is the schema half of the
 // compress.backfill fix: leftover is z IS NULL, and that predicate
@@ -42,6 +83,10 @@ func TestCompressionStatusUsesStoredLengths(t *testing.T) {
 	mustExec(t, s, `INSERT INTO messages
 		(session_id, project, role, text, timestamp, type, is_noise, content_type)
 		VALUES ('sess-auto', 'proj', 'assistant', 'tiny', '2026-04-01T10:00:00Z', 'assistant', 0, 'text')`)
+	// These inserts leave plain_len NULL. Measuring is the background
+	// worker's job now, never the status call's (🎯T173), so do here what
+	// the worker does at the top of each cycle.
+	measureAllFamilies(t, s)
 
 	st, err := s.CompressionStatus()
 	if err != nil {
@@ -126,8 +171,24 @@ func TestHotTokenSQLAvoidsEntriesV(t *testing.T) {
 		src := string(body)
 		switch rel {
 		case filepath.Join("internal", "store", "store.go"):
-			if !strings.Contains(src, "FROM entries e") || strings.Contains(src, "FROM entries_v e\n") {
-				// Usage / usageByBlock / activeHours must use the base table.
+			// Empty bodies assert nothing. This arm existed and was dead.
+			if !strings.Contains(src, "FROM entries e") {
+				t.Errorf("%s: Usage/usageByBlock/activeHours must read the base table "+
+					"so idx_entries_*_m is usable", rel)
+			}
+			// Precise, not blanket: store.go legitimately reads entries_v
+			// where it needs decoded raw (the per-session image scan). What
+			// must never happen is a TOKEN AGGREGATE on entries_v, whose
+			// COALESCE/mnemo_raw hides idx_entries_*_m. Check per SQL
+			// literal rather than per file.
+			for _, lit := range sqlLiterals(t, filepath.Join(root, rel)) {
+				if !strings.Contains(lit, "entries_v") {
+					continue
+				}
+				if tokenColRe.MatchString(lit) {
+					t.Errorf("%s: a token aggregate is back on entries_v, which hides "+
+						"idx_entries_*_m:\n%s", rel, firstLines(lit, 4))
+				}
 			}
 			if strings.Contains(src, "json_extract(e.raw,") || strings.Contains(src, "e.raw->>") {
 				t.Errorf("%s still extracts billable fields from e.raw", rel)

@@ -82,6 +82,19 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 				return
 			}
 		}
+		// Measure a bounded batch of unmeasured rows first (🎯T173).
+		// This is the only place that reads payloads to compute lengths;
+		// it used to run unbounded on the /health path. Failure is logged
+		// and the cycle continues: an unmeasured row is invisible to the
+		// leftover probe, which delays packing it but breaks nothing.
+		if filled, err := s.fillLengths(ctx, fs); err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("compress length fill failed", "family", family, "err", err)
+			}
+		} else if filled > 0 {
+			slog.Info("compress lengths measured", "family", family, "rows", filled)
+		}
+
 		// Membership probe, not SUM(length(blob)). When the family is
 		// already done and leftover is empty (or only short rows), this
 		// is an index-only walk of idx_*_z_null and we do not reopen.

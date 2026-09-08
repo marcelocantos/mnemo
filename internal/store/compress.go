@@ -409,19 +409,24 @@ type CompressionStatus struct {
 // SUM(length(blob)). Outstanding is leftover membership (z IS NULL)
 // filtered by the compress threshold on the stored length.
 type FamilyStatus struct {
-	Family        string
-	Rows          int64
-	Compressed    int64
-	PlainBytes    int64 // leftover plain_len (z-col NULL)
-	PackedBytes   int64 // stored z_len of packed rows (0 until lengths are filled)
-	Outstanding   int64 // leftover plain_len where length ≥ compressMinBytes
-	LeftoverRows  int64 // z IS NULL and (plain_len NULL or ≥ compressMinBytes)
-	BackfillDone  bool
-	BackfillNext  int64 // next row id the backfill will visit
-	BackfillSaved int64 // bytes saved so far by the backfill
-	BackfillAt    string
-	Running       bool
-	LastError     string
+	Family       string
+	Rows         int64
+	Compressed   int64
+	PlainBytes   int64 // leftover plain_len (z-col NULL)
+	PackedBytes  int64 // stored z_len of packed rows (0 until lengths are filled)
+	Outstanding  int64 // leftover plain_len where length ≥ compressMinBytes
+	LeftoverRows int64 // z IS NULL and plain_len ≥ compressMinBytes
+	// LengthsPending is rows whose stored length is not yet measured
+	// (🎯T173). Non-zero only after an upgrade. While it is non-zero
+	// PlainBytes/PackedBytes understate, and the status output says so
+	// rather than presenting a provisional number as a settled one.
+	LengthsPending int64
+	BackfillDone   bool
+	BackfillNext   int64 // next row id the backfill will visit
+	BackfillSaved  int64 // bytes saved so far by the backfill
+	BackfillAt     string
+	Running        bool
+	LastError      string
 }
 
 // Compress worker phases (🎯T162). Reported by the health check and
@@ -529,11 +534,10 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		fs := familySpecs[family]
 		var f FamilyStatus
 		f.Family = family
-		if err := s.ensureLeftoverLengths(fs); err != nil {
-			return st, err
-		}
 		// Membership + stored lengths. No length(blob): that is the
-		// overflow-page scan that made compress.backfill ~22s.
+		// overflow-page scan that made compress.backfill ~22s. And no
+		// measurement either — filling lengths is the background
+		// worker's job, never a reader's (🎯T173).
 		q := fmt.Sprintf(`
 			SELECT
 				(SELECT COUNT(*) FROM %[1]s),
@@ -560,20 +564,29 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		}
 		f.LeftoverRows = rows
 		f.Outstanding = bytes
+		if f.LengthsPending, err = s.familyLengthsPending(fs); err != nil {
+			return st, err
+		}
 		st.Families = append(st.Families, f)
 	}
 	return st, nil
 }
 
-// familyLeftover is leftover membership: z IS NULL and either the
-// stored length is unknown or it meets the compress threshold. Short
-// measured rows stay plain forever and must not look outstanding.
-// Byte total is SUM(plain_len), never length(blob).
+// familyLeftover is ACTIONABLE leftover: z IS NULL and the stored length
+// is known to meet the compress threshold. Byte total is SUM(plain_len),
+// never length(blob).
+//
+// Rows whose length is not yet measured are deliberately excluded (🎯T173).
+// Counting them as leftover would make the auto-backfill reopen a finished
+// family on every cycle, walk it, compress nothing, and mark it done again
+// — which is precisely the ~22s-every-2-minutes loop this work exists to
+// remove. They are reported separately by familyLengthsPending, so the
+// backlog is disclosed rather than hidden or acted upon.
 func (s *Store) familyLeftover(fs familySpec) (rows, bytes int64, err error) {
 	q := fmt.Sprintf(`
 		SELECT COUNT(*), COALESCE(SUM(plain_len), 0)
 		FROM %[1]s
-		WHERE %[2]s IS NULL AND (plain_len IS NULL OR plain_len >= ?)`,
+		WHERE %[2]s IS NULL AND plain_len >= ?`,
 		fs.table, fs.zCol)
 	err = s.readDB.QueryRow(q, compressMinBytes).Scan(&rows, &bytes)
 	return rows, bytes, err
@@ -582,9 +595,6 @@ func (s *Store) familyLeftover(fs familySpec) (rows, bytes int64, err error) {
 // familyOutstanding is leftover plain bytes (length ≥ compressMinBytes).
 // Kept as a bytes figure because doctor/compress_status format it as IEC.
 func (s *Store) familyOutstanding(fs familySpec) (int64, error) {
-	if err := s.ensureLeftoverLengths(fs); err != nil {
-		return 0, err
-	}
 	_, bytes, err := s.familyLeftover(fs)
 	return bytes, err
 }
@@ -593,35 +603,87 @@ func (s *Store) familyOutstanding(fs familySpec) (int64, error) {
 // instead of SUM(length(blob)). Empty (or only-short) leftover is an
 // index-only walk of idx_*_z_null.
 func (s *Store) familyLeftoverCount(fs familySpec) (int64, error) {
-	if err := s.ensureLeftoverLengths(fs); err != nil {
-		return 0, err
-	}
 	rows, _, err := s.familyLeftover(fs)
 	return rows, err
 }
 
-// ensureLeftoverLengths writes plain_len for leftover rows that have
-// none, so later probes are integer arithmetic on the z-IS-NULL index.
-// Runs against leftover only — packed overflow pages are never touched.
-// A cheap COUNT skips the UPDATE once every leftover row has a length
-// (the steady state of a finished family).
-func (s *Store) ensureLeftoverLengths(fs familySpec) error {
-	var n int64
-	probe := fmt.Sprintf(`
-		SELECT COUNT(*) FROM %[1]s
-		WHERE %[2]s IS NULL AND plain_len IS NULL`, fs.table, fs.zCol)
-	if err := s.readDB.QueryRow(probe).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		return nil
-	}
+// familyLengthsPending counts rows whose stored length is still unknown:
+// unpacked rows with no plain_len, and packed rows with no z_len. Both
+// arise only on an upgrade — every insert and every pack writes its own
+// lengths — and both are filled in bounded batches by the background
+// worker (fillLengths).
+//
+// It is a disclosure, not an alarm. While it is non-zero the family's
+// PlainBytes/PackedBytes are understated, and saying so is the difference
+// between a provisional number and a wrong one.
+func (s *Store) familyLengthsPending(fs familySpec) (int64, error) {
 	q := fmt.Sprintf(`
-		UPDATE %[1]s SET plain_len = length(%[2]s)
-		WHERE %[3]s IS NULL AND plain_len IS NULL`,
-		fs.table, fs.plainCol, fs.zCol)
-	_, err := s.writeDB.Exec(q)
-	return err
+		SELECT (SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NULL AND plain_len IS NULL)
+		     + (SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NOT NULL AND z_len IS NULL)`,
+		fs.table, fs.zCol)
+	var n int64
+	err := s.readDB.QueryRow(q).Scan(&n)
+	return n, err
+}
+
+// lengthFillBatch bounds one fillLengths pass per family per cycle. Each
+// row read pulls the payload (and its overflow pages) once, so this is
+// the one place that still pays that cost — deliberately, in the
+// background, at a bounded rate, and exactly once per row for the life of
+// the database.
+var lengthFillBatch int64 = 5000
+
+// lengthFillBatchForTest sets the batch size and returns the previous
+// value, so a test can prove the pass is bounded. Tests only.
+func lengthFillBatchForTest(n int64) int64 {
+	prev := lengthFillBatch
+	lengthFillBatch = n
+	return prev
+}
+
+// fillLengths measures a bounded batch of rows whose stored lengths are
+// unknown (🎯T173).
+//
+// This used to run as one unbounded UPDATE on the /health path, from
+// CompressionStatus, which is a Fast-tier diag check: on an upgraded
+// store that rewrote every unpacked row in a single transaction while
+// every other writer queued behind SQLite's single writer. That is the
+// same starvation the compression backfill was taught to avoid in 🎯T168,
+// reintroduced in the health handler — so measurement now belongs to the
+// background worker, and never to a reader.
+//
+// plain_len and z_len are BYTES OF THE PAYLOAD THE PACKER COMPRESSES —
+// fs.readExpr — for every writer: the ingest INSERT, the pack UPDATE, and
+// this pass. Getting that wrong is silent: SQLite's length() counts
+// CHARACTERS on TEXT and BYTES on BLOB, and entries.raw is stored as
+// jsonb, whose byte length is a third quantity again. CAST(... AS BLOB)
+// pins all three to the same unit as Go's len().
+func (s *Store) fillLengths(ctx context.Context, fs familySpec) (int64, error) {
+	var filled int64
+
+	plainQ := fmt.Sprintf(`
+		UPDATE %[1]s SET plain_len = length(CAST(%[2]s AS BLOB))
+		WHERE id IN (
+			SELECT id FROM %[1]s WHERE %[3]s IS NULL AND plain_len IS NULL LIMIT ?)`,
+		fs.table, fs.readExpr, fs.zCol)
+	r, err := s.writeDB.ExecContext(ctx, plainQ, lengthFillBatch)
+	if err != nil {
+		return filled, fmt.Errorf("%s: fill plain_len: %w", fs.table, err)
+	}
+	n, _ := r.RowsAffected()
+	filled += n
+
+	zQ := fmt.Sprintf(`
+		UPDATE %[1]s SET z_len = length(%[2]s)
+		WHERE id IN (
+			SELECT id FROM %[1]s WHERE %[2]s IS NOT NULL AND z_len IS NULL LIMIT ?)`,
+		fs.table, fs.zCol)
+	if r, err = s.writeDB.ExecContext(ctx, zQ, lengthFillBatch); err != nil {
+		return filled, fmt.Errorf("%s: fill z_len: %w", fs.table, err)
+	}
+	n, _ = r.RowsAffected()
+	filled += n
+	return filled, nil
 }
 
 // reopenBackfill clears the completion marker so a newly-detected

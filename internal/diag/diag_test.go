@@ -83,3 +83,52 @@ func TestSeverityAndTierStrings(t *testing.T) {
 		t.Error("tier strings")
 	}
 }
+
+// TestCheckTimeoutContainsAPathologicalCheck covers the maintainer
+// brief's item 1, suggestion 4.
+//
+// The report is assembled sequentially with no per-check bound, so one
+// slow check held the whole /health response — which is how a Fast-tier
+// check running a full-table blob scan took the endpoint to 95s. A check
+// that will not answer must become a failed check, not a stalled report.
+func TestCheckTimeoutContainsAPathologicalCheck(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(Check{Name: "wedged", Tier: Fast, Run: func(ctx context.Context) CheckResult {
+		<-ctx.Done() // never answers on its own
+		return Healthy("unreachable")
+	}})
+	reg.Register(Check{Name: "quick", Tier: Fast, Run: func(context.Context) CheckResult {
+		return Healthy("fine")
+	}})
+
+	// Drive the PER-CHECK bound, not the caller's deadline: a caller
+	// deadline that expires mid-report would fail every remaining check,
+	// which is a different behaviour from the one under test.
+	defer CheckTimeoutForTest(CheckTimeoutForTest(200 * time.Millisecond))
+
+	start := time.Now()
+	rep := reg.Run(context.Background(), false, time.Now())
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Errorf("Run took %s; a wedged check must not hold the report", elapsed)
+	}
+	var wedged, quick *Result
+	for i := range rep.Results {
+		switch rep.Results[i].Name {
+		case "wedged":
+			wedged = &rep.Results[i]
+		case "quick":
+			quick = &rep.Results[i]
+		}
+	}
+	if wedged == nil || quick == nil {
+		t.Fatalf("both checks must appear in the report, got %+v", rep.Results)
+	}
+	if wedged.Severity != Fail.String() {
+		t.Errorf("wedged check severity = %q, want fail", wedged.Severity)
+	}
+	if quick.Severity != OK.String() {
+		t.Errorf("a healthy check must still report ok alongside a wedged one, got %q", quick.Severity)
+	}
+}

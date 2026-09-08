@@ -275,7 +275,7 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 					doc_source   = ''
 				WHERE docs.kind = 'vault'
 			`, vaultRepo, path, title, contentPlain, hash, int64(len(human)), now, now, contentZ,
-				len(human), lenOrNil(contentZ))
+					len(human), lenOrNil(contentZ))
 			}
 			if err != nil {
 				slog.Error("vault: ingest annotation failed", "file", path, "err", err)

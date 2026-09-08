@@ -263,7 +263,12 @@ func renderHealthHTML(report diag.Report) string {
 			b.WriteString(html.EscapeString(res.Tier))
 			b.WriteString(`</span>`)
 		}
-		if res.DurationMs > 0 || res.Name != "" {
+		// Unconditional: every result has a name, so the old
+		// `DurationMs > 0 || Name != ""` was always true and read as a
+		// filter that wasn't one. A sub-millisecond check showing 0ms is
+		// the intended output — the badge's value is that it is always
+		// there to compare against.
+		{
 			b.WriteString(`<span class="badge">`)
 			fmt.Fprintf(&b, "%dms", res.DurationMs)
 			b.WriteString(`</span>`)

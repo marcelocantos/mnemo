@@ -1372,7 +1372,10 @@ CREATE TRIGGER entries_materialise AFTER INSERT ON entries
 				attribution_agent_m = raw->>'$.attributionAgent',
 				spawn_agent_id_m = raw->>'$.toolUseResult.agentId',
 				spawn_tool_use_id_m = raw->>'$.message.content[0].tool_use_id',
-				plain_len = COALESCE(plain_len, length(raw))
+				-- Bytes of the JSON text, matching Go's len() and
+				-- fillLengths. length(raw) would be the jsonb encoding's
+				-- byte count, which is a different number again.
+				plain_len = COALESCE(plain_len, length(CAST(json(raw) AS BLOB)))
 			WHERE id = new.id;
 		END;
 
