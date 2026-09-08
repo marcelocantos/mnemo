@@ -263,6 +263,11 @@ func renderHealthHTML(report diag.Report) string {
 			b.WriteString(html.EscapeString(res.Tier))
 			b.WriteString(`</span>`)
 		}
+		if res.DurationMs > 0 || res.Name != "" {
+			b.WriteString(`<span class="badge">`)
+			fmt.Fprintf(&b, "%dms", res.DurationMs)
+			b.WriteString(`</span>`)
+		}
 		b.WriteString(`
     </div>
   </div>`)

@@ -36,8 +36,10 @@ import (
 // with their columns and nothing else.
 var tableNotes = map[string]string{
 	"entries_v": "READ ENTRIES HERE. Every JSONL line, with raw decoded and the hot " +
-		"fields (uuid, model, token counts, …) served from materialised columns. " +
-		"The base table `entries` stores raw compressed with those columns NULL. " +
+		"fields (uuid, model, token counts, message_id, request_id, cache-write " +
+		"tiers, …) served from materialised columns. The base table `entries` " +
+		"stores raw compressed with generated columns NULL; token aggregates " +
+		"must read entries.*_m, not this view (COALESCE/mnemo_raw hide the covering indexes). " +
 		"Entry types: user, assistant, progress, system, file-history-snapshot. " +
 		"Use json_extract(raw, '$.path') for fields without a column.",
 	"messages_v": "READ MESSAGE TEXT HERE. Content blocks from user/assistant entries; " +

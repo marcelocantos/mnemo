@@ -492,12 +492,14 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					"check the daemon log for compress/dictionary errors")
 			}
 			var outstanding int64
+			var leftover int64
 			var saved int64
 			var parts []string
 			for _, f := range st.Families {
 				outstanding += f.Outstanding
+				leftover += f.LeftoverRows
 				saved += f.BackfillSaved
-				if f.Outstanding > 0 || f.Running {
+				if f.Outstanding > 0 || f.LeftoverRows > 0 || f.Running {
 					parts = append(parts, fmt.Sprintf("%s %s plain / %s packed",
 						f.Family, formatIEC(f.Outstanding), formatIEC(f.PackedBytes)))
 				}
@@ -513,7 +515,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			switch {
 			case snap.Phase == store.CompressPhaseDisabled:
 				return diag.Healthy(detail)
-			case outstanding > 0:
+			case outstanding > 0 || leftover > 0:
 				return diag.Warning(detail,
 					"the daemon packs leftover rows on its own; space returns to the filesystem only after a manual VACUUM")
 			default:

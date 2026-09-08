@@ -421,8 +421,9 @@ func (s *Store) SelectCompactionCandidatesSince(
 		  -- its cursor, and switching THAT to a message count would make
 		  -- every compacted session owed again, forever.
 		  AND (CASE WHEN s.sess_tokens > 0 THEN COALESCE((
-		        SELECT SUM(e.output_tokens + e.cache_creation_tokens)
-		        FROM entries_v e
+		        SELECT SUM(e.output_tokens_m + e.cache_creation_tokens_m)
+		        FROM entries e
+		        INDEXED BY idx_entries_addenda_m
 		        WHERE e.session_id = s.session_id
 		          AND e.type = 'assistant'
 		          AND e.id > COALESCE((
@@ -605,8 +606,9 @@ func (s *Store) ClearDeferredQuarantine() (int64, error) {
 func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error) {
 	var sessTokens int64
 	if err := s.readDB.QueryRow(`
-		SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
-		FROM entries_v WHERE session_id = ? AND type = 'assistant'
+		SELECT COALESCE(SUM(input_tokens_m + output_tokens_m), 0)
+		FROM entries INDEXED BY idx_entries_assistant_tokens_m
+		WHERE session_id = ? AND type = 'assistant'
 	`, sessionID).Scan(&sessTokens); err != nil {
 		return 0, fmt.Errorf("addenda tokens (session volume): %w", err)
 	}
@@ -624,8 +626,9 @@ func (s *Store) AddendaTokens(sessionID string, cursorMsgID int64) (int64, error
 
 	var tokens int64
 	err := s.readDB.QueryRow(`
-		SELECT COALESCE(SUM(e.output_tokens + e.cache_creation_tokens), 0)
-		FROM entries_v e
+		SELECT COALESCE(SUM(e.output_tokens_m + e.cache_creation_tokens_m), 0)
+		FROM entries e
+		INDEXED BY idx_entries_addenda_m
 		WHERE e.session_id = ?
 		  AND e.type = 'assistant'
 		  AND e.id > COALESCE((SELECT m.entry_id FROM messages m WHERE m.id = ?), 0)

@@ -98,13 +98,15 @@ type Check struct {
 
 // Result is a check's outcome enriched with its identity for the Report
 // (and the dashboard / tool / notifications). Severity and Tier are the
-// stable string forms.
+// stable string forms. DurationMs is wall time of the check itself so a
+// /health regression is visible in the payload without a separate probe.
 type Result struct {
 	Name        string `json:"name"`
 	Severity    string `json:"severity"`
 	Tier        string `json:"tier"`
 	Detail      string `json:"detail,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
+	DurationMs  int64  `json:"duration_ms"`
 }
 
 // Report is the outcome of running a set of checks at a point in time.
@@ -204,7 +206,9 @@ func (r *Registry) Run(ctx context.Context, full bool, now time.Time) Report {
 // runOne runs a single check with panic recovery and maps it to a Result.
 func runOne(ctx context.Context, c Check) (res Result) {
 	res = Result{Name: c.Name, Tier: c.Tier.String(), Severity: Fail.String()}
+	start := time.Now()
 	defer func() {
+		res.DurationMs = time.Since(start).Milliseconds()
 		if r := recover(); r != nil {
 			res.Severity = Fail.String()
 			res.Detail = "check panicked"
@@ -212,11 +216,12 @@ func runOne(ctx context.Context, c Check) (res Result) {
 		}
 	}()
 	cr := c.Run(ctx)
-	return Result{
+	res = Result{
 		Name:        c.Name,
 		Tier:        c.Tier.String(),
 		Severity:    cr.Severity.String(),
 		Detail:      cr.Detail,
 		Remediation: cr.Remediation,
 	}
+	return res
 }

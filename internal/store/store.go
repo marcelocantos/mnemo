@@ -738,27 +738,16 @@ type UncountedVolume struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 }
 
-// The billable-call identity and the cache-write TTL split, extracted
-// inline from the raw JSON (🎯T135).
-//
-// These were originally added as GENERATED columns on `entries`, which is
-// the obvious place for them and does not work. sqlift plans a full table
-// REBUILD to add a column to an existing table, and the append-only schema
-// policy forbids rebuilds — so the migration could never be applied to any
-// existing installation. The whole test suite stayed green regardless,
-// because every test store is created fresh and is therefore already on
-// the current schema. It surfaced only when the migration was planned
-// against a copy of a real database.
-//
-// Extracting inline costs nothing over the column form. SQLite's generated
-// columns here are VIRTUAL, meaning computed on read rather than stored —
-// so `json_extract(raw, ...)` in the query and a virtual column reading
-// the same path do identical work. The column was only ever notation.
+// The billable-call identity and the cache-write TTL split. These live
+// in real *_m columns (append-only ADD COLUMN), not generated columns
+// and not json_extract(raw): a generated column forces a table rebuild
+// that sqlift AllowNone refuses (🎯T135), and extracting from raw
+// through entries_v forces mnemo_raw on every assistant row.
 const (
-	sqlMessageID    = `json_extract(e.raw, '$.message.id')`
-	sqlRequestID    = `e.raw->>'$.requestId'`
-	sqlCacheWrite5m = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')`
-	sqlCacheWrite1h = `json_extract(e.raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')`
+	sqlMessageID    = `e.message_id_m`
+	sqlRequestID    = `e.request_id_m`
+	sqlCacheWrite5m = `e.cache_write_5m_m`
+	sqlCacheWrite1h = `e.cache_write_1h_m`
 )
 
 // effectiveDedupKey reads the configured deduplication key, falling back
@@ -1414,6 +1403,11 @@ func New(dbPath, projectDir string) (*Store, error) {
 			}
 			s.codec.entriesPackable.Store(true)
 			slog.Info("entries fields materialised", "rows", res.Rows, "updated", res.Compressed)
+			if ures, uerr := s.MaterialiseUsageFields(ctx); uerr != nil {
+				return uerr
+			} else if ures.Rows > 0 {
+				slog.Info("entries usage fields materialised", "rows", ures.Rows, "updated", ures.Compressed)
+			}
 			return nil
 		},
 	})
@@ -3742,7 +3736,10 @@ const (
 		 uuid_m, model_m, stop_reason_m, input_tokens_m, output_tokens_m,
 		 cache_read_tokens_m, cache_creation_tokens_m, agent_id_m, version_m, slug_m,
 		 is_sidechain_m, data_type_m, data_command_m, data_hook_event_m,
-		 top_tool_use_id_m, parent_tool_use_id_m)
+		 top_tool_use_id_m, parent_tool_use_id_m,
+		 message_id_m, request_id_m, cache_write_5m_m, cache_write_1h_m,
+		 source_tool_assistant_uuid_m, attribution_skill_m, attribution_agent_m,
+		 spawn_agent_id_m, spawn_tool_use_id_m, plain_len, z_len)
 		VALUES (?1, ?2, ?3, ?4, CASE WHEN ?6 IS NULL THEN jsonb(?5) END, ?6,
 		 COALESCE(?5->>'$.uuid', ?5->>'$.messageId'),
 		 ?5->>'$.message.model',
@@ -3759,7 +3756,17 @@ const (
 		 ?5->>'$.data.command',
 		 ?5->>'$.data.hookEvent',
 		 ?5->>'$.toolUseID',
-		 ?5->>'$.parentToolUseID')`
+		 ?5->>'$.parentToolUseID',
+		 json_extract(?5, '$.message.id'),
+		 ?5->>'$.requestId',
+		 json_extract(?5, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'),
+		 json_extract(?5, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'),
+		 ?5->>'$.sourceToolAssistantUUID',
+		 ?5->>'$.attributionSkill',
+		 ?5->>'$.attributionAgent',
+		 ?5->>'$.toolUseResult.agentId',
+		 ?5->>'$.message.content[0].tool_use_id',
+		 length(?5), length(?6))`
 	// entryInsertLegacySQL is used while a deferred schema upgrade has
 	// not yet added the *_m columns (🎯T114.1 serves on the old schema).
 	entryInsertLegacySQL = `INSERT OR IGNORE INTO entries
@@ -3767,8 +3774,9 @@ const (
 		VALUES (?, ?, ?, ?, jsonb(?))`
 	messageInsertSQL = `INSERT INTO messages
 		(entry_id, session_id, project, role, text, timestamp, type, is_noise,
-		 content_type, tool_name, tool_use_id, tool_input, is_error, text_z)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?)`
+		 content_type, tool_name, tool_use_id, tool_input, is_error, text_z,
+		 plain_len, z_len)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?, ?)`
 	// messageInsertLegacySQL is used while a deferred schema upgrade has
 	// not yet added text_z (🎯T114.1 serves on the old schema meanwhile).
 	messageInsertLegacySQL = `INSERT INTO messages
@@ -3860,8 +3868,12 @@ func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text
 		return
 	}
 	plain, z := ws.codec.pack(FamilyMessagesText, text)
+	var zLen any
+	if z != nil {
+		zLen = len(z)
+	}
 	ws.msgStmt.Exec(entryID, sessionID, project, role, plain, timestamp, typ, isNoise,
-		contentType, toolName, toolUseID, toolInput, isError, z)
+		contentType, toolName, toolUseID, toolInput, isError, z, len(text), zLen)
 }
 
 func (ws *writerState) Close() {
@@ -5259,7 +5271,7 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		args = append(args, pattern, pattern)
 	}
 	if p.Model != "" {
-		where = append(where, "e.model LIKE ?")
+		where = append(where, "e.model_m LIKE ?")
 		args = append(args, p.Model+"%")
 	}
 
@@ -5312,18 +5324,18 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		WITH billable AS (
 			SELECT
 				e.timestamp AS timestamp,
-				e.model AS model,
+				e.model_m AS model,
 				e.session_id AS session_id,
 				COALESCE(sm.source, 'unknown') AS source,
 				MAX(CASE WHEN COALESCE(sm.repo, '') != '' THEN sm.repo ELSE COALESCE(sm.cwd, '') END) AS repo_key,
-				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
-				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
-				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
-				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
-				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
-				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
-				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
-			FROM entries_v e
+				CASE WHEN COALESCE(%s, '') = '' THEN 0 ELSE 1 END AS keyed,
+				MAX(COALESCE(e.input_tokens_m, 0))          AS input_tokens,
+				MAX(COALESCE(e.output_tokens_m, 0))         AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens_m, 0))     AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens_m, 0)) AS cache_creation_tokens,
+				MAX(COALESCE(%s, 0)) AS cw5m,
+				MAX(COALESCE(%s, 0)) AS cw1h
+			FROM entries e
 			%s
 			WHERE %s
 			GROUP BY %s
@@ -5348,7 +5360,8 @@ func (s *Store) Usage(p UsageParams) (*UsageResult, error) {
 		%s
 		GROUP BY %s, e.model, e.source, e.keyed, over_threshold
 		ORDER BY period DESC
-	`, joinClause, strings.Join(where, " AND "), dedupGroupSQL(dedupKey),
+	`, sqlMessageID, sqlCacheWrite5m, sqlCacheWrite1h,
+		joinClause, strings.Join(where, " AND "), dedupGroupSQL(dedupKey),
 		periodExpr, LongContextThreshold, reconcCostCol, reconcJoin, groupExpr)
 
 	rows, err := s.readDB.Query(q, args...)
@@ -5604,16 +5617,16 @@ func (s *Store) usageByBlock(
 		WITH billable AS (
 			SELECT
 				e.timestamp AS timestamp,
-				COALESCE(e.model, '') AS model,
+				COALESCE(e.model_m, '') AS model,
 				COALESCE(sm.source, 'unknown') AS source,
-				CASE WHEN COALESCE(`+sqlMessageID+`, '') = '' THEN 0 ELSE 1 END AS keyed,
-				MAX(COALESCE(e.input_tokens, 0))             AS input_tokens,
-				MAX(COALESCE(e.output_tokens, 0))            AS output_tokens,
-				MAX(COALESCE(e.cache_read_tokens, 0))        AS cache_read_tokens,
-				MAX(COALESCE(e.cache_creation_tokens, 0))    AS cache_creation_tokens,
-				MAX(COALESCE(`+sqlCacheWrite5m+`, 0)) AS cw5m,
-				MAX(COALESCE(`+sqlCacheWrite1h+`, 0)) AS cw1h
-			FROM entries_v e
+				CASE WHEN COALESCE(%s, '') = '' THEN 0 ELSE 1 END AS keyed,
+				MAX(COALESCE(e.input_tokens_m, 0))             AS input_tokens,
+				MAX(COALESCE(e.output_tokens_m, 0))            AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens_m, 0))        AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens_m, 0))    AS cache_creation_tokens,
+				MAX(COALESCE(%s, 0)) AS cw5m,
+				MAX(COALESCE(%s, 0)) AS cw1h
+			FROM entries e
 			%s
 			WHERE %s
 			GROUP BY %s
@@ -5623,7 +5636,8 @@ func (s *Store) usageByBlock(
 		       cache_creation_tokens, cw5m, cw1h
 		FROM billable
 		ORDER BY timestamp ASC
-	`, joinClause, strings.Join(where, " AND "), dedupGroupSQL(effectiveDedupKey()))
+	`, sqlMessageID, sqlCacheWrite5m, sqlCacheWrite1h,
+		joinClause, strings.Join(where, " AND "), dedupGroupSQL(effectiveDedupKey()))
 
 	rows, err := s.readDB.Query(q, args...)
 	if err != nil {
@@ -5804,7 +5818,7 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 		args = append(args, pattern, pattern)
 	}
 	if model != "" {
-		where = append(where, "e.model LIKE ?")
+		where = append(where, "e.model_m LIKE ?")
 		args = append(args, model+"%")
 	}
 
@@ -5815,7 +5829,7 @@ func (s *Store) activeHours(days int, repoFilter, model string) (float64, error)
 
 	q := fmt.Sprintf(`
 		SELECT e.session_id, e.timestamp
-		FROM entries_v e
+		FROM entries e
 		%s
 		WHERE %s
 		ORDER BY e.session_id, e.timestamp
@@ -5880,7 +5894,7 @@ func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float6
 		args = append(args, pattern, pattern)
 	}
 	if model != "" {
-		where = append(where, "e.model LIKE ?")
+		where = append(where, "e.model_m LIKE ?")
 		args = append(args, model+"%")
 	}
 
@@ -5891,7 +5905,7 @@ func (s *Store) activeHoursRange(since, until, repoFilter, model string) (float6
 
 	q := fmt.Sprintf(`
 		SELECT e.session_id, e.timestamp
-		FROM entries_v e
+		FROM entries e
 		%s
 		WHERE %s
 		ORDER BY e.session_id, e.timestamp

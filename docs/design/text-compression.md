@@ -134,6 +134,17 @@ plain bytes, and distinguishes bytes repacked from bytes reclaimed.
 `compression.auto_backfill: false` pauses the worker. `op=compress_gc`
 remains for an explicit one-family run.
 
+Status and the auto-backfill probe are membership queries, not live
+`SUM(length(blob))`. Leftover is `z IS NULL` (partial indexes
+`idx_messages_text_z_null`, `idx_docs_content_z_null`,
+`idx_entries_raw_z_null`); the compress threshold uses stored
+`plain_len`, filled on write/pack and lazily for leftover rows only.
+Packed overflow pages are never read for `/health` or `compress_status`.
+Token aggregates (`Store.Usage`, `/api/context`, `/api/dbstats`,
+compactor addenda, AgentTrees) read `entries.*_m` on the base table so
+the covering `idx_entries_*_m` indexes are usable — `entries_v`'s
+`COALESCE`/`mnemo_raw` made them dead.
+
 ## Ops
 
 ```

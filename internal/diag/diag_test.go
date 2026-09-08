@@ -49,6 +49,21 @@ func TestRunTiersAndTally(t *testing.T) {
 	}
 }
 
+func TestRunRecordsDurationMs(t *testing.T) {
+	r := NewRegistry()
+	r.Register(Check{Name: "slowish", Tier: Fast, Run: func(context.Context) CheckResult {
+		time.Sleep(5 * time.Millisecond)
+		return Healthy("ok")
+	}})
+	rep := r.Run(context.Background(), true, now)
+	if len(rep.Results) != 1 {
+		t.Fatalf("results: %+v", rep.Results)
+	}
+	if rep.Results[0].DurationMs < 5 {
+		t.Fatalf("duration_ms=%d, want >= 5", rep.Results[0].DurationMs)
+	}
+}
+
 func TestPanicBecomesFail(t *testing.T) {
 	r := NewRegistry()
 	r.Register(Check{Name: "boom", Tier: Fast, Run: func(context.Context) CheckResult {

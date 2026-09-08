@@ -102,10 +102,10 @@ func TestMetadataOnlyPlanSkipsTheBackup(t *testing.T) {
 	// permits — a column inserted mid-table makes sqlift plan a rebuild
 	// instead, which this classifier also (correctly) refuses.
 	colChange := strings.Replace(base,
-		"			content_z BLOB"+eol+"		);",
-		"			content_z BLOB,"+eol+"			t155_probe TEXT"+eol+"		);", 1)
+		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER"+eol+"		);",
+		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER,"+eol+"			t155_probe TEXT"+eol+"		);", 1)
 	if colChange == base {
-		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
+		t.Fatal("fixture is stale: docs.z_len is no longer the last column")
 	}
 	ok, why = planIsMetadataOnly(planFor(t, dbPath, colChange))
 	if ok {
@@ -193,10 +193,10 @@ func TestUpgradeSkipsBackupForMetadataOnlyPlan(t *testing.T) {
 
 	// A column change must still be insured.
 	withCol := strings.Replace(withView,
-		"			content_z BLOB"+eol+"		);",
-		"			content_z BLOB,"+eol+"			t155_col TEXT"+eol+"		);", 1)
+		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER"+eol+"		);",
+		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER,"+eol+"			t155_col TEXT"+eol+"		);", 1)
 	if withCol == withView {
-		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
+		t.Fatal("fixture is stale: docs.z_len is no longer the last column")
 	}
 	if err := upgradeSchemaWith(dbPath, withCol); err != nil {
 		t.Fatalf("column upgrade: %v", err)
@@ -249,10 +249,10 @@ func TestPreMigrationBackupPrunes(t *testing.T) {
 	}
 	// A column addition: table-touching, so it must take a snapshot.
 	withCol := strings.Replace(schemaSQL,
-		"			content_z BLOB"+eol+"		);",
-		"			content_z BLOB,"+eol+"			t158_col TEXT"+eol+"		);", 1)
+		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER"+eol+"		);",
+		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER,"+eol+"			t158_col TEXT"+eol+"		);", 1)
 	if withCol == schemaSQL {
-		t.Fatal("fixture is stale: docs.content_z is no longer the last column")
+		t.Fatal("fixture is stale: docs.z_len is no longer the last column")
 	}
 	if err := upgradeSchemaWith(dbPath, withCol); err != nil {
 		t.Fatalf("column upgrade: %v", err)

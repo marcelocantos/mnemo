@@ -174,7 +174,11 @@ CREATE TABLE docs (
 			doc_source TEXT NOT NULL DEFAULT '',
 			-- 🎯T151: zstd frame of content when compressed; content is then ''.
 			-- Read through mnemo_text(content, content_z) or the docs_v view.
-			content_z BLOB
+			content_z BLOB,
+			-- Stored lengths for status/membership. Status must never
+			-- SUM(length(blob)): that pulls overflow pages of every row.
+			plain_len INTEGER,
+			z_len INTEGER
 		);
 
 -- 🎯T151: dictionary lineage for per-row zstd compression. dict_id is
@@ -248,7 +252,22 @@ CREATE TABLE entries (
 			-- 🎯T152: zstd frame of the JSON line when compressed; raw is
 			-- then NULL (an empty string would make the generated columns
 			-- raise "malformed JSON"). Read through mnemo_raw(raw, raw_z).
-			raw_z BLOB
+			raw_z BLOB,
+			-- Stored lengths for status/membership. Status must never
+			-- SUM(length(blob)): that pulls overflow pages of every row.
+			plain_len INTEGER,
+			z_len INTEGER,
+			-- Usage / AgentTrees identity and cache-tier fields, written
+			-- at ingest so token aggregates never decode raw via mnemo_raw.
+			message_id_m TEXT,
+			request_id_m TEXT,
+			cache_write_5m_m INTEGER,
+			cache_write_1h_m INTEGER,
+			source_tool_assistant_uuid_m TEXT,
+			attribution_skill_m TEXT,
+			attribution_agent_m TEXT,
+			spawn_agent_id_m TEXT,
+			spawn_tool_use_id_m TEXT
 		);
 
 CREATE TABLE git_commits (
@@ -507,8 +526,11 @@ CREATE TABLE messages (
 			tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId')),
 			-- 🎯T151: zstd frame of text when compressed; text is then ''.
 			-- Read through mnemo_text(text, text_z) or the messages_v view.
-			-- Last so ALTER TABLE ADD COLUMN reproduces this order exactly.
-			text_z BLOB
+			text_z BLOB,
+			-- Stored lengths for status/membership. Status must never
+			-- SUM(length(blob)): that pulls overflow pages of every row.
+			plain_len INTEGER,
+			z_len INTEGER
 		);
 
 -- 🎯T64.7: workaround patterns, promoted from a live query to a
@@ -960,6 +982,13 @@ CREATE INDEX idx_entries_parent_tool_use_id_m ON entries(parent_tool_use_id_m) W
 CREATE UNIQUE INDEX idx_entries_session_uuid_m ON entries(session_id, uuid_m) WHERE uuid_m IS NOT NULL;
 CREATE INDEX idx_entries_top_tool_use_id_m ON entries(top_tool_use_id_m) WHERE top_tool_use_id_m IS NOT NULL;
 
+-- Leftover-membership indexes: packer walks and status "done/outstanding"
+-- are z IS NULL, not live SUM(length(blob)). A finished family leaves
+-- only short rows (below the compress threshold) in these indexes.
+CREATE INDEX idx_messages_text_z_null ON messages(id) WHERE text_z IS NULL;
+CREATE INDEX idx_docs_content_z_null ON docs(id) WHERE content_z IS NULL;
+CREATE INDEX idx_entries_raw_z_null ON entries(id) WHERE raw_z IS NULL;
+
 CREATE INDEX idx_git_commits_date ON git_commits(commit_date);
 
 CREATE INDEX idx_git_commits_hash ON git_commits(commit_hash);
@@ -1333,7 +1362,17 @@ CREATE TRIGGER entries_materialise AFTER INSERT ON entries
 				data_command_m = data_command,
 				data_hook_event_m = data_hook_event,
 				top_tool_use_id_m = top_tool_use_id,
-				parent_tool_use_id_m = parent_tool_use_id
+				parent_tool_use_id_m = parent_tool_use_id,
+				message_id_m = json_extract(raw, '$.message.id'),
+				request_id_m = raw->>'$.requestId',
+				cache_write_5m_m = json_extract(raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'),
+				cache_write_1h_m = json_extract(raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'),
+				source_tool_assistant_uuid_m = raw->>'$.sourceToolAssistantUUID',
+				attribution_skill_m = raw->>'$.attributionSkill',
+				attribution_agent_m = raw->>'$.attributionAgent',
+				spawn_agent_id_m = raw->>'$.toolUseResult.agentId',
+				spawn_tool_use_id_m = raw->>'$.message.content[0].tool_use_id',
+				plain_len = COALESCE(plain_len, length(raw))
 			WHERE id = new.id;
 		END;
 
@@ -1726,5 +1765,14 @@ CREATE VIEW entries_v AS
 			COALESCE(data_command_m, data_command) AS data_command,
 			COALESCE(data_hook_event_m, data_hook_event) AS data_hook_event,
 			COALESCE(top_tool_use_id_m, top_tool_use_id) AS top_tool_use_id,
-			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id
+			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id,
+			message_id_m AS message_id,
+			request_id_m AS request_id,
+			cache_write_5m_m AS cache_write_5m,
+			cache_write_1h_m AS cache_write_1h,
+			source_tool_assistant_uuid_m AS source_tool_assistant_uuid,
+			attribution_skill_m AS attribution_skill,
+			attribution_agent_m AS attribution_agent,
+			spawn_agent_id_m AS spawn_agent_id,
+			spawn_tool_use_id_m AS spawn_tool_use_id
 		FROM entries;

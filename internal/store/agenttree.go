@@ -148,20 +148,20 @@ func (s *Store) AgentTrees(p AgentTreeParams) ([]AgentTree, error) {
 			SELECT
 				e.session_id AS session_id,
 				e.timestamp AS timestamp,
-				COALESCE(e.model, '') AS model,
-				COALESCE(e.is_sidechain, 0) AS sidechain,
-				COALESCE(e.agent_id, '') AS agent_id,
-				COALESCE(e.raw->>'$.uuid', '') AS uuid,
-				COALESCE(e.raw->>'$.sourceToolAssistantUUID', '') AS src_uuid,
-				COALESCE(e.raw->>'$.attributionSkill', '') AS skill,
-				COALESCE(e.raw->>'$.attributionAgent', '') AS agent_type,
-				MAX(COALESCE(e.input_tokens, 0))          AS input_tokens,
-				MAX(COALESCE(e.output_tokens, 0))         AS output_tokens,
-				MAX(COALESCE(e.cache_read_tokens, 0))     AS cache_read_tokens,
-				MAX(COALESCE(e.cache_creation_tokens, 0)) AS cache_creation_tokens,
+				COALESCE(e.model_m, '') AS model,
+				COALESCE(e.is_sidechain_m, 0) AS sidechain,
+				COALESCE(e.agent_id_m, '') AS agent_id,
+				COALESCE(e.uuid_m, '') AS uuid,
+				COALESCE(e.source_tool_assistant_uuid_m, '') AS src_uuid,
+				COALESCE(e.attribution_skill_m, '') AS skill,
+				COALESCE(e.attribution_agent_m, '') AS agent_type,
+				MAX(COALESCE(e.input_tokens_m, 0))          AS input_tokens,
+				MAX(COALESCE(e.output_tokens_m, 0))         AS output_tokens,
+				MAX(COALESCE(e.cache_read_tokens_m, 0))     AS cache_read_tokens,
+				MAX(COALESCE(e.cache_creation_tokens_m, 0)) AS cache_creation_tokens,
 				MAX(COALESCE(%s, 0)) AS cw5m,
 				MAX(COALESCE(%s, 0)) AS cw1h
-			FROM entries_v e
+			FROM entries e
 			LEFT JOIN session_meta sm ON sm.session_id = e.session_id
 			WHERE %s
 			GROUP BY %s
@@ -516,13 +516,13 @@ func (s *Store) spawnLinks(since, until string) (spawnIndex, error) {
 		from = t.Add(-7 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	}
 	rows, err := s.readDB.Query(`
-		SELECT COALESCE(e.raw->>'$.toolUseResult.agentId', ''),
+		SELECT COALESCE(e.spawn_agent_id_m, ''),
 		       e.session_id,
-		       COALESCE(e.raw->>'$.message.content[0].tool_use_id', ''),
+		       COALESCE(e.spawn_tool_use_id_m, ''),
 		       e.timestamp
-		FROM entries_v e
+		FROM entries e
 		WHERE e.timestamp >= ? AND e.timestamp <= ?
-		  AND e.raw->>'$.toolUseResult.agentId' IS NOT NULL`, from, until)
+		  AND e.spawn_agent_id_m IS NOT NULL`, from, until)
 	if err != nil {
 		return ix, err
 	}
