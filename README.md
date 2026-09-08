@@ -298,7 +298,11 @@ working the whole time.
 
 After the schema is current, historical plaintext rows pack in the
 background (🎯T162). Watch `compress.backfill` in `mnemo_ops`
-(op=doctor) for phase and outstanding plain bytes. Repacking does not
+(op=doctor) for phase and outstanding plain bytes — a membership count
+against stored lengths rather than a live scan of every blob, which is
+what made `/health` fast in v0.97.0. Straight after an upgrade the check
+may add "N rows unmeasured, byte totals provisional" while a background
+pass measures those lengths; it clears itself. Repacking does not
 return space to the filesystem — VACUUM stays a manual operator step.
 
 The packer is built to stay out of the way: rows are compressed outside
@@ -432,7 +436,7 @@ in four months; the indexes behind them stayed.
 
 | Tool | Description |
 |---|---|
-| `mnemo_query` | Read-only SQL or sqldeep nested syntax against the full database. Call `mnemo_query(describe=true)` — or read the `mnemo://schema` resource — for the table/column catalogue, generated from the live database so it cannot drift (🎯T156). Read message text through `messages_v`, doc content through `docs_v` and entries through `entries_v`: those columns are zstd-compressed per row (🎯T151, 🎯T152) and the bare column is empty for compressed rows |
+| `mnemo_query` | Read-only SQL or sqldeep nested syntax against the full database. Call `mnemo_query(describe=true)` — or read the `mnemo://schema` resource — for the table/column catalogue, generated from the live database so it cannot drift (🎯T156). Read message text through `messages_v`, doc content through `docs_v` and entries through `entries_v`: those columns are zstd-compressed per row (🎯T151, 🎯T152) and the bare column is empty for compressed rows. **For aggregates and filters on a materialised field, read `entries.<field>_m` on the base table instead** — `entries_v`'s `COALESCE` cannot use an index, so a query through the view scans every row (🎯T179) |
 | `mnemo_repos` | List repos with paths, session counts, last activity. Supports globs. |
 | `mnemo_stats` | Index statistics — sessions and messages by type |
 

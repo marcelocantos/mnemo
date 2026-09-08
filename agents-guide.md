@@ -329,6 +329,25 @@ problem rather than a reading error. Use:
 or call `mnemo_text(col, col_z)` explicitly. A ratchet test enforces
 this over every SQL literal in the tree.
 
+**One carve-out, and it matters for speed.** `entries_v` serves
+`COALESCE(x_m, x)`, which SQLite cannot answer from an index — a filter
+or aggregate through the view SCANs every row. So a query that
+**aggregates or filters on a materialised field** must read the base
+table's `*_m` column instead:
+
+```sql
+-- scans 5.7M rows
+SELECT COUNT(*) FROM entries_v WHERE model = 'claude-opus-5';
+-- covering index
+SELECT COUNT(*) FROM entries   WHERE model_m = 'claude-opus-5';
+```
+
+Text is unaffected: read `raw`, message text and doc content through the
+views as above. The rule is only about the materialised scalar fields
+(`uuid_m`, `model_m`, `input_tokens_m`, …) that carry an index. This is
+what made `/health` and the dashboard token APIs take 18-95s before
+v0.97.0 (🎯T179).
+
 The daemon packs historical plain rows itself (🎯T162) whenever it
 finds a backlog — `compression.auto_backfill` defaults on. Doctor
 reports `compress.backfill` (phase plus outstanding plain bytes).
@@ -530,7 +549,8 @@ Operational surface, op-dispatched:
 `op=doctor|compactor|divergence|backup_status|backup_now|restore|budget|agent_trees|compress_status|compress_train|compress_gc|dedupe_entries`.
 
 `op=doctor` is the first thing to reach for when something looks wrong —
-a per-check health report (ok/warn/fail plus remediation) covering the
+a per-check health report (ok/warn/fail, remediation, and `duration_ms`
+per check) covering the
 summariser workdir, `claude` on PATH, configured roots, the compaction
 circuit-breaker AND its sustained failure ratio (🎯T167), ingest and
 compression backfill, and database responsiveness. The same data backs `GET /health` and the dashboard.
@@ -551,7 +571,9 @@ non-payload) is not a failure and does not increment `fail_count`.
 Leftover `last_error=deferred` rows are cleared on watcher start. Only
 hard failures and timeouts accrue toward quarantine.
 
-`op=compress_status` reports dictionary and cursor state.
+`op=compress_status` reports dictionary and cursor state, and flags any
+family whose stored lengths are still being measured, since its byte
+totals understate until that finishes.
 `op=compress_gc` is an explicit one-family override of the automatic
 backfill (🎯T162); leave it alone unless you have paused
 `compression.auto_backfill`.
@@ -679,7 +701,10 @@ instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,
 mnemo continuously checks its own health (🎯T83). A registry of named
 checks runs on a schedule — the full suite at startup, fast checks every
 ~3 minutes, the full suite hourly — each returning a severity
-(ok / warn / fail), a detail, and a remediation hint.
+(ok / warn / fail), a detail, a remediation hint, and `duration_ms`.
+Each check is bounded at 20 seconds; one that does not answer inside its
+budget is reported as a **failed** check rather than being allowed to
+hold the whole report, since the report is assembled sequentially.
 
 Checks, grouped by what they answer (the roster is
 `internal/registry/diagchecks.go`; plugins can add more at runtime):
@@ -720,9 +745,16 @@ Deferred ticks do not quarantine a session (🎯T163);
 check enforces.
 
 *Is historical compression finishing?* — `compress.backfill` (🎯T162 —
-phase plus outstanding plain bytes; 0 reclaimed / VACUUM is manual). A
-family that reports done with a plain residue left names the reason
-(🎯T169).
+phase plus outstanding plain bytes; 0 reclaimed / VACUUM is manual).
+Outstanding is membership (`z IS NULL`) filtered by the stored
+`plain_len`, never a live `SUM(length(blob))` — that scan was most of a
+95-second `/health`. A family whose only residue is rows **below** the
+compression threshold reports healthy: they stay plain forever and a
+check that can never return to OK is one people stop reading. After an
+upgrade the detail may add "N rows unmeasured, byte totals provisional"
+while a background pass measures stored lengths; that is disclosure, not
+a fault, and it clears itself (🎯T173). A family that reports done with a
+plain residue left names the reason (🎯T169).
 
 *What is it costing?* — `budget.projection` (month-end projection
 against the cap, or "unpriced" with no rate card), `budget.throttle`
@@ -757,8 +789,12 @@ the generated `uuid` column and drops the row out of
 `idx_entries_session_uuid` — a partial index, `WHERE uuid IS NOT NULL`.
 An insert that did not bind `uuid_m` then conflicted with neither index
 and landed a second copy. The insert path now chooses its statements by
-schema shape rather than codec readiness, so `uuid_m` is always bound
-when the column exists. To clear rows already written:
+schema shape rather than codec readiness, probing for **every** column
+the modern INSERT binds — not just `uuid_m`, since a 0.96-shaped schema
+already had that one. A deferred upgrade can add columns after the first
+writer starts, so a boot that probes during the backup window caches
+"legacy" for the process lifetime and the AFTER INSERT trigger fills the
+new columns once the migration lands. To clear rows already written:
 `mnemo_ops op=dedupe_entries` (add `apply=true`; it reports and changes
 nothing otherwise), or `mnemo dedupe-entries --apply` offline with the
 daemon stopped. Idempotent. Space returns to the filesystem only after

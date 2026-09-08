@@ -171,7 +171,14 @@ tree. `entries.raw` likewise lives in `raw_z` with `raw NULL` (🎯T152);
 its sixteen generated columns are NULL for those rows and their
 materialised twins (`uuid_m`, `model_m`, …) are the source of truth —
 read entries through the `entries_v` view, which serves the original
-column names and decoded `raw`. A boot-time pass fills the twins for
+column names and decoded `raw`. **Except for aggregates and filters on a
+materialised field**: `entries_v` serves `COALESCE(x_m, x)`, which is not
+sargable, so those queries SCAN and must read `entries.<field>_m` on the
+base table to reach `idx_entries_*_m` (🎯T179). Nine further `*_m`
+columns (`message_id_m`, `request_id_m`, `cache_write_5m_m`,
+`cache_write_1h_m`, the attribution and spawn fields) have no generated
+counterpart at all — the `entries_materialise` trigger fills them from
+`raw` — alongside `plain_len` / `z_len` on messages, docs and entries. A boot-time pass fills the twins for
 historical rows before `compress_gc family=entries` is allowed. The daemon
 enqueues that packer itself when it finds a backlog (🎯T162); `compress_gc`
 is no longer the only path. Doctor reports `compress.backfill` (plain bytes
@@ -204,8 +211,10 @@ An insert that did not bind `uuid_m` then conflicted with neither index
 and landed a duplicate, and the `entries_materialise` AFTER INSERT
 trigger that would have set `uuid_m` was swallowed by the statement's own
 `OR IGNORE`. `writerState` now picks its statements by **schema shape**
-(`modernInsertShape`, a cached `pragma_table_info` probe), not codec
-readiness, so `uuid_m` is bound whenever the column exists. Rows already
+(`modernInsertShape`, a cached `pragma_table_info` probe over **every**
+column the modern INSERT binds — `uuid_m` alone is not enough, since a
+0.96-shaped schema has it but lacks `message_id_m` and
+`messages.plain_len`), not codec readiness. Rows already
 written are cleared by `mnemo_ops op=dedupe_entries apply=true` or
 `mnemo dedupe-entries --apply`; both are idempotent and dry-run by
 default, and neither reclaims disk without a VACUUM.
