@@ -19,6 +19,7 @@ package diag
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -98,13 +99,15 @@ type Check struct {
 
 // Result is a check's outcome enriched with its identity for the Report
 // (and the dashboard / tool / notifications). Severity and Tier are the
-// stable string forms.
+// stable string forms. DurationMs is wall time of the check itself so a
+// /health regression is visible in the payload without a separate probe.
 type Result struct {
 	Name        string `json:"name"`
 	Severity    string `json:"severity"`
 	Tier        string `json:"tier"`
 	Detail      string `json:"detail,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
+	DurationMs  int64  `json:"duration_ms"`
 }
 
 // Report is the outcome of running a set of checks at a point in time.
@@ -202,21 +205,83 @@ func (r *Registry) Run(ctx context.Context, full bool, now time.Time) Report {
 }
 
 // runOne runs a single check with panic recovery and maps it to a Result.
+// CheckTimeout bounds a single check. The report is assembled
+// sequentially, so without it one slow check holds the whole /health
+// response — and has: a Fast-tier check running a full-table blob scan
+// took the endpoint to 95s on a large store. A check that cannot answer
+// inside this budget is reported as a failed check, which is information,
+// rather than being allowed to delay every other check's answer.
+//
+// Generous on purpose. This is a backstop against pathology, not a
+// performance target; a check that legitimately needs longer than this
+// is a check that should be moved to the Full tier.
+var CheckTimeout = 20 * time.Second
+
+// CheckTimeoutForTest sets the per-check bound and returns the previous
+// value. Tests only.
+func CheckTimeoutForTest(d time.Duration) time.Duration {
+	prev := CheckTimeout
+	CheckTimeout = d
+	return prev
+}
+
 func runOne(ctx context.Context, c Check) (res Result) {
 	res = Result{Name: c.Name, Tier: c.Tier.String(), Severity: Fail.String()}
+	start := time.Now()
 	defer func() {
+		res.DurationMs = time.Since(start).Milliseconds()
 		if r := recover(); r != nil {
 			res.Severity = Fail.String()
 			res.Detail = "check panicked"
 			res.Remediation = "file a mnemo bug — a diagnostic check should never panic"
 		}
 	}()
-	cr := c.Run(ctx)
-	return Result{
+
+	ctx, cancel := context.WithTimeout(ctx, CheckTimeout)
+	defer cancel()
+	done := make(chan CheckResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Re-panic on the caller's goroutine so the deferred
+				// recover above still turns it into a fail result.
+				done <- CheckResult{Severity: Fail,
+					Detail:      "check panicked",
+					Remediation: "file a mnemo bug — a diagnostic check should never panic"}
+			}
+		}()
+		done <- c.Run(ctx)
+	}()
+
+	var cr CheckResult
+	select {
+	case cr = <-done:
+	case <-ctx.Done():
+		// Deliberately no second look at done. A cancelled context
+		// unblocks any check that waits on it, so an answer arriving now
+		// is a consequence of the timeout rather than despite it, and
+		// crediting it would report a wedged check as healthy. Both cases
+		// are only ready together once the deadline has genuinely passed,
+		// so reporting the timeout is the honest verdict either way.
+		//
+		// The check's own goroutine is left to unwind on the cancelled
+		// context; the report does not wait for it.
+		return Result{
+			Name:     c.Name,
+			Tier:     c.Tier.String(),
+			Severity: Fail.String(),
+			Detail: fmt.Sprintf("check did not answer within %s",
+				CheckTimeout),
+			Remediation: "this check is doing more work than a health probe should; " +
+				"look for a full-table scan, and move it to the Full tier if it genuinely needs the time",
+		}
+	}
+	res = Result{
 		Name:        c.Name,
 		Tier:        c.Tier.String(),
 		Severity:    cr.Severity.String(),
 		Detail:      cr.Detail,
 		Remediation: cr.Remediation,
 	}
+	return res
 }

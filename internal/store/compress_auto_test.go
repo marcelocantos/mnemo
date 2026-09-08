@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -12,6 +13,12 @@ import (
 func TestAutoBackfillPacksPlainRowsWithoutAnOpsCall(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	seedLegacyMessages(t, s, 80)
+
+	// Legacy-shaped inserts leave plain_len NULL, and an unmeasured row is
+	// deliberately not actionable leftover (🎯T173) — otherwise a finished
+	// family reopens every cycle. Measure first, exactly as the worker does
+	// at the top of each cycle.
+	measureAllFamilies(t, s)
 
 	st, err := s.CompressionStatus()
 	if err != nil {
@@ -57,6 +64,7 @@ func TestAutoBackfillRestartsWhenPlainRowsReappear(t *testing.T) {
 	}
 
 	seedLegacyMessages(t, s, 25)
+	measureAllFamilies(t, s) // see 🎯T173: unmeasured rows are not leftover
 	st, err := s.CompressionStatus()
 	if err != nil {
 		t.Fatal(err)
@@ -87,14 +95,16 @@ func TestAutoBackfillDisabledStaysOff(t *testing.T) {
 	s.StartCompressBackfill()
 	s.compressBackfillCycle(t.Context())
 
-	st, err := s.CompressionStatus()
-	if err != nil {
+	// Assert on packing directly rather than via Outstanding: a disabled
+	// worker also skips the measurement pass, so Outstanding is 0 for a
+	// reason unrelated to what this test is about (🎯T173).
+	var packed int64
+	if err := s.readDB.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE text_z IS NOT NULL`).Scan(&packed); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range st.Families {
-		if f.Family == FamilyMessagesText && f.Outstanding == 0 {
-			t.Fatal("disabled worker must not pack leftover rows")
-		}
+	if packed != 0 {
+		t.Fatalf("disabled worker packed %d rows", packed)
 	}
 	if snap := s.CompressWorkerStatus(); snap.Phase != CompressPhaseDisabled {
 		t.Fatalf("phase=%s, want disabled", snap.Phase)
@@ -159,4 +169,22 @@ func waitOutstanding(t *testing.T, s *Store, family string, want int64) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("outstanding for %s did not reach %d", family, want)
+}
+
+// measureAllFamilies runs the bounded length-measurement pass for every
+// family, which is what compressBackfillCycle does before probing
+// leftover (🎯T173). Tests that seed through a legacy-shaped insert need
+// it, because those rows carry no plain_len and an unmeasured row is not
+// actionable leftover.
+func measureAllFamilies(t *testing.T, s *Store) {
+	t.Helper()
+	for _, family := range allFamilies {
+		fs, err := familyOf(family)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.fillLengths(context.Background(), fs); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

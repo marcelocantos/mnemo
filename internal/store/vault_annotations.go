@@ -253,14 +253,17 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 			} else {
 				_, err = s.writeDB.Exec(`
 				INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
-					size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z)
-				VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '', ?)
+					size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z,
+					plain_len, z_len)
+				VALUES (?, ?, 'vault', ?, ?, ?, ?, ?, ?, '', '', '', '', '', ?, ?, ?)
 				ON CONFLICT(file_path) DO UPDATE SET
 					repo         = excluded.repo,
 					kind         = excluded.kind,
 					title        = excluded.title,
 					content      = excluded.content,
 					content_z    = excluded.content_z,
+					plain_len    = excluded.plain_len,
+					z_len        = excluded.z_len,
 					content_hash = excluded.content_hash,
 					size         = excluded.size,
 					mtime        = excluded.mtime,
@@ -271,7 +274,8 @@ func (s *Store) IngestVaultAnnotations(vaultPath string, opts VaultIndexingOptio
 					doc_target   = '',
 					doc_source   = ''
 				WHERE docs.kind = 'vault'
-			`, vaultRepo, path, title, contentPlain, hash, int64(len(human)), now, now, contentZ)
+			`, vaultRepo, path, title, contentPlain, hash, int64(len(human)), now, now, contentZ,
+					len(human), lenOrNil(contentZ))
 			}
 			if err != nil {
 				slog.Error("vault: ingest annotation failed", "file", path, "err", err)

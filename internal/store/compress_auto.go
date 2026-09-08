@@ -82,14 +82,30 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 				return
 			}
 		}
-		outstanding, err := s.familyOutstanding(fs)
+		// Measure a bounded batch of unmeasured rows first (🎯T173).
+		// This is the only place that reads payloads to compute lengths;
+		// it used to run unbounded on the /health path. Failure is logged
+		// and the cycle continues: an unmeasured row is invisible to the
+		// leftover probe, which delays packing it but breaks nothing.
+		if filled, err := s.fillLengths(ctx, fs); err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("compress length fill failed", "family", family, "err", err)
+			}
+		} else if filled > 0 {
+			slog.Info("compress lengths measured", "family", family, "rows", filled)
+		}
+
+		// Membership probe, not SUM(length(blob)). When the family is
+		// already done and leftover is empty (or only short rows), this
+		// is an index-only walk of idx_*_z_null and we do not reopen.
+		leftover, err := s.familyLeftoverCount(fs)
 		if err != nil {
 			if ctx.Err() == nil {
-				slog.Warn("compress backfill outstanding probe failed", "family", family, "err", err)
+				slog.Warn("compress backfill leftover probe failed", "family", family, "err", err)
 			}
 			continue
 		}
-		if outstanding == 0 {
+		if leftover == 0 {
 			continue
 		}
 		if err := s.reopenIfMarkedDone(family); err != nil {
@@ -116,9 +132,9 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 			"saved", res.Saved, "done", res.Done)
 	}
 
-	left, err := s.totalOutstanding()
+	left, err := s.totalLeftoverRows()
 	if err != nil && ctx.Err() == nil {
-		slog.Warn("compress backfill outstanding sum failed", "err", err)
+		slog.Warn("compress backfill leftover sum failed", "err", err)
 	}
 	switch {
 	case anyRunning || left > 0:
@@ -128,14 +144,14 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 	}
 }
 
-func (s *Store) totalOutstanding() (int64, error) {
+func (s *Store) totalLeftoverRows() (int64, error) {
 	var sum int64
 	for _, family := range allFamilies {
 		fs, err := familyOf(family)
 		if err != nil {
 			continue
 		}
-		n, err := s.familyOutstanding(fs)
+		n, err := s.familyLeftoverCount(fs)
 		if err != nil {
 			return 0, err
 		}

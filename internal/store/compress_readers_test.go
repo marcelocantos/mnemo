@@ -118,10 +118,18 @@ func bareColumnReads(s string) []string {
 	// A read of entries that touches raw or a generated column must go
 	// through the view; id/session_id/type/timestamp-only reads (the GC
 	// cursor, existence checks) are fine on the base table.
+	// Token aggregates must read the base table's *_m columns so
+	// idx_entries_*_m is usable — entries_v's COALESCE/mnemo_raw hides them.
 	// A literal pinning an idx_entries_*_m index is a deliberate base-table
 	// read of the materialised columns (a view cannot take INDEXED BY).
-	if entriesReadRe.MatchString(s) && entriesHotColsRe.MatchString(s) && !entriesDeleteRe.MatchString(s) &&
-		!strings.Contains(s, "INDEXED BY idx_entries_") {
+	//
+	// The materialised-column test must be a WORD match. strings.Contains
+	// on "_m" also matches the literal "session_meta", which most entries
+	// queries join — that exempted nearly every query from this ratchet
+	// and reopened the 🎯T152 hole it exists to hold shut (🎯T176).
+	if entriesReadRe.MatchString(s) && entriesHotColsRe.MatchString(stripSafeEntries(s)) && !entriesDeleteRe.MatchString(s) &&
+		!strings.Contains(s, "INDEXED BY idx_entries_") &&
+		!(materialisedColRe.MatchString(s) && !entriesReadsRaw(s)) {
 		out = append(out, "entries (use entries_v)")
 	}
 	return out
@@ -149,6 +157,41 @@ var safeContentRe = regexp.MustCompile(`(?i)mnemo_text\(\s*(\w+\.)?content\s*,\s
 
 func stripSafeContent(s string) string { return safeContentRe.ReplaceAllString(s, " ") }
 
+// mnemo_raw(raw, raw_z) is the documented decoder; *_m columns are the
+// hot-path source of truth (token aggregates must not go through the view).
+// materialisedColRe matches a materialised twin as a WORD — foo_m, not
+// any string containing "_m" such as session_meta (🎯T176).
+var materialisedColRe = regexp.MustCompile(`\b\w+_m\b`)
+
+var safeEntriesRe = regexp.MustCompile(`(?i)mnemo_raw\(\s*(\w+\.)?raw\s*,\s*(\w+\.)?raw_z\s*\)|\braw_z\b|\b\w+_m\b`)
+
+var entriesAliasRe = regexp.MustCompile(`(?i)\bAS\s+(raw|uuid|model|stop_reason|input_tokens|output_tokens|cache_read_tokens|cache_creation_tokens|agent_id|version|slug|is_sidechain|data_type|data_command|data_hook_event|top_tool_use_id|parent_tool_use_id)\b`)
+
+// entriesReadsRaw reports a raw-column read that is not mnemo_raw/raw_z.
+func entriesReadsRaw(s string) bool {
+	s = regexp.MustCompile(`(?i)mnemo_raw\(\s*(\w+\.)?raw\s*,\s*(\w+\.)?raw_z\s*\)|\braw_z\b`).ReplaceAllString(s, " ")
+	return regexp.MustCompile(`(?i)\braw\b`).MatchString(s)
+}
+
+func stripSafeEntries(s string) string {
+	// Record aliases before stripping: `model_m AS model` plus an outer
+	// `e.model` in the same literal is the CTE name, not the generated
+	// column. A single ReplaceAll cannot see `AS model` after `model_m`
+	// has already been removed.
+	aliased := map[string]bool{}
+	for _, m := range entriesAliasRe.FindAllStringSubmatch(s, -1) {
+		if len(m) > 1 {
+			aliased[strings.ToLower(m[1])] = true
+		}
+	}
+	s = safeEntriesRe.ReplaceAllString(s, " ")
+	s = entriesAliasRe.ReplaceAllString(s, " ")
+	for col := range aliased {
+		s = regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(col)+`\b`).ReplaceAllString(s, " ")
+	}
+	return s
+}
+
 // bareSnippet returns the text around the first bare reference, for the
 // failure message.
 func bareSnippet(s, col string) string {
@@ -171,4 +214,61 @@ func bareSnippet(s, col string) string {
 		b = len(s)
 	}
 	return s[a:b]
+}
+
+// TestRatchetIsNotDisarmedBySessionMetaJoin is the regression test for
+// 🎯T176.
+//
+// The exemption for deliberate base-table reads of the materialised
+// columns was `strings.Contains(s, "_m")`. "session_meta" contains "_m",
+// and most entries queries join it — so the substring test exempted
+// nearly every query in the tree and the ratchet silently stopped
+// guarding the 🎯T152 hole it exists for.
+func TestRatchetIsNotDisarmedBySessionMetaJoin(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		flagged bool
+		why     string
+	}{
+		{
+			name: "generated column, joined to session_meta",
+			sql: `SELECT e.model, e.input_tokens FROM entries e
+			      LEFT JOIN session_meta sm ON sm.session_id = e.session_id`,
+			flagged: true,
+			why:     "model/input_tokens are NULL on packed rows; the session_meta join must not exempt this",
+		},
+		{
+			name: "materialised twins, joined to session_meta",
+			sql: `SELECT e.model_m, e.input_tokens_m FROM entries e
+			      LEFT JOIN session_meta sm ON sm.session_id = e.session_id`,
+			flagged: false,
+			why:     "reading the twins on the base table is the intended token-aggregate form",
+		},
+		{
+			name:    "generated column, no join at all",
+			sql:     `SELECT e.input_tokens FROM entries e WHERE e.session_id = ?`,
+			flagged: true,
+			why:     "the plain case the ratchet has always caught",
+		},
+		{
+			name:    "session_meta alone, no entries columns",
+			sql:     `SELECT sm.repo FROM session_meta sm`,
+			flagged: false,
+			why:     "not an entries read",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bareColumnReads(tc.sql)
+			var flagged bool
+			for _, g := range got {
+				if strings.HasPrefix(g, "entries") {
+					flagged = true
+				}
+			}
+			if flagged != tc.flagged {
+				t.Errorf("flagged = %v, want %v — %s", flagged, tc.flagged, tc.why)
+			}
+		})
+	}
 }

@@ -492,12 +492,16 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					"check the daemon log for compress/dictionary errors")
 			}
 			var outstanding int64
+			var leftover int64
 			var saved int64
+			var pending int64
 			var parts []string
 			for _, f := range st.Families {
 				outstanding += f.Outstanding
+				leftover += f.LeftoverRows
 				saved += f.BackfillSaved
-				if f.Outstanding > 0 || f.Running {
+				pending += f.LengthsPending
+				if f.Outstanding > 0 || f.LeftoverRows > 0 || f.Running {
 					parts = append(parts, fmt.Sprintf("%s %s plain / %s packed",
 						f.Family, formatIEC(f.Outstanding), formatIEC(f.PackedBytes)))
 				}
@@ -510,10 +514,17 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				detail += ": " + strings.Join(parts, "; ")
 			}
 			detail += fmt.Sprintf("; %s repacked, 0 reclaimed (VACUUM is manual)", formatIEC(saved))
+			if pending > 0 {
+				// Disclosed, not alarmed: this clears on its own as the
+				// background pass measures rows, and a warning that
+				// resolves itself teaches people to ignore warnings
+				// (🎯T173).
+				detail += fmt.Sprintf("; %d rows unmeasured, byte totals provisional", pending)
+			}
 			switch {
 			case snap.Phase == store.CompressPhaseDisabled:
 				return diag.Healthy(detail)
-			case outstanding > 0:
+			case outstanding > 0 || leftover > 0:
 				return diag.Warning(detail,
 					"the daemon packs leftover rows on its own; space returns to the filesystem only after a manual VACUUM")
 			default:

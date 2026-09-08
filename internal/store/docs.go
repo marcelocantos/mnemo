@@ -395,14 +395,17 @@ func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped
 	} else {
 		_, err = s.writeDB.Exec(`
 		INSERT INTO docs (repo, file_path, kind, title, content, content_hash,
-			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			size, mtime, indexed_at, taxonomy, doc_date, doc_status, doc_target, doc_source, content_z,
+			plain_len, z_len)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(file_path) DO UPDATE SET
 			repo         = excluded.repo,
 			kind         = excluded.kind,
 			title        = excluded.title,
 			content      = excluded.content,
 			content_z    = excluded.content_z,
+			plain_len    = excluded.plain_len,
+			z_len        = excluded.z_len,
 			content_hash = excluded.content_hash,
 			size         = excluded.size,
 			mtime        = excluded.mtime,
@@ -413,7 +416,8 @@ func (s *Store) ingestDocFile(path, repo string, treeID int64) (indexed, skipped
 			doc_target   = excluded.doc_target,
 			doc_source   = excluded.doc_source
 	`, repo, path, kind, title, contentPlain, hash, fi.Size(), mtime, now,
-			taxonomy, meta.Date, meta.Status, meta.Target, meta.Source, contentZ)
+			taxonomy, meta.Date, meta.Status, meta.Target, meta.Source, contentZ,
+			len(content), lenOrNil(contentZ))
 	}
 	if err != nil {
 		slog.Error("insert doc failed", "file", path, "err", err)

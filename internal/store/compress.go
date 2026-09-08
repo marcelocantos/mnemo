@@ -110,6 +110,14 @@ const writerDriverName = "sqlite3_mnemo_rw"
 // SQLiteDriverName is the database/sql driver to open mnemo.db with.
 const SQLiteDriverName = writerDriverName
 
+// lenOrNil is the stored z_len for a frame: NULL when the row stayed plain.
+func lenOrNil(z []byte) any {
+	if z == nil {
+		return nil
+	}
+	return len(z)
+}
+
 func init() {
 	sql.Register(writerDriverName, &sqlite3.SQLiteDriver{
 		ConnectHook: registerTextFunc,
@@ -396,19 +404,29 @@ type CompressionStatus struct {
 }
 
 // FamilyStatus is one compressed column's row accounting.
+//
+// Byte totals come from stored plain_len / z_len, never from live
+// SUM(length(blob)). Outstanding is leftover membership (z IS NULL)
+// filtered by the compress threshold on the stored length.
 type FamilyStatus struct {
-	Family        string
-	Rows          int64
-	Compressed    int64
-	PlainBytes    int64 // bytes still held in the legacy column
-	PackedBytes   int64 // bytes held in the *_z column
-	Outstanding   int64 // compressible plain bytes (length ≥ compressMinBytes, z-col NULL)
-	BackfillDone  bool
-	BackfillNext  int64 // next row id the backfill will visit
-	BackfillSaved int64 // bytes saved so far by the backfill
-	BackfillAt    string
-	Running       bool
-	LastError     string
+	Family       string
+	Rows         int64
+	Compressed   int64
+	PlainBytes   int64 // leftover plain_len (z-col NULL)
+	PackedBytes  int64 // stored z_len of packed rows (0 until lengths are filled)
+	Outstanding  int64 // leftover plain_len where length ≥ compressMinBytes
+	LeftoverRows int64 // z IS NULL and plain_len ≥ compressMinBytes
+	// LengthsPending is rows whose stored length is not yet measured
+	// (🎯T173). Non-zero only after an upgrade. While it is non-zero
+	// PlainBytes/PackedBytes understate, and the status output says so
+	// rather than presenting a provisional number as a settled one.
+	LengthsPending int64
+	BackfillDone   bool
+	BackfillNext   int64 // next row id the backfill will visit
+	BackfillSaved  int64 // bytes saved so far by the backfill
+	BackfillAt     string
+	Running        bool
+	LastError      string
 }
 
 // Compress worker phases (🎯T162). Reported by the health check and
@@ -457,7 +475,16 @@ const entriesMaterialiseSet = `uuid_m = COALESCE(uuid_m, uuid),
 	data_command_m = COALESCE(data_command_m, data_command),
 	data_hook_event_m = COALESCE(data_hook_event_m, data_hook_event),
 	top_tool_use_id_m = COALESCE(top_tool_use_id_m, top_tool_use_id),
-	parent_tool_use_id_m = COALESCE(parent_tool_use_id_m, parent_tool_use_id)`
+	parent_tool_use_id_m = COALESCE(parent_tool_use_id_m, parent_tool_use_id),
+	message_id_m = COALESCE(message_id_m, json_extract(raw, '$.message.id')),
+	request_id_m = COALESCE(request_id_m, raw->>'$.requestId'),
+	cache_write_5m_m = COALESCE(cache_write_5m_m, json_extract(raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')),
+	cache_write_1h_m = COALESCE(cache_write_1h_m, json_extract(raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')),
+	source_tool_assistant_uuid_m = COALESCE(source_tool_assistant_uuid_m, raw->>'$.sourceToolAssistantUUID'),
+	attribution_skill_m = COALESCE(attribution_skill_m, raw->>'$.attributionSkill'),
+	attribution_agent_m = COALESCE(attribution_agent_m, raw->>'$.attributionAgent'),
+	spawn_agent_id_m = COALESCE(spawn_agent_id_m, raw->>'$.toolUseResult.agentId'),
+	spawn_tool_use_id_m = COALESCE(spawn_tool_use_id_m, raw->>'$.message.content[0].tool_use_id')`
 
 var familySpecs = map[string]familySpec{
 	FamilyMessagesText: {table: "messages", plainCol: "text", zCol: "text_z",
@@ -507,13 +534,17 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		fs := familySpecs[family]
 		var f FamilyStatus
 		f.Family = family
-		// Table and column names come from familySpecs, not the caller.
+		// Membership + stored lengths. No length(blob): that is the
+		// overflow-page scan that made compress.backfill ~22s. And no
+		// measurement either — filling lengths is the background
+		// worker's job, never a reader's (🎯T173).
 		q := fmt.Sprintf(`
-			SELECT COUNT(*),
-			       COALESCE(SUM(%[2]s IS NOT NULL), 0),
-			       COALESCE(SUM(length(%[3]s)), 0),
-			       COALESCE(SUM(length(%[2]s)), 0)
-			FROM %[1]s`, fs.table, fs.zCol, fs.plainCol)
+			SELECT
+				(SELECT COUNT(*) FROM %[1]s),
+				(SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NOT NULL),
+				(SELECT COALESCE(SUM(plain_len), 0) FROM %[1]s WHERE %[2]s IS NULL),
+				(SELECT COALESCE(SUM(z_len), 0) FROM %[1]s WHERE z_len IS NOT NULL)`,
+			fs.table, fs.zCol)
 		if err := s.readDB.QueryRow(q).Scan(&f.Rows, &f.Compressed, &f.PlainBytes, &f.PackedBytes); err != nil {
 			return st, err
 		}
@@ -527,27 +558,132 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		}
 		f.BackfillDone = done == 1
 		f.Running = s.backfill.running(family)
-		if n, err := s.familyOutstanding(fs); err != nil {
+		rows, bytes, err := s.familyLeftover(fs)
+		if err != nil {
 			return st, err
-		} else {
-			f.Outstanding = n
+		}
+		f.LeftoverRows = rows
+		f.Outstanding = bytes
+		if f.LengthsPending, err = s.familyLengthsPending(fs); err != nil {
+			return st, err
 		}
 		st.Families = append(st.Families, f)
 	}
 	return st, nil
 }
 
-// familyOutstanding is the compressible residue: plain rows that would
-// pay to pack. Short rows and already-packed sentinels are excluded so
-// a finished family does not look unfinished forever.
-func (s *Store) familyOutstanding(fs familySpec) (int64, error) {
+// familyLeftover is ACTIONABLE leftover: z IS NULL and the stored length
+// is known to meet the compress threshold. Byte total is SUM(plain_len),
+// never length(blob).
+//
+// Rows whose length is not yet measured are deliberately excluded (🎯T173).
+// Counting them as leftover would make the auto-backfill reopen a finished
+// family on every cycle, walk it, compress nothing, and mark it done again
+// — which is precisely the ~22s-every-2-minutes loop this work exists to
+// remove. They are reported separately by familyLengthsPending, so the
+// backlog is disclosed rather than hidden or acted upon.
+func (s *Store) familyLeftover(fs familySpec) (rows, bytes int64, err error) {
 	q := fmt.Sprintf(`
-		SELECT COALESCE(SUM(length(%[2]s)), 0)
+		SELECT COUNT(*), COALESCE(SUM(plain_len), 0)
 		FROM %[1]s
-		WHERE %[3]s IS NULL AND length(%[2]s) >= ?`, fs.table, fs.plainCol, fs.zCol)
+		WHERE %[2]s IS NULL AND plain_len >= ?`,
+		fs.table, fs.zCol)
+	err = s.readDB.QueryRow(q, compressMinBytes).Scan(&rows, &bytes)
+	return rows, bytes, err
+}
+
+// familyOutstanding is leftover plain bytes (length ≥ compressMinBytes).
+// Kept as a bytes figure because doctor/compress_status format it as IEC.
+func (s *Store) familyOutstanding(fs familySpec) (int64, error) {
+	_, bytes, err := s.familyLeftover(fs)
+	return bytes, err
+}
+
+// familyLeftoverCount is the membership probe the auto-backfill uses
+// instead of SUM(length(blob)). Empty (or only-short) leftover is an
+// index-only walk of idx_*_z_null.
+func (s *Store) familyLeftoverCount(fs familySpec) (int64, error) {
+	rows, _, err := s.familyLeftover(fs)
+	return rows, err
+}
+
+// familyLengthsPending counts rows whose stored length is still unknown:
+// unpacked rows with no plain_len, and packed rows with no z_len. Both
+// arise only on an upgrade — every insert and every pack writes its own
+// lengths — and both are filled in bounded batches by the background
+// worker (fillLengths).
+//
+// It is a disclosure, not an alarm. While it is non-zero the family's
+// PlainBytes/PackedBytes are understated, and saying so is the difference
+// between a provisional number and a wrong one.
+func (s *Store) familyLengthsPending(fs familySpec) (int64, error) {
+	q := fmt.Sprintf(`
+		SELECT (SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NULL AND plain_len IS NULL)
+		     + (SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NOT NULL AND z_len IS NULL)`,
+		fs.table, fs.zCol)
 	var n int64
-	err := s.readDB.QueryRow(q, compressMinBytes).Scan(&n)
+	err := s.readDB.QueryRow(q).Scan(&n)
 	return n, err
+}
+
+// lengthFillBatch bounds one fillLengths pass per family per cycle. Each
+// row read pulls the payload (and its overflow pages) once, so this is
+// the one place that still pays that cost — deliberately, in the
+// background, at a bounded rate, and exactly once per row for the life of
+// the database.
+var lengthFillBatch int64 = 5000
+
+// lengthFillBatchForTest sets the batch size and returns the previous
+// value, so a test can prove the pass is bounded. Tests only.
+func lengthFillBatchForTest(n int64) int64 {
+	prev := lengthFillBatch
+	lengthFillBatch = n
+	return prev
+}
+
+// fillLengths measures a bounded batch of rows whose stored lengths are
+// unknown (🎯T173).
+//
+// This used to run as one unbounded UPDATE on the /health path, from
+// CompressionStatus, which is a Fast-tier diag check: on an upgraded
+// store that rewrote every unpacked row in a single transaction while
+// every other writer queued behind SQLite's single writer. That is the
+// same starvation the compression backfill was taught to avoid in 🎯T168,
+// reintroduced in the health handler — so measurement now belongs to the
+// background worker, and never to a reader.
+//
+// plain_len and z_len are BYTES OF THE PAYLOAD THE PACKER COMPRESSES —
+// fs.readExpr — for every writer: the ingest INSERT, the pack UPDATE, and
+// this pass. Getting that wrong is silent: SQLite's length() counts
+// CHARACTERS on TEXT and BYTES on BLOB, and entries.raw is stored as
+// jsonb, whose byte length is a third quantity again. CAST(... AS BLOB)
+// pins all three to the same unit as Go's len().
+func (s *Store) fillLengths(ctx context.Context, fs familySpec) (int64, error) {
+	var filled int64
+
+	plainQ := fmt.Sprintf(`
+		UPDATE %[1]s SET plain_len = length(CAST(%[2]s AS BLOB))
+		WHERE id IN (
+			SELECT id FROM %[1]s WHERE %[3]s IS NULL AND plain_len IS NULL LIMIT ?)`,
+		fs.table, fs.readExpr, fs.zCol)
+	r, err := s.writeDB.ExecContext(ctx, plainQ, lengthFillBatch)
+	if err != nil {
+		return filled, fmt.Errorf("%s: fill plain_len: %w", fs.table, err)
+	}
+	n, _ := r.RowsAffected()
+	filled += n
+
+	zQ := fmt.Sprintf(`
+		UPDATE %[1]s SET z_len = length(%[2]s)
+		WHERE id IN (
+			SELECT id FROM %[1]s WHERE %[2]s IS NOT NULL AND z_len IS NULL LIMIT ?)`,
+		fs.table, fs.zCol)
+	if r, err = s.writeDB.ExecContext(ctx, zQ, lengthFillBatch); err != nil {
+		return filled, fmt.Errorf("%s: fill z_len: %w", fs.table, err)
+	}
+	n, _ = r.RowsAffected()
+	filled += n
+	return filled, nil
 }
 
 // reopenBackfill clears the completion marker so a newly-detected
@@ -854,7 +990,7 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 	if fs.extraSet != "" {
 		extra = ", " + fs.extraSet
 	}
-	updateSQL := fmt.Sprintf(`UPDATE %[1]s SET %[2]s = %[4]s, %[3]s = ?%[5]s WHERE id = ?`,
+	updateSQL := fmt.Sprintf(`UPDATE %[1]s SET %[2]s = %[4]s, %[3]s = ?, plain_len = ?, z_len = ?%[5]s WHERE id = ?`,
 		fs.table, fs.plainCol, fs.zCol, fs.sentinel, extra)
 	maxSQL := fmt.Sprintf(`SELECT COALESCE(MAX(id), 0) FROM %s`, fs.table)
 	enc := s.codec.encoder(family)
@@ -905,9 +1041,10 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 		// lock, which is how a background packer took /health down with
 		// it. The transaction below now contains only the UPDATEs.
 		type packed struct {
-			id    int64
-			z     []byte
-			saved int64
+			id       int64
+			z        []byte
+			saved    int64
+			plainLen int
 		}
 		var (
 			toWrite   []packed
@@ -932,7 +1069,7 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 				return fmt.Errorf("%s id %d: round-trip mismatch (%v); backfill halted", fs.table, r.id, err)
 			}
 			d := int64(len(r.text) - len(z))
-			toWrite = append(toWrite, packed{id: r.id, z: z, saved: d})
+			toWrite = append(toWrite, packed{id: r.id, z: z, saved: d, plainLen: len(r.text)})
 			saved += d
 			zBytes += int64(len(z))
 		}
@@ -952,7 +1089,7 @@ func (s *Store) compressBackfill(ctx context.Context, fs familySpec, family stri
 				return err
 			}
 			for _, w := range toWrite {
-				if _, err := stmt.ExecContext(ctx, w.z, w.id); err != nil {
+				if _, err := stmt.ExecContext(ctx, w.z, w.plainLen, len(w.z), w.id); err != nil {
 					// One unwritable row must not strand the family
 					// (🎯T169). entries.raw carries materialised twins in
 					// extraSet, and writing them can collide with the
@@ -1158,6 +1295,84 @@ func (s *Store) materialiseEntries(ctx context.Context, res *BackfillResult) err
 		res.Compressed += n
 		next = hi.Int64 + 1
 		if err := s.saveBackfillCursor(entriesFieldsFamily, next, 0, false); err != nil {
+			return err
+		}
+	}
+}
+
+// entriesUsageFieldsFamily is the boot-time pass that fills the Usage /
+// AgentTrees *_m columns on historical rows so token aggregates never
+// decode raw. New ingest writes these at INSERT; this walk covers rows
+// ingested before the columns existed (including already-packed ones).
+const entriesUsageFieldsFamily = "entries.usage_fields"
+
+// MaterialiseUsageFields copies message_id / request_id / cache-tier /
+// agent-tree fields out of raw (or raw_z) into their *_m twins.
+func (s *Store) MaterialiseUsageFields(ctx context.Context) (BackfillResult, error) {
+	res := BackfillResult{Family: entriesUsageFieldsFamily}
+	if !s.CompressionReady() {
+		return res, errors.New("compression schema not ready (deferred upgrade still running?)")
+	}
+	if !s.backfill.start(entriesUsageFieldsFamily) {
+		return res, fmt.Errorf("%s: already running", entriesUsageFieldsFamily)
+	}
+	err := s.materialiseUsageFields(ctx, &res)
+	s.backfill.finish(entriesUsageFieldsFamily, err)
+	return res, err
+}
+
+func (s *Store) materialiseUsageFields(ctx context.Context, res *BackfillResult) error {
+	var next int64
+	var done int
+	err := s.readDB.QueryRow(`SELECT next_id, done FROM compression_gc WHERE family = ?`, entriesUsageFieldsFamily).Scan(&next, &done)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if done == 1 {
+		res.Done = true
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var lo, hi sql.NullInt64
+		var count int64
+		err := s.readDB.QueryRowContext(ctx, `
+			SELECT MIN(id), MAX(id), COUNT(*) FROM (
+				SELECT id FROM entries WHERE id >= ? ORDER BY id LIMIT ?)`,
+			next, backfillBatchRows).Scan(&lo, &hi, &count)
+		if err != nil {
+			return err
+		}
+		if !hi.Valid {
+			res.Done = true
+			return s.saveBackfillCursor(entriesUsageFieldsFamily, next, 0, true)
+		}
+		r, err := s.writeDB.ExecContext(ctx, `
+			UPDATE entries SET
+				message_id_m = COALESCE(entries.message_id_m, json_extract(src.j, '$.message.id')),
+				request_id_m = COALESCE(entries.request_id_m, src.j->>'$.requestId'),
+				cache_write_5m_m = COALESCE(entries.cache_write_5m_m, json_extract(src.j, '$.message.usage.cache_creation.ephemeral_5m_input_tokens')),
+				cache_write_1h_m = COALESCE(entries.cache_write_1h_m, json_extract(src.j, '$.message.usage.cache_creation.ephemeral_1h_input_tokens')),
+				source_tool_assistant_uuid_m = COALESCE(entries.source_tool_assistant_uuid_m, src.j->>'$.sourceToolAssistantUUID'),
+				attribution_skill_m = COALESCE(entries.attribution_skill_m, src.j->>'$.attributionSkill'),
+				attribution_agent_m = COALESCE(entries.attribution_agent_m, src.j->>'$.attributionAgent'),
+				spawn_agent_id_m = COALESCE(entries.spawn_agent_id_m, src.j->>'$.toolUseResult.agentId'),
+				spawn_tool_use_id_m = COALESCE(entries.spawn_tool_use_id_m, src.j->>'$.message.content[0].tool_use_id')
+			FROM (
+				SELECT id, mnemo_raw(raw, raw_z) AS j FROM entries
+				WHERE id BETWEEN ? AND ?
+			) src
+			WHERE entries.id = src.id`, lo.Int64, hi.Int64)
+		if err != nil {
+			return err
+		}
+		n, _ := r.RowsAffected()
+		res.Rows += count
+		res.Compressed += n
+		next = hi.Int64 + 1
+		if err := s.saveBackfillCursor(entriesUsageFieldsFamily, next, 0, false); err != nil {
 			return err
 		}
 	}
