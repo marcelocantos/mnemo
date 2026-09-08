@@ -93,8 +93,9 @@ type Store struct {
 	dbPath     string
 	projectDir string
 
-	// insertShapeModern caches whether the schema carries the columns the
-	// modern insert statements bind (🎯T170). See modernInsertShape.
+	// insertShapeModern caches whether the schema carries every column
+	// the modern insert statements bind (🎯T170 + usage/length columns).
+	// See modernInsertShape.
 	insertShapeOnce   sync.Once
 	insertShapeModern bool
 
@@ -8683,22 +8684,33 @@ func (s *Store) knnImageSearch(queryVec []float32, excludeID int64, repo string,
 	return results, nil
 }
 
+// modernInsertShapeSQL is 1 iff every column the modern INSERT
+// statements bind exists. 0.96.0 already has uuid_m and text_z;
+// message_id_m and messages.plain_len arrived with the health-latency
+// columns. The T170 pair alone is not enough: 🎯T114.1 serves writers
+// on the old schema during the pre-migration backup, and the modern
+// SQL would fail there with "no such column".
+const modernInsertShapeSQL = `
+		SELECT (SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'uuid_m')
+		     * (SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'message_id_m')
+		     * (SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'text_z')
+		     * (SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'plain_len')`
+
 // modernInsertShape reports whether the schema has the columns the
-// modern insert statements bind: entries.uuid_m and messages.text_z
-// (🎯T170). Asked of the schema itself rather than of a startup
-// capability, because the capability latch is about a migration having
-// run in THIS process — a store opened on an already-migrated database
-// has the columns whether or not that phase was observed, and a test
-// store has them with no phases at all.
+// modern insert statements bind. Asked of the schema itself rather
+// than of a startup capability, because the capability latch is about
+// a migration having run in THIS process — a store opened on an
+// already-migrated database has the columns whether or not that phase
+// was observed, and a test store has them with no phases at all.
 //
-// Probed once and cached: it cannot change under a running store, since
-// the migration that adds these columns runs before any writer exists.
+// Probed once and cached. A deferred upgrade (🎯T114.1) can add the
+// columns after the first writer, so a 0.96.0 boot that probes during
+// the backup window caches legacy for the life of the process; the
+// AFTER INSERT trigger fills the new columns once the migration lands.
 func (s *Store) modernInsertShape() bool {
 	s.insertShapeOnce.Do(func() {
 		var n int
-		err := s.readDB.QueryRow(`
-			SELECT (SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'uuid_m')
-			     * (SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'text_z')`).Scan(&n)
+		err := s.readDB.QueryRow(modernInsertShapeSQL).Scan(&n)
 		if err != nil {
 			// Unknown shape: the legacy statements are valid against both
 			// schemas, so they are the safe answer. The cost is a NULL
