@@ -131,7 +131,7 @@ func TestVaultViaMCP(t *testing.T) {
     d := e2e.Start(t)  // tempdir-isolated daemon
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    out, err := d.Call(ctx, "mnemo_vault_status", nil)
+    out, err := d.Call(ctx, "mnemo_vault", map[string]any{"op": "status"})
     if err != nil { t.Fatal(err) }
     // … assertions on `out` …
 }

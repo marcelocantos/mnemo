@@ -50,7 +50,7 @@ func snapshotHome(t *testing.T) string {
 // invariant assertion (🎯T73 acceptance #6 — backlog convergence).
 // On any production-shape snapshot, the compactor's reported
 // backlog must be a bounded, observable number — not an unbounded
-// runaway. Concretely, mnemo_compactor_status returns a numeric
+// runaway. Concretely, mnemo_ops(op=compactor) returns a numeric
 // "backlog" line and the value must be parseable, non-negative, and
 // (loosely) less than the total session count (a backlog larger
 // than the entire session set means the trigger is broken).
@@ -66,13 +66,13 @@ func TestScaleBacklogConvergence(t *testing.T) {
 
 	// Pull the live compactor status. Look for "backlog:" and
 	// parse the integer.
-	out, err := d.Call(ctx, "mnemo_compactor_status", nil)
+	out, err := d.Call(ctx, "mnemo_ops", map[string]any{"op": "compactor"})
 	if err != nil {
-		t.Fatalf("mnemo_compactor_status: %v\n%s", err, d.Log())
+		t.Fatalf("mnemo_ops op=compactor: %v\n%s", err, d.Log())
 	}
 	backlog, ok := parseBacklog(out)
 	if !ok {
-		t.Fatalf("mnemo_compactor_status: could not parse backlog from:\n%s", out)
+		t.Fatalf("mnemo_ops op=compactor: could not parse backlog from:\n%s", out)
 	}
 	if backlog < 0 {
 		t.Errorf("compactor backlog is negative (%d) — invariant broken", backlog)
@@ -101,7 +101,7 @@ func TestScaleBacklogConvergence(t *testing.T) {
 
 // TestScaleVaultStatusReachable is a second worked example: even
 // against a production-scale snapshot the basic MCP surface
-// (mnemo_vault_status) must remain reachable and return a parseable
+// (mnemo_vault op=status) must remain reachable and return a parseable
 // response within a few seconds. Validates the e2e harness against
 // real data sizes without any specific value claims.
 func TestScaleVaultStatusReachable(t *testing.T) {
@@ -111,20 +111,20 @@ func TestScaleVaultStatusReachable(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	out, err := d.Call(ctx, "mnemo_vault_status", nil)
+	out, err := d.Call(ctx, "mnemo_vault", map[string]any{"op": "status"})
 	if err != nil {
-		t.Fatalf("mnemo_vault_status: %v\n%s", err, d.Log())
+		t.Fatalf("mnemo_vault op=status: %v\n%s", err, d.Log())
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Errorf("mnemo_vault_status took %v — exceeds 10s budget at scale", elapsed)
+		t.Errorf("mnemo_vault op=status took %v — exceeds 10s budget at scale", elapsed)
 	}
 	if len(out) == 0 {
-		t.Errorf("mnemo_vault_status returned empty body at scale")
+		t.Errorf("mnemo_vault op=status returned empty body at scale")
 	}
 }
 
 // parseBacklog extracts the integer following the literal "backlog:"
-// in the mnemo_compactor_status output. The status tool formats it
+// in the mnemo_ops(op=compactor) output. The status tool formats it
 // like "backlog: 8633" (possibly indented).
 func parseBacklog(s string) (int, bool) {
 	const key = "backlog:"

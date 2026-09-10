@@ -12,7 +12,7 @@ import (
 
 // TestCompactorStatusDefaultUserViaMCP is the 🎯T79 regression: when an
 // MCP request omits ?user=, the per-user resolvers for
-// mnemo_compactor_status (and the vault tools, covered by
+// mnemo_ops(op=compactor) (and the vault tools, covered by
 // TestVaultSyncViaMCP) must fall back to the daemon's default user —
 // the same fallback every store-backed tool already applies.
 //
@@ -36,15 +36,15 @@ func TestCompactorStatusDefaultUserViaMCP(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		var err error
-		out, err = d.Call(ctx, "mnemo_compactor_status", nil)
+		out, err = d.Call(ctx, "mnemo_ops", map[string]any{"op": "compactor"})
 		if err != nil {
-			t.Fatalf("mnemo_compactor_status: %v\n%s", err, d.Log())
+			t.Fatalf("mnemo_ops op=compactor: %v\n%s", err, d.Log())
 		}
 		if strings.Contains(out, "Compactor watcher status:") {
 			return // fell back to the default user and reported real state
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	t.Fatalf("mnemo_compactor_status did not fall back to the default user "+
+	t.Fatalf("mnemo_ops op=compactor did not fall back to the default user "+
 		"without ?user= (🎯T79) — got:\n%s\n--- daemon log ---\n%s", out, d.Log())
 }
