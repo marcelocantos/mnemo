@@ -83,9 +83,6 @@ func (f *fakeBackend) UpsertReconciledCost(date string, costUSD float64) error {
 func (f *fakeBackend) SearchMemories(query string, memType string, project string, limit int) ([]store.MemoryInfo, error) {
 	panic("unexpected SearchMemories call")
 }
-func (f *fakeBackend) GetMemory(project, name string) (*store.MemoryInfo, error) {
-	panic("unexpected GetMemory call")
-}
 func (f *fakeBackend) SearchSkills(query string, limit int) ([]store.SkillInfo, error) {
 	panic("unexpected SearchSkills call")
 }
@@ -107,23 +104,8 @@ func (f *fakeBackend) SearchDocs(query string, repo string, kind string, limit i
 func (f *fakeBackend) SearchSynthesis(query string, taxonomy string, repo string, limit int) ([]store.DocInfo, error) {
 	panic("unexpected SearchSynthesis call")
 }
-func (f *fakeBackend) WhoRan(pattern string, days int, repoFilter string, limit int) ([]store.WhoRanResult, error) {
-	panic("unexpected WhoRan call")
-}
-func (f *fakeBackend) Permissions(days int, repoFilter string, limit int) (*store.PermissionsResult, error) {
-	panic("unexpected Permissions call")
-}
 func (f *fakeBackend) SearchCI(query string, repo string, conclusion string, days int, limit int) ([]store.CIRun, error) {
 	panic("unexpected SearchCI call")
-}
-func (f *fakeBackend) DefineTemplate(name, description, queryText string, paramNames []string) error {
-	panic("unexpected DefineTemplate call")
-}
-func (f *fakeBackend) EvaluateTemplate(name string, params map[string]string) ([]map[string]any, error) {
-	panic("unexpected EvaluateTemplate call")
-}
-func (f *fakeBackend) ListTemplates() ([]store.QueryTemplate, error) {
-	panic("unexpected ListTemplates call")
 }
 func (f *fakeBackend) LiveSessions() map[string]int { panic("unexpected LiveSessions call") }
 func (f *fakeBackend) Predecessor(sessionID string) (string, error) {
@@ -161,18 +143,6 @@ func (f *fakeBackend) DiscoverPatterns(days int, repoFilter string, minOccurrenc
 }
 func (f *fakeBackend) ListPatterns(q store.PatternQuery) ([]store.PatternCandidate, error) {
 	panic("unexpected ListPatterns call")
-}
-func (f *fakeBackend) SearchImages(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
-	panic("unexpected SearchImages call")
-}
-func (f *fakeBackend) SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]store.ImageSearchResult, error) {
-	panic("unexpected SearchImagesFiltered call")
-}
-func (f *fakeBackend) SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
-	panic("unexpected SearchImagesSemantic call")
-}
-func (f *fakeBackend) SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]store.ImageSearchResult, error) {
-	panic("unexpected SearchImagesSimilar call")
 }
 func (f *fakeBackend) ToolResult(sessionID, toolUseID string, offset, truncateLen int) (*store.ToolResultPayload, error) {
 	panic("unexpected ToolResult call")

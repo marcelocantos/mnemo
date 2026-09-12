@@ -28,16 +28,11 @@ type Backend interface {
 	AgentTrees(p AgentTreeParams) ([]AgentTree, error)
 	UpsertReconciledCost(date string, costUSD float64) error
 	SearchMemories(query string, memType string, project string, limit int) ([]MemoryInfo, error)
-	GetMemory(project, name string) (*MemoryInfo, error)
 	SearchSkills(query string, limit int) ([]SkillInfo, error)
 	SearchClaudeConfigs(query string, repo string, limit int) ([]ClaudeConfigInfo, error)
 	SearchTargets(query string, repo string, status string, limit int) ([]TargetInfo, error)
 	SearchPlans(query string, repo string, limit int) ([]PlanInfo, error)
-	Permissions(days int, repoFilter string, limit int) (*PermissionsResult, error)
 	SearchCI(query string, repo string, conclusion string, days int, limit int) ([]CIRun, error)
-	DefineTemplate(name, description, queryText string, paramNames []string) error
-	EvaluateTemplate(name string, params map[string]string) ([]map[string]any, error)
-	ListTemplates() ([]QueryTemplate, error)
 	LiveSessions() map[string]int
 	Predecessor(sessionID string) (string, error)
 	Successor(sessionID string) (string, error)
@@ -54,10 +49,6 @@ type Backend interface {
 	// ListPatterns reads persisted workaround patterns (🎯T64.7). The
 	// vault exporter uses it directly so rendering never triggers a mine.
 	ListPatterns(q PatternQuery) ([]PatternCandidate, error)
-	SearchImages(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
-	SearchImagesFiltered(query string, repo string, session string, days int, limit int, searchFields string) ([]ImageSearchResult, error)
-	SearchImagesSemantic(query string, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
-	SearchImagesSimilar(similarTo int, repo string, session string, days int, limit int) ([]ImageSearchResult, error)
 	ToolResult(sessionID, toolUseID string, offset, truncateLen int) (*ToolResultPayload, error)
 	ChainCompactions(sessionID string) ([]Compaction, error)
 	CompactionsForConnection(connectionID string) ([]Compaction, error)
