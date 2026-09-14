@@ -1918,6 +1918,16 @@ func (c Config) ResolvedSynthesisRoots() []string {
 //
 // model: empty → provider default (grok-4 / sonnet)
 type SummariserConfig struct {
+	// Disabled turns off every summariser-backed worker: the /clear-span
+	// compactor and the CLAUDE.md reviewer (🎯T185). Nothing else is
+	// affected — ingest, search, and the rest of the daemon run
+	// unchanged, which is the point: search has been the useful surface
+	// and summarisation has not yet earned its cost.
+	//
+	// Phrased as Disabled rather than Enabled so the zero value (section
+	// absent) keeps the historical behaviour of summarising, and turning
+	// it off is an explicit act recorded in the file.
+	Disabled bool `json:"disabled,omitempty"`
 	// Provider is "grok", "claude", "auto", or empty (auto).
 	Provider string `json:"provider,omitempty"`
 	// Model is the provider model id. Empty uses the provider default.

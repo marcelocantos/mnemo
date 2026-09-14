@@ -675,7 +675,13 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	// spawn into a missing cwd and fail every tick, we skip these workers
 	// entirely and log once. Ingest and the other workers below run
 	// regardless.
-	if r.summariserWorkDir == "" {
+	if r.cfg.Summariser.Disabled {
+		// Owner opt-out (🎯T185). Distinct from the workdir failure
+		// below: this is a deliberate choice, so it logs at info and
+		// names the config key that reverses it.
+		logger.Info("compaction and CLAUDE.md review disabled by config",
+			"key", "summariser.disabled")
+	} else if r.summariserWorkDir == "" {
 		logger.Warn("compaction and CLAUDE.md review disabled: no usable summariser workdir")
 	} else {
 		// Capture under the caller's lock (ForUser/EnsureBackgroundWorkers

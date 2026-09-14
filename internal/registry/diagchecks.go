@@ -33,6 +33,7 @@ import (
 func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) *diag.Registry {
 	reg := diag.NewRegistry()
 	workDir := r.summariserWorkDir
+	summariserOff := r.cfg.Summariser.Disabled
 	cfg := r.cfg
 
 	// state returns the default user's store + watcher, or nils when that
@@ -288,6 +289,12 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		diag.Check{Name: "compactor.breaker", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			_, w := state()
 			if w == nil {
+				if summariserOff {
+					// Deliberate, so healthy — but say WHY, or a reader
+					// hunting a silent compactor finds "not started yet"
+					// and goes looking for a fault (🎯T185).
+					return diag.Healthy("compaction disabled by config (summariser.disabled)")
+				}
 				if workDir == "" {
 					return diag.Warning("compactor disabled (no summariser workdir)", "see compactor.workdir")
 				}
