@@ -194,8 +194,11 @@ var configDocs = map[string]configFieldDoc{
 			"tracks removing the remaining config, watch and schema residue.",
 	},
 	"summariser": {
-		summary: "Provider and model for compaction summaries.",
-		detail:  "provider: \"claude\" or \"grok\". Auto mode prefers Grok when its CLI is on PATH.",
+		summary: "Compaction summaries: on/off, provider and model.",
+		detail: "disabled: true turns off every summariser-backed worker — the " +
+			"/clear-span compactor and the CLAUDE.md reviewer (🎯T185). Ingest, " +
+			"search and everything else are unaffected. " +
+			"provider: \"claude\" or \"grok\". Auto mode prefers Grok when its CLI is on PATH.",
 	},
 	"compression": {
 		summary: "Automatic historical-row compression backfill.",
