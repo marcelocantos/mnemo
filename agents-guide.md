@@ -696,6 +696,37 @@ Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,
 `mnemo ping-peer <name>` are the operator-facing CLI tools.
 
+## Team-mnemo (🎯T36)
+
+A team may run a **central mnemo** that contributors push their sessions
+to and query as a second MCP server. If the user has one, it is
+registered separately (conventionally as `mnemo-team`) and its tools are
+prefixed `mnemo_team_`:
+
+`mnemo_team_search`, `mnemo_team_sessions`, `mnemo_team_read_session`,
+`mnemo_team_recent_activity`, `mnemo_team_authors`, `mnemo_team_stats`,
+`mnemo_team_retract`.
+
+Reach for them when the question is about **other people's** work:
+picking up an ongoing program of work, finding out who has touched a
+subsystem, or catching up on a repo you have not worked in. The local
+`mnemo_*` tools only ever see this user's own sessions, so a team
+question asked of them returns a confident, incomplete answer.
+
+Two things to know when reading a result:
+
+- **Every hit carries an author.** In a multi-author index an
+  unattributed claim is not interpretable — calibrate on who said it.
+- **Content is redacted and incomplete by design.** Secrets and
+  home-directory paths were removed on the contributor's machine, and
+  thinking blocks and images were never pushed at all. A `<REDACTED>`
+  marker means a privacy rule fired, not that the transcript is
+  corrupt; `mnemo_team_sessions` reports each session's redaction tally.
+
+The team index is append-only. `mnemo_team_retract` is the sole
+deletion path and removes only the calling contributor's own session
+(or anyone's, if the caller is an admin on that server).
+
 ## Self-diagnostics
 
 mnemo continuously checks its own health (🎯T83). A registry of named

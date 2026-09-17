@@ -25,9 +25,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -85,6 +87,14 @@ type Endpoint struct {
 	// successfully loaded peer cert, sorted lexicographically.
 	PeerNames []string
 
+	// peerByFingerprint maps a trusted peer cert's SHA-256 fingerprint
+	// to the basename it was installed under (🎯T36.1). TrustedPeers is
+	// a CertPool, which answers "does this verify?" but not "who is
+	// it?" — and team-mnemo needs the second question answered, because
+	// the name the admin filed a contributor's cert under IS that
+	// contributor's identity on this server.
+	peerByFingerprint map[string]string
+
 	// EndpointDir is the resolved ~/.mnemo/endpoint directory.
 	EndpointDir string
 
@@ -124,7 +134,7 @@ func Load(mnemoDir string) (*Endpoint, error) {
 		return nil, fmt.Errorf("chmod key file: %w", err)
 	}
 
-	pool, names := loadPeers(peersDir)
+	pool, names, byFingerprint := loadPeers(peersDir)
 
 	return &Endpoint{
 		CertPEM:      certPEM,
@@ -133,8 +143,10 @@ func Load(mnemoDir string) (*Endpoint, error) {
 		PrivateKey:   key,
 		TrustedPeers: pool,
 		PeerNames:    names,
-		EndpointDir:  epDir,
-		PeersDir:     peersDir,
+
+		peerByFingerprint: byFingerprint,
+		EndpointDir:       epDir,
+		PeersDir:          peersDir,
 	}, nil
 }
 
@@ -379,18 +391,20 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 
 // loadPeers walks <peersDir>/*.pem and adds parseable certs to a pool.
 // Malformed entries are skipped with a slog.Warn. Returns a non-nil
-// (possibly empty) pool plus the sorted basenames of loaded peers.
-func loadPeers(peersDir string) (*x509.CertPool, []string) {
+// (possibly empty) pool, the sorted basenames of loaded peers, and a
+// fingerprint→basename index for PeerNameFor.
+func loadPeers(peersDir string) (*x509.CertPool, []string, map[string]string) {
 	pool := x509.NewCertPool()
 	var names []string
+	byFingerprint := map[string]string{}
 
 	entries, err := os.ReadDir(peersDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return pool, names
+		return pool, names, byFingerprint
 	}
 	if err != nil {
 		slog.Warn("read peers dir failed", "dir", peersDir, "err", err)
-		return pool, names
+		return pool, names, byFingerprint
 	}
 
 	for _, e := range entries {
@@ -418,9 +432,35 @@ func loadPeers(peersDir string) (*x509.CertPool, []string) {
 			continue
 		}
 		pool.AddCert(cert)
-		names = append(names, strings.TrimSuffix(name, ".pem"))
+		peerName := strings.TrimSuffix(name, ".pem")
+		names = append(names, peerName)
+		byFingerprint[CertFingerprint(cert)] = peerName
 	}
 
 	sort.Strings(names)
-	return pool, names
+	return pool, names, byFingerprint
+}
+
+// CertFingerprint returns the SHA-256 fingerprint of a certificate's
+// DER encoding, lowercase hex. Used as the identity key for trusted
+// peers: the subject is attacker-chosen in a self-signed world, so
+// matching on CommonName would let anyone with a trusted cert claim
+// to be any peer. The fingerprint is the key material itself.
+func CertFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// PeerNameFor returns the basename the given certificate was installed
+// under in ~/.mnemo/peers/, or "" when the cert is not a trusted peer.
+//
+// The TLS handshake has already established that the cert verifies
+// against the pool; this answers which entry in the pool it was. Both
+// questions matter: the first is authentication, the second is the
+// identity that authorisation and attribution are written against.
+func (e *Endpoint) PeerNameFor(cert *x509.Certificate) string {
+	if cert == nil || e.peerByFingerprint == nil {
+		return ""
+	}
+	return e.peerByFingerprint[CertFingerprint(cert)]
 }

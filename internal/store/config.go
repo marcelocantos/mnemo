@@ -212,6 +212,20 @@ type Config struct {
 	// entirely; the daemon makes no outbound peer calls.
 	LinkedInstances []LinkedInstance `json:"linked_instances,omitempty"`
 
+	// TeamInstance declares the central team-mnemo instance this
+	// contributor pushes to and queries (🎯T36). Absent means no team
+	// membership: `mnemo push-team` has nowhere to send and makes no
+	// outbound call. Written by `mnemo onboard-team` from a repo's
+	// .mnemo/team.json, or by hand.
+	TeamInstance *TeamInstance `json:"team_instance,omitempty"`
+
+	// TeamServer configures this daemon as a CENTRAL team instance —
+	// the receiving end (🎯T36.1). Absent, or with an empty addr, the
+	// team listener does not start at all: a laptop must not open an
+	// authenticated write port to the network because the binary it
+	// runs happens to be able to.
+	TeamServer TeamServerConfig `json:"team_server,omitempty"`
+
 	// Backup controls the daemon's periodic backup worker (🎯T61).
 	// Absent in config.json → all defaults apply, backup enabled.
 	Backup BackupConfig `json:"backup,omitempty"`
@@ -1051,6 +1065,87 @@ type LinkedInstance struct {
 	PeerCert string `json:"peer_cert"`
 }
 
+// TeamInstance is the central team-mnemo instance a contributor is a
+// member of (🎯T36). One, not a list: team-mnemo is write-aggregation
+// to a canonical shared store, and a contributor who pushed the same
+// sessions to two central indexes would have created two partial
+// histories rather than one shared one. Federation (LinkedInstances)
+// is the plural, read-side relationship.
+type TeamInstance struct {
+	// Name identifies the team in log lines and command output.
+	Name string `json:"name"`
+
+	// URL is the team instance's endpoint, https only. Conventionally
+	// ends in /mcp; the push client derives /push from it.
+	URL string `json:"url"`
+
+	// PeerCert names a file under ~/.mnemo/peers/ (e.g. "team-mnemo" →
+	// ~/.mnemo/peers/team-mnemo.pem) or carries inline PEM. Same
+	// resolution rules as LinkedInstance.PeerCert.
+	PeerCert string `json:"peer_cert"`
+
+	// Author is the identity pushes are attributed to — a GitHub
+	// username or email. Sent in the X-Mnemo-Author header and
+	// validated by the server against the name it filed this
+	// contributor's certificate under, so it cannot be used to claim
+	// someone else's work. Empty means "use whatever name the server
+	// knows me by".
+	Author string `json:"author,omitempty"`
+}
+
+// TeamServerConfig configures a central team-mnemo instance.
+type TeamServerConfig struct {
+	// Addr is the team listen address (conventionally :19421). Empty
+	// disables the team listener entirely, which is the default.
+	Addr string `json:"addr,omitempty"`
+
+	// RateLimitSessions bounds sessions accepted per contributor per
+	// hour. Zero uses the built-in default (100); negative disables the
+	// limit.
+	RateLimitSessions int `json:"rate_limit_sessions,omitempty"`
+
+	// Admins lists peer names allowed to retract other contributors'
+	// sessions. Empty means nobody can, which is the right default:
+	// who administers a team's shared memory is the operator's call.
+	Admins []string `json:"admins,omitempty"`
+}
+
+// ResolveTeamPeerCert resolves the team instance's pinned certificate,
+// reusing LinkedInstance's resolution rules so a contributor learns one
+// convention rather than two.
+func (ti TeamInstance) ResolveTeamPeerCert(peersDir string) (*x509.Certificate, error) {
+	li := LinkedInstance{Name: ti.Name, PeerCert: ti.PeerCert}
+	return li.ResolvePeerCert(peersDir)
+}
+
+// validateTeamInstance enforces the same shape rules as a federation
+// peer: https URL, resolvable pinned cert. Startup fails loud rather
+// than leaving a contributor to discover at push time that the team
+// they think they are on was never configured.
+func (c Config) validateTeamInstance(peersDir string) error {
+	ti := c.TeamInstance
+	if ti == nil {
+		return nil
+	}
+	if ti.URL == "" {
+		return fmt.Errorf("team_instance: url is required")
+	}
+	u, err := url.Parse(ti.URL)
+	if err != nil {
+		return fmt.Errorf("team_instance: parse url %q: %w", ti.URL, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("team_instance: url scheme must be https, got %q", u.Scheme)
+	}
+	if ti.PeerCert == "" {
+		return fmt.Errorf("team_instance: peer_cert is required")
+	}
+	if _, err := ti.ResolveTeamPeerCert(peersDir); err != nil {
+		return fmt.Errorf("team_instance: %w", err)
+	}
+	return nil
+}
+
 // LoadConfig reads ~/.mnemo/config.json. Returns a zero Config if the
 // file doesn't exist. Federation peers (LinkedInstances) are validated
 // against ~/.mnemo/peers/; any structural problem (duplicate name,
@@ -1066,6 +1161,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if err := cfg.validateLinkedInstances(filepath.Join(home, ".mnemo", "peers")); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validateTeamInstance(filepath.Join(home, ".mnemo", "peers")); err != nil {
 		return Config{}, err
 	}
 	if err := cfg.validatePlugins(home); err != nil {
