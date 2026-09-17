@@ -1,6 +1,9 @@
 # Team-mnemo Design
 
-*Status: design draft — 2026-04-25. Tracked as 🎯T36.*
+*Status: design accepted 2026-04-25 (🎯T36). Implemented 2026-09-17 as
+🎯T36.1–🎯T36.5 and 🎯T36.7; 🎯T36.6 (GitHub OIDC) is raised and not built.
+See "What shipped" at the end for where the implementation departed from
+this document.*
 
 ---
 
@@ -711,3 +714,91 @@ Must be unobtrusive — hook failure should not block the git push.*
 ---
 
 *Design by: Claude Sonnet 4.6, 2026-04-25. Accepted and tracked as 🎯T36.*
+
+
+---
+
+## What shipped
+
+Built 2026-09-17. 🎯T36.1–🎯T36.5 and 🎯T36.7 are achieved; 🎯T36.6 (GitHub
+OIDC) is raised and deliberately not built — this design sequences it
+after mTLS, and the reasoning held: certificate distribution is fine for a
+team whose admin knows everyone and only stops scaling for a large project
+with fast-changing contributors.
+
+Where the code is:
+
+| Piece | Location |
+|-------|----------|
+| Redaction, wire format, push client, collector | `internal/teampush/` |
+| Push endpoint, team MCP tools | `internal/teamserver/` |
+| Team index storage and queries | `internal/store/team.go`, `team_*` tables |
+| `push-team`, `onboard-team`, `install-team-hook` | `team_cli.go` |
+| `team_instance`, `team_server` config | `internal/store/config.go` |
+
+### Where the implementation departed from this design
+
+**Storage is separate tables, as specified, and the reason sharpened.**
+The design says `pushed_author` belongs on "the team-mnemo entries table
+(not on the standard `messages` or `entries` tables, which are
+single-user by design)". Implemented as `team_sessions` /
+`team_entries` / `team_pushes`. The reason worth recording: adding an
+author column to the existing tables would make every query that predates
+team-mnemo author-aware *by omission* — a read that forgot the filter
+would return a colleague's transcripts as the local user's own, and the
+pre-existing read paths are exactly the ones that would forget. Separate
+tables make the boundary structural rather than disciplined.
+
+**Tool names carry a `mnemo_team_` prefix.** Open question 1 leaned the
+other way — same `mnemo_*` names, disambiguated by registering the server
+as `mnemo-team`. Reversed: an agent with both servers registered sees a
+flat tool list, and `mnemo_search` appearing twice with different meanings
+is a trap the agent cannot see. The prefix costs a few tokens per session
+and removes the ambiguity entirely.
+
+**Author validation is peer-name-based, with a machine-suffix rule.** The
+design chose the out-of-band `X-Mnemo-Author` header (option 2) and left
+its validation as "against GitHub org membership", which needs 🎯T36.6.
+Without OIDC, the claim is validated against the basename the admin filed
+the contributor's certificate under in `~/.mnemo/peers/`: the claim must
+equal that name, or the name must be the claim plus a suffix
+(`alice` claimed from a cert filed as `alice-laptop`). That second form is
+what lets one contributor push from several machines under one identity
+without the admin maintaining a mapping file, and identity stays
+admin-granted rather than self-asserted.
+
+**Entry keying is positional.** As the design anticipated, entries are
+keyed `(session_id, entry_index)` rather than by transcript UUID, so a
+cross-contributor UUID collision is harmless structurally rather than by
+relying on Claude Code's UUID generation being globally unique — an
+assumption about someone else's code that we cannot check and would not
+notice breaking.
+
+**The server re-validates what the client filtered.** The design puts
+thinking blocks and images behind a client-side filter. They are also
+rejected on receipt, and the push decoder refuses unknown fields. A
+privacy rule enforced only by the sender binds only senders that choose to
+honour it, and an old or modified client is exactly the case the rule
+exists for.
+
+**Connectivity checking needed a real round trip.** The first
+implementation of `onboard-team`'s check pushed an empty payload, which
+fails local validation *before* reaching the network — so it reported
+"reachable and trusted" against a server that had never seen the
+contributor's certificate. Replaced with `Client.Ping`, an authenticated
+GET against `/health` that also classifies the peer-sent TLS alert, since
+the common "not trusted yet" case is refused during the handshake and
+never reaches HTTP at all. A connectivity check that cannot fail is not a
+check.
+
+**`mnemo_team_retract` exists now rather than as a separate command.**
+The design sketches `mnemo team-retract`. It is an MCP tool on the team
+surface instead, author-scoped, with `team_server.admins` naming who may
+retract on a contributor's behalf. That keeps the one deletion path on the
+same authenticated surface as the queries, rather than adding a second
+client-side command with its own connection handling.
+
+**Open question 4 (compaction in the team index) is unresolved and
+unblocking.** The team index is a pure transcript store today.
+Contributors can push their own compaction summaries as ordinary session
+content; nothing in the central instance runs a compactor.

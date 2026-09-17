@@ -561,6 +561,117 @@ When `linked_instances` is empty or absent, federation is disabled and
 all tools return their original local-only response shape unchanged
 (backwards-compatible).
 
+## Team-mnemo: a shared index across contributors
+
+Federation (above) is peer-to-peer read fan-out across machines *you*
+own. Team-mnemo is the other shape: contributors **push** sessions to a
+central instance that becomes the team's collective memory, so a
+newcomer can query "what is the state of the authentication refactor?"
+and be answered from the sessions that did it rather than from commit
+messages and Slack.
+
+Same binary, a third listener on `:19421`. Full design:
+`docs/design/team-mnemo.md`.
+
+### Running the central instance
+
+```json
+{ "team_server": { "addr": ":19421", "admins": ["ops"] } }
+```
+
+Restart the daemon. Without this block the team listener never starts —
+an mnemo install does not open an authenticated write port to the
+network unless its owner asks it to.
+
+Onboard a contributor by filing the certificate they send you:
+
+```bash
+cp alice.pem ~/.mnemo/peers/alice.pem   # the BASENAME is their identity
+supervisorctl restart mnemo             # peers load at startup
+```
+
+Publish the team config in each participating repo, at `.mnemo/team.json`,
+and check it in:
+
+```json
+{
+  "name": "acme",
+  "url": "https://mnemo.acme.example:19421/mcp",
+  "peer_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+}
+```
+
+That certificate is the server's public key. Shipping it with the code
+is what lets a contributor pin the server on first contact instead of
+trusting whatever answers the URL.
+
+### Joining as a contributor
+
+```bash
+mnemo onboard-team --author alice   # from a repo containing .mnemo/team.json
+```
+
+This installs the server's cert, writes `team_instance` into
+`~/.mnemo/config.json`, tests connectivity, and prints your own cert for
+the admin to install. Until they do, the check reports "reachable but
+does not trust your certificate yet" — that is the expected state, not a
+fault.
+
+Then:
+
+```bash
+mnemo push-team --dry-run              # exactly what would be sent, sending nothing
+mnemo push-team --repo backend         # send it
+mnemo install-team-hook                # optional: push after each git push
+```
+
+Register the team instance as a second MCP server to query it:
+
+```bash
+claude mcp add --scope user --transport http mnemo-team https://mnemo.acme.example:19421/mcp
+```
+
+### What gets uploaded
+
+Redaction runs on **your** machine, before anything is transmitted. The
+server cannot request unredacted content — there is no raw mode.
+
+| Content | Pushed? |
+|---------|---------|
+| User and assistant text, tool calls and results | yes, redacted |
+| Thinking blocks | **never** |
+| Images | **never** |
+| Working directory | **never** |
+| Secrets, tokens, API keys | redacted |
+| `KEY=value` env assignments | name kept, value redacted |
+| Home-directory paths | masked to `~` |
+
+Add your own patterns in `~/.mnemo/push-redact.yaml`:
+
+```yaml
+custom_patterns:
+  - name: internal_host
+    regex: '\b[a-z0-9-]+\.corp\.internal\b'
+```
+
+The file is additive — it cannot switch a built-in rule off — and a
+malformed one fails the push rather than falling back to the built-ins.
+
+To keep a repo out entirely, put a `.mnemo-push-exclude` file at its root
+or `mnemo: private` in its `CLAUDE.md`. Neither can be overridden by a
+command-line flag.
+
+`mnemo push-team --dry-run` prints the fully redacted payload before you
+commit to sending it. Run it first.
+
+### Retracting
+
+`mnemo_team_retract` on the team MCP server removes a session you pushed
+and makes it unsearchable. You can withdraw your own content; an admin
+listed in `team_server.admins` can withdraw on a contributor's behalf.
+Nothing else deletes from the team index — entries are otherwise
+append-only, including against their own author.
+
 ## Workflows mnemo enables
 
 mnemo's tools are building blocks. Some examples of what you can build

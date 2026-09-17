@@ -105,6 +105,18 @@ var configDocs = map[string]configFieldDoc{
 		detail: "Persisted but NOT adopted live: a change here needs a daemon " +
 			"restart. Absent or empty means zero federation calls.",
 	},
+	"team_instance": {
+		summary: "Central team-mnemo instance this contributor pushes to and queries.",
+		detail: "Absent means no team membership and no outbound push. " +
+			"Written by `mnemo onboard-team` from a repo's .mnemo/team.json. " +
+			"Needs a daemon restart only for the server side; `mnemo push-team` " +
+			"reads it per run.",
+	},
+	"team_server": {
+		summary: "Run this daemon as a CENTRAL team instance that receives pushes.",
+		detail: "Absent or with an empty addr, the team listener never starts. " +
+			"Not adopted live: a change here needs a daemon restart.",
+	},
 	"cost_reconciliation": {
 		summary: "Fetch authoritative daily costs from the Anthropic Admin API.",
 		detail: "Disabled by default. Needs BOTH enabled:true here and " +

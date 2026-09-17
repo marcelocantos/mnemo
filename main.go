@@ -57,6 +57,7 @@ import (
 	"github.com/marcelocantos/mnemo/internal/plugin"
 	"github.com/marcelocantos/mnemo/internal/registry"
 	"github.com/marcelocantos/mnemo/internal/store"
+	"github.com/marcelocantos/mnemo/internal/teamserver"
 	"github.com/marcelocantos/mnemo/internal/throttle"
 	"github.com/marcelocantos/mnemo/internal/tools"
 	"github.com/marcelocantos/mnemo/internal/upgrade"
@@ -219,6 +220,15 @@ func main() {
 			return
 		case "dedupe-entries":
 			cmdDedupeEntries(os.Args[2:])
+			return
+		case "push-team":
+			cmdPushTeam(os.Args[2:])
+			return
+		case "onboard-team":
+			cmdOnboardTeam(os.Args[2:])
+			return
+		case "install-team-hook":
+			cmdInstallTeamHook(os.Args[2:])
 			return
 		case store.OCRWorkerSubcommand:
 			// Hidden: the daemon re-execs itself to run Apple Vision in a
@@ -1560,6 +1570,33 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 		}
 	}
 
+	// Optionally start the central team-mnemo listener (🎯T36.1). Like
+	// federation, a failure here is non-fatal and logged: a busy team
+	// port must not cost the owner their local index.
+	//
+	// It starts only when team_server.addr is configured. An mnemo
+	// install is one person's laptop until its owner says otherwise,
+	// and "the binary supports it" is not that.
+	var teamSrv *teamserver.Server
+	if cfg.TeamServer.Addr != "" {
+		if defErr != nil {
+			slog.Warn("team listener disabled: no default user identity on this deployment")
+		} else if mnemoDir, err := endpoint.DefaultDir(); err != nil {
+			slog.Warn("team listener disabled", "err", err)
+		} else if idx, err := reg.ForUser(defaultUser); err != nil {
+			slog.Warn("team listener disabled", "err", err)
+		} else {
+			teamSrv, err = teamserver.Start(ctx, mnemoDir, version, idx, teamserver.Config{
+				Addr:              cfg.TeamServer.Addr,
+				RateLimitSessions: cfg.TeamServer.RateLimitSessions,
+				Admins:            cfg.TeamServer.Admins,
+			})
+			if err != nil {
+				slog.Warn("team listener disabled", "err", err)
+			}
+		}
+	}
+
 	// Eager-start the default user's per-user workers (compactor,
 	// reviewer, CI poller, backup worker, etc.) at daemon boot (🎯T62).
 	// Runs after ListenAndServe so health stays available during
@@ -1595,6 +1632,9 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 				}
 				if fedSrv != nil {
 					_ = fedSrv.Close()
+				}
+				if teamSrv != nil {
+					_ = teamSrv.Shutdown(context.Background())
 				}
 				return err
 			}
@@ -1638,6 +1678,9 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 			if fedSrv != nil {
 				graceful = append(graceful, fedSrv)
 				force = append(force, fedSrv)
+			}
+			if teamSrv != nil {
+				graceful = append(graceful, teamSrv)
 			}
 			drainIntake(drainIntakeGrace, graceful, force)
 			// 2. Release singleton background lease (🎯T97.4) so a peer

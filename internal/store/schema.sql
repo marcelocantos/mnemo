@@ -878,6 +878,84 @@ CREATE TABLE trees_of_interest (
 			created_at TEXT NOT NULL
 		);
 
+-- 🎯T36 team-mnemo: the multi-author index a central instance serves.
+--
+-- Deliberately NOT the `entries` / `messages` tables. Those are
+-- single-user by construction — every row belongs to the daemon's own
+-- user, and nothing in them carries an author. Teaching them a
+-- pushed_author column would make every existing query author-aware by
+-- omission: a query that forgot the filter would read a colleague's
+-- transcripts as the local user's own, and the read paths that predate
+-- team-mnemo are exactly the ones that would forget.
+--
+-- Separate tables make the boundary structural instead of disciplined.
+-- A local tool cannot accidentally read pushed content, and a team tool
+-- cannot accidentally read local content, because they do not name the
+-- same tables.
+--
+-- Content here arrives already filtered and redacted by the
+-- contributor's own daemon (see internal/teampush). The server applies
+-- no redaction of its own and has no access to the unredacted original.
+CREATE TABLE team_sessions (
+			session_id TEXT PRIMARY KEY,
+			pushed_author TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'claude',
+			repo TEXT NOT NULL DEFAULT '',
+			project TEXT NOT NULL DEFAULT '',
+			git_branch TEXT NOT NULL DEFAULT '',
+			work_type TEXT NOT NULL DEFAULT '',
+			topic TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
+			ended_at TEXT NOT NULL DEFAULT '',
+			entry_count INTEGER NOT NULL DEFAULT 0,
+			-- redaction_tally is the contributor's own report of what
+			-- their pipeline removed, stored so a reader can see that a
+			-- transcript is incomplete BY DESIGN rather than truncated.
+			-- A gap with no explanation gets read as "they never ran it".
+			redaction_tally TEXT NOT NULL DEFAULT '',
+			first_pushed_at TEXT NOT NULL DEFAULT '',
+			last_pushed_at TEXT NOT NULL DEFAULT ''
+		);
+
+-- team_entries is keyed by (session_id, entry_index), not by the
+-- transcript's own entry UUID. The design calls for cross-contributor
+-- UUID collisions to be harmless; a positional key makes them harmless
+-- structurally rather than relying on Claude Code's UUID generation
+-- being globally unique, which is an assumption about someone else's
+-- code that we cannot check and would not notice breaking.
+CREATE TABLE team_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			entry_index INTEGER NOT NULL,
+			pushed_author TEXT NOT NULL,
+			repo TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT '',
+			content_type TEXT NOT NULL DEFAULT 'text',
+			text TEXT NOT NULL DEFAULT '',
+			timestamp TEXT NOT NULL DEFAULT '',
+			tool_name TEXT NOT NULL DEFAULT '',
+			tool_use_id TEXT NOT NULL DEFAULT '',
+			is_error INTEGER NOT NULL DEFAULT 0,
+			pushed_at TEXT NOT NULL DEFAULT ''
+		);
+
+-- team_pushes is the append-only audit log of who pushed what, when.
+-- It is what makes the containment story in the design real: cert
+-- revocation stops future pushes, but identifying what a compromised
+-- contributor already landed needs a record that survives the entries
+-- being purged. It also backs the per-contributor rate limit.
+CREATE TABLE team_pushes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			pushed_author TEXT NOT NULL,
+			peer_name TEXT NOT NULL DEFAULT '',
+			at TEXT NOT NULL,
+			sessions INTEGER NOT NULL DEFAULT 0,
+			accepted INTEGER NOT NULL DEFAULT 0,
+			skipped INTEGER NOT NULL DEFAULT 0,
+			conflicts INTEGER NOT NULL DEFAULT 0,
+			entries INTEGER NOT NULL DEFAULT 0
+		);
+
 -- Indexes
 
 CREATE INDEX idx_audit_entries_date ON audit_entries(date);
@@ -1108,6 +1186,20 @@ CREATE INDEX idx_todos_status ON todos(status);
 
 -- Virtual tables (FTS5)
 
+CREATE INDEX idx_team_entries_author ON team_entries(pushed_author);
+
+CREATE INDEX idx_team_entries_repo ON team_entries(repo);
+
+CREATE UNIQUE INDEX idx_team_entries_session_index ON team_entries(session_id, entry_index);
+
+CREATE INDEX idx_team_pushes_author_at ON team_pushes(pushed_author, at);
+
+CREATE INDEX idx_team_sessions_author ON team_sessions(pushed_author);
+
+CREATE INDEX idx_team_sessions_ended ON team_sessions(ended_at DESC);
+
+CREATE INDEX idx_team_sessions_repo ON team_sessions(repo);
+
 CREATE VIRTUAL TABLE audit_entries_fts USING fts5(
 			summary, raw_text, repo,
 			content=audit_entries,
@@ -1235,6 +1327,12 @@ CREATE VIRTUAL TABLE patterns_fts USING fts5(
 			pattern_type, signature, representative_excerpts,
 			content=patterns,
 			content_rowid=rowid
+		);
+
+CREATE VIRTUAL TABLE team_entries_fts USING fts5(
+			text, role, repo, pushed_author,
+			content=team_entries,
+			content_rowid=id
 		);
 
 -- Triggers
@@ -1695,6 +1793,26 @@ CREATE TRIGGER patterns_au AFTER UPDATE ON patterns
 			VALUES ('delete', old.rowid, old.pattern_type, old.signature, old.representative_excerpts);
 			INSERT INTO patterns_fts(rowid, pattern_type, signature, representative_excerpts)
 			VALUES (new.rowid, new.pattern_type, new.signature, new.representative_excerpts);
+		END;
+
+CREATE TRIGGER team_entries_ad AFTER DELETE ON team_entries
+		BEGIN
+			INSERT INTO team_entries_fts(team_entries_fts, rowid, text, role, repo, pushed_author)
+			VALUES ('delete', old.id, old.text, old.role, old.repo, old.pushed_author);
+		END;
+
+CREATE TRIGGER team_entries_ai AFTER INSERT ON team_entries
+		BEGIN
+			INSERT INTO team_entries_fts(rowid, text, role, repo, pushed_author)
+			VALUES (new.id, new.text, new.role, new.repo, new.pushed_author);
+		END;
+
+CREATE TRIGGER team_entries_au AFTER UPDATE ON team_entries
+		BEGIN
+			INSERT INTO team_entries_fts(team_entries_fts, rowid, text, role, repo, pushed_author)
+			VALUES ('delete', old.id, old.text, old.role, old.repo, old.pushed_author);
+			INSERT INTO team_entries_fts(rowid, text, role, repo, pushed_author)
+			VALUES (new.id, new.text, new.role, new.repo, new.pushed_author);
 		END;
 
 -- Views

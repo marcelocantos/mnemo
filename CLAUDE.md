@@ -529,6 +529,98 @@ searchable via `mnemo_search(kinds: "target")`. That index does **not**
 read `bullseye.yaml`, so mnemo's own targets are invisible to it — use
 `bullseye_list(cwd)` directly until the indexer is taught to read it.
 
+## Team-mnemo (🎯T36)
+
+A **central instance** accumulates sessions that contributors push to
+it, and serves them back as an author-aware, read-only MCP surface, so
+someone joining a program of work can ask "what is the state of the
+authentication refactor?" and be answered from the sessions that did it.
+
+Same binary, third listener. The design's port table:
+
+| Port | Purpose | Auth |
+|------|---------|------|
+| `:19419` | Local MCP (per-user) | none, localhost only |
+| `:19420` | Federated read MCP (🎯T15 peer) | mTLS, peer cert pinning |
+| `:19421` | Team push + query | mTLS, per-contributor cert |
+
+This is **write-aggregation**, a different shape from 🎯T15 federation's
+peer-to-peer read fan-out — see `docs/design/team-mnemo.md` § Relationship
+to 🎯T15 federation for why they compose rather than subsume.
+
+### Running a central instance
+
+```json
+{ "team_server": { "addr": ":19421", "admins": ["ops"] } }
+```
+
+Absent, or with an empty addr, **the team listener never starts**. An
+mnemo install is one person's laptop until its owner says otherwise, and
+"the binary supports it" is not that. An admin onboards a contributor by
+copying their cert to `~/.mnemo/peers/<name>.pem` and restarting; the
+**basename is the contributor's identity** on that server.
+
+### Joining a team
+
+```bash
+mnemo onboard-team --author alice     # reads .mnemo/team.json from the repo
+mnemo push-team --dry-run             # see exactly what would be sent
+mnemo push-team --repo backend        # send it
+mnemo install-team-hook               # optional: push after each git push
+```
+
+### What leaves the machine, and what does not
+
+Redaction runs on the **contributor's** daemon, over content read from
+the local index, and the redacted payload is what the transport sees.
+The server never receives unredacted content and has no way to ask for
+it — no raw mode, and no payload field the redactor did not produce.
+`teampush.Collect` refuses to run without a redactor rather than
+defaulting to none.
+
+Never pushed: **thinking blocks** and **images** (excluded in SQL, and
+rejected by the server as well — a privacy rule enforced only by the
+sender binds only senders that choose to honour it), and **cwd**, which
+identifies a machine's layout and no team query uses.
+
+Redacted before sending: known secret patterns, environment-variable
+values (the name survives, the value does not), high-entropy tokens,
+and home-directory paths. Custom patterns go in
+`~/.mnemo/push-redact.yaml`; the file is **additive and cannot disable a
+built-in rule**, and a malformed one is a hard error — a contributor who
+typoed the pattern guarding an internal hostname must not be told the
+push succeeded.
+
+Opt out of a whole repo with a `.mnemo-push-exclude` file at its root or
+`mnemo: private` in its CLAUDE.md. Both are absolute: no flag overrides
+them, because the flag is what a hurried contributor reaches for.
+
+### Storage and attribution
+
+Pushed content lives in `team_sessions` / `team_entries` / `team_pushes`
+— **not** in `entries` / `messages` with an author column. Those tables
+are single-user by construction, and an added `pushed_author` would make
+every pre-existing query author-aware by omission. Separate tables make
+the boundary structural: a local tool cannot accidentally read pushed
+content because it does not name those tables.
+
+Attribution is the peer name the admin filed the cert under. The
+`X-Mnemo-Author` header may claim an identity, but the server accepts it
+only when it matches that peer name, or the peer name is the claim plus
+a machine suffix (`alice` from a cert filed as `alice-laptop`, so one
+person can push from several machines). Self-asserted identity in a
+multi-author index is not identity — it is a text field.
+
+Entries are immutable once pushed, including by their own author: a
+re-push appends new indexes only. A session UUID already held by another
+author is a **conflict**, never an overwrite. `mnemo_team_retract` is the
+one deletion path, author-scoped; admins listed in `team_server.admins`
+may retract on a contributor's behalf.
+
+Not built: 🎯T36.6, GitHub OIDC auth. Tracked, and deliberately after
+mTLS ships — cert distribution only stops scaling for a large project
+with fast-changing contributors.
+
 ## Gates
 
 profile: mnemo
