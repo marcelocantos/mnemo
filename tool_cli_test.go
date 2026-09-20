@@ -5,6 +5,9 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/marcelocantos/mnemo/internal/tools"
@@ -137,5 +140,69 @@ func TestCLINameMapping(t *testing.T) {
 		if got := toolCLIName(tc.tool); got != tc.cli {
 			t.Errorf("toolCLIName(%q) = %q, want %q", tc.tool, got, tc.cli)
 		}
+	}
+}
+
+// TestFlagsMayFollowThePositional is the regression test for the defect
+// shipped in v0.99.0.
+//
+// Go's flag package stops parsing at the first non-flag argument, so
+// `mnemo search compaction --limit 1` parsed no flags at all and left
+// "compaction --limit 1" in fs.Args(). Because the positional words are
+// joined into one string, the search then ran for that literal text,
+// found nothing, and printed a perfectly ordinary "No results found".
+// Nothing errored and no flag was rejected, so the only way to catch it
+// was to compare against the same call made directly against the daemon.
+func TestFlagsMayFollowThePositional(t *testing.T) {
+	newFS := func() (*flag.FlagSet, *float64, *bool, *string) {
+		fs := flag.NewFlagSet("search", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		limit := fs.Float64("limit", 0, "")
+		asJSON := fs.Bool("json", false, "")
+		repo := fs.String("repo", "", "")
+		return fs, limit, asJSON, repo
+	}
+
+	for _, tc := range []struct {
+		name  string
+		argv  []string
+		query string
+		limit float64
+		json  bool
+		repo  string
+	}{
+		{"flags after", []string{"compaction", "--limit", "1"}, "compaction", 1, false, ""},
+		{"flags before", []string{"--limit", "1", "compaction"}, "compaction", 1, false, ""},
+		{"bool does not eat the next word", []string{"--json", "compaction"}, "compaction", 0, true, ""},
+		{"bool after the positional", []string{"compaction", "--json"}, "compaction", 0, true, ""},
+		{"multi-word query with trailing flags",
+			[]string{"how", "is", "compaction", "working", "--limit", "2"},
+			"how is compaction working", 2, false, ""},
+		{"equals form", []string{"compaction", "--limit=3"}, "compaction", 3, false, ""},
+		{"interleaved", []string{"--repo", "mnemo", "compaction", "--limit", "1"},
+			"compaction", 1, false, "mnemo"},
+		{"single dash", []string{"compaction", "-limit", "1"}, "compaction", 1, false, ""},
+		{"double dash ends flags", []string{"--limit", "1", "--", "--not-a-flag"},
+			"--not-a-flag", 1, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, limit, asJSON, repo := newFS()
+			flagArgs, words := partitionArgs(fs, tc.argv)
+			if err := fs.Parse(flagArgs); err != nil {
+				t.Fatalf("parse %v: %v", flagArgs, err)
+			}
+			if got := strings.Join(words, " "); got != tc.query {
+				t.Errorf("query = %q, want %q", got, tc.query)
+			}
+			if *limit != tc.limit {
+				t.Errorf("limit = %v, want %v", *limit, tc.limit)
+			}
+			if *asJSON != tc.json {
+				t.Errorf("json = %v, want %v", *asJSON, tc.json)
+			}
+			if *repo != tc.repo {
+				t.Errorf("repo = %v, want %v", *repo, tc.repo)
+			}
+		})
 	}
 }

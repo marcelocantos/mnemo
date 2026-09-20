@@ -144,22 +144,23 @@ func cmdTool(name string, t mcp.Tool, argv []string) {
 		fmt.Fprintf(out, " [flags]\n\n%s\n\nFlags:\n", firstParagraph(t.Description))
 		fs.PrintDefaults()
 	}
-	_ = fs.Parse(argv)
+	flagArgs, words := partitionArgs(fs, argv)
+	_ = fs.Parse(flagArgs)
 
 	args := map[string]any{}
 	if positional != "" {
-		if fs.NArg() == 0 {
+		if len(words) == 0 {
 			fmt.Fprintf(os.Stderr, "mnemo %s: <%s> is required\n", name, positional)
 			fs.Usage()
 			os.Exit(2)
 		}
-		// Join the rest so `mnemo search QR code pairing` works without
+		// Join the words so `mnemo search QR code pairing` works without
 		// quoting — a search query is the common case and a shell user
 		// should not have to think about it.
-		args[positional] = strings.Join(fs.Args(), " ")
-	} else if fs.NArg() > 0 {
+		args[positional] = strings.Join(words, " ")
+	} else if len(words) > 0 {
 		fmt.Fprintf(os.Stderr, "mnemo %s: unexpected argument %q (this command takes flags only)\n",
-			name, fs.Arg(0))
+			name, words[0])
 		os.Exit(2)
 	}
 	fs.Visit(func(f *flag.Flag) {
@@ -186,6 +187,55 @@ func cmdTool(name string, t mcp.Tool, argv []string) {
 	if !ok {
 		os.Exit(1)
 	}
+}
+
+// partitionArgs splits argv into flag tokens and positional words, so
+// flags may appear anywhere on the line.
+//
+// Go's flag package stops parsing at the first non-flag argument, which
+// for these commands is the common shape: `mnemo search compaction
+// --limit 1` would parse zero flags and hand "compaction --limit 1" to
+// fs.Args(). Since the positional is joined into one string, that lands
+// in the query itself — the search runs for the literal text "compaction
+// --limit 1", finds nothing, and reports an honest-looking empty result.
+// Nothing errors, so the only way to notice is to compare against the
+// same call made directly against the daemon.
+//
+// A flag token is "-x" or "--x", optionally "=value". When it carries no
+// "=" and names a non-boolean flag, the following token is its value and
+// travels with it. Everything else is a positional word. "--" ends flag
+// parsing, as usual.
+func partitionArgs(fs *flag.FlagSet, argv []string) (flagArgs, words []string) {
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if a == "--" {
+			words = append(words, argv[i+1:]...)
+			return flagArgs, words
+		}
+		if len(a) < 2 || a[0] != '-' {
+			words = append(words, a)
+			continue
+		}
+		flagArgs = append(flagArgs, a)
+		bare := strings.TrimLeft(a, "-")
+		if strings.Contains(bare, "=") {
+			continue
+		}
+		// A boolean flag never consumes the next token: `--json compaction`
+		// must leave "compaction" as the query, not eat it as a value.
+		if f := fs.Lookup(bare); f != nil && !isBoolFlag(f) && i+1 < len(argv) {
+			i++
+			flagArgs = append(flagArgs, argv[i])
+		}
+	}
+	return flagArgs, words
+}
+
+// isBoolFlag reports whether f is a boolean flag, which the flag package
+// models as a Value that additionally answers IsBoolFlag.
+func isBoolFlag(f *flag.Flag) bool {
+	bf, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && bf.IsBoolFlag()
 }
 
 // callToolViaDaemon posts the arguments to the daemon and returns the
