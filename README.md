@@ -477,6 +477,29 @@ second writer of the file.
 For full parameter documentation, see [`agents-guide.md`](agents-guide.md)
 or run `mnemo --help-agent`.
 
+## Tools from the command line
+
+Every MCP tool is also a shell command: drop the `mnemo_` prefix and
+hyphenate the rest.
+
+```bash
+mnemo search qr pairing protocol --repo mnemo --limit 5
+mnemo status --days 3
+mnemo usage --days 7 --group-by model
+mnemo read-session 08ddee56 --limit 20
+mnemo ops doctor
+```
+
+`mnemo --help` lists the commands; `mnemo <command> -h` shows one
+command's flags. The commands run against the **running daemon**, so
+they need no MCP client and never open the database themselves — if
+mnemo is not running they say so. `--json` returns the daemon's
+`{"ok": …, "text": …}` envelope, and a tool that reports an error exits
+non-zero.
+
+The command surface is derived from the tools' own schemas rather than
+written by hand, so it cannot drift from what an agent sees.
+
 ## Federation across linked instances
 
 Multiple mnemo daemons (different machines, different Claude Code

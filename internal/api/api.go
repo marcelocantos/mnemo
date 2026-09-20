@@ -39,6 +39,7 @@ type Handler struct {
 	events         *EventHub      // optional; nil until wired by SetEventHub (🎯T86)
 	plugins        PluginUILister // optional; nil until wired by SetPluginUILister (🎯T102.9)
 	budgetProvider BudgetProvider // optional; nil until SetBudgetProvider (🎯T140)
+	tools          ToolCaller     // optional; nil until SetToolCaller (🎯T187)
 }
 
 // analyticsCacheTTL is how long a heavy analytics response is reused. The
@@ -86,6 +87,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/active", getOnly(h.active))
 	mux.HandleFunc("/api/events", getOnly(h.eventStream))
 	mux.HandleFunc("/health", getOnly(h.health))
+	// 🎯T187: the CLI counterparts of the MCP tools. Trailing slash —
+	// the tool name is the rest of the path.
+	mux.HandleFunc("/api/tool/", postOnly(h.toolCall))
 	h.registerThreadRoutes(mux)
 	h.registerSessionRoutes(mux)
 	h.registerPluginRoutes(mux)

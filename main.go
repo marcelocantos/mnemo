@@ -69,7 +69,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.98.0"
+	version              = "0.100.0"
 	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 
@@ -177,50 +177,7 @@ func main() {
 	// default (no subcommand) path keeps the v0.21.0 behaviour: parse
 	// global flags and serve HTTP.
 	if len(os.Args) >= 2 {
-		switch os.Args[1] {
-		case "register-mcp":
-			cmdRegisterMCP(os.Args[2:])
-			return
-		case "unregister-mcp":
-			cmdUnregisterMCP(os.Args[2:])
-			return
-		case "install-service":
-			cmdInstallService(os.Args[2:])
-			return
-		case "uninstall-service":
-			cmdUninstallService(os.Args[2:])
-			return
-		case "diagnose":
-			cmdDiagnose(os.Args[2:])
-			return
-		case "print-endpoint":
-			cmdPrintEndpoint(os.Args[2:])
-			return
-		case "print-federated-addr":
-			cmdPrintFederatedAddr(os.Args[2:])
-			return
-		case "ping-peer":
-			cmdPingPeer(os.Args[2:])
-			return
-		case "thread":
-			cmdThread(os.Args[2:])
-			return
-		case "resume":
-			cmdResume(os.Args[2:])
-			return
-		case "budget":
-			cmdBudget(os.Args[2:])
-			return
-		case "edge":
-			cmdEdge(os.Args[2:])
-			return
-		case "replay-files":
-			cmdReplayFiles(os.Args[2:])
-			return
-		case "dedupe-entries":
-			cmdDedupeEntries(os.Args[2:])
-			return
-		case store.OCRWorkerSubcommand:
+		if os.Args[1] == store.OCRWorkerSubcommand {
 			// Hidden: the daemon re-execs itself to run Apple Vision in a
 			// child, so a framework abort kills only the child (🎯T118).
 			// Not in the help output — an implementation detail, not a
@@ -230,6 +187,20 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		}
+		if c, ok := otherCommands[os.Args[1]]; ok {
+			c.run(os.Args[2:])
+			return
+		}
+		// 🎯T187: CLI counterparts to the MCP tools, derived from
+		// tools.Definitions() rather than listed here. Checked after the
+		// hand-written cases so a name like `thread` keeps its existing
+		// local implementation (see reservedToolCommands).
+		if name := os.Args[1]; !strings.HasPrefix(name, "-") {
+			if t, ok := toolCommands()[name]; ok {
+				cmdTool(name, t, os.Args[2:])
+				return
+			}
 		}
 	}
 
@@ -242,6 +213,17 @@ func main() {
 	homeFlag := flag.String("home", "",
 		"daemon home directory (overrides $MNEMO_HOME; defaults to OS user home). "+
 			"Routes ~/.mnemo and the default-user data tree to this root. (🎯T73)")
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, "mnemo %s — searchable memory across agent session transcripts.\n\n", version)
+		fmt.Fprint(out, "Usage:\n  mnemo [flags]                 run the HTTP MCP daemon\n"+
+			"  mnemo <command> [args]        run a command against the running daemon\n\nFlags:\n")
+		flag.PrintDefaults()
+		fmt.Fprint(out, "\nTool commands (counterparts of the MCP tools, served by the daemon):\n")
+		fmt.Fprint(out, toolCommandSummary())
+		fmt.Fprint(out, "\nOther commands:\n"+otherCommandSummary())
+		fmt.Fprint(out, "\nRun `mnemo <command> -h` for a command's own flags.\n")
+	}
 	flag.Parse()
 	addrExplicit := false
 	flag.Visit(func(f *flag.Flag) {
@@ -274,8 +256,7 @@ func main() {
 	}
 	if *helpAgent {
 		flag.CommandLine.SetOutput(os.Stdout)
-		fmt.Fprintf(os.Stdout, "mnemo %s\n\nUsage: mnemo [flags]\n\nFlags:\n", version)
-		flag.PrintDefaults()
+		flag.Usage()
 		fmt.Fprintln(os.Stdout)
 		fmt.Print(agentsGuide)
 		return
@@ -1493,6 +1474,12 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	if pm := reg.PluginManager(); pm != nil {
 		apiHandler.SetPluginUILister(pm)
 	}
+	// 🎯T187: CLI counterparts reach the tools through the daemon. The
+	// bridge shares tools.Handler.Call with the /mcp mount, so a CLI
+	// command cannot drift from the tool an agent calls.
+	apiHandler.SetToolCaller(func(ctx context.Context, user, name string, args map[string]any) (string, bool, error) {
+		return handler.Call(ctx, tools.CallContext{Username: user}, name, args)
+	})
 	apiHandler.RegisterRoutes(mux)
 
 	// 🎯T102.5: reverse-proxy /plugins/<name>/* to ready instances (same
