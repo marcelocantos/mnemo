@@ -664,6 +664,47 @@ An edit takes effect within a couple of seconds. A file that does not
 parse is logged and ignored — the running configuration is kept, so a
 half-saved edit never reverts the daemon to defaults.
 
+## Command-line counterparts (🎯T187)
+
+Every tool above is also a shell command. Drop the `mnemo_` prefix and
+hyphenate: `mnemo_read_session` becomes `mnemo read-session`. Run
+`mnemo --help` for the list, `mnemo <command> -h` for one command's
+flags.
+
+```bash
+mnemo search qr pairing protocol --repo mnemo --limit 5
+mnemo status --days 3
+mnemo usage --days 7 --group-by model
+mnemo read-session 08ddee56 --limit 20
+mnemo ops doctor
+mnemo stats --json
+```
+
+Three things worth knowing:
+
+- **It goes through the running daemon** (`POST /api/tool/<name>`), so
+  the CLI never opens the database itself and never contends with the
+  daemon's writer. If mnemo is not running, the command says so rather
+  than doing something local and different. This is not a second MCP
+  transport: there is no JSON-RPC envelope and no handshake, because
+  mnemo has no stdio modality (🎯T160).
+- **The surface is derived, not written.** Commands, flags and
+  positional arguments all come from each tool's input schema, so the
+  CLI cannot drift from the tool an agent calls, and a new tool arrives
+  on the command line for free. A ratchet fails the build on drift in
+  either direction.
+- **`--json` returns the envelope**, `{"ok": …, "text": …}`, not a
+  structured rendering of the result: tool output is prose written for
+  an agent. The flag is there so a script can read the `ok` verdict; the
+  exit status carries it too (1 when the tool reports an error).
+
+`mnemo thread` is the deliberate exception. It keeps its own local
+implementation, because `list`, `show`, `new` and `archive` read the
+filesystem directly and work with the daemon stopped; routing them
+through the bridge would take a working command and give it a new
+prerequisite. Only `thread go` needs the daemon — it holds the single
+iTerm2 Automation grant — and it already delegates.
+
 ## Federation across linked instances
 
 If `~/.mnemo/config.json` declares `linked_instances`, four read-shaped
