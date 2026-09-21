@@ -314,50 +314,56 @@ func TestUsageReadsMessageIDFromMaterialisedColumn(t *testing.T) {
 // Note the last clause filters on the blob column rather than on z_len:
 // the two select the same rows, but only that spelling matches the
 // partial index.
+// TestFamilyStatusAggregatesAreIndexOnly is the ratchet for 🎯T181.
+//
+// It asserts the shape of the SQL the product issues — familyStatusSQL
+// is the same function CompressionStatus calls — rather than a
+// hand-copied approximation of it. The first version of this test got
+// that wrong: it checked the four sub-queries individually while the
+// product issued them as one statement with four scalar sub-selects,
+// and SQLite plans those differently. The test passed and the daemon
+// still scanned.
+//
+// Note what this test can and cannot decide. It runs against an empty
+// store, so the planner's *choice* here says nothing about its choice
+// on a 21 GiB database — that difference is how the defect shipped.
+// What it does decide is that every probe is pinned with INDEXED BY to
+// an index that exists, which is data-independent and is exactly the
+// property that makes the plan not a matter of the planner's opinion.
+// The timings belong to the live daemon and are recorded on the target.
 func TestFamilyStatusAggregatesAreIndexOnly(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
-	for _, tc := range []struct {
-		name, query, wantIndex string
-	}{
-		{
-			"packed rows", "SELECT COUNT(*) FROM messages WHERE text_z IS NOT NULL",
-			"idx_messages_text_z_len",
-		},
-		{
-			"packed bytes", "SELECT COALESCE(SUM(z_len), 0) FROM messages WHERE text_z IS NOT NULL",
-			"idx_messages_text_z_len",
-		},
-		{
-			"plain bytes", "SELECT COALESCE(SUM(plain_len), 0) FROM messages WHERE text_z IS NULL",
-			"idx_messages_text_plain_len",
-		},
-		{
-			"entries packed bytes", "SELECT COALESCE(SUM(z_len), 0) FROM entries WHERE raw_z IS NOT NULL",
-			"idx_entries_raw_z_len",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rows, err := s.readDB.Query("EXPLAIN QUERY PLAN " + tc.query)
-			if err != nil {
-				t.Fatal(err)
+	for _, family := range allFamilies {
+		fs := familySpecs[family]
+		for _, probe := range familyStatusSQL(fs) {
+			if probe.name == "rows" {
+				continue // COUNT(*) has no predicate to pin
 			}
-			defer rows.Close()
-			var plan strings.Builder
-			for rows.Next() {
-				var id, parent, notused int
-				var detail string
-				if err := rows.Scan(&id, &parent, &notused, &detail); err == nil {
-					plan.WriteString(detail + "\n")
+			t.Run(fs.table+" "+probe.name, func(t *testing.T) {
+				rows, err := s.readDB.Query("EXPLAIN QUERY PLAN " + probe.query)
+				if err != nil {
+					t.Fatalf("%s: %v", probe.query, err)
 				}
-			}
-			got := plan.String()
-			if !strings.Contains(got, tc.wantIndex) {
-				t.Errorf("%s does not use %s — it walks the table and pulls "+
-					"every payload's overflow pages with it:\n%s", tc.query, tc.wantIndex, got)
-			}
-			if strings.Contains(got, "SCAN messages\n") || strings.Contains(got, "SCAN entries\n") {
-				t.Errorf("%s scans the table:\n%s", tc.query, got)
-			}
-		})
+				defer rows.Close()
+				var plan strings.Builder
+				for rows.Next() {
+					var id, parent, notused int
+					var detail string
+					if err := rows.Scan(&id, &parent, &notused, &detail); err == nil {
+						plan.WriteString(detail + "\n")
+					}
+				}
+				got := plan.String()
+				if !strings.Contains(got, "INDEX") {
+					t.Errorf("%s does not use an index:\n%s", probe.query, got)
+				}
+				// "SCAN <table>" with no index named is the regression:
+				// the table walk that drags every payload's overflow
+				// pages through the page cache to reach an integer.
+				if strings.Contains(got, "SCAN "+fs.table+"\n") {
+					t.Errorf("%s walks the table:\n%s", probe.query, got)
+				}
+			})
+		}
 	}
 }

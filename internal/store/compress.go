@@ -449,6 +449,11 @@ type CompressWorkerSnapshot struct {
 // constants baked into SQL text below, never caller-supplied.
 type familySpec struct {
 	table, plainCol, zCol string
+	// zLenIdx and plainLenIdx are the partial indexes that make the
+	// status aggregates index-only (🎯T181). They are named here because
+	// the queries pin them with INDEXED BY rather than trusting the
+	// planner — see familyStatusSQL for why that is not paranoia.
+	zLenIdx, plainLenIdx string
 	// readExpr yields the bytes to compress from a plain row; sentinel is
 	// what the plain column holds once compressed; decodeFn reads either
 	// shape back; extraSet is appended to the compressing UPDATE
@@ -488,11 +493,14 @@ const entriesMaterialiseSet = `uuid_m = COALESCE(uuid_m, uuid),
 
 var familySpecs = map[string]familySpec{
 	FamilyMessagesText: {table: "messages", plainCol: "text", zCol: "text_z",
-		readExpr: "text", sentinel: "''", decodeFn: textSQLFunc},
+		readExpr: "text", sentinel: "''", decodeFn: textSQLFunc,
+		zLenIdx: "idx_messages_text_z_len", plainLenIdx: "idx_messages_text_plain_len"},
 	FamilyDocsContent: {table: "docs", plainCol: "content", zCol: "content_z",
-		readExpr: "content", sentinel: "''", decodeFn: textSQLFunc},
+		readExpr: "content", sentinel: "''", decodeFn: textSQLFunc,
+		zLenIdx: "idx_docs_content_z_len", plainLenIdx: "idx_docs_content_plain_len"},
 	FamilyEntriesRaw: {table: "entries", plainCol: "raw", zCol: "raw_z",
-		readExpr: "json(raw)", sentinel: "NULL", decodeFn: rawSQLFunc, extraSet: entriesMaterialiseSet},
+		readExpr: "json(raw)", sentinel: "NULL", decodeFn: rawSQLFunc, extraSet: entriesMaterialiseSet,
+		zLenIdx: "idx_entries_raw_z_len", plainLenIdx: "idx_entries_raw_plain_len"},
 }
 
 func familyOf(name string) (familySpec, error) {
@@ -502,6 +510,54 @@ func familyOf(name string) (familySpec, error) {
 			name, FamilyMessagesText, FamilyDocsContent, FamilyEntriesRaw)
 	}
 	return fs, nil
+}
+
+// familyStatusProbe is one of the four numbers compress_status reports
+// for a family, with the SQL that answers it.
+type familyStatusProbe struct {
+	name  string
+	query string
+}
+
+// familyStatusSQL builds the four status probes, each pinned to the
+// index that makes it index-only (🎯T181).
+//
+// These were one statement with four scalar sub-selects, which is the
+// natural way to write them and was the wrong way. SQLite planned the
+// combined statement differently from the same sub-queries issued
+// alone: standalone it used the partial index, and inside the combined
+// statement it chose `SCAN entries` for the packed-side clauses — 98.7%
+// of entries rows are packed, so to a cost model that cannot see that
+// each row carries a multi-kilobyte blob, a table scan looks about as
+// cheap as an index walk. It is not: the scan drags every payload's
+// overflow pages through the page cache. Measured on the owner's 21 GiB
+// database, the combined statement took 25.2s while the same four
+// numbers fetched separately took under a second in total.
+//
+// So the probes are issued one at a time and pinned with INDEXED BY.
+// Pinning is deliberate rather than defensive: these queries have one
+// correct plan, the planner has twice now chosen another, and a wrong
+// choice here is not a slow report but a daemon burning a third of a
+// core on a three-minute timer. INDEXED BY also fails loudly if the
+// index is ever removed, which is the right failure.
+//
+// The total-rows probe is left unpinned: COUNT(*) has no predicate to
+// match a partial index, and SQLite already answers it from whatever
+// covering index is cheapest (0.04s measured).
+func familyStatusSQL(fs familySpec) [4]familyStatusProbe {
+	return [4]familyStatusProbe{
+		{"rows", fmt.Sprintf(
+			`SELECT COUNT(*) FROM %s`, fs.table)},
+		{"packed rows", fmt.Sprintf(
+			`SELECT COUNT(*) FROM %s INDEXED BY %s WHERE %s IS NOT NULL`,
+			fs.table, fs.zLenIdx, fs.zCol)},
+		{"plain bytes", fmt.Sprintf(
+			`SELECT COALESCE(SUM(plain_len), 0) FROM %s INDEXED BY %s WHERE %s IS NULL`,
+			fs.table, fs.plainLenIdx, fs.zCol)},
+		{"packed bytes", fmt.Sprintf(
+			`SELECT COALESCE(SUM(z_len), 0) FROM %s INDEXED BY %s WHERE %s IS NOT NULL`,
+			fs.table, fs.zLenIdx, fs.zCol)},
+	}
 }
 
 // CompressionStatus reports dictionaries and per-family accounting.
@@ -538,25 +594,15 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		// overflow-page scan that made compress.backfill ~22s. And no
 		// measurement either — filling lengths is the background
 		// worker's job, never a reader's (🎯T173).
-		//
-		// Reading a stored length is not free either (🎯T181). Every
-		// clause here is matched by a partial index carrying the column
-		// it sums, so all four are index-only; without them SQLite walks
-		// the table and drags each row's overflow pages through the page
-		// cache to reach an integer. The packed-side sum alone measured
-		// 19.9s on entries. Note the last clause filters on the blob
-		// column, not on z_len: same rows, because both are written by
-		// the same UPDATE, but only that spelling matches the index.
-		q := fmt.Sprintf(`
-			SELECT
-				(SELECT COUNT(*) FROM %[1]s),
-				(SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NOT NULL),
-				(SELECT COALESCE(SUM(plain_len), 0) FROM %[1]s WHERE %[2]s IS NULL),
-				(SELECT COALESCE(SUM(z_len), 0) FROM %[1]s WHERE %[2]s IS NOT NULL)`,
-			fs.table, fs.zCol)
-		if err := s.readDB.QueryRow(q).Scan(&f.Rows, &f.Compressed, &f.PlainBytes, &f.PackedBytes); err != nil {
-			return st, err
+		var counts [4]int64
+		for i, probe := range familyStatusSQL(fs) {
+			if err := s.readDB.QueryRow(probe.query).Scan(&counts[i]); err != nil {
+				return st, fmt.Errorf("%s %s: %w", fs.table, probe.name, err)
+			}
 		}
+		f.Rows, f.Compressed = counts[0], counts[1]
+		f.PlainBytes, f.PackedBytes = counts[2], counts[3]
+
 		var done int
 		err := s.readDB.QueryRow(`
 			SELECT done, next_id, saved_bytes, updated_at, COALESCE(last_error, '')
