@@ -538,12 +538,21 @@ func (s *Store) CompressionStatus() (CompressionStatus, error) {
 		// overflow-page scan that made compress.backfill ~22s. And no
 		// measurement either — filling lengths is the background
 		// worker's job, never a reader's (🎯T173).
+		//
+		// Reading a stored length is not free either (🎯T181). Every
+		// clause here is matched by a partial index carrying the column
+		// it sums, so all four are index-only; without them SQLite walks
+		// the table and drags each row's overflow pages through the page
+		// cache to reach an integer. The packed-side sum alone measured
+		// 19.9s on entries. Note the last clause filters on the blob
+		// column, not on z_len: same rows, because both are written by
+		// the same UPDATE, but only that spelling matches the index.
 		q := fmt.Sprintf(`
 			SELECT
 				(SELECT COUNT(*) FROM %[1]s),
 				(SELECT COUNT(*) FROM %[1]s WHERE %[2]s IS NOT NULL),
 				(SELECT COALESCE(SUM(plain_len), 0) FROM %[1]s WHERE %[2]s IS NULL),
-				(SELECT COALESCE(SUM(z_len), 0) FROM %[1]s WHERE z_len IS NOT NULL)`,
+				(SELECT COALESCE(SUM(z_len), 0) FROM %[1]s WHERE %[2]s IS NOT NULL)`,
 			fs.table, fs.zCol)
 		if err := s.readDB.QueryRow(q).Scan(&f.Rows, &f.Compressed, &f.PlainBytes, &f.PackedBytes); err != nil {
 			return st, err

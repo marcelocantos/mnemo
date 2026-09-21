@@ -145,8 +145,17 @@ func TestLeftoverCountUsesPartialIndex(t *testing.T) {
 		}
 	}
 	got := plan.String()
-	if !strings.Contains(got, "idx_messages_text_z_null") {
-		t.Fatalf("leftover probe did not use idx_messages_text_z_null:\n%s", got)
+	// Either partial index is acceptable and both are index-only:
+	// idx_messages_text_z_null carries id, idx_messages_text_plain_len
+	// carries the summed column (🎯T181), and the planner picks between
+	// them. What must never appear is a table scan — on an unpacked row
+	// that means reading the payload to reach an integer beside it.
+	if !strings.Contains(got, "idx_messages_text_z_null") &&
+		!strings.Contains(got, "idx_messages_text_plain_len") {
+		t.Fatalf("leftover probe used neither partial index:\n%s", got)
+	}
+	if strings.Contains(got, "SCAN messages\n") {
+		t.Fatalf("leftover probe scans messages:\n%s", got)
 	}
 }
 
@@ -284,5 +293,71 @@ func TestUsageReadsMessageIDFromMaterialisedColumn(t *testing.T) {
 	}
 	if got.Total.Messages == 0 {
 		t.Fatalf("Usage quarantined the keyed row; uncounted=%+v", got.Uncounted)
+	}
+}
+
+// TestFamilyStatusAggregatesAreIndexOnly is the ratchet for 🎯T181.
+//
+// compress_status reports four small integers per family, and all four
+// used to be answered by walking the table. That is not a mild
+// inefficiency on this schema: the rows being stepped over carry the
+// compressed payload, so SQLite drags every blob's overflow pages
+// through the page cache to reach an INTEGER beside them. On the
+// owner's 21 GiB database the packed-side sum alone took 19.9s for
+// entries and 9.3s for messages, and because compress.backfill runs on
+// the Fast tier every three minutes the daemon sat at roughly a third
+// of a core re-answering a question whose answer had not changed. The
+// 20s per-check timeout concealed it instead of stopping it: the check
+// reported "did not answer" while the query ran on to completion.
+//
+// "SCAN <table>" in any of these plans means the regression is back.
+// Note the last clause filters on the blob column rather than on z_len:
+// the two select the same rows, but only that spelling matches the
+// partial index.
+func TestFamilyStatusAggregatesAreIndexOnly(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	for _, tc := range []struct {
+		name, query, wantIndex string
+	}{
+		{
+			"packed rows", "SELECT COUNT(*) FROM messages WHERE text_z IS NOT NULL",
+			"idx_messages_text_z_len",
+		},
+		{
+			"packed bytes", "SELECT COALESCE(SUM(z_len), 0) FROM messages WHERE text_z IS NOT NULL",
+			"idx_messages_text_z_len",
+		},
+		{
+			"plain bytes", "SELECT COALESCE(SUM(plain_len), 0) FROM messages WHERE text_z IS NULL",
+			"idx_messages_text_plain_len",
+		},
+		{
+			"entries packed bytes", "SELECT COALESCE(SUM(z_len), 0) FROM entries WHERE raw_z IS NOT NULL",
+			"idx_entries_raw_z_len",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := s.readDB.Query("EXPLAIN QUERY PLAN " + tc.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var plan strings.Builder
+			for rows.Next() {
+				var id, parent, notused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &notused, &detail); err == nil {
+					plan.WriteString(detail + "\n")
+				}
+			}
+			got := plan.String()
+			if !strings.Contains(got, tc.wantIndex) {
+				t.Errorf("%s does not use %s — it walks the table and pulls "+
+					"every payload's overflow pages with it:\n%s", tc.query, tc.wantIndex, got)
+			}
+			if strings.Contains(got, "SCAN messages\n") || strings.Contains(got, "SCAN entries\n") {
+				t.Errorf("%s scans the table:\n%s", tc.query, got)
+			}
+		})
 	}
 }

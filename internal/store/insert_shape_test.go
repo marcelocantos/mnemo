@@ -76,6 +76,11 @@ func TestIngestDuring096UpgradeUsesLegacyInsert(t *testing.T) {
 	for _, stmt := range []string{
 		`DROP VIEW IF EXISTS entries_v`,
 		`DROP TRIGGER IF EXISTS entries_materialise`,
+		// An index over a column this fixture is about to drop blocks
+		// the DROP (🎯T181 added one on plain_len). Dropping the index
+		// first is right for the fixture's purpose: a 0.96 database had
+		// neither the column nor any index over it.
+		`DROP INDEX IF EXISTS idx_messages_text_plain_len`,
 		`ALTER TABLE entries DROP COLUMN message_id_m`,
 		`ALTER TABLE messages DROP COLUMN plain_len`,
 	} {

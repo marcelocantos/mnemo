@@ -989,6 +989,35 @@ CREATE INDEX idx_messages_text_z_null ON messages(id) WHERE text_z IS NULL;
 CREATE INDEX idx_docs_content_z_null ON docs(id) WHERE content_z IS NULL;
 CREATE INDEX idx_entries_raw_z_null ON entries(id) WHERE raw_z IS NULL;
 
+-- Packed-side aggregates (🎯T181). compress_status reports, per family,
+-- how many rows are packed and how many bytes they occupy. Both figures
+-- are small integers, but without an index SQLite answers them by
+-- walking the table -- and every row it steps over drags its blob's
+-- overflow pages through the page cache. Measured on the owner's
+-- 21 GiB database: SUM(z_len) over entries took 19.9s and over messages
+-- 9.3s. The compress.backfill health check runs on the Fast tier every
+-- three minutes, so that is ~30s of scanning every 180s: a daemon
+-- sitting at a third of a core doing nothing but re-answering a
+-- question whose answer had not changed. The 20s per-check timeout hid
+-- it rather than stopping it -- the check reported "did not answer" and
+-- the query kept running to completion in the background.
+--
+-- Indexing z_len over the packed rows makes both the count and the sum
+-- index-only, so neither touches a payload. The predicate is
+-- `<z> IS NOT NULL` rather than `z_len IS NOT NULL` so that it matches
+-- the queries in familyStatus; the two select the same rows, because
+-- z_len is written by the same UPDATE that writes the blob.
+CREATE INDEX idx_messages_text_z_len ON messages(z_len) WHERE text_z IS NOT NULL;
+CREATE INDEX idx_docs_content_z_len ON docs(z_len) WHERE content_z IS NOT NULL;
+CREATE INDEX idx_entries_raw_z_len ON entries(z_len) WHERE raw_z IS NOT NULL;
+
+-- Unpacked-side bytes. The z_null indexes above carry only id, so
+-- SUM(plain_len) over them still had to visit each row to read the
+-- column -- on an unpacked row that is the row holding the payload.
+CREATE INDEX idx_messages_text_plain_len ON messages(plain_len) WHERE text_z IS NULL;
+CREATE INDEX idx_docs_content_plain_len ON docs(plain_len) WHERE content_z IS NULL;
+CREATE INDEX idx_entries_raw_plain_len ON entries(plain_len) WHERE raw_z IS NULL;
+
 CREATE INDEX idx_git_commits_date ON git_commits(commit_date);
 
 CREATE INDEX idx_git_commits_hash ON git_commits(commit_hash);
