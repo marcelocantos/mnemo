@@ -222,6 +222,9 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				return storeNotReadyResult("watch.fds")
 			}
 			tel := s.WatchTelemetrySnapshot()
+			if r, starting := watcherStarting(tel, boot.Get(), time.Now()); starting {
+				return r
+			}
 			sev, detail, rem := store.EvaluateWatchHealth(tel)
 			switch sev {
 			case "fail":
@@ -616,6 +619,35 @@ func storeNotReadyResult(check string) diag.CheckResult {
 	default:
 		return diag.Warning(boot.Summary(), "see startup.ready")
 	}
+}
+
+// watcherStartGrace is how long after the daemon becomes ready a watcher
+// that has never started is reported as starting rather than missing.
+const watcherStartGrace = time.Minute
+
+// watcherStarting reports a watcher that has not started yet, just after
+// startup, as starting rather than absent.
+//
+// The health pass that runs when startup finishes lands within
+// milliseconds of the store opening, and the transcript watcher starts on
+// its own goroutine just after that. The pass therefore saw "not running"
+// on every restart and served it as a warning for three minutes, until
+// the next tick — on a daemon whose watcher was up, with events flowing.
+// The other worker checks already treat not-yet-started as healthy
+// (compactor.breaker, images.embedder); this one did not.
+//
+// StartedAt separates the two cases that matter: zero means the loop has
+// never begun, set means it ran and stopped. Only the first is excused,
+// and only for watcherStartGrace after ready — a watcher that never
+// starts still warns on the next pass after that.
+func watcherStarting(tel store.WatchTelemetry, st boot.Status, now time.Time) (diag.CheckResult, bool) {
+	if tel.Running || !tel.StartedAt.IsZero() {
+		return diag.CheckResult{}, false
+	}
+	if st.Phase != boot.PhaseReady || now.Sub(st.Since) >= watcherStartGrace {
+		return diag.CheckResult{}, false
+	}
+	return diag.Healthy("transcript tree watcher starting"), true
 }
 
 // compactionFailureRatioResult judges the compactor's lifetime
