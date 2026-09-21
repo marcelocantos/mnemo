@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,51 +23,49 @@ import (
 // wrapper become testable.
 //
 // Flow:
-//  1. Launch a daemon under MNEMO_HOME=<tempdir>.
-//  2. Hot-reload via mnemo_config(op=write, patch={vault_path: ...}).
-//  3. Invoke mnemo_vault_sync via MCP.
-//  4. Assert <vault>/index.md exists with the standard fence
+//  1. Write ~/.mnemo/config.json with vault_path (file-only config,
+//     🎯T156) and launch a daemon under MNEMO_HOME=<tempdir>.
+//  2. Invoke mnemo_vault(op=sync) via MCP.
+//  3. Assert <vault>/index.md exists with the standard fence
 //     contract (every mnemo-owned vault note carries the
 //     <!-- mnemo:generated --> marker).
-//  5. Assert mnemo_vault_status reports the vault path back.
+//  4. Assert mnemo_vault(op=status) reports the vault path back.
 func TestVaultSyncViaMCP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e vault sync skipped under -short")
 	}
+	home := t.TempDir()
+	// Tempdir for the vault, outside MNEMO_HOME/.mnemo so the test
+	// verifies the daemon honours the configured path rather than a
+	// hidden default.
+	vaultDir := filepath.Join(home, "vault")
+	cfgDir := filepath.Join(home, ".mnemo")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := json.Marshal(map[string]string{"vault_path": vaultDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// 🎯T79: omit ?user= — the vault resolver now falls back to the
 	// default user just like every other tool, so the explicit-user
 	// workaround this test used to need is gone.
-	d := Start(t)
+	d := Start(t, Options{Home: home})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Tempdir for the vault, outside MNEMO_HOME so the test verifies
-	// the daemon honours the configured path rather than a hidden
-	// default.
-	vaultDir := filepath.Join(d.Home, "vault")
-
-	// Hot-reload via mnemo_config(op=write). The patch shape is the
-	// same as ~/.mnemo/config.json — passed as a nested JSON object,
-	// not a string.
-	cfgOut, err := d.Call(ctx, "mnemo_config", map[string]any{
-		"op":    "write",
-		"patch": map[string]any{"vault_path": vaultDir},
-	})
-	if err != nil {
-		t.Fatalf("mnemo_config write: %v\n%s", err, d.Log())
-	}
-	if !strings.Contains(cfgOut, "vault_path") && !strings.Contains(cfgOut, "applied") {
-		t.Logf("mnemo_config output (informational):\n%s", cfgOut)
-	}
-
-	// The mnemo_config hot-reload kicks off an automatic vault sync
-	// in the background. An explicit mnemo_vault_sync called too soon
+	// Boot with vault_path set starts an automatic vault sync in the
+	// background. An explicit mnemo_vault(op=sync) called too soon
 	// may coalesce with "already in flight, skipping." To handle both
 	// the coalescing case and the case where the background sync has
-	// not yet started, we retry mnemo_vault_sync until index.md
-	// appears with the expected fence. Each retry attempt that returns
-	// a coalescing message is followed by a short sleep to let the
-	// in-flight sync finish before we look for the file.
+	// not yet started, we retry until index.md appears with the
+	// expected fence. Each retry attempt that returns a coalescing
+	// message is followed by a short sleep to let the in-flight sync
+	// finish before we look for the file.
 	rootIndex := filepath.Join(vaultDir, "index.md")
 	var body []byte
 	deadline := time.Now().Add(45 * time.Second)
@@ -82,7 +81,7 @@ func TestVaultSyncViaMCP(t *testing.T) {
 			// File does not exist yet — trigger a sync attempt; ignore
 			// coalescing-skip responses, they mean one is already in
 			// flight.
-			_, _ = d.Call(ctx, "mnemo_vault_sync", nil)
+			_, _ = d.Call(ctx, "mnemo_vault", map[string]any{"op": "sync"})
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -98,14 +97,14 @@ func TestVaultSyncViaMCP(t *testing.T) {
 			rootIndex, d.Log())
 	}
 
-	// mnemo_vault_status must reach the configured path through the
+	// mnemo_vault(op=status) must reach the configured path through the
 	// same MCP transport.
-	statusOut, err := d.Call(ctx, "mnemo_vault_status", nil)
+	statusOut, err := d.Call(ctx, "mnemo_vault", map[string]any{"op": "status"})
 	if err != nil {
-		t.Fatalf("mnemo_vault_status: %v\n%s", err, d.Log())
+		t.Fatalf("mnemo_vault op=status: %v\n%s", err, d.Log())
 	}
 	if !strings.Contains(statusOut, vaultDir) {
-		t.Errorf("mnemo_vault_status did not surface vault_path %q:\n%s",
+		t.Errorf("mnemo_vault op=status did not surface vault_path %q:\n%s",
 			vaultDir, statusOut)
 	}
 }
