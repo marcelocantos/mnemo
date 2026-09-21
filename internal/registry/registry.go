@@ -226,6 +226,23 @@ func (r *Registry) EvaluateThrottle(defaultUser string) {
 		return
 	}
 	prev := r.governor.State().Level
+	if cfg.Budget.MonthlyCapUSD <= 0 {
+		// No cap means nothing to enforce, so the month's spend does not
+		// need computing. It was computed anyway: BudgetStatusNow
+		// aggregates a month of usage, measured at over 30s on a busy
+		// daemon, and this runs before every full health pass. On
+		// 2026-09-21 it delayed the pass that follows startup by ~48s,
+		// so /health kept serving "opening store" results long after the
+		// store was open — on a machine with no budget configured.
+		//
+		// Priced is set so Evaluate reaches its no-cap branch. Left
+		// false, it stops at the unpriced branch first, which leaves the
+		// level untouched — so a throttle persisted under an earlier cap
+		// would never lift after the cap was removed.
+		r.governor.Evaluate(throttle.BudgetView{Priced: true, CapUSD: 0})
+		r.notifyThrottleLevelChange(prev, r.governor.State().Level, notifier)
+		return
+	}
 	b, err := e.store.BudgetStatusNow(cfg.Budget, time.Now())
 	if err != nil {
 		return

@@ -6,6 +6,7 @@ package diag
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,6 +41,8 @@ type Scheduler struct {
 	// See SetReady.
 	ready     func() bool
 	readyPoll time.Duration
+	// beforeFullBusy keeps at most one beforeFull running.
+	beforeFullBusy atomic.Bool
 }
 
 // defaultReadyPoll is how often the scheduler asks whether startup has
@@ -143,7 +146,20 @@ func (s *Scheduler) BeforeFull(fn func()) { s.beforeFull = fn }
 // names, so a fail=1 line is not anonymous.
 func (s *Scheduler) runOnce(ctx context.Context, full bool) {
 	if full && s.beforeFull != nil {
-		s.beforeFull()
+		// Off the critical path. beforeFull refreshes state that a check
+		// later reads (the throttle governor, for budget.throttle), and it
+		// was run synchronously so that read would be current. The cost
+		// was that every full pass waited for it — and the budget
+		// evaluation it wraps measured over 30s on a busy daemon. The
+		// check reads whatever the governor last settled on, which between
+		// full passes it always did anyway; health does not wait for it.
+		// One evaluation at a time: a slow one is not stacked upon.
+		if s.beforeFullBusy.CompareAndSwap(false, true) {
+			go func() {
+				defer s.beforeFullBusy.Store(false)
+				s.beforeFull()
+			}()
+		}
 	}
 	rep := s.reg.Run(ctx, full, s.now())
 	// The notifier sees the run itself: it tracks transitions per check,

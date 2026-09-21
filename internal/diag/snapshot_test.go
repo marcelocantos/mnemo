@@ -176,3 +176,45 @@ func TestSchedulerKeepsTickingWhenNeverReady(t *testing.T) {
 		t.Fatalf("fast check ran %d times; health froze while waiting for readiness", runs.Load())
 	}
 }
+
+// A full pass must not wait for beforeFull. It used to run synchronously,
+// and the budget evaluation it wraps took over 30s on a busy daemon, so
+// the pass that follows startup — the one that replaces "opening store"
+// results — landed ~48s after the store was open.
+func TestFullPassDoesNotWaitForBeforeFull(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(Check{Name: "a", Tier: Fast, Run: func(context.Context) CheckResult { return Healthy("") }})
+	sch := NewScheduler(reg, nil, time.Hour, time.Hour)
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	sch.BeforeFull(func() { calls.Add(1); <-release })
+
+	done := make(chan struct{})
+	go func() { sch.runOnce(context.Background(), true); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the full pass waited for beforeFull")
+	}
+	if _, ok := sch.Latest(); !ok {
+		t.Fatal("pass finished but produced no snapshot")
+	}
+
+	// While the first evaluation is still blocked, another full pass must
+	// not start a second one on top of it. Wait until the first is really
+	// inside beforeFull — it runs on its own goroutine, so checking the
+	// count straight after runOnce returns races with it starting.
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("first beforeFull never started (calls=%d)", calls.Load())
+	}
+	sch.runOnce(context.Background(), true)
+	time.Sleep(20 * time.Millisecond) // room for a wrongly spawned second call to show
+	if n := calls.Load(); n != 1 {
+		t.Errorf("beforeFull started %d times while one was still running, want 1", n)
+	}
+}
