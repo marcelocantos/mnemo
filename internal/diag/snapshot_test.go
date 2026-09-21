@@ -5,6 +5,7 @@ package diag
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -101,5 +102,77 @@ func TestResultsCarryCheckedAt(t *testing.T) {
 	rep := reg.Run(context.Background(), true, time.Now())
 	if rep.Results[0].CheckedAt.Before(before) {
 		t.Fatalf("CheckedAt = %v, want it set when the check ran", rep.Results[0].CheckedAt)
+	}
+}
+
+// The regression this guards: the startup pass runs before the store has
+// opened, and without a pass on the ready transition /health served those
+// results until the next tick — three minutes for Fast checks, an hour for
+// Full ones. The intervals here are set far beyond the test's lifetime so
+// that only the readiness poll can produce a second full pass.
+func TestSchedulerRunsAFullPassWhenStartupFinishes(t *testing.T) {
+	var ready atomic.Bool
+	reg := NewRegistry()
+	reg.Register(Check{Name: "full.store", Tier: Full, Run: func(context.Context) CheckResult {
+		if !ready.Load() {
+			return Healthy("no default-user store yet")
+		}
+		return Healthy("store open")
+	}})
+	sch := NewScheduler(reg, nil, time.Hour, time.Hour)
+	sch.readyPoll = 5 * time.Millisecond
+	sch.SetReady(ready.Load)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.Run(ctx)
+
+	detail := func() string {
+		rep, ok := sch.Latest()
+		if !ok || len(rep.Results) == 0 {
+			return ""
+		}
+		return rep.Results[0].Detail
+	}
+	waitFor := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if detail() == want {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("detail = %q, want %q", detail(), want)
+	}
+
+	waitFor("no default-user store yet")
+	ready.Store(true)
+	waitFor("store open")
+}
+
+// A daemon that never finishes starting must not have its health frozen:
+// the Fast ticker keeps running regardless of readiness.
+func TestSchedulerKeepsTickingWhenNeverReady(t *testing.T) {
+	var runs atomic.Int32
+	reg := NewRegistry()
+	reg.Register(Check{Name: "fast.a", Tier: Fast, Run: func(context.Context) CheckResult {
+		runs.Add(1)
+		return Healthy("")
+	}})
+	sch := NewScheduler(reg, nil, 10*time.Millisecond, time.Hour)
+	sch.readyPoll = 5 * time.Millisecond
+	sch.SetReady(func() bool { return false })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runs.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if runs.Load() < 4 {
+		t.Fatalf("fast check ran %d times; health froze while waiting for readiness", runs.Load())
 	}
 }

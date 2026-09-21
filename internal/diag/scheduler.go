@@ -36,7 +36,34 @@ type Scheduler struct {
 	// snap merges every run, Fast and Full, into one complete report.
 	// It is what /health serves and what onReport is handed.
 	snap *Snapshot
+	// ready, when set, reports whether the daemon has finished starting.
+	// See SetReady.
+	ready     func() bool
+	readyPoll time.Duration
 }
+
+// defaultReadyPoll is how often the scheduler asks whether startup has
+// finished, until it has. The predicate is a mutex read, so polling is
+// cheap; the interval bounds how long /health can show startup-era results
+// after the daemon is actually serving.
+const defaultReadyPoll = 2 * time.Second
+
+// SetReady gives the scheduler a readiness predicate, and makes it run a
+// full pass the moment the daemon becomes ready.
+//
+// Without this, /health (which serves the snapshot) reported the startup
+// pass for longer than it was true. That pass runs as the daemon comes up,
+// usually before the store has opened, so it records "opening store" for
+// every check that needs one. The Fast checks were corrected at the next
+// tick, three minutes later; the Full-tier ones were not corrected for an
+// hour. On 2026-09-21 budget.projection sat at "no default-user store yet"
+// on a daemon that had been serving for minutes, and /health showed seven
+// warnings on a healthy daemon for the first three minutes of every run.
+//
+// The Fast ticker is untouched, so a daemon that never becomes ready — a
+// failed startup — still has its health refreshed rather than frozen on
+// the first pass.
+func (s *Scheduler) SetReady(fn func() bool) { s.ready = fn }
 
 // NewScheduler builds a scheduler. A zero interval uses the default;
 // notifier may be nil to run checks without notifications.
@@ -48,7 +75,7 @@ func NewScheduler(reg *Registry, notifier *Notifier, fast, full time.Duration) *
 		full = DefaultFullInterval
 	}
 	return &Scheduler{reg: reg, notifier: notifier, fast: fast, full: full,
-		now: time.Now, snap: NewSnapshot()}
+		now: time.Now, snap: NewSnapshot(), readyPoll: defaultReadyPoll}
 }
 
 // Latest is the merged report of every check's most recent result. ok is
@@ -74,10 +101,26 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 	t := time.NewTicker(s.fast)
 	defer t.Stop()
+
+	// Poll for readiness only while startup is in progress. Once the
+	// transition has been seen, readyC is set to nil, and a nil channel is
+	// never selected, so the poll costs nothing for the rest of the run.
+	var readyC <-chan time.Time
+	if s.ready != nil && !s.ready() {
+		rt := time.NewTicker(s.readyPoll)
+		defer rt.Stop()
+		readyC = rt.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-readyC:
+			if s.ready() {
+				readyC = nil
+				lastFull = s.now()
+				s.runOnce(ctx, true)
+			}
 		case <-t.C:
 			now := s.now()
 			full := now.Sub(lastFull) >= s.full

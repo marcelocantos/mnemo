@@ -69,7 +69,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.103.0"
+	version              = "0.104.0"
 	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 
@@ -1216,6 +1216,9 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	// rather than one an hour old. Full tier because it runs several
 	// usage aggregations, and a budget does not move on a fast tick.
 	diagScheduler.BeforeFull(func() { reg.EvaluateThrottle(defaultUser) })
+	// Run a full pass the moment the store is serving, so /health does not
+	// serve the startup pass's "opening store" results for up to an hour.
+	diagScheduler.SetReady(boot.Ready)
 	diagScheduler.OnReport(func(rep diag.Report) {
 		// Retained: a shim connecting between scheduler ticks gets the current
 		// health snapshot immediately rather than waiting for the next tick.
