@@ -28,6 +28,13 @@ type DiagRunner interface {
 	Run(ctx context.Context, full bool, now time.Time) diag.Report
 }
 
+// HealthSource serves the scheduler's merged report. It is what GET
+// /health answers from; DiagRunner remains for ?fresh=1 and for the
+// window at startup before the first scheduled run has finished.
+type HealthSource interface {
+	Latest() (diag.Report, bool)
+}
+
 // Handler wraps a store resolver and serves JSON REST endpoints.
 // resolve("") returns the default user's backend, matching the behaviour
 // of a local single-user deployment; multi-user deployments can pass a
@@ -40,7 +47,12 @@ type Handler struct {
 	plugins        PluginUILister // optional; nil until wired by SetPluginUILister (🎯T102.9)
 	budgetProvider BudgetProvider // optional; nil until SetBudgetProvider (🎯T140)
 	tools          ToolCaller     // optional; nil until SetToolCaller (🎯T187)
+	healthSrc      HealthSource   // optional; nil until SetHealthSource
 }
+
+// SetHealthSource wires the scheduler's snapshot. Call once during startup
+// wiring. Unset, GET /health runs the checks live as it always did.
+func (h *Handler) SetHealthSource(src HealthSource) { h.healthSrc = src }
 
 // analyticsCacheTTL is how long a heavy analytics response is reused. The
 // dashboard polls/refreshes faster than these aggregates meaningfully
@@ -674,7 +686,29 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	report := h.diags.Run(r.Context(), true, time.Now().UTC())
+	// Serve the scheduler's snapshot rather than running the checks.
+	//
+	// A health endpoint that does work inherits the latency of its slowest
+	// check and multiplies load by however often anyone looks. This one
+	// ran every check, Full tier included, on every GET — while the
+	// scheduler was running the same checks on its own cadence and keeping
+	// the answer. Measured on 2026-09-21 at ~12s per request. Reading the
+	// snapshot costs a mutex, and the only thing that runs checks is the
+	// scheduler, at a rate it controls.
+	//
+	// Staleness is the price, and it is visible rather than hidden: each
+	// result carries checked_at, and X-Mnemo-Health says which path
+	// answered. ?fresh=1 runs everything now for whoever needs that.
+	report, fromSnapshot := diag.Report{}, false
+	if h.healthSrc != nil && r.URL.Query().Get("fresh") == "" {
+		report, fromSnapshot = h.healthSrc.Latest()
+	}
+	if fromSnapshot {
+		w.Header().Set("X-Mnemo-Health", "snapshot")
+	} else {
+		report = h.diags.Run(r.Context(), true, time.Now().UTC())
+		w.Header().Set("X-Mnemo-Health", "live")
+	}
 	if html {
 		// 200 even when checks fail — the page itself rendered; severity
 		// is in the body (and matches mnemo_doctor / JSON shape).

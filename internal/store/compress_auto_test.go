@@ -10,7 +10,24 @@ import (
 	"time"
 )
 
+// isolateConfig points MNEMO_HOME at a scratch directory so LoadConfig
+// reads an absent config rather than the developer's own.
+//
+// autoBackfillEnabled() consults the config on every cycle, by design —
+// it is how the operator pauses the packer without a restart. The
+// consequence for tests is that a machine whose ~/.mnemo/config.json
+// sets compression.auto_backfill=false makes every test in this file
+// fail, with "outstanding did not reach 0" forty-five seconds later and
+// nothing to suggest the cause is a file outside the repo. That is not
+// hypothetical: it happened on 2026-09-21, while the owner had the
+// packer paused to stop it burning a third of a core.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv(MnemoHomeEnv, t.TempDir())
+}
+
 func TestAutoBackfillPacksPlainRowsWithoutAnOpsCall(t *testing.T) {
+	isolateConfig(t)
 	s := newTestStore(t, t.TempDir())
 	seedLegacyMessages(t, s, 80)
 
@@ -53,6 +70,7 @@ func TestAutoBackfillPacksPlainRowsWithoutAnOpsCall(t *testing.T) {
 }
 
 func TestAutoBackfillRestartsWhenPlainRowsReappear(t *testing.T) {
+	isolateConfig(t)
 	s := newTestStore(t, t.TempDir())
 	seedLegacyMessages(t, s, 40)
 	if _, err := s.CompressBackfill(t.Context(), FamilyMessagesText); err != nil {

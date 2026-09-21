@@ -108,6 +108,11 @@ type Result struct {
 	Detail      string `json:"detail,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
 	DurationMs  int64  `json:"duration_ms"`
+	// CheckedAt is when this check last ran. /health serves a snapshot
+	// assembled from runs on different cadences (Fast every few minutes,
+	// Full hourly), so a result's age is a property of the result, not
+	// of the report that contains it.
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 // Report is the outcome of running a set of checks at a point in time.
@@ -230,6 +235,7 @@ func runOne(ctx context.Context, c Check) (res Result) {
 	start := time.Now()
 	defer func() {
 		res.DurationMs = time.Since(start).Milliseconds()
+		res.CheckedAt = start.UTC()
 		if r := recover(); r != nil {
 			res.Severity = Fail.String()
 			res.Detail = "check panicked"

@@ -222,6 +222,9 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				return storeNotReadyResult("watch.fds")
 			}
 			tel := s.WatchTelemetrySnapshot()
+			if r, starting := watcherStarting(tel, boot.Get(), time.Now()); starting {
+				return r
+			}
 			sev, detail, rem := store.EvaluateWatchHealth(tel)
 			switch sev {
 			case "fail":
@@ -487,51 +490,35 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		// 🎯T162: historical-row compression must not sit unfinished
 		// behind an all-green doctor. Reports phase and outstanding
 		// plain bytes; VACUUM is never implied.
+		// compress.backfill reports the worker's own published state and
+		// does no database work. It used to call CompressionStatus to put
+		// byte figures in its detail: a dozen aggregates over the three
+		// largest tables, on every Fast tick, measured at ~12s on a busy
+		// daemon (0.12s of work, the rest waiting on ingest). The verdict
+		// never needed those figures — only whether leftover exists, which
+		// the worker counts at the end of every cycle and publishes. The
+		// byte breakdown is one command away for whoever wants it.
 		diag.Check{Name: "compress.backfill", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
 				return diag.Healthy("store not started yet")
 			}
 			snap := s.CompressWorkerStatus()
-			st, err := s.CompressionStatus()
-			if err != nil {
-				return diag.Warning("compression status: "+err.Error(),
-					"check the daemon log for compress/dictionary errors")
-			}
-			var outstanding int64
-			var leftover int64
-			var saved int64
-			var pending int64
-			var parts []string
-			for _, f := range st.Families {
-				outstanding += f.Outstanding
-				leftover += f.LeftoverRows
-				saved += f.BackfillSaved
-				pending += f.LengthsPending
-				if f.Outstanding > 0 || f.LeftoverRows > 0 || f.Running {
-					parts = append(parts, fmt.Sprintf("%s %s plain / %s packed",
-						f.Family, formatIEC(f.Outstanding), formatIEC(f.PackedBytes)))
-				}
-			}
 			detail := snap.Phase
 			if snap.Reason != "" {
 				detail += " (" + snap.Reason + ")"
 			}
-			if len(parts) > 0 {
-				detail += ": " + strings.Join(parts, "; ")
+			if snap.LeftoverKnown {
+				detail += fmt.Sprintf("; %d leftover rows as of %s",
+					snap.LeftoverRows, snap.LeftoverAt.Format("15:04"))
 			}
-			detail += fmt.Sprintf("; %s repacked, 0 reclaimed (VACUUM is manual)", formatIEC(saved))
-			if pending > 0 {
-				// Disclosed, not alarmed: this clears on its own as the
-				// background pass measures rows, and a warning that
-				// resolves itself teaches people to ignore warnings
-				// (🎯T173).
-				detail += fmt.Sprintf("; %d rows unmeasured, byte totals provisional", pending)
-			}
+			// Static, so it costs nothing, and it is the point people most
+			// often miss: packing empties columns, it does not shrink the file.
+			detail += "; space is reclaimed only by a manual VACUUM; byte figures: mnemo ops compress_status"
 			switch {
 			case snap.Phase == store.CompressPhaseDisabled:
 				return diag.Healthy(detail)
-			case outstanding > 0 || leftover > 0:
+			case snap.LeftoverKnown && snap.LeftoverRows > 0:
 				return diag.Warning(detail,
 					"the daemon packs leftover rows on its own; space returns to the filesystem only after a manual VACUUM")
 			default:
@@ -634,22 +621,33 @@ func storeNotReadyResult(check string) diag.CheckResult {
 	}
 }
 
-func formatIEC(n int64) string {
-	const (
-		ki = 1024
-		mi = 1024 * ki
-		gi = 1024 * mi
-	)
-	switch {
-	case n >= gi:
-		return fmt.Sprintf("%.2f GiB", float64(n)/float64(gi))
-	case n >= mi:
-		return fmt.Sprintf("%.1f MiB", float64(n)/float64(mi))
-	case n >= ki:
-		return fmt.Sprintf("%.0f KiB", float64(n)/float64(ki))
-	default:
-		return fmt.Sprintf("%d B", n)
+// watcherStartGrace is how long after the daemon becomes ready a watcher
+// that has never started is reported as starting rather than missing.
+const watcherStartGrace = time.Minute
+
+// watcherStarting reports a watcher that has not started yet, just after
+// startup, as starting rather than absent.
+//
+// The health pass that runs when startup finishes lands within
+// milliseconds of the store opening, and the transcript watcher starts on
+// its own goroutine just after that. The pass therefore saw "not running"
+// on every restart and served it as a warning for three minutes, until
+// the next tick — on a daemon whose watcher was up, with events flowing.
+// The other worker checks already treat not-yet-started as healthy
+// (compactor.breaker, images.embedder); this one did not.
+//
+// StartedAt separates the two cases that matter: zero means the loop has
+// never begun, set means it ran and stopped. Only the first is excused,
+// and only for watcherStartGrace after ready — a watcher that never
+// starts still warns on the next pass after that.
+func watcherStarting(tel store.WatchTelemetry, st boot.Status, now time.Time) (diag.CheckResult, bool) {
+	if tel.Running || !tel.StartedAt.IsZero() {
+		return diag.CheckResult{}, false
 	}
+	if st.Phase != boot.PhaseReady || now.Sub(st.Since) >= watcherStartGrace {
+		return diag.CheckResult{}, false
+	}
+	return diag.Healthy("transcript tree watcher starting"), true
 }
 
 // compactionFailureRatioResult judges the compactor's lifetime
