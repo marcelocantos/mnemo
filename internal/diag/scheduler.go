@@ -33,6 +33,9 @@ type Scheduler struct {
 	// live dashboard panel and status glyph can update via the SSE hub (🎯T86).
 	onReport   func(Report)
 	beforeFull func()
+	// snap merges every run, Fast and Full, into one complete report.
+	// It is what /health serves and what onReport is handed.
+	snap *Snapshot
 }
 
 // NewScheduler builds a scheduler. A zero interval uses the default;
@@ -44,12 +47,22 @@ func NewScheduler(reg *Registry, notifier *Notifier, fast, full time.Duration) *
 	if full <= 0 {
 		full = DefaultFullInterval
 	}
-	return &Scheduler{reg: reg, notifier: notifier, fast: fast, full: full, now: time.Now}
+	return &Scheduler{reg: reg, notifier: notifier, fast: fast, full: full,
+		now: time.Now, snap: NewSnapshot()}
 }
+
+// Latest is the merged report of every check's most recent result. ok is
+// false until the startup run has finished, so /health can fall back to
+// a live run in that window instead of serving nothing.
+func (s *Scheduler) Latest() (Report, bool) { return s.snap.Report() }
 
 // OnReport registers a sink for every report the scheduler produces (startup,
 // each fast tick, and each hourly full pass). The daemon wires this to the SSE
 // hub so the native dashboard panel and status glyph update live. (🎯T86)
+//
+// The sink receives the merged snapshot, not the run that just finished. A
+// Fast run carries only Fast checks, and handing that on as-is made the
+// shim drop every Full-tier result for up to an hour after each tick.
 func (s *Scheduler) OnReport(fn func(Report)) { s.onReport = fn }
 
 // Run executes the full suite once, then loops until ctx is cancelled,
@@ -90,11 +103,16 @@ func (s *Scheduler) runOnce(ctx context.Context, full bool) {
 		s.beforeFull()
 	}
 	rep := s.reg.Run(ctx, full, s.now())
+	// The notifier sees the run itself: it tracks transitions per check,
+	// and only the checks that just ran can have transitioned.
 	if s.notifier != nil {
 		s.notifier.Observe(rep, s.now())
 	}
+	s.snap.Observe(rep, full)
 	if s.onReport != nil {
-		s.onReport(rep)
+		if merged, ok := s.snap.Report(); ok {
+			s.onReport(merged)
+		}
 	}
 	if rep.Fail > 0 || rep.Warn > 0 {
 		var failed, warned []string

@@ -440,9 +440,25 @@ const (
 )
 
 // CompressWorkerSnapshot is the auto-backfill worker's last decision.
+//
+// It is what the compress.backfill health check reports, and it has to
+// be enough on its own: the check used to call CompressionStatus to add
+// byte figures to its detail, which cost a dozen aggregates over the
+// three largest tables on every Fast tick and measured ~12s on a busy
+// daemon. The verdict never needed them — only whether leftover exists,
+// which the worker already counts at the end of every cycle. So the
+// worker publishes that count here, and the byte figures stay where a
+// person who asked for them is prepared to wait: compress_status.
 type CompressWorkerSnapshot struct {
 	Phase  string
 	Reason string
+	// LeftoverRows is the actionable leftover the worker counted at the
+	// end of its most recent completed cycle. LeftoverKnown is false
+	// until a cycle has counted — in particular while the worker is
+	// disabled, which returns before counting.
+	LeftoverRows  int64
+	LeftoverKnown bool
+	LeftoverAt    time.Time
 }
 
 // familySpec maps a family to its table and columns. Identifiers are
@@ -907,6 +923,21 @@ type backfillState struct {
 	reason        string
 	started       bool
 	forceDisabled bool
+
+	// Kept separately from phase: setPhase runs at the top of every
+	// cycle, and clearing the count there would make a throttled or
+	// disabled cycle forget a backlog it has not re-measured.
+	leftover      int64
+	leftoverKnown bool
+	leftoverAt    time.Time
+}
+
+func (b *backfillState) setLeftover(n int64, at time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.leftover = n
+	b.leftoverKnown = true
+	b.leftoverAt = at
 }
 
 func (b *backfillState) setPhase(phase, reason string) {
@@ -923,7 +954,10 @@ func (b *backfillState) snapshot() CompressWorkerSnapshot {
 	if phase == "" {
 		phase = CompressPhaseIdle
 	}
-	return CompressWorkerSnapshot{Phase: phase, Reason: b.reason}
+	return CompressWorkerSnapshot{
+		Phase: phase, Reason: b.reason,
+		LeftoverRows: b.leftover, LeftoverKnown: b.leftoverKnown, LeftoverAt: b.leftoverAt,
+	}
 }
 
 func (b *backfillState) setYield(d time.Duration) {

@@ -181,9 +181,11 @@ counterpart at all — the `entries_materialise` trigger fills them from
 `raw` — alongside `plain_len` / `z_len` on messages, docs and entries. A boot-time pass fills the twins for
 historical rows before `compress_gc family=entries` is allowed. The daemon
 enqueues that packer itself when it finds a backlog (🎯T162); `compress_gc`
-is no longer the only path. Doctor reports `compress.backfill` (plain bytes
-outstanding, running/complete/throttled/disabled) and distinguishes bytes
-repacked from bytes reclaimed — VACUUM stays manual. Outstanding is
+is no longer the only path. Doctor reports `compress.backfill` from the
+worker's own published state — phase (running/complete/throttled/disabled)
+and the leftover row count from its last cycle — and does no database work
+itself; byte figures, and bytes repacked versus reclaimed, are in
+`mnemo_ops op=compress_status`. VACUUM stays manual. Outstanding is
 leftover membership (`z IS NULL` plus stored `plain_len` ≥ 64), never
 live `SUM(length(blob))`. Dictionaries are trained
 from the corpus and versioned in

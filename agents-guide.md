@@ -350,7 +350,8 @@ v0.97.0 (🎯T179).
 
 The daemon packs historical plain rows itself (🎯T162) whenever it
 finds a backlog — `compression.auto_backfill` defaults on. Doctor
-reports `compress.backfill` (phase plus outstanding plain bytes).
+reports `compress.backfill` (phase plus leftover row count, read from the
+worker's published state); `op=compress_status` has the byte figures.
 Repacking empties the legacy columns; it does **not** reclaim disk.
 VACUUM stays a manual operator step. `op=compress_gc` is an explicit
 one-family override, not the only path.
@@ -786,7 +787,10 @@ Deferred ticks do not quarantine a session (🎯T163);
 check enforces.
 
 *Is historical compression finishing?* — `compress.backfill` (🎯T162 —
-phase plus outstanding plain bytes; 0 reclaimed / VACUUM is manual).
+phase plus leftover row count; VACUUM is manual). It reads the worker's
+published state rather than querying: it used to run a dozen aggregates
+per Fast tick, which cost ~12s on a busy daemon. `op=compress_status`
+has the byte breakdown when you want it.
 Outstanding is membership (`z IS NULL`) filtered by the stored
 `plain_len`, never a live `SUM(length(blob))` — that scan was most of a
 95-second `/health`. A family whose only residue is rows **below** the
@@ -815,7 +819,12 @@ Three surfaces expose the same report:
   "is mnemo healthy, and what do I do about it" call.
 - **`GET /health`** — the JSON report; backs the dashboard **health
   page** at `http://localhost:19419/#health` (issues sorted by severity,
-  with copy-remediation and file-a-fix affordances).
+  with copy-remediation and file-a-fix affordances). It serves the
+  scheduler's most recent result for each check and runs nothing, so it
+  answers immediately however slow a check is. Results are up to a few
+  minutes old for Fast checks and up to an hour for Full ones: each carries
+  `checked_at`, and the `X-Mnemo-Health` header says `snapshot` or `live`.
+  `GET /health?fresh=1` runs every check now.
 - **OS notifications** — on a transition *into* fail severity, a native
   notification (macOS `osascript`, Linux `notify-send`; local-only, no
   network) deep-links the health page. **Opt-out**: enabled by default,

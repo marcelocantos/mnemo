@@ -69,7 +69,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.102.0"
+	version              = "0.103.0"
 	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 
@@ -1437,6 +1437,9 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	mux.Handle("/mcp/", mcpHandler) // catch sub-paths used by the MCP transport
 	apiHandler := api.New(resolve)
 	apiHandler.SetDiagRunner(diagReg) // 🎯T83: serve GET /health from the diag registry
+	// GET /health reads the scheduler's merged snapshot instead of running
+	// every check per request; the registry above serves ?fresh=1.
+	apiHandler.SetHealthSource(diagScheduler)
 	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
 	// 🎯T140: budget/throttle/agent-trees for dashboard, CLI, menubar.
 	apiHandler.SetBudgetProvider(func() (*api.BudgetSnapshot, error) {

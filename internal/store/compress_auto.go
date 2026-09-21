@@ -136,6 +136,11 @@ func (s *Store) compressBackfillCycle(ctx context.Context) {
 	if err != nil && ctx.Err() == nil {
 		slog.Warn("compress backfill leftover sum failed", "err", err)
 	}
+	if err == nil {
+		// Published for the health check, which reports this instead of
+		// re-deriving it (see CompressWorkerSnapshot).
+		s.backfill.setLeftover(left, time.Now())
+	}
 	switch {
 	case anyRunning || left > 0:
 		s.backfill.setPhase(CompressPhaseRunning, "packing historical rows")
