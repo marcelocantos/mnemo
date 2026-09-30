@@ -69,7 +69,7 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.106.0"
+	version              = "0.107.0"
 	defaultAddr          = "localhost:19419"
 	defaultFederatedAddr = ":19420"
 
@@ -1443,7 +1443,7 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	// GET /health reads the scheduler's merged snapshot instead of running
 	// every check per request; the registry above serves ?fresh=1.
 	apiHandler.SetHealthSource(diagScheduler)
-	apiHandler.SetEventHub(eventHub)  // 🎯T86: serve GET /api/events (SSE) from the hub
+	apiHandler.SetEventHub(eventHub) // 🎯T86: serve GET /api/events (SSE) from the hub
 	// 🎯T140: budget/throttle/agent-trees for dashboard, CLI, menubar.
 	apiHandler.SetBudgetProvider(func() (*api.BudgetSnapshot, error) {
 		mem, err := resolve("")

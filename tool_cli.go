@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/marcelocantos/mnemo/internal/tools"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // CLI counterparts to the MCP tools (🎯T187).

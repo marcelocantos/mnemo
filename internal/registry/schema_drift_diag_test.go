@@ -39,6 +39,12 @@ func TestSchemaCurrentRemediationDistinguishesDriftFromLock(t *testing.T) {
 // interrupted additive migration stays failed, and the packer must not
 // report ok while it is throttled.
 func TestWedgedSchemaIsAFailureAndThrottledCompressIsNotOK(t *testing.T) {
+	// autoBackfillEnabled() re-reads LoadConfig each cycle. Without this,
+	// a developer whose ~/.mnemo/config.json sets compression.auto_backfill
+	// =false makes the worker report "disabled" and the wait below times out
+	// with no hint that the cause is outside the repo (same trap as
+	// store.isolateConfig / compress_auto_test.go, 2026-09-21).
+	t.Setenv(store.MnemoHomeEnv, t.TempDir())
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "mnemo.db")
 	s, err := store.New(dbPath, t.TempDir())

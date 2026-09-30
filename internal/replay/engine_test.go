@@ -155,8 +155,8 @@ func TestOpFromToolRowWriteEdit(t *testing.T) {
 	}
 	falseVal := false
 	ops, reason = OpFromToolRow(ToolRow{
-		ToolName:  "Edit",
-		ToolInput: []byte(`{"file_path":"/x.go","old_string":"a","new_string":"b"}`),
+		ToolName:    "Edit",
+		ToolInput:   []byte(`{"file_path":"/x.go","old_string":"a","new_string":"b"}`),
 		ResultError: &falseVal,
 	})
 	if reason != "" || ops[0].Kind != KindPatch {
