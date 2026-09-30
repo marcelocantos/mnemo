@@ -145,7 +145,35 @@ jobs:
           for f in arena liteparser lp_tokenize lp_unparse parse; do
             "$CC" $DP_CFLAGS -c "${DP_SRC}/${f}.c" -o "build/deepparser/${f}.o"
           done
-          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -I${DP_SRC} -c dist/sqldeep.cpp -o build/sqldeep.o
+          # Same MinGW GCC 15 clash as ci.yml: an -O0 sqldeep.o defines
+          # std::string::_M_replace_cold, which libstdc++ also exports.
+          # -O2 leaves it undefined (the DLL or the static lib provides
+          # it). -fno-keep-inline-dllexport is GCC-only; the arm64 leg
+          # is clang and skips a flag it does not accept. A leftover
+          # global is localized so it cannot collide at link time.
+          CXX_EXTRA=""
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            CXX_EXTRA="-O2"
+            if echo 'int main(){return 0;}' | "$CXX" -fno-keep-inline-dllexport -x c++ -c - -o cxxflag_probe.o 2>/dev/null; then
+              CXX_EXTRA="$CXX_EXTRA -fno-keep-inline-dllexport"
+            fi
+            rm -f cxxflag_probe.o
+          fi
+          echo "sqldeep.cpp extra flags:${CXX_EXTRA:+ $CXX_EXTRA}"
+          "$CXX" -std=c++20 -Wall -Wextra -Wpedantic -Idist -Ivendor/include -I${DP_SRC} $CXX_EXTRA -c dist/sqldeep.cpp -o build/sqldeep.o
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            defined=$(nm -g --defined-only build/sqldeep.o | tr -d '\r' | awk '/_M_replace_cold/ {print $3}')
+            if [ -n "$defined" ]; then
+              args=()
+              for s in $defined; do
+                args+=(--localize-symbol="$s")
+              done
+              objcopy "${args[@]}" build/sqldeep.o
+              echo "localized _M_replace_cold in sqldeep.o: $defined"
+            else
+              echo "sqldeep.o does not define _M_replace_cold"
+            fi
+          fi
           "$CC" -w -Idist -Ivendor/include -c dist/sqldeep_xml.c -o build/sqldeep_xml.o
           "$AR" rcs build/libsqldeep.a build/sqldeep.o build/deepparser/*.o
 
