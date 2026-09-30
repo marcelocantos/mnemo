@@ -257,6 +257,15 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				}
 			}
 			switch {
+			case schemaCurrentDown(st.StartupReport()):
+				// schema.current unavailable is a failed migration, and
+				// drift is the failure a restart cannot retry. That is a
+				// fault, not a warning: a wedged store was reporting
+				// 18 ok / 1 warn / 0 fail.
+				reason := schemaCurrentReason(st.StartupReport())
+				return diag.Failure(
+					"startup capabilities unavailable: "+strings.Join(unavailable, "; "),
+					schemaCurrentRemediation(reason))
 			case len(unavailable) > 0:
 				return diag.Warning(
 					"startup capabilities unavailable: "+strings.Join(unavailable, "; "),
@@ -518,6 +527,12 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			switch {
 			case snap.Phase == store.CompressPhaseDisabled:
 				return diag.Healthy(detail)
+			case snap.Phase == store.CompressPhaseThrottled:
+				// Throttled is the worker refusing to run, not a finished
+				// pass. Reporting it ok hid a store whose compression
+				// could not start because the schema upgrade had failed.
+				return diag.Warning(detail,
+					"compression is paused ("+snap.Reason+"). It stays paused while the schema or a prerequisite is unavailable — see schema.current. A restart retries the migration only when the stored schema hash still matches the database")
 			case snap.LeftoverKnown && snap.LeftoverRows > 0:
 				return diag.Warning(detail,
 					"the daemon packs leftover rows on its own; space returns to the filesystem only after a manual VACUUM")
@@ -592,6 +607,39 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		return out
 	})
 	return reg
+}
+
+// schemaCurrentDown reports whether the schema.current capability has
+// resolved unavailable. Pending (an upgrade still running) is not down.
+func schemaCurrentDown(report []store.CapabilityStatus) bool {
+	for _, c := range report {
+		if c.Name == string(store.CapSchemaCurrent) && c.State == "unavailable" {
+			return true
+		}
+	}
+	return false
+}
+
+func schemaCurrentReason(report []store.CapabilityStatus) string {
+	for _, c := range report {
+		if c.Name == string(store.CapSchemaCurrent) {
+			return c.Reason
+		}
+	}
+	return ""
+}
+
+// schemaCurrentRemediation distinguishes a drifted hash, which a restart
+// will not retry, from a lock failure, which was rolled back and will.
+func schemaCurrentRemediation(reason string) string {
+	switch {
+	case strings.Contains(reason, "schema drift:"):
+		return "The schema hash no longer matches the database, so a restart will not retry the migration. This build repairs an interrupted additive migration (a missing index, column, or table) on startup and re-stamps the hash. If schema.current is still failed, the drift is not that kind of partial migration — the daemon log names the blocking object. Do not hand-edit the database."
+	case strings.Contains(reason, "write lock"):
+		return "The schema upgrade could not take the write lock. The attempt was rolled back and the schema hash still matches, so restart the daemon to retry after stopping any other mnemo process."
+	default:
+		return "Schema upgrade failed, so schema.current is unavailable. Read the daemon log. A restart retries the migration only when the stored schema hash still matches the database."
+	}
 }
 
 // expandTilde resolves a leading ~ to the process home dir.

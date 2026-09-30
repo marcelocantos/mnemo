@@ -229,6 +229,13 @@ type Store struct {
 	// backup attempt). Atomic so reads and writes don't need rootsMu.
 	lastWriteAt atomic.Int64
 
+	// schemaMu is held for the DDL apply itself, not for the
+	// pre-migration backup. newWriterState takes it before BEGIN so an
+	// ingest transaction cannot start across CREATE INDEX. The backup
+	// stays outside the lock: that window is when the store is supposed
+	// to keep serving on the old schema.
+	schemaMu sync.Mutex
+
 	// upgradeDone is closed when any deferred schema upgrade (pre-
 	// migration backup + sqlift.Apply) has finished, or immediately when
 	// no upgrade was pending. Close waits on it so we do not tear down
@@ -1010,6 +1017,13 @@ func upgradeSchema(dbPath string) error {
 // it exists so the backup-skip decision (🎯T155) can be driven against
 // real sqlift plans rather than asserted from the classifier alone.
 func upgradeSchemaWith(dbPath, desiredSQL string) error {
+	return upgradeSchemaWithGate(dbPath, desiredSQL, nil)
+}
+
+// upgradeSchemaWithGate is upgradeSchemaWith. applyMu, when non-nil, is
+// held across the DDL apply and the post-migration ANALYZE, and not
+// across the pre-migration backup.
+func upgradeSchemaWithGate(dbPath, desiredSQL string, applyMu *sync.Mutex) error {
 	defer boot.ClearUpgrade()
 
 	sdb, err := sqlift.Open(dbPath)
@@ -1088,8 +1102,19 @@ func upgradeSchemaWith(dbPath, desiredSQL string) error {
 		}
 	}
 
+	if applyMu != nil {
+		// Held through ANALYZE, which is the last writer this function
+		// starts. newWriterState must not be called on this goroutine
+		// while the lock is held: it takes the same mutex.
+		applyMu.Lock()
+		defer applyMu.Unlock()
+	}
+
 	reportUpgrade(boot.PhaseApplyingSchema, "applying additive schema migration (sqlift AllowNone)")
-	if err := sqlift.Apply(sdb, plan, sqlift.ApplyOptions{Allow: sqlift.AllowNone}); err != nil {
+	if err := setSchemaBusyTimeout(sdb); err != nil {
+		return err
+	}
+	if err := applyMigration(sdb, plan, desired); err != nil {
 		return err
 	}
 
@@ -1330,8 +1355,9 @@ func New(dbPath, projectDir string) (*Store, error) {
 				defer close(done)
 				// upgradeSchema takes no context: it runs a VACUUM INTO
 				// backup and sqlift.Apply, neither of which is safe to
-				// abandon midway.
-				if err := upgradeSchema(dbPath); err != nil {
+				// abandon midway. schemaMu is held only for the DDL, so
+				// ingest cannot begin a write in the middle of it.
+				if err := upgradeSchemaWithGate(dbPath, schemaSQL, &s.schemaMu); err != nil {
 					// Degrade rather than fail the store: keep serving on
 					// the old schema. CapSchemaCurrent resolves
 					// unavailable, so dependent phases skip and dependent
@@ -3468,6 +3494,14 @@ type parsedFile struct {
 // IngestAll scans the project directory and ingests all JSONL files
 // using a parallel pipeline: collector → N workers → 1 writer.
 func (s *Store) IngestAll() error {
+	// Startup ingest used to run alongside the deferred schema upgrade.
+	// CREATE INDEX on messages then lost the write lock to that ingest,
+	// the migration aborted having already committed the earlier
+	// statements, and the store was wedged on schema drift. Ingest waits
+	// the upgrade out. Queries do not: the daemon still serves on the
+	// old schema during the pre-migration backup.
+	s.AwaitSchemaUpgrade()
+
 	numWorkers := runtime.NumCPU()
 	if numWorkers < 2 {
 		numWorkers = 2
@@ -3783,6 +3817,14 @@ type writerState struct {
 }
 
 func (s *Store) newWriterState() (*writerState, error) {
+	// Block until a schema DDL apply releases schemaMu, then drop it
+	// before BEGIN. An in-flight transaction is waited out by the
+	// migration connection's busy_timeout; this stops the next one
+	// from starting until CREATE INDEX has committed. Do not call this
+	// from the schema-upgrade goroutine while it holds schemaMu.
+	s.schemaMu.Lock()
+	s.schemaMu.Unlock()
+
 	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return nil, err
@@ -4214,6 +4256,17 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 // promptly on cancellation lets Registry.Close finish stopping workers
 // and reach the WAL checkpoint.
 func (s *Store) Watch(ctx context.Context) error {
+	// Same reason as IngestAll: a watcher that ingests during CREATE
+	// INDEX is another writer on the lock the migration needs. Honour
+	// cancellation so Close is not stuck behind a long upgrade.
+	if s.upgradeDone != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.upgradeDone:
+		}
+	}
+
 	projectDirs := s.projectDirs()
 	var roots []string
 	for _, dir := range projectDirs {
