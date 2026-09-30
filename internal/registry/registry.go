@@ -562,6 +562,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
+		// Watch itself waits out a schema upgrade before it ingests.
 		if err := e.store.Watch(r.baseCtx); err != nil {
 			logger.Error("watcher failed", "err", err)
 		}
@@ -571,6 +572,9 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	e.workers.Add(1)
 	go func() {
 		defer e.workers.Done()
+		// IngestAll waits out a schema upgrade before it takes the
+		// write lock. The rest of this goroutine's ingests run after
+		// that, so they see the migrated schema.
 		logger.Info("ingesting transcripts", "dir", projectDir)
 		if err := e.store.IngestAll(); err != nil {
 			logger.Error("initial ingest failed", "err", err)
@@ -706,15 +710,23 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 		// if startWorkers is still on the stack holding r.mu.
 		sumModel, sumProv := r.compactorModel, r.summariserProvider
 
-		// Compaction watcher.
-		if n, err := e.store.ClearDeferredQuarantine(); err != nil {
-			logger.Warn("clear deferred quarantine failed", "err", err)
-		} else if n > 0 {
-			logger.Info("cleared leftover deferred quarantine rows", "rows", n)
-		}
+		// Compaction watcher. The scan is a reader, but the watcher
+		// also writes, and on the upgrade that wedged the store it was
+		// in flight while CREATE INDEX needed the write lock. It waits
+		// the upgrade out, and the deferred-quarantine delete moves
+		// with it so that write does too.
 		e.workers.Add(1)
 		go func() {
 			defer e.workers.Done()
+			e.store.AwaitSchemaUpgrade()
+			if r.baseCtx.Err() != nil {
+				return
+			}
+			if n, err := e.store.ClearDeferredQuarantine(); err != nil {
+				logger.Warn("clear deferred quarantine failed", "err", err)
+			} else if n > 0 {
+				logger.Info("cleared leftover deferred quarantine rows", "rows", n)
+			}
 			caller := compact.NewClaudiaCaller(compact.ClaudiaCallerOpts{
 				WorkDir: r.summariserWorkDir, Model: sumModel, Provider: sumProv,
 			})
