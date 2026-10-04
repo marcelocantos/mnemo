@@ -5,7 +5,20 @@
 Once mnemo reaches 1.0, backwards compatibility becomes a binding
 contract. Breaking changes to the CLI interface, MCP tool signatures,
 configuration, or database schema will not be made without forking to a
-new product. The pre-1.0 period exists to get these surfaces right.
+new product. The cut is the owner's `## 1.0 judgment`, under `/release`
+B.3a, and the last breaking release recorded here is v0.85.0. The
+retired rule was that the pre-1.0 period existed to get these surfaces
+right before the cut.
+
+## Annotation key
+
+- **Stable** — the owner will fork the product rather than break this
+  promise after 1.0.
+- **Needs review** — may still be true after 1.0. A non-empty pile is
+  not a failed gate.
+- **Fluid** — may still be true after 1.0. A non-empty pile is not a
+  failed gate. Used here for a shape the catalogue already treats as
+  unsettled.
 
 ## Interaction surface catalogue
 
@@ -24,9 +37,8 @@ unchanged.
 
 **v0.84.0 / v0.85.0 note — MCP tool surface reduced from 70 tools to 18
 (🎯T143, 🎯T144).** This is the largest breaking change to the tool
-surface before 1.0, and it is deliberately made now: this document's own
-commitment is that backwards compatibility binds at 1.0 and "the pre-1.0
-period exists to get these surfaces right". An audit on 2026-08-07 found
+surface recorded here. v0.85.0 is the last breaking release this file
+names. An audit on 2026-08-07 found
 that of 70 registered tools, only 40 had ever been called by an agent and
 15 in the previous 30 days, with `mnemo_search` alone accounting for 55%
 of all calls.
@@ -77,8 +89,8 @@ a tool agents already find, a name beats an op.
 
 An unknown `op` returns an error naming the valid ops, and a parameter
 belonging to a different op is rejected rather than ignored.
-**Stability**: the consolidated tools are Needs review; the `op`
-vocabulary may still change before 1.0.
+**Stability**: the consolidated tools are Needs review. The `op`
+vocabulary may still change. The level may remain after 1.0.
 
 **v0.33.0 note**: Cost-tracking trio (🎯T43 🎯T44 🎯T45) plus
 Homebrew formula runtime deps (🎯T47). `mnemo_usage` gains
@@ -145,7 +157,7 @@ one of `current` / `stale` / `rewritten`, recorded in the new
 auto-applies; `mnemo_repos` annotates summaries with `[stale,
 reviewed <ts>]` or `[needs rewrite, reviewed <ts>]` markers.
 **Stability**: Fluid — trigger thresholds, verdict vocabulary, and
-the marker rendering may evolve before 1.0.
+the marker rendering may still change. The level may remain after 1.0.
 
 **v0.30.0 note**: Eight targets shipped in parallel. Four new MCP
 tools — `mnemo_session_structure(session_id)` (🎯T28, structural
@@ -383,7 +395,7 @@ median, reads as a safe default and is not one: it loses deterministically
 to any corpus holding a full result window above its own median, which
 removes the corpus from the results entirely.
 Both parameters are **Needs review**: the corpus vocabulary and the
-ranking may still change before 1.0.
+ranking may still change. The level may remain after 1.0.
 
 #### mnemo_sessions
 
@@ -518,7 +530,7 @@ inside `tool_use` blocks. Output is a single compact JSON object;
 shape designed to be diffable across sessions. Replaces the
 inline-Python `Counter()` JSONL introspection pattern observed in 16
 post-mnemo sessions. **Stability**: Needs review — shape may add
-fields (e.g. byte counts per kind) before 1.0.
+fields (e.g. byte counts per kind). The level may remain after 1.0.
 
 #### mnemo_locate_uuid
 
@@ -538,7 +550,7 @@ surrounding context window. Returns "not found" cleanly when no arm
 hits. Replaces Python-loop-over-JSONL workarounds for
 debugging session chaining and tracing tool_use_id retries.
 **Stability**: Needs review — output is structured JSON; shape may
-add e.g. confidence ranking before 1.0.
+add e.g. confidence ranking. The level may remain after 1.0.
 
 #### `mnemo_rework_history`
 
@@ -555,7 +567,7 @@ parameter so the rework agent sees what was tried before. Parameters:
 `targets_progressed` keys, e.g. "T1.5"), `repo` (optional path
 fragment filter), `limit` (default 20). **Stability**: Needs review —
 the per-span fields are likely stable, but the ordering / dedup story
-across overlapping spans may evolve before 1.0.
+across overlapping spans may still change. The level may remain after 1.0.
 
 ### Store / Backend interface methods
 
@@ -703,7 +715,7 @@ Content types (messages): `text`, `tool_use`, `tool_result`, `thinking`.
 
 Tool outputs are plain text, not structured JSON. This is intentional
 for readability in agent contexts but **Fluid** — structured output may
-be added or replace text output before 1.0.
+be added or replace text output. The level may remain after 1.0.
 
 ### Configuration
 
@@ -744,7 +756,7 @@ Optional config file at `~/.mnemo/config.json` (since v0.15.0):
   on duplicate names, non-https URLs, or unresolvable certs.
 
 All other configuration is via CLI flags. **Stability**: Fluid — the
-config file is new and its schema may grow before 1.0.
+config schema may still grow. The level may remain after 1.0.
 
 ### Data storage
 
@@ -761,9 +773,8 @@ config file is new and its schema may grow before 1.0.
   skipped with a warning at startup; the daemon continues.
 
 Database and transcript paths are hardcoded. **Stability**: Needs
-review — may become configurable before 1.0. Federation paths
-(endpoint, peers) are also hardcoded under `~/.mnemo/`; **Stability**:
-Needs review.
+review. Federation paths (endpoint, peers) are also hardcoded under
+`~/.mnemo/`; **Stability**: Needs review. Neither level is a gate.
 
 ### Federation response shape (FanoutEnvelope)
 
@@ -801,21 +812,25 @@ remaining twelve bypass federation — `mnemo_compacted_session`,
 write-shaped, local-state-shaped, or return a bespoke format that does
 not merge across peers. **Stability**: Fluid — envelope shape may evolve
 (per-record attribution vs envelope wrapping; rank normalisation
-across instances) before 1.0.
+across instances). The level may remain after 1.0.
 
-## Gaps and prerequisites
+## Gaps
 
-- **Structured output**: Most MCP tools return plain text. `mnemo_recent_activity`
+These are inputs to the owner's `## 1.0 judgment`, and they do not authorize the cut.
+
+- **Structured output** (**Additive**). Most MCP tools return plain text. `mnemo_recent_activity`
   and `mnemo_status` return structured JSON; `mnemo_query` with sqldeep
-  syntax returns hierarchical JSON. Remaining text-output tools may
-  migrate to structured output before 1.0.
-- **Configurable paths**: Database and transcript paths are hardcoded.
-  Should be configurable via flags or env vars.
-- **Session metadata completeness**: repo, work_type, and topic are
+  syntax returns hierarchical JSON. Remaining text-output tools can
+  migrate to structured output later without revising a Stable promise.
+- **Configurable paths** (**Additive**). Database and transcript paths are hardcoded.
+  They can become configurable via flags or env vars later without revising a Stable promise.
+- **Session metadata completeness** (**Additive**). repo, work_type, and topic are
   extracted heuristically and may be missing or inaccurate. Extraction
-  quality should be audited before locking the schema.
+  quality can be audited and improved later without revising a Stable promise.
 
 ## Out of scope for 1.0
+
+Scope notes, not a gate. They do not authorize or block the cut.
 
 - Multi-user / remote database support
 - Authentication / access control on the HTTP endpoint
