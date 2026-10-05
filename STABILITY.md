@@ -5,8 +5,8 @@
 Once mnemo reaches 1.0, backwards compatibility becomes a binding
 contract. Breaking changes to the CLI interface, MCP tool signatures,
 configuration, or database schema will not be made without forking to a
-new product. The cut is the owner's `## 1.0 judgment`, under `/release`
-B.3a, and the last breaking release recorded here is v0.85.0. The
+new product. The cut requires the agent's `## 1.0 judgment`, under
+`/release` B.3a, and the last breaking release is v0.85.0. The
 retired rule was that the pre-1.0 period existed to get these surfaces
 right before the cut.
 
@@ -816,7 +816,7 @@ across instances). The level may remain after 1.0.
 
 ## Gaps
 
-These are inputs to the owner's `## 1.0 judgment`, and they do not authorize the cut.
+These are inputs to the agent's `## 1.0 judgment`, and they do not authorize the cut.
 
 - **Structured output** (**Additive**). Most MCP tools return plain text. `mnemo_recent_activity`
   and `mnemo_status` return structured JSON; `mnemo_query` with sqldeep
@@ -862,3 +862,21 @@ Scope notes, not a gate. They do not authorize or block the cut.
   out-of-scope for 1.0.
 - Agent-defined query templates (🎯T7) — mnemo_define / mnemo_evaluate
   / mnemo_list_templates.
+
+## 1.0 judgment
+
+Last breaking release recorded here: v0.85.0.
+
+**Expandability.** A requirement not yet seen can be met by addition. The permanent limits are the ones named here.
+
+`schema.sql` is the schema. It grows by new tables and nullable columns. Existing columns are not dropped, retyped, or newly constrained. The hand-written database-schema table in this file is not that definition and is not a promise. The `Backend` method list is internal since v0.20.0 and is not part of the public contract.
+
+Stable filters that name a set can gain a value, and a named value keeps its meaning: `mnemo_search` `session_type` (`interactive`, `subagent`, `worktree`, `ephemeral`, `all`) and `mnemo_read_session` `role` (`user`, `assistant`). `session_id` stays an id or a prefix. Accepting a repo name or `latest` only after that resolution fails is addition. An exact id and a unique prefix keep resolving as they do now. `mnemo_query` `query` stays SQL SELECT/WITH or sqldeep. A truncation marker on a capped result is addition. A result under the cap stays as it is, and a capped call still returns its rows.
+
+These can each gain a value, and a value named in the catalogue keeps its name: `kinds`, `expand`, ranking (`calibrated`, `rank_fusion`), `group_by`, `context_filter`, `mnemo_usage` `source`, the `mnemo_repos` verdicts (`current`, `stale`, `rewritten`), `error_kind`, entry types, and message content types. `error_kind` already includes `unknown`. A new `op` on `mnemo_vault`, `mnemo_thread`, or `mnemo_ops` is addition, because an unknown `op` returns the valid list. An `op` named today keeps its name. These rows are Needs review or Fluid, so they are not fork promises.
+
+Config keys can be added. `workspace_roots`, `extra_project_dirs`, `synthesis_roots`, and a `linked_instances` entry's `name`, `url`, and `peer_cert` keep their meaning. Tool output can gain a structured form beside plain text. `mnemo_recent_activity`, `mnemo_status`, and sqldeep `mnemo_query` keep a structured result. Replacing today's plain text would revise a Fluid row. The federation envelope can gain a field. When `linked_instances` is empty, the local response is unchanged, and the four tools that fan out today still fan out. Replacing the envelope with per-record attribution would revise a Fluid row. Database and transcript paths can become configurable. The defaults stay `~/.mnemo/mnemo.db` and the transcript roots listed under data storage.
+
+One database file, and no authentication on the local HTTP endpoint, are permanent. Codex, Grok, and Cursor are already recorded under data storage, so the out-of-scope bullet that declines non-Claude transcript formats does not describe the catalogue. A further source is that same shape: a source tag and an ingest path. The bullet is a stale scope note, not a seam.
+
+**Closure.** The catalogue names no kind of situation the locked contract could not absorb. The hand-written schema table omits tables the rest of this file already describes, including `session_meta.source` and `claude_md_reviews`. That is a stale write-up of `schema.sql`, and the database already holds those tables. Heuristic `repo`, `work_type`, and `topic` can be improved without giving an existing column a new meaning. Text-corpus semantic search, a multi-user remote database, HTTP authentication, and transcript modification are declined scope, not unmapped situations.
