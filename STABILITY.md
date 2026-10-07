@@ -353,7 +353,7 @@ helpful error pointing at brew services / systemd instead.
 
 | Parameter | Type | Required | Description | Stability |
 |---|---|---|---|---|
-| `query` | string | yes | Search query — plain words use OR (fuzzy), explicit AND/NOT/NEAR/quotes for precise control | Stable |
+| `query` | string | yes | Search query — plain words are ORed over exact tokens (no stemming); explicit AND/NOT/NEAR/quotes for precise control; a quoted phrase matches inflections of its last word | Stable |
 | `limit` | number | no | Max results (default 20) | Stable |
 | `session_type` | string | no | Filter: interactive, subagent, worktree, ephemeral, all (default interactive) | Stable |
 | `repo` | string | no | Repo filter (bare name, org/repo, or path fragment) | Stable |
