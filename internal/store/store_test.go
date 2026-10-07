@@ -1449,8 +1449,30 @@ func TestRelaxQuery(t *testing.T) {
 		{"QR AND pairing", "QR AND pairing"},
 		// Explicit NOT — unchanged.
 		{"QR NOT test", "QR NOT test"},
-		// Quoted phrase — unchanged.
-		{`"QR transfer"`, `"QR transfer"`},
+		// Quoted phrase — becomes a prefix phrase so the last word also
+		// matches its plural (🎯T191).
+		{`"QR transfer"`, `"QR transfer"*`},
+		// Already starred — unchanged.
+		{`"QR transfer"*`, `"QR transfer"*`},
+		// Last word too short to prefix — unchanged.
+		{`"QR db"`, `"QR db"`},
+		// Phrase alongside an operator — only the phrase changes.
+		{`"QR transfer" AND test`, `"QR transfer"* AND test`},
+		{`NOT "QR transfer"`, `NOT "QR transfer"*`},
+		// Two phrases — both.
+		{`"QR transfer" OR "pairing code"`, `"QR transfer"* OR "pairing code"*`},
+		// Column filter — exact value, unchanged.
+		{`role:"user"`, `role:"user"`},
+		{`{role project}: "user"`, `{role project}: "user"`},
+		// Phrase inside NEAR — unchanged.
+		{`NEAR("QR transfer" code, 5)`, `NEAR("QR transfer" code, 5)`},
+		// Escaped quote inside the phrase — still one phrase.
+		{`"say ""hello"" there"`, `"say ""hello"" there"*`},
+		// Unbalanced quote — passed through for FTS5 to reject.
+		{`"QR transfer`, `"QR transfer`},
+		// Trailing punctuation inside the phrase does not count as a word.
+		{`"QR transfer."`, `"QR transfer."*`},
+		{`"QR ..."`, `"QR ..."`},
 		// NEAR — unchanged.
 		{"NEAR(QR transfer)", "NEAR(QR transfer)"},
 		// Case-insensitive operator detection.
