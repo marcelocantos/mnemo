@@ -26,6 +26,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/marcelocantos/mnemo/internal/backup"
 	"github.com/marcelocantos/mnemo/internal/boot"
@@ -831,8 +833,9 @@ var fts5Operators = regexp.MustCompile(`(?i)\b(OR|NOT|AND|NEAR)\b|"`)
 
 // relaxQuery rewrites a plain word list into an OR query so that partial
 // matches surface instead of requiring every term. Queries that already
-// contain explicit FTS5 operators (OR, NOT, AND, NEAR, quoted phrases)
-// are returned unchanged.
+// contain explicit FTS5 operators (OR, NOT, AND, NEAR) are returned
+// unchanged, except that a top-level quoted phrase becomes a prefix
+// phrase (see prefixPhrases).
 func relaxQuery(q string) string {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -840,13 +843,86 @@ func relaxQuery(q string) string {
 	}
 	// If the query uses any explicit FTS5 operators, leave it alone.
 	if fts5Operators.MatchString(q) {
-		return q
+		return prefixPhrases(q)
 	}
 	words := strings.Fields(q)
 	if len(words) <= 1 {
 		return q
 	}
 	return strings.Join(words, " OR ")
+}
+
+// phrasePrefixMinLen is the shortest last word a quoted phrase may end
+// in and still be made a prefix. Below it a prefix matches far too much
+// ("db"* is every word starting with db) for the plural it was after.
+const phrasePrefixMinLen = 3
+
+// prefixPhrases rewrites each top-level quoted phrase `"a b"` to the
+// FTS5 prefix phrase `"a b"*`, so the last word also matches its plural
+// and other inflections (🎯T191). messages_fts has no stemming
+// tokenizer: a reindex of the whole store is what adding one would
+// cost, whereas this is a query-side change with the same effect on the
+// case that was reported — a phrase missing every row where its last
+// word is pluralised.
+//
+// Left alone: a phrase already starred, a phrase inside NEAR(...) or any
+// other parenthesised group, a phrase qualified by a column filter
+// (`role:"user"` is an exact value, not a word to inflect), and a
+// phrase whose last word is shorter than phrasePrefixMinLen.
+func prefixPhrases(q string) string {
+	var out strings.Builder
+	depth := 0
+	for i := 0; i < len(q); i++ {
+		c := q[i]
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case '"':
+			// Find the closing quote; FTS5 escapes a quote inside a
+			// phrase by doubling it.
+			end := -1
+			for j := i + 1; j < len(q); j++ {
+				if q[j] != '"' {
+					continue
+				}
+				if j+1 < len(q) && q[j+1] == '"' {
+					j++
+					continue
+				}
+				end = j
+				break
+			}
+			if end < 0 {
+				// Unbalanced: pass the rest through untouched.
+				out.WriteString(q[i:])
+				return out.String()
+			}
+			start := i
+			phrase := q[start : end+1]
+			out.WriteString(phrase)
+			i = end
+			if depth > 0 || (end+1 < len(q) && q[end+1] == '*') {
+				continue
+			}
+			if before := strings.TrimRight(q[:start], " \t"); strings.HasSuffix(before, ":") {
+				continue
+			}
+			words := strings.FieldsFunc(strings.ReplaceAll(phrase[1:len(phrase)-1], `""`, `"`), func(r rune) bool {
+				return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+			})
+			if len(words) == 0 || utf8.RuneCountInString(words[len(words)-1]) < phrasePrefixMinLen {
+				continue
+			}
+			out.WriteByte('*')
+			continue
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }
 
 // backgroundDrainGrace bounds how long Close waits for supervised
@@ -1420,6 +1496,19 @@ func New(dbPath, projectDir string) (*Store, error) {
 		requires: []Capability{CapCodecReady},
 		provides: []Capability{CapEntriesMaterialised},
 		run:      s.runEntriesMaterialisePhase,
+	})
+
+	// Rows of mnemo's own tool traffic written before 🎯T190 are still
+	// in the index; flip them. Behind the schema only because it reads
+	// messages_v, which an old store gains in the upgrade. Idempotent
+	// and index-driven, so a converged store pays two indexed probes.
+	s.startPhase(bgCtx, phase{
+		name:     "self-noise-backfill",
+		requires: []Capability{CapSchemaCurrent},
+		run: func(ctx context.Context) error {
+			_, err := s.SelfNoiseBackfill(ctx)
+			return err
+		},
 	})
 
 	return s, nil
@@ -3814,6 +3903,10 @@ type writerState struct {
 	codec     *textCodec
 	packed    bool // msgStmt / entryStmt carry the *_z parameters
 	packRaw   bool // entries.raw may be written compressed (fields materialised)
+	// selfToolUses holds the tool_use ids of mnemo's own tool calls
+	// written in this transaction, so their tool_results can be flagged
+	// without a lookup (🎯T190; see selfnoise.go).
+	selfToolUses map[string]struct{}
 }
 
 func (s *Store) newWriterState() (*writerState, error) {
@@ -3870,7 +3963,8 @@ func (s *Store) newWriterState() (*writerState, error) {
 		return nil, err
 	}
 	return &writerState{tx: tx, entryStmt: entryStmt, msgStmt: msgStmt, codec: s.codec, packed: packed,
-		packRaw: packed && s.entriesRawPackable()}, nil
+		packRaw:      packed && s.entriesRawPackable(),
+		selfToolUses: map[string]struct{}{}}, nil
 }
 
 // insertEntry runs entryStmt with the JSON line packed for storage
@@ -3889,8 +3983,26 @@ func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any
 }
 
 // insertMessage runs msgStmt with text packed for storage (🎯T151).
+//
+// Every parser's rows pass through here, so this is also where mnemo's
+// own tool traffic is kept out of the index (🎯T190): a tool_use naming
+// one of mnemo's tools, and the tool_result paired with it, are written
+// with is_noise=1 whatever the caller decided.
 func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text string, timestamp, typ any,
-	isNoise any, contentType, toolName, toolUseID any, toolInput any, isError any) {
+	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) {
+	switch contentType {
+	case "tool_use":
+		if isSelfTool(toolName) {
+			isNoise = 1
+			if toolUseID != "" {
+				ws.selfToolUses[toolUseID] = struct{}{}
+			}
+		}
+	case "tool_result":
+		if isSelfTool(toolName) || ws.pairedSelfToolResult(toolUseID) {
+			isNoise = 1
+		}
+	}
 	if !ws.packed {
 		ws.msgStmt.Exec(entryID, sessionID, project, role, text, timestamp, typ, isNoise,
 			contentType, toolName, toolUseID, toolInput, isError)

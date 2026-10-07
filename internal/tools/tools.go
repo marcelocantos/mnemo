@@ -193,15 +193,17 @@ type callHandler struct {
 func Definitions() []mcp.Tool {
 	return []mcp.Tool{
 		mcp.NewTool("mnemo_search",
-			mcp.WithDescription(`Search across Claude Code session transcripts. Uses FTS5 full-text search with fuzzy matching.
+			mcp.WithDescription(`Search across Claude Code session transcripts. FTS5 full-text search over exact tokens: there is no stemming and no fuzzy matching, so "deploy" does not match "deployment" and a misspelling matches nothing.
 
 Plain word queries use OR matching — "QR code pairing protocol" finds messages containing ANY of those words, ranked by how many match (BM25). This means partial matches surface instead of returning nothing. Messages matching more/rarer terms rank higher.
 
-For exact matching, use explicit FTS5 operators:
+For precise control, use explicit FTS5 operators:
 - Require all terms: "QR AND transfer"
-- Exact phrase: "\"QR transfer\""
+- Phrase: "\"QR transfer\"" — words adjacent, in order. A quoted phrase is run as the prefix phrase "\"QR transfer\"*" automatically (when its last word has 3+ characters), so the last word also matches its plural and other inflections: "\"QR transfer\"" finds "QR transfers". Write the trailing * yourself to make any word a prefix: "deploy*".
 - Exclude terms: "QR NOT test"
 - Proximity: NEAR(QR transfer, 5)
+
+mnemo's own tool calls and their results are not indexed, so a search never returns mnemo's echo of an earlier search.
 
 By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.
 
@@ -210,7 +212,7 @@ SPANS THE INDEX (🎯T144). One search covers messages AND the other indexed cor
 RANKING ACROSS CORPORA. BM25 scores are not comparable between indexes (the length-normalisation baseline is per-index), so hits are ranked by CALIBRATED QUANTILE: a score maps to its position within its own corpus's distribution, and quantiles compete. Each hit reports a "ranking" field — "calibrated", or "fusion" when that corpus has no fresh distribution yet, in which case "degraded" names the corpus and why. Never raw score comparison.
 
 COST. One FTS query per corpus in scope: 8 by default. Narrow kinds when you know where to look.`),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words use OR (fuzzy). Use AND/NOT/NEAR/quotes for precise control.")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words are ORed; exact tokens, no stemming. Use AND/NOT/NEAR/quotes for precise control; a quoted phrase matches inflections of its last word.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
