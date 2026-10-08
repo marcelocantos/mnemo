@@ -205,13 +205,15 @@ For precise control, use explicit FTS5 operators:
 
 mnemo's own tool calls and their results are not indexed, so a search never returns mnemo's echo of an earlier search.
 
+TOOL OUTPUT. A tool result Claude Code persisted to disk (the <persisted-output> preview in the transcript) is indexed in full as a tool_output hit; the hit names the preview message (msg:<id>) and its session, so mnemo_read_session gives the surrounding context.
+
 By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.
 
-SPANS THE INDEX (🎯T144). One search covers messages AND the other indexed corpora, returning typed hits each labelled with the corpus they came from. Default kinds: message, segment, decision, doc, target, commit, pr, memory. On request: plan, config, skill, audit. (These are the exact values the kinds parameter accepts.) Use the kinds parameter to scope. This replaces the per-corpus search tools that were removed: their content is reachable here rather than only through raw SQL.
+SPANS THE INDEX (🎯T144). One search covers messages AND the other indexed corpora, returning typed hits each labelled with the corpus they came from. Default kinds: message, tool_output, segment, decision, doc, target, commit, pr, memory. On request: plan, config, skill, audit. (These are the exact values the kinds parameter accepts.) Use the kinds parameter to scope. This replaces the per-corpus search tools that were removed: their content is reachable here rather than only through raw SQL.
 
 RANKING ACROSS CORPORA. BM25 scores are not comparable between indexes (the length-normalisation baseline is per-index), so hits are ranked by CALIBRATED QUANTILE: a score maps to its position within its own corpus's distribution, and quantiles compete. Each hit reports a "ranking" field — "calibrated", or "fusion" when that corpus has no fresh distribution yet, in which case "degraded" names the corpus and why. Never raw score comparison.
 
-COST. One FTS query per corpus in scope: 8 by default. Narrow kinds when you know where to look.`),
+COST. One FTS query per corpus in scope: 9 by default. Narrow kinds when you know where to look.`),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words are ORed; exact tokens, no stemming. Use AND/NOT/NEAR/quotes for precise control; a quoted phrase matches inflections of its last word.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
@@ -220,7 +222,7 @@ COST. One FTS query per corpus in scope: 8 by default. Narrow kinds when you kno
 			mcp.WithNumber("context_after", mcp.Description("Number of messages after each hit to include (default 3)")),
 			mcp.WithString("context_filter", mcp.Description(`Filter for context messages. "substantive" (default): only non-noise user/assistant messages. "all": include everything (tool calls, system messages, noise).`)),
 			mcp.WithString("expand", mcp.Description(`Expand each hit to a topic segment (🎯T64.10). "none" (default): ±N context only. "segment": smallest enclosing sealed segment. "segment:coarse": top-level span. Default remains "none" until boundary-quality gates clear.`)),
-			mcp.WithString("kinds", mcp.Description("Comma-separated corpora to search (\U0001F3AFT144). Omit for the default set: message, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit \u2014 outside the default because each corpus is another FTS query on the most-called tool in the product. Message hits keep their full shape (context, session, repo filters) and carry the enclosing topic span when one exists.")),
+			mcp.WithString("kinds", mcp.Description("Comma-separated corpora to search (\U0001F3AFT144). Omit for the default set: message, tool_output, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit \u2014 outside the default because each corpus is another FTS query on the most-called tool in the product. Message hits keep their full shape (context, session, repo filters) and carry the enclosing topic span when one exists.")),
 		),
 		mcp.NewTool("mnemo_sessions",
 			mcp.WithDescription("List transcript sessions, sorted by most recent activity. By default shows only interactive sessions with at least 6 substantive messages."),

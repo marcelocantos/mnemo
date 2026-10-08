@@ -533,6 +533,33 @@ CREATE TABLE messages (
 			z_len INTEGER
 		);
 
+-- 🎯T192: the full text of a persisted tool output. Claude Code keeps a
+-- tool result over ~2 KB on disk (a sidecar under the session's
+-- tool-results/ directory) and puts a <persisted-output> preview in the
+-- transcript; only that preview reached messages, so a search could not
+-- see the output's body. The body lives here, one row per preview
+-- message, and never in messages.text — mnemo_read_session and the
+-- compactor read that column and must not grow by megabytes per tool
+-- call. source records where the body came from: 'sidecar' (the file on
+-- disk), 'tool_use_result' (the string leaves of the entry's
+-- toolUseResult object), or 'none' (neither was available; the row
+-- exists so the backfill does not re-examine the preview forever).
+-- text/text_z follow the messages.text convention (🎯T151): read through
+-- mnemo_text(text, text_z).
+CREATE TABLE tool_outputs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+			session_id TEXT NOT NULL,
+			project TEXT NOT NULL DEFAULT '',
+			tool_use_id TEXT,
+			source TEXT NOT NULL,
+			text TEXT NOT NULL DEFAULT '',
+			text_z BLOB,
+			plain_len INTEGER,
+			z_len INTEGER,
+			indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
 -- 🎯T64.7: workaround patterns, promoted from a live query to a
 -- persisted table so they survive across sessions, accumulate a real
 -- first_seen, and give the clustering engine (🎯T64.8) a deterministic
@@ -1099,6 +1126,8 @@ CREATE INDEX idx_messages_tool_url ON messages(tool_url) WHERE tool_url IS NOT N
 
 CREATE INDEX idx_messages_tool_use_id ON messages(tool_use_id);
 
+CREATE INDEX idx_tool_outputs_session_id ON tool_outputs(session_id);
+
 CREATE INDEX idx_patterns_type ON patterns(pattern_type);
 
 CREATE INDEX idx_plans_phase ON plans(phase);
@@ -1215,6 +1244,12 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 CREATE VIRTUAL TABLE messages_fts USING fts5(
 			text, role, project, session_id,
 			content=messages,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE tool_outputs_fts USING fts5(
+			text, session_id,
+			content=tool_outputs,
 			content_rowid=id
 		);
 
@@ -1584,6 +1619,20 @@ END,
 				substantive_msgs = substantive_msgs + CASE WHEN new.is_noise = 0 THEN 1 ELSE 0 END,
 				first_msg = MIN(first_msg, new.timestamp),
 				last_msg = MAX(last_msg, new.timestamp);
+		END;
+
+CREATE TRIGGER tool_outputs_ai AFTER INSERT ON tool_outputs
+		BEGIN
+			INSERT INTO tool_outputs_fts(rowid, text, session_id)
+			SELECT new.id, mnemo_text(new.text, new.text_z), new.session_id
+			WHERE new.source != 'none';
+		END;
+
+CREATE TRIGGER tool_outputs_ad AFTER DELETE ON tool_outputs
+		BEGIN
+			INSERT INTO tool_outputs_fts(tool_outputs_fts, rowid, text, session_id)
+			SELECT 'delete', old.id, mnemo_text(old.text, old.text_z), old.session_id
+			WHERE old.source != 'none';
 		END;
 
 CREATE TRIGGER plans_ad AFTER DELETE ON plans

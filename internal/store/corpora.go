@@ -5,7 +5,7 @@ package store
 
 // Corpus registry for unified search (🎯T144).
 //
-// mnemo indexes 22 FTS corpora and, before this, mnemo_search queried
+// mnemo indexes 23 FTS corpora and, before this, mnemo_search queried
 // exactly one of them (messages_fts). Every other corpus was reachable
 // only through a tool of its own — which is why the tool surface reached
 // 70 entries: "search X" meant "a tool for X". This registry is the
@@ -65,6 +65,22 @@ func searchCorpora() []corpusSpec {
 			source: "messages",
 			selectSQL: `SELECT rowid, COALESCE(role,''), COALESCE(mnemo_text(text, text_z),''),
 				COALESCE(session_id,''), COALESCE(timestamp,'') FROM messages`,
+			sampleExpr: "mnemo_text(text, text_z)",
+			inDefault:  true,
+		},
+		{
+			// The body of a tool result Claude Code persisted to disk
+			// (🎯T192). Title and meta carry the preview message's id and
+			// session so a reader can pull context with mnemo_read_session;
+			// the timestamp is the preview's.
+			kind:   "tool_output",
+			fts:    "tool_outputs_fts",
+			source: "tool_outputs",
+			selectSQL: `SELECT rowid, 'tool result ' || COALESCE(source,'') || ' · msg:' || message_id,
+				COALESCE(mnemo_text(text, text_z),''),
+				COALESCE(session_id,''),
+				COALESCE((SELECT timestamp FROM messages WHERE messages.id = tool_outputs.message_id),'')
+				FROM tool_outputs`,
 			sampleExpr: "mnemo_text(text, text_z)",
 			inDefault:  true,
 		},

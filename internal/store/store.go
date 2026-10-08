@@ -1511,6 +1511,19 @@ func New(dbPath, projectDir string) (*Store, error) {
 		},
 	})
 
+	// Persisted tool outputs for previews written before tool_outputs
+	// existed (🎯T192). Behind the schema because the table arrives with
+	// it; the writer skips the insert until then and this catches up.
+	// Also behind the codec so the bodies are stored packed.
+	s.startPhase(bgCtx, phase{
+		name:     "tool-output-backfill",
+		requires: []Capability{CapSchemaCurrent, CapCodecReady},
+		run: func(ctx context.Context) error {
+			_, err := s.ToolOutputBackfill(ctx)
+			return err
+		},
+	})
+
 	return s, nil
 }
 
@@ -3548,6 +3561,9 @@ type parsedMessage struct {
 	toolUseID   string
 	toolInput   []byte // raw JSON, nil if not tool_use
 	isError     int
+	// output is the resolved body of a persisted-output preview, or nil
+	// for every other block (🎯T192).
+	output *toolOutputText
 }
 
 // parsedRawEntry is a raw JSONL line ready for insertion into the entries table.
@@ -3988,8 +4004,12 @@ func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any
 // own tool traffic is kept out of the index (🎯T190): a tool_use naming
 // one of mnemo's tools, and the tool_result paired with it, are written
 // with is_noise=1 whatever the caller decided.
+//
+// It returns the new row's id (0 when the insert failed) and the noise
+// flag actually written, so a caller can hang dependent rows off the
+// message without a second lookup (🎯T192).
 func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text string, timestamp, typ any,
-	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) {
+	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) (int64, int) {
 	switch contentType {
 	case "tool_use":
 		if isSelfTool(toolName) {
@@ -4003,18 +4023,25 @@ func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text
 			isNoise = 1
 		}
 	}
+	var res sql.Result
+	var err error
 	if !ws.packed {
-		ws.msgStmt.Exec(entryID, sessionID, project, role, text, timestamp, typ, isNoise,
+		res, err = ws.msgStmt.Exec(entryID, sessionID, project, role, text, timestamp, typ, isNoise,
 			contentType, toolName, toolUseID, toolInput, isError)
-		return
+	} else {
+		plain, z := ws.codec.pack(FamilyMessagesText, text)
+		var zLen any
+		if z != nil {
+			zLen = len(z)
+		}
+		res, err = ws.msgStmt.Exec(entryID, sessionID, project, role, plain, timestamp, typ, isNoise,
+			contentType, toolName, toolUseID, toolInput, isError, z, len(text), zLen)
 	}
-	plain, z := ws.codec.pack(FamilyMessagesText, text)
-	var zLen any
-	if z != nil {
-		zLen = len(z)
+	if err != nil || res == nil {
+		return 0, isNoise
 	}
-	ws.msgStmt.Exec(entryID, sessionID, project, role, plain, timestamp, typ, isNoise,
-		contentType, toolName, toolUseID, toolInput, isError, z, len(text), zLen)
+	id, _ := res.LastInsertId()
+	return id, isNoise
 }
 
 func (ws *writerState) Close() {
@@ -4135,8 +4162,13 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 		if m.toolInput != nil {
 			toolInput = string(m.toolInput)
 		}
-		ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+		msgID, noise := ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 			m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
+		if m.output != nil && noise == 0 && msgID != 0 && s.toolOutputsWritable() {
+			if err := ws.insertToolOutput(msgID, pf.sessionID, pf.project, m.toolUseID, m.output); err != nil {
+				slog.Warn("tool output insert failed", "session", pf.sessionID, "err", err)
+			}
+		}
 
 		// 🎯T72 recursion guard: flag claudia-spawned compaction runs
 		// by the marker on their opening prompt.
@@ -4318,6 +4350,11 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 				isErr = 1
 			}
 
+			var output *toolOutputText
+			if b.ContentType == "tool_result" || (b.ContentType == "text" && entry.Type == "user") {
+				output = resolveToolOutput(b.Text, entry.ToolUseResult)
+			}
+
 			pf.messages = append(pf.messages, parsedMessage{
 				entryIdx:    entryIdx,
 				role:        entry.Type,
@@ -4330,6 +4367,7 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 				toolUseID:   b.ToolUseID,
 				toolInput:   b.ToolInput,
 				isError:     isErr,
+				output:      output,
 			})
 		}
 	}
@@ -6904,6 +6942,10 @@ type jsonlEntry struct {
 	Cwd       string          `json:"cwd"`
 	GitBranch string          `json:"gitBranch"`
 	Message   json.RawMessage `json:"message"`
+	// ToolUseResult is Claude Code's own record of a tool result, kept
+	// beside the message. For a persisted-output preview it carries the
+	// sidecar path and, for most tools, the result body (🎯T192).
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
 }
 
 // jsonlMessage is the message field within a JSONL entry.
@@ -7150,9 +7192,17 @@ func (s *Store) ingestFile(path string) error {
 				isErr = 1
 			}
 
-			ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+			msgID, effectiveNoise := ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
 				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
 			count++
+			if (b.ContentType == "tool_result" || (b.ContentType == "text" && entry.Type == "user")) &&
+				effectiveNoise == 0 && msgID != 0 && s.toolOutputsWritable() {
+				if out := resolveToolOutput(b.Text, entry.ToolUseResult); out != nil {
+					if err := ws.insertToolOutput(msgID, sessionID, project, b.ToolUseID, out); err != nil {
+						slog.Warn("tool output insert failed", "session", sessionID, "err", err)
+					}
+				}
+			}
 
 			// 🎯T72 recursion guard: flag claudia-spawned compaction
 			// runs by the marker on their opening prompt.

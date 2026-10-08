@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Unified cross-corpus search (🎯T144).
@@ -222,6 +223,22 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 				}
 			}
 			rows.Close()
+			// A tool output belongs to a session, so it honours the
+			// session_type and repo filters the message corpus does
+			// (🎯T192). Other corpora are not session-shaped.
+			if spec.kind == "tool_output" && (opts.SessionType != "all" || opts.Repo != "") {
+				kept := raw[:0]
+				for _, r := range raw {
+					var sessionID string
+					if err := s.readDB.QueryRow(`SELECT session_id FROM tool_outputs WHERE id = ?`, r.id).Scan(&sessionID); err != nil {
+						continue
+					}
+					if s.sessionMatches(sessionID, opts.SessionType, opts.Repo) {
+						kept = append(kept, r)
+					}
+				}
+				raw = kept
+			}
 		}
 		if len(raw) == 0 {
 			continue
@@ -342,7 +359,7 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 	if len(all) > limit {
 		all = all[:limit]
 	}
-	if err := s.hydrateHits(all); err != nil {
+	if err := s.hydrateHits(all, query); err != nil {
 		return nil, err
 	}
 	s.enrichWithSegments(all)
@@ -382,8 +399,9 @@ func resolveCorpora(kinds []string) ([]corpusSpec, error) {
 }
 
 // hydrateHits fills in display fields, one query per corpus rather than
-// one per hit.
-func (s *Store) hydrateHits(hits []UnifiedHit) error {
+// one per hit. query is the search text, used to centre the excerpt of a
+// tool_output body on the term that matched.
+func (s *Store) hydrateHits(hits []UnifiedHit, query string) error {
 	byKind := map[string][]int64{}
 	for _, h := range hits {
 		byKind[h.Kind] = append(byKind[h.Kind], h.ID)
@@ -424,7 +442,15 @@ func (s *Store) hydrateHits(hits []UnifiedHit) error {
 			continue
 		}
 		hits[i].Title = truncateField(f.title, 200)
-		hits[i].Body = truncateField(f.body, 600)
+		body := f.body
+		// A tool output is the full body of a persisted result — up to
+		// 4 MiB — and the match is usually well past its head, so the
+		// display body is a window around the first query term rather
+		// than the head that truncateField would keep (🎯T192).
+		if hits[i].Kind == "tool_output" {
+			body = ExcerptAround(body, query, toolOutputExcerptRunes)
+		}
+		hits[i].Body = truncateField(body, 600)
 		hits[i].Meta = f.meta
 		hits[i].TS = f.ts
 	}
@@ -467,4 +493,76 @@ func truncateField(s string, max int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:max])) + "…"
+}
+
+// sessionMatches applies the session_type and repo filters Search uses
+// for messages to any session-shaped row. An empty sessionType, or
+// "all", passes every session; an empty repo passes every repo.
+func (s *Store) sessionMatches(sessionID, sessionType, repo string) bool {
+	if sessionType != "" && sessionType != "all" {
+		var st string
+		if err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", sessionID).Scan(&st); err != nil || st != sessionType {
+			return false
+		}
+	}
+	if repo != "" {
+		var count int
+		pattern := "%" + repo + "%"
+		if err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", sessionID, pattern, pattern).Scan(&count); err != nil || count == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// toolOutputExcerptRunes bounds the excerpt shown for a tool_output hit.
+const toolOutputExcerptRunes = 400
+
+// ExcerptAround returns a window of about max runes from body centred on
+// the first occurrence of any term in query, or the head of body when no
+// term occurs. FTS5 syntax (quotes, operators, column filters, *) is
+// stripped before matching, and whitespace is flattened so the excerpt
+// stays one block in a rendered result.
+func ExcerptAround(body, query string, max int) string {
+	flat := strings.Join(strings.Fields(body), " ")
+	runes := []rune(flat)
+	if len(runes) <= max {
+		return flat
+	}
+	lower := strings.ToLower(flat)
+	at := -1
+	for _, raw := range strings.Fields(query) {
+		term := strings.ToLower(strings.Trim(raw, `"'*():{}`))
+		switch term {
+		case "", "and", "or", "not", "near":
+			continue
+		}
+		if i := strings.Index(lower, term); i >= 0 && (at < 0 || i < at) {
+			at = i
+		}
+	}
+	start := 0
+	if at > 0 {
+		// Byte offset to rune offset, then centre the window.
+		start = utf8.RuneCountInString(flat[:at]) - max/2
+		if start < 0 {
+			start = 0
+		}
+	}
+	end := start + max
+	if end > len(runes) {
+		end = len(runes)
+		start = end - max
+		if start < 0 {
+			start = 0
+		}
+	}
+	out := string(runes[start:end])
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(runes) {
+		out += "…"
+	}
+	return out
 }

@@ -142,6 +142,13 @@ func (s *Store) ReconcileStaleMirrors(ctx context.Context, now time.Time) (int, 
 			if err := ctx.Err(); err != nil {
 				return reconciled, err
 			}
+			if passBudgetSpent(ctx) {
+				// Out of budget, not out of work: what was reconciled is
+				// recorded per (repo, stream), so the next tick resumes
+				// where this one stopped. Returning nil here is what keeps
+				// a long backlog from reading as a failing stream (🎯T193).
+				return reconciled, nil
+			}
 			if !s.mirrorDue(repo, mr.stream, mr.interval, now) {
 				continue
 			}
@@ -170,6 +177,29 @@ func (s *Store) ReconcileStaleMirrors(ctx context.Context, now time.Time) (int, 
 		}
 	}
 	return reconciled, nil
+}
+
+// mirrorPassReserve is how much of the pass budget a mirror pass keeps
+// in hand before it stops starting new repos (🎯T193). A pass that runs
+// into its deadline mid-repo is reported as a failure by the driver,
+// and five of those in a row trip the stream's circuit breaker for ten
+// minutes, during which streams.overdue warns. Measured on the owner's
+// store on 2026-10-07: 302 stale (repo, stream) pairs, one gh subprocess
+// each, against a 45-second budget — the pass timed out on nearly every
+// tick that attempted it and the stream completed a pass only once every
+// eleven minutes all day. Stopping early with the work so far recorded
+// turns the same backlog into a sequence of short successful passes.
+// The reserve is wide enough for one gh call to finish.
+const mirrorPassReserve = 10 * time.Second
+
+// passBudgetSpent reports whether ctx's deadline is closer than
+// mirrorPassReserve. A ctx without a deadline never spends its budget.
+func passBudgetSpent(ctx context.Context) bool {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	return time.Until(dl) < mirrorPassReserve
 }
 
 // subprocessWaitDelay bounds how long a cancelled mirror subprocess may
