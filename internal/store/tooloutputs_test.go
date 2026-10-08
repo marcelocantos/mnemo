@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Tests for 🎯T192: persisted tool output is searchable in full.
@@ -128,6 +129,11 @@ func TestPersistedOutputSearchableViaBulkIngest(t *testing.T) {
 	hits := toolOutputHits(t, s, "zqxbulkneedle", UnifiedOpts{})
 	if len(hits) != 1 || hits[0].Kind != "tool_output" {
 		t.Fatalf("got %d hits %+v, want one tool_output hit", len(hits), hits)
+	}
+	// The displayed body is the window around the match, past the 2 KB
+	// the preview carried, not the head truncateField would have kept.
+	if !strings.Contains(hits[0].Body, "zqxbulkneedle") {
+		t.Errorf("hit body does not show the matching passage: %q", hits[0].Body)
 	}
 	if !strings.Contains(hits[0].Title, "msg:") || hits[0].Meta != "sess-bulk" || hits[0].TS != "2026-04-01T10:00:02Z" {
 		t.Errorf("hit does not link back to the preview message: title=%q meta=%q ts=%q", hits[0].Title, hits[0].Meta, hits[0].TS)
@@ -441,6 +447,36 @@ func TestResolveToolOutputGuards(t *testing.T) {
 	out = resolveToolOutput(previewFor(hugeFile, "x"), nil)
 	if out == nil || out.source != ToolOutputSourceSidecar || len(out.text) != toolOutputMaxBytes {
 		t.Errorf("sidecar cap: source=%v len=%d", out.source, len(out.text))
+	}
+}
+
+// TestExcerptAroundCentresOnTheMatch: a tool_output body is shown as a
+// bounded window around the first query term, not as its head and not
+// whole.
+func TestExcerptAroundCentresOnTheMatch(t *testing.T) {
+	body := strings.Repeat("filler words here\n", 300) + "the needle zqxneedle appears late\n" + strings.Repeat("more filler\n", 300)
+	got := ExcerptAround(body, `"needle zqxneedle"`, 200)
+	if !strings.Contains(got, "zqxneedle") {
+		t.Fatalf("excerpt lost the match: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n > 200+2 {
+		t.Errorf("excerpt is %d runes, want at most 202", n)
+	}
+	if !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "…") {
+		t.Errorf("a window cut from the middle should be marked on both ends: %q", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("excerpt should be flattened to one line: %q", got)
+	}
+	head := ExcerptAround(body, "absent", 50)
+	if !strings.HasPrefix(head, "filler words") || !strings.HasSuffix(head, "…") || utf8.RuneCountInString(head) > 51 {
+		t.Errorf("fallback should be the bounded head: %q", head)
+	}
+	if got := ExcerptAround("short body", "body", 400); got != "short body" {
+		t.Errorf("short body changed: %q", got)
+	}
+	if got := ExcerptAround(body, "AND OR NOT", 50); !strings.HasPrefix(got, "filler") {
+		t.Errorf("operators were treated as terms: %q", got)
 	}
 }
 

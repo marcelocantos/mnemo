@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/marcelocantos/mnemo/internal/store"
 )
@@ -101,15 +100,7 @@ func (h *callHandler) unifiedSearch(query, kindsArg string, limit int,
 			b.WriteString("\n")
 		}
 		if hit.Body != "" {
-			body := hit.Body
-			// A tool output is the full body of a persisted result — up to
-			// 4 MiB — and the match is usually well past its head, so show
-			// a window around the first query term rather than the whole
-			// thing or its first lines (🎯T192).
-			if hit.Kind == "tool_output" {
-				body = excerpt(body, query, toolOutputExcerptRunes)
-			}
-			fmt.Fprintf(&b, "  %s\n", body)
+			fmt.Fprintf(&b, "  %s\n", hit.Body)
 		}
 		// Message hits keep their surrounding context, which is the
 		// affordance the pre-🎯T144 tool was most used for.
@@ -134,56 +125,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "…"
-}
-
-// toolOutputExcerptRunes bounds the excerpt shown for a tool_output hit.
-const toolOutputExcerptRunes = 400
-
-// excerpt returns a window of about max runes from body centred on the
-// first occurrence of any term in query, or the head of body when no
-// term occurs. FTS5 syntax (quotes, operators, column filters, *) is
-// stripped before matching, and newlines are flattened so the excerpt
-// stays one block in the rendered result.
-func excerpt(body, query string, max int) string {
-	flat := strings.Join(strings.Fields(body), " ")
-	runes := []rune(flat)
-	if len(runes) <= max {
-		return flat
-	}
-	lower := strings.ToLower(flat)
-	at := -1
-	for _, raw := range strings.Fields(query) {
-		term := strings.ToLower(strings.Trim(raw, `"'*():{}`))
-		switch term {
-		case "", "and", "or", "not", "near":
-			continue
-		}
-		if i := strings.Index(lower, term); i >= 0 && (at < 0 || i < at) {
-			at = i
-		}
-	}
-	start := 0
-	if at > 0 {
-		// Byte offset to rune offset, then centre the window.
-		start = utf8.RuneCountInString(flat[:at]) - max/2
-		if start < 0 {
-			start = 0
-		}
-	}
-	end := start + max
-	if end > len(runes) {
-		end = len(runes)
-		start = end - max
-		if start < 0 {
-			start = 0
-		}
-	}
-	out := string(runes[start:end])
-	if start > 0 {
-		out = "…" + out
-	}
-	if end < len(runes) {
-		out += "…"
-	}
-	return out
 }
