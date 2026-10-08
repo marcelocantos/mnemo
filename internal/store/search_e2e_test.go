@@ -92,6 +92,17 @@ func seedAllCorpora(t *testing.T, s *Store) {
 		mustExec(t, s, `INSERT INTO audit_entries (repo, file_path, date, skill, version, summary, raw_text)
 			VALUES ('o/r', ?, '2026-01-01', 'release', 'v1', ?, ?)`,
 			fmt.Sprintf("audit%d.md", i), p, q)
+		// tool_outputs hangs off the message seeded above (🎯T192). No
+		// extra messages rows: every corpus must hold exactly 60
+		// documents, or the evidence-weighted shrinkage favours the
+		// bigger one and the symmetry the ranking tests rely on is gone.
+		var lastMsg int64
+		if err := s.readDB.QueryRow(`SELECT MAX(id) FROM messages`).Scan(&lastMsg); err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, s, `INSERT INTO tool_outputs (message_id, session_id, project, tool_use_id, source, text, plain_len)
+			VALUES (?, ?, 'p', ?, 'sidecar', ?, ?)`,
+			lastMsg, fmt.Sprintf("s%d", i), fmt.Sprintf("tu%d", i), p+" "+q, len(p+" "+q))
 		// topic_segments carries a TEXT id — the corpus whose hydration
 		// bug only a cross-corpus test could find.
 		mustExec(t, s, `INSERT INTO topic_segments

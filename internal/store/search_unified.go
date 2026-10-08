@@ -222,6 +222,22 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 				}
 			}
 			rows.Close()
+			// A tool output belongs to a session, so it honours the
+			// session_type and repo filters the message corpus does
+			// (🎯T192). Other corpora are not session-shaped.
+			if spec.kind == "tool_output" && (opts.SessionType != "all" || opts.Repo != "") {
+				kept := raw[:0]
+				for _, r := range raw {
+					var sessionID string
+					if err := s.readDB.QueryRow(`SELECT session_id FROM tool_outputs WHERE id = ?`, r.id).Scan(&sessionID); err != nil {
+						continue
+					}
+					if s.sessionMatches(sessionID, opts.SessionType, opts.Repo) {
+						kept = append(kept, r)
+					}
+				}
+				raw = kept
+			}
 		}
 		if len(raw) == 0 {
 			continue
@@ -467,4 +483,24 @@ func truncateField(s string, max int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:max])) + "…"
+}
+
+// sessionMatches applies the session_type and repo filters Search uses
+// for messages to any session-shaped row. An empty sessionType, or
+// "all", passes every session; an empty repo passes every repo.
+func (s *Store) sessionMatches(sessionID, sessionType, repo string) bool {
+	if sessionType != "" && sessionType != "all" {
+		var st string
+		if err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", sessionID).Scan(&st); err != nil || st != sessionType {
+			return false
+		}
+	}
+	if repo != "" {
+		var count int
+		pattern := "%" + repo + "%"
+		if err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", sessionID, pattern, pattern).Scan(&count); err != nil || count == 0 {
+			return false
+		}
+	}
+	return true
 }

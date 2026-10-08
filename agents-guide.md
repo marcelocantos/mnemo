@@ -235,9 +235,12 @@ Key parameters:
   user/assistant messages as context. `"all"` includes tool calls,
   system messages, etc.
 - `limit` — max results (default 20)
-- `kinds` — corpora to search. Default covers messages plus segment,
-  decision, doc, target, commit, pr and memory. Pass
-  `plan` / `config` / `skill` / `audit` to include those too.
+- `kinds` — corpora to search. Default covers messages plus
+  tool_output, segment, decision, doc, target, commit, pr and memory.
+  Pass `plan` / `config` / `skill` / `audit` to include those too. A
+  `tool_output` hit is the full body of a tool result Claude Code
+  persisted to disk; its title names the preview message (`msg:<id>`)
+  for follow-up with `mnemo_read_session`.
 
 Each result includes a `message_id` for follow-up queries.
 

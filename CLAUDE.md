@@ -93,7 +93,7 @@ user. Good moments to reach for mnemo:
 
 ## MCP Tools
 
-- `mnemo_search` — Full-text search spanning the index (🎯T144). Covers messages plus segment, decision, doc, target, commit, pr and memory corpora by default; plan/config/skill/audit on request via `kinds`. Message hits keep context (default 3 before/after), repo and session_type filters, and carry the enclosing topic span. Cross-corpus ranking is by **calibrated quantile** — a BM25 score maps to its position in its own corpus's distribution, because BM25 is not comparable between indexes (avgdl is per-index). Each hit reports `ranking`: `calibrated`, or `fusion` when a corpus has no fresh distribution, with `degraded` naming which and why. Cost is one FTS query per corpus in scope (8 by default).
+- `mnemo_search` — Full-text search spanning the index (🎯T144). Covers messages plus tool_output, segment, decision, doc, target, commit, pr and memory corpora by default; plan/config/skill/audit on request via `kinds`. Message hits keep context (default 3 before/after), repo and session_type filters, and carry the enclosing topic span. Cross-corpus ranking is by **calibrated quantile** — a BM25 score maps to its position in its own corpus's distribution, because BM25 is not comparable between indexes (avgdl is per-index). Each hit reports `ranking`: `calibrated`, or `fusion` when a corpus has no fresh distribution, with `degraded` naming which and why. Cost is one FTS query per corpus in scope (9 by default).
 - `mnemo_sessions` — List sessions by recency, type, project, repo, work type
 - `mnemo_read_session` — Read messages from a specific session (supports prefix IDs)
 - `mnemo_usage` — Token usage analytics: aggregated input/output/cache tokens with costs. Filters by repo, model, date range. Groups by day, model, repo, session, or 5-hour billing block. Costs come from a fetched rate card matched on the **exact** model identifier — no prefix matching, no fallback (🎯T135). Two disclosure fields matter as much as the totals: `unpriced_models` (counted but not costed, because the card has no entry — normal for a newly released model, which is exactly the spend you want to see) and `uncounted` (volume EXCLUDED from every total, per source, with the reason: a record with no message id cannot be deduplicated, and deduplication is worth 1.95x-2.83x).
@@ -204,6 +204,27 @@ being busy. A row that fails a
 constraint is skipped rather than stranding the family, with the reason
 recorded on the cursor (🎯T169). Ops: `mnemo_ops op=compress_status |
 compress_train | compress_gc`. Design: `docs/design/text-compression.md`.
+
+## Persisted tool output (🎯T192)
+
+Claude Code keeps a tool result over ~2 KB on disk (a sidecar under the
+session's `tool-results/` directory) and writes a `<persisted-output>`
+preview into the transcript. The preview is what `messages.text` holds
+and all it will ever hold: `mnemo_read_session` and the compactor read
+that column. The body lives in `tool_outputs` (one row per preview
+message, `UNIQUE(message_id)`, `text`/`text_z` read through
+`mnemo_text`) and is indexed by `tool_outputs_fts` as the `tool_output`
+search corpus. Resolution order at ingest, on both the bulk and realtime
+paths: the sidecar named by `toolUseResult.persistedOutputPath` (or the
+preview's "Full output saved to:" line) when it is a text file under a
+`.claude/projects/**/tool-results/` directory, else the string leaves of
+`toolUseResult` (metadata keys excluded), else nothing — recorded as
+`source = 'none'` so the row is not re-examined. Bodies are capped at
+4 MiB. A startup phase (`tool-output-backfill`, behind the schema and
+the codec) fills the table for previews written before the table
+existed, reading each entry's stored line from `entries_v.raw`;
+idempotent, batched, yielding. Proof query: `SELECT source, COUNT(*)
+FROM tool_outputs GROUP BY source`.
 
 ## Duplicate entries (🎯T170)
 

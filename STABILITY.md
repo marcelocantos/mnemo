@@ -360,7 +360,7 @@ helpful error pointing at brew services / systemd instead.
 | `context_before` | number | no | Messages before each hit (default 3) | Stable |
 | `context_after` | number | no | Messages after each hit (default 3) | Stable |
 | `context_filter` | string | no | "substantive" (default) or "all" | Needs review |
-| `kinds` | string | no | Comma-separated corpora to search (🎯T144). Omitted = the default eight: message, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit | Needs review |
+| `kinds` | string | no | Comma-separated corpora to search (🎯T144). Omitted = the default nine: message, tool_output, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit | Needs review |
 | `expand` | string | no | "none" (default), "segment", or "segment:coarse" — expand each hit to its enclosing topic span | Needs review |
 
 **Notes**: as of v0.85.0 `mnemo_search` spans the whole index rather
