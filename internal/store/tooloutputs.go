@@ -112,10 +112,22 @@ func resolveToolOutput(preview string, toolUseResult json.RawMessage) *toolOutpu
 	return &toolOutputText{source: ToolOutputSourceNone}
 }
 
+// bashInputClose ends the <bash-input> block that precedes <bash-stdout>
+// when the user's command is recorded in the same message.
+const bashInputClose = "</bash-input>"
+
 // isPersistedOutputPreview reports whether a block's text is a preview:
-// the tag opens the text, or opens it right after the <bash-stdout>
-// wrapper. A preview quoted deeper inside a prompt is not one.
+// the tag opens the text, or opens the <bash-stdout> block (itself
+// optionally preceded by the <bash-input> block). A preview quoted
+// deeper inside a prompt — the compactor's opening prompt, say, which
+// carries whole transcripts — is not one.
 func isPersistedOutputPreview(text string) bool {
+	if strings.HasPrefix(text, "<bash-input>") {
+		if i := strings.Index(text, bashInputClose); i >= 0 {
+			text = text[i+len(bashInputClose):]
+		}
+	}
+	text = strings.TrimLeft(text, " \n")
 	text = strings.TrimLeft(strings.TrimPrefix(text, bashStdoutTag), " \n")
 	return strings.HasPrefix(text, persistedOutputTag)
 }
@@ -260,7 +272,10 @@ const toolOutputBackfillYield = 20 * time.Millisecond
 // toolOutputCandidatesSQL lists preview messages with no tool_outputs
 // row yet, in id order from a cursor. The FTS index is the cheap way to
 // find previews among millions of rows: both phrases occur in every
-// preview Claude Code writes.
+// preview Claude Code writes. They also occur in anything that quotes
+// one — on the owner's store 2,297 of 4,671 FTS matches were prompts
+// carrying whole transcripts — so the head of the decoded text is
+// checked here, and the resolver's full check decides after that.
 const toolOutputCandidatesSQL = `
 	SELECT m.id, COALESCE(m.entry_id, 0), m.session_id, m.project, COALESCE(m.tool_use_id, ''),
 		mnemo_text(m.text, m.text_z)
@@ -268,6 +283,7 @@ const toolOutputCandidatesSQL = `
 	WHERE m.id IN (SELECT rowid FROM messages_fts
 			WHERE messages_fts MATCH '"persisted output" AND "full output saved to"')
 	  AND m.content_type IN ('tool_result', 'text') AND m.role = 'user' AND m.is_noise = 0 AND m.id > ?
+	  AND substr(mnemo_text(m.text, m.text_z), 1, 12) IN ('<persisted-o', '<bash-stdout', '<bash-input>')
 	  AND NOT EXISTS (SELECT 1 FROM tool_outputs t WHERE t.message_id = m.id)
 	ORDER BY m.id LIMIT ?`
 
@@ -367,10 +383,11 @@ func (s *Store) toolOutputBackfillBatch(ctx context.Context, cursor int64) (seen
 		}
 		out := resolveToolOutput(c.preview, entry.ToolUseResult)
 		if out == nil {
-			// Matched the FTS phrases without being a preview — a prompt
-			// quoting one, say. Record it as 'none' so it is examined
-			// once rather than on every start.
-			out = &toolOutputText{source: ToolOutputSourceNone}
+			// Passed the head check but is not a preview (a <bash-input>
+			// block followed by something else). Not a tool output; no
+			// row. The candidate filter already excludes it cheaply on
+			// the next start, so nothing is re-examined at any cost.
+			continue
 		}
 		if err := ws.insertToolOutput(c.id, c.sessionID, c.project, c.toolUseID, out); err != nil {
 			return 0, cursor, res, fmt.Errorf("insert tool output for message %d: %w", c.id, err)

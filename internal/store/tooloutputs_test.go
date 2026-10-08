@@ -421,6 +421,16 @@ func TestResolveToolOutputGuards(t *testing.T) {
 	if out := resolveToolOutput("an ordinary tool result", nil); out != nil {
 		t.Errorf("non-preview resolved to %+v, want nil", out)
 	}
+	// The `!` command shape with the command recorded first.
+	okPath := writeSidecar(t, dir, "bang-2.txt", "command output zqxbanginput body")
+	wrapped := "<bash-input>ls -R</bash-input>\n" + bashStdoutTag + previewFor(okPath, "x") + "</bash-stdout>"
+	if out := resolveToolOutput(wrapped, nil); out == nil || out.source != ToolOutputSourceSidecar {
+		t.Errorf("<bash-input>…<bash-stdout><persisted-output> should resolve via its sidecar: %+v", out)
+	}
+	// A prompt that quotes a preview after other text is not one.
+	if out := resolveToolOutput("[compactor prompt]\nplease summarise:\n"+previewFor(okPath, "x"), nil); out != nil {
+		t.Errorf("quoting prompt resolved to %+v, want nil", out)
+	}
 
 	huge := strings.Repeat("y", toolOutputMaxBytes+100)
 	out = resolveToolOutput(previewFor(filepath.Join(dir, "none.txt"), "x"), mustJSON(map[string]any{"stdout": huge}))
