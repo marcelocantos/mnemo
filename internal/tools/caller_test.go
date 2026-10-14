@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,6 +127,88 @@ func TestSearchExcludesCallerAndOptsIn(t *testing.T) {
 	}
 }
 
+func TestSearchResolvesCallerFromTranscript(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "t.db")
+	s, err := store.New(dbPath, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.AwaitStartup()
+
+	db, err := sql.Open("sqlite3_mnemo_rw", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	const caller = "callerS1aaaaaaaa"
+	const other = "otherS2bbbbbbbb"
+	const token = "zqxsharedhit"
+	const toolUse = "toolu_transcriptscan"
+	pad := strings.Repeat("padding word ", 40)
+	insert := func(session, text string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO messages (session_id, project, role, text, timestamp, type, is_noise, content_type)
+			VALUES (?, 'workbench', 'user', ?, '2026-01-01T00:00:00Z', 'user', 0, 'text')`, session, text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 60; i++ {
+		insert(caller, token)
+	}
+	insert(other, token+" "+pad)
+
+	proj := filepath.Join(dir, "workbench")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","sessionId":"` + caller + `","message":{"role":"assistant","content":[{"type":"tool_use","id":"` + toolUse + `","name":"mnemo_search","input":{"query":"zqxsharedhit"}}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(proj, caller+".jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(string) (store.Backend, error) { return s, nil })
+	call := func(id string) string {
+		t.Helper()
+		args := map[string]any{
+			"query": token, "limit": float64(10), "kinds": "message",
+			"context_before": float64(0), "context_after": float64(0),
+			"session_type": "all",
+		}
+		meta := map[string]any{}
+		if id != "" {
+			meta["claudecode/toolUseId"] = id
+		}
+		text, isErr, err := h.Call(context.Background(), CallContext{Meta: meta}, "mnemo_search", args)
+		if err != nil || isErr {
+			t.Fatalf("search err=%v isErr=%v text=%s", err, isErr, text)
+		}
+		return text
+	}
+
+	// The tool-use row is not in the index. The transcript tail supplies it.
+	excluded := call(toolUse)
+	if strings.Contains(excluded, caller[:8]) {
+		t.Fatalf("caller session leaked after the transcript scan:\n%s", excluded)
+	}
+	if !strings.Contains(excluded, other[:8]) {
+		t.Fatalf("other session missing when the transcript identified the caller:\n%s", excluded)
+	}
+	if !strings.Contains(excluded, "excluded") {
+		t.Fatalf("result did not say the caller was excluded:\n%s", excluded)
+	}
+
+	// Nothing in the index or the transcripts: do not exclude, and say so.
+	missed := call("toolu_notwrittenany")
+	if !strings.Contains(missed, "not identified") {
+		t.Fatalf("result did not say the caller was unidentified:\n%s", missed)
+	}
+	if !strings.Contains(missed, caller[:8]) {
+		t.Fatalf("unidentified caller was excluded:\n%s", missed)
+	}
+}
+
 func TestSearchToolDocumentsCallerExclusion(t *testing.T) {
 	var desc string
 	for _, tool := range Definitions() {
@@ -133,7 +216,7 @@ func TestSearchToolDocumentsCallerExclusion(t *testing.T) {
 			desc = tool.Description
 		}
 	}
-	for _, want := range []string{"include_caller", "CALLING SESSION", "Default kinds:", "before the per-corpus candidate limit"} {
+	for _, want := range []string{"include_caller", "CALLING SESSION", "Default kinds:", "before the per-corpus candidate limit", "newest session transcripts"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("description missing %q", want)
 		}

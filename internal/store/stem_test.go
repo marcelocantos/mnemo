@@ -7,10 +7,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestRelaxQueryStemmedSkipsPrefix(t *testing.T) {
@@ -299,13 +302,112 @@ func TestStemMigrationFromPriorSchema(t *testing.T) {
 	}
 }
 
+// benchWords is a varied vocabulary. Repeated four-word text collapses
+// the inverted index and hides both the byte cost and the tokenize cost
+// of a real transcript.
+var benchWords = []string{
+	"adapter", "anchor", "archive", "argument", "array", "buffer", "bundle",
+	"candidate", "channel", "checksum", "chunk", "client", "clock", "cluster",
+	"column", "commit", "compile", "config", "context", "cursor", "daemon",
+	"deadline", "decode", "default", "delay", "delta", "descriptor", "dialog",
+	"digest", "directory", "document", "duration", "editor", "encode", "engine",
+	"entry", "error", "event", "export", "factor", "failure", "fetch", "field",
+	"filter", "fingerprint", "folder", "format", "frame", "function", "gateway",
+	"header", "histogram", "identifier", "import", "index", "ingest", "input",
+	"instance", "interval", "journal", "kernel", "label", "latency", "layer",
+	"ledger", "library", "limit", "listener", "loader", "local", "lock",
+	"manifest", "marker", "memory", "message", "method", "metric", "mirror",
+	"module", "namespace", "network", "object", "offset", "option", "output",
+	"packet", "padding", "parser", "partition", "payload", "pipeline", "pointer",
+	"policy", "prefix", "process", "progress", "project", "protocol", "provider",
+	"proxy", "query", "queue", "quota", "reader", "record", "registry", "remote",
+	"replica", "request", "resolver", "resource", "response", "result", "retry",
+	"revision", "runtime", "sample", "scanner", "schedule", "schema", "segment",
+	"sequence", "server", "session", "shard", "signal", "snapshot", "socket",
+	"source", "span", "stack", "status", "storage", "stream", "string", "summary",
+	"table", "target", "thread", "threshold", "timeout", "token", "trace",
+	"transaction", "transform", "trigger", "tuple", "update", "upload", "value",
+	"vector", "version", "viewer", "volume", "watcher", "window", "worker",
+	"writer",
+}
+
+// benchText builds one message. Sizes mix short turns, typical assistant
+// text, and longer tool output. About a third of the tokens are unique
+// to the row so the postings list is not a handful of repeated words.
+func benchText(rng *rand.Rand, i int) string {
+	var target int
+	switch i % 10 {
+	case 0, 1:
+		target = 160 + rng.Intn(280)
+	case 2, 3, 4:
+		target = 4500 + rng.Intn(7000)
+	default:
+		target = 900 + rng.Intn(1800)
+	}
+	var b strings.Builder
+	b.Grow(target + 64)
+	fmt.Fprintf(&b, "zqxbench %04d ", i)
+	n := 0
+	for b.Len() < target {
+		switch {
+		case n%7 == 0:
+			fmt.Fprintf(&b, "id%x ", rng.Uint64())
+		case n%11 == 0:
+			fmt.Fprintf(&b, "sample/app/pkg%d/file_%d.go ", rng.Intn(50), rng.Intn(400))
+		default:
+			w := benchWords[rng.Intn(len(benchWords))]
+			if n%5 == 0 {
+				w += "s"
+			}
+			b.WriteString(w)
+			b.WriteByte(' ')
+		}
+		n++
+	}
+	return b.String()
+}
+
 func TestStemBackfillThroughput(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	defer resetStemHooks()
 	const n = 800
-	body := strings.Repeat("alpha beta gamma delta ", 60) // ~1.3 KiB
+	rng := rand.New(rand.NewSource(195197))
+	type row struct {
+		id   int64
+		text string
+	}
+	rows := make([]row, 0, n)
+	var textBytes int
 	for i := 0; i < n; i++ {
-		insertPlain(t, s, "sess-bench-aaa", "workbench", fmt.Sprintf("zqxbench %d %s", i, body))
+		body := benchText(rng, i)
+		textBytes += len(body)
+		rows = append(rows, row{id: insertPlain(t, s, "sess-bench-aaa", "workbench", body), text: body})
+	}
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer enc.Close()
+	compressed := 0
+	for i, row := range rows {
+		if i%3 == 2 || len(row.text) < 64 {
+			continue
+		}
+		frame := enc.EncodeAll([]byte(row.text), nil)
+		if len(frame) == 0 || len(frame) >= len(row.text) {
+			continue
+		}
+		if _, err := s.writeDB.Exec(`UPDATE messages SET text = '', text_z = ? WHERE id = ?`, frame, row.id); err != nil {
+			t.Fatal(err)
+		}
+		compressed++
+	}
+	var round string
+	if err := s.readDB.QueryRow(`SELECT mnemo_text(text, text_z) FROM messages WHERE id = ?`, rows[0].id).Scan(&round); err != nil {
+		t.Fatal(err)
+	}
+	if round != rows[0].text {
+		t.Fatal("compressed row did not decode to the original text")
 	}
 	mustExec(t, s, `INSERT INTO messages_fts_stem(messages_fts_stem) VALUES('delete-all')`)
 	var maxID int64
@@ -334,10 +436,14 @@ func TestStemBackfillThroughput(t *testing.T) {
 	const storeRows = 4.95e6
 	fullDuty := time.Duration(float64(time.Second) * storeRows / rate)
 	halfDuty := fullDuty * 2
-	t.Logf("STEM_BENCH rows=%d elapsed=%s rows_per_s=%.1f bytes_per_row=%.0f disk_bytes=%d full_duty_5M=%s half_duty_5M=%s text_bytes=%d",
-		n, elapsed.Round(time.Millisecond), rate, perRow, overhead, fullDuty.Round(time.Second), halfDuty.Round(time.Second), len(body))
+	avg := textBytes / n
+	t.Logf("STEM_BENCH rows=%d elapsed=%s rows_per_s=%.1f bytes_per_row=%.0f disk_bytes=%d full_duty_5M=%s half_duty_5M=%s text_bytes_avg=%d compressed=%d",
+		n, elapsed.Round(time.Millisecond), rate, perRow, overhead, fullDuty.Round(time.Second), halfDuty.Round(time.Second), avg, compressed)
 	if rate <= 0 || overhead <= 0 {
 		t.Fatalf("benchmark did not measure a rate (%.1f rows/s) and a disk delta (%d)", rate, overhead)
+	}
+	if compressed < n/3 {
+		t.Fatalf("compressed %d of %d rows, want a substantial zstd share", compressed, n)
 	}
 }
 

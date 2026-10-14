@@ -113,8 +113,13 @@ type Store struct {
 	stemRunning bool
 	stemSnapMu  sync.Mutex
 	stemSnap    StemSnapshot
-	bgCtx       context.Context
-	bgCancel    context.CancelFunc
+	// callerCache maps a tool-use id to the transcript session resolved
+	// for it (🎯T195). Positive hits only; a miss stays uncached so a
+	// later ingest or a newly appended JSONL line can still match.
+	callerCacheMu sync.Mutex
+	callerCache   map[string]string
+	bgCtx         context.Context
+	bgCancel      context.CancelFunc
 	// startup is the capability graph and background-work supervisor
 	// (🎯T154). Every background goroutine this package starts goes
 	// through it, so AwaitStartup is a complete answer to "is the store
@@ -4747,21 +4752,15 @@ func (s *Store) ingestJSONLPath(path string) {
 }
 
 // SessionForToolUse returns the transcript session that contains a tool
-// call id. A miss is an empty id, not an error: ingest may not have
-// written the row yet, and search then excludes nothing (🎯T195).
+// call id. The index is checked first, with a short retry, because
+// ingest often commits the assistant line within a few milliseconds.
+// When that misses, the newest session JSONLs under the configured
+// Claude project dirs are tailed: Claude Code writes the tool_use line
+// before it issues the MCP call, so the file already has the id.
+// A miss is an empty id, not an error, and search then excludes
+// nothing (🎯T195).
 func (s *Store) SessionForToolUse(toolUseID string) (string, error) {
-	toolUseID = strings.TrimSpace(toolUseID)
-	if toolUseID == "" {
-		return "", nil
-	}
-	var sid string
-	err := s.readDB.QueryRow(
-		`SELECT session_id FROM messages WHERE tool_use_id = ? AND session_id != '' LIMIT 1`,
-		toolUseID).Scan(&sid)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return sid, err
+	return s.resolveToolUseSession(toolUseID)
 }
 
 // Search performs a full-text search and returns matching messages

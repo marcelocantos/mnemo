@@ -35,12 +35,29 @@ Resolution order, first hit wins:
    `X-Cursor-Conversation-Id`.
 3. W3C `Baggage` keys `session_id`, `session.id`, `claude.session_id`.
 4. A tool-use id (`claudecode/toolUseId`, `claude-code/toolUseId`,
-   `cursor/toolCallId`, `toolUseId`) looked up in `messages.tool_use_id`.
-   This races ingest: a call that has not been indexed yet misses.
+   `cursor/toolCallId`, `toolUseId`). The index is tried first, twice
+   more after a short pause, then the newest session JSONLs under the
+   configured Claude project directories (the primary dir plus
+   `extra_project_dirs`). Claude Code appends the assistant tool_use
+   line before it issues the MCP call, so the file already contains
+   the id when the database does not. The scan keeps the eight newest
+   `*.jsonl` files modified in the last three minutes and reads a
+   256 KiB tail of each, newest first, stopping at the first hit. The
+   session id is the `sessionId` on that entry, or the file stem when
+   the entry has none. That is the id ingest stores. Hits are cached.
+   A miss is not.
 
 An id must match `^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`. Anything else
 is ignored. When nothing identifies a session, nothing is excluded and
 the tool result says so. The most recent session is not guessed.
+
+For Claude Code today the exclusion should succeed on essentially
+every `mnemo_search` call that carries `claudecode/toolUseId`. The
+calling file is the one just appended, so it is inside the window and
+is the newest transcript unless several other sessions were written
+in the same moment. A miss is a call with no tool-use id, a transcript
+outside the configured roots, or more than eight newer JSONLs in that
+window.
 
 ## In-query filters (T196)
 
@@ -165,20 +182,22 @@ adds no mode.
 
 ### Measured throughput
 
-`TestStemBackfillThroughput` indexed 800 synthetic messages of about
-1.3 KiB (`alpha beta gamma delta` repeated) with yielding and
-calibration off:
+`TestStemBackfillThroughput` indexed 800 synthetic messages with a
+varied vocabulary, a mix of short, medium, and long bodies (average
+3.4 KiB), and 497 of the 800 stored as zstd frames. Yielding and
+calibration were off. The timed section is the backfill, which reads
+`mnemo_text` and so decompresses those frames:
 
-- 34,691 rows/s, 23 ms
-- disk delta 256 KiB, 328 bytes/row (page quantized)
+- 7,277 rows/s, 110 ms
+- disk delta 1.46 MiB, 1,910 bytes/row
 
-At that rate, 4.95 million messages is about 2 min 23 s of full-duty
-backfill, or about 4 min 45 s at the 50% duty the daemon actually
+At that rate, 4.95 million messages is about 11 min 20 s of full-duty
+backfill, or about 22 min 40 s at the 50% duty the daemon actually
 uses. Messages dominate; the other corpora add a smaller amount of
 the same shape. Calibration is extra and is not in the timed section.
 
-The disk figure is a lower bound. The synthetic text is four words
-repeated, so the inverted index is unusually small. A real transcript
-vocabulary will cost more per row. 328 bytes/row extrapolated is
-about 1.6 GB for the message stem index; treat that as the floor, not
-the expected size of a 33 GB store.
+1,910 bytes/row on this mix is about 9.5 GB for the message stem
+index. Real transcripts are larger and more repetitive than these
+rows in some places and more unique in others; treat 9.5 GB as the
+planning figure for the message index, not a measurement of the
+33 GB store.

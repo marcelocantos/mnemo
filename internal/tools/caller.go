@@ -50,7 +50,9 @@ var sessionHeaders = []string{
 
 // toolUseMetaKeys name the tool call that is in flight. The indexed
 // messages.tool_use_id row for that id is the caller's session, when
-// ingest has already written it. A miss degrades to "do not exclude".
+// ingest has already written it. A miss reads the newest session
+// JSONLs under the configured Claude roots: Claude Code appends the
+// tool_use line before the MCP call. A miss there does not exclude.
 var toolUseMetaKeys = []string{
 	"claudecode/toolUseId",
 	"claude-code/toolUseId",
