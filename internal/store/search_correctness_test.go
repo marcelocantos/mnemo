@@ -246,9 +246,14 @@ func TestOneBadCorpusDoesNotFailTheSearch(t *testing.T) {
 	seedCorpora(t, s)
 
 	// An FTS5 syntax error affects every corpus equally, so instead
-	// drop one corpus's index out from under the query.
+	// drop one corpus's indexes out from under the query. Search uses
+	// the porter table once the migration has finished, so both have
+	// to go or the stem index still answers.
 	if _, err := s.writeDB.Exec(`DROP TABLE docs_fts`); err != nil {
 		t.Skipf("cannot drop docs_fts in this build: %v", err)
+	}
+	if _, err := s.writeDB.Exec(`DROP TABLE docs_fts_stem`); err != nil {
+		t.Skipf("cannot drop docs_fts_stem in this build: %v", err)
 	}
 
 	res, err := s.UnifiedSearch("watcher", []string{"message", "doc", "commit"}, 10, time.Now())

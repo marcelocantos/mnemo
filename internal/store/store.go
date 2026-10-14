@@ -107,8 +107,19 @@ type Store struct {
 	// before the handles go away.
 	codec    *textCodec
 	backfill backfillState
-	bgCtx    context.Context
-	bgCancel context.CancelFunc
+	// stemMu guards stemRunning. stemSnapMu guards the snapshot /health
+	// reads; the worker publishes it, the check does no SQL (🎯T197).
+	stemMu      sync.Mutex
+	stemRunning bool
+	stemSnapMu  sync.Mutex
+	stemSnap    StemSnapshot
+	// callerCache maps a tool-use id to the transcript session resolved
+	// for it (🎯T195). Positive hits only; a miss stays uncached so a
+	// later ingest or a newly appended JSONL line can still match.
+	callerCacheMu sync.Mutex
+	callerCache   map[string]string
+	bgCtx         context.Context
+	bgCancel      context.CancelFunc
 	// startup is the capability graph and background-work supervisor
 	// (🎯T154). Every background goroutine this package starts goes
 	// through it, so AwaitStartup is a complete answer to "is the store
@@ -489,16 +500,22 @@ type ContextMessage struct {
 
 // SearchResult is a single search hit with optional surrounding context.
 type SearchResult struct {
-	MessageID int               `json:"message_id"`
-	SessionID string            `json:"session_id"`
-	Project   string            `json:"project"`
-	Role      string            `json:"role"`
-	Text      string            `json:"text"`
-	Timestamp string            `json:"timestamp"`
-	Rank      float64           `json:"rank"`
-	Before    []ContextMessage  `json:"before,omitempty"`
-	After     []ContextMessage  `json:"after,omitempty"`
-	Segment   *SegmentExpandHit `json:"segment,omitempty"` // 🎯T64.10 expand=
+	MessageID int     `json:"message_id"`
+	SessionID string  `json:"session_id"`
+	Project   string  `json:"project"`
+	Role      string  `json:"role"`
+	Text      string  `json:"text"`
+	Timestamp string  `json:"timestamp"`
+	Rank      float64 `json:"rank"`
+	// UseFairScore is set while a corpus is mid-migration and Rank is a
+	// BM25 value from one of two indexes. FairScore is the per-side
+	// calibrated quantile those ranks were merged on. Finished stores
+	// leave both zero and keep ranking by Rank.
+	UseFairScore bool              `json:"-"`
+	FairScore    float64           `json:"-"`
+	Before       []ContextMessage  `json:"before,omitempty"`
+	After        []ContextMessage  `json:"after,omitempty"`
+	Segment      *SegmentExpandHit `json:"segment,omitempty"` // 🎯T64.10 expand=
 }
 
 // SessionInfo is a summary of a transcript session.
@@ -1520,6 +1537,23 @@ func New(dbPath, projectDir string) (*Store, error) {
 		requires: []Capability{CapSchemaCurrent, CapCodecReady},
 		run: func(ctx context.Context) error {
 			_, err := s.ToolOutputBackfill(ctx)
+			return err
+		},
+	})
+
+	// Porter backfill (🎯T197). Finite, so a test's AwaitStartup sees a
+	// settled frontier, but it yields between batches and does not gate
+	// serving: an empty store finishes immediately, and a multi-million-row
+	// store keeps answering search from the split indexes while it runs.
+	// A test hook that pauses the pass is not a failure.
+	s.startPhase(bgCtx, phase{
+		name:     "stem-backfill",
+		requires: []Capability{CapSchemaCurrent, CapCodecReady},
+		run: func(ctx context.Context) error {
+			err := s.stemBackfill(ctx)
+			if errors.Is(err, errStemPause) {
+				return nil
+			}
 			return err
 		},
 	})
@@ -4717,9 +4751,28 @@ func (s *Store) ingestJSONLPath(path string) {
 	}
 }
 
+// SessionForToolUse returns the transcript session that contains a tool
+// call id. The index is checked first, with a short retry, because
+// ingest often commits the assistant line within a few milliseconds.
+// When that misses, the newest session JSONLs under the configured
+// Claude project dirs are tailed: Claude Code writes the tool_use line
+// before it issues the MCP call, so the file already has the id.
+// A miss is an empty id, not an error, and search then excludes
+// nothing (🎯T195).
+func (s *Store) SessionForToolUse(toolUseID string) (string, error) {
+	return s.resolveToolUseSession(toolUseID)
+}
+
 // Search performs a full-text search and returns matching messages
 // with optional surrounding context messages.
 func (s *Store) Search(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool) ([]SearchResult, error) {
+	return s.SearchExcluding(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly, "")
+}
+
+// SearchExcluding is Search with the caller's own session left out of
+// the candidate set (🎯T195). excludeSession is applied inside the FTS
+// query, before LIMIT. An empty excludeSession keeps every session.
+func (s *Store) SearchExcluding(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool, excludeSession string) ([]SearchResult, error) {
 
 	if limit <= 0 {
 		limit = 20
@@ -4728,47 +4781,24 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 		sessionType = "interactive"
 	}
 
-	// Two-phase search: first get top FTS hits (fast, no JOINs),
-	// then filter by session type/repo and enrich with message data.
-	// This avoids JOINing the full FTS result set with large tables.
-	needSessionFilter := sessionType != "all"
-	needRepoFilter := repoFilter != ""
-
-	// Rewrite plain word lists to OR queries so partial matches surface.
-	// Explicit FTS5 operators (OR, NOT, AND, NEAR, quotes) are preserved.
-	ftsQuery := relaxQuery(query)
-
-	// Phase 1: FTS-only scan with generous over-fetch.
-	// Over-fetch 10x to account for session type filtering.
-	fetchLimit := limit * 10
-	if fetchLimit < 200 {
-		fetchLimit = 200
+	// Session type, repo and the caller's session are constraints on the
+	// FTS query itself (🎯T196). Filtering after a fixed over-fetch dropped
+	// the rows the caller asked for once the window filled with other
+	// session types.
+	filt := hitFilter{
+		sessionType:    sessionType,
+		repo:           repoFilter,
+		excludeSession: excludeSession,
+		shape:          "message",
 	}
-	ftsRows, err := s.readDB.Query(`
-		SELECT rowid, rank FROM messages_fts
-		WHERE messages_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?
-	`, ftsQuery, fetchLimit)
+	if sessionType == "all" {
+		filt.sessionType = ""
+	}
+	hits, err := s.searchCorpus("message", "messages_fts", "messages_fts_stem", query, limit, filt)
 	if err != nil {
 		return nil, err
 	}
 
-	type ftsHit struct {
-		rowid int
-		rank  float64
-	}
-	var hits []ftsHit
-	for ftsRows.Next() {
-		var h ftsHit
-		if err := ftsRows.Scan(&h.rowid, &h.rank); err != nil {
-			continue
-		}
-		hits = append(hits, h)
-	}
-	ftsRows.Close()
-
-	// Phase 2: enrich hits with message data and apply filters.
 	var results []SearchResult
 	for _, h := range hits {
 		if len(results) >= limit {
@@ -4786,25 +4816,8 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 			continue
 		}
 		r.Rank = h.rank
-
-		// Apply session type filter.
-		if needSessionFilter {
-			var st string
-			err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", r.SessionID).Scan(&st)
-			if err != nil || st != sessionType {
-				continue
-			}
-		}
-
-		// Apply repo filter.
-		if needRepoFilter {
-			var count int
-			pattern := "%" + repoFilter + "%"
-			err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", r.SessionID, pattern, pattern).Scan(&count)
-			if err != nil || count == 0 {
-				continue
-			}
-		}
+		r.UseFairScore = h.useFair
+		r.FairScore = h.fair
 
 		if len(r.Text) > 500 {
 			r.Text = r.Text[:497] + "..."
@@ -4821,54 +4834,37 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	type matchedSpan struct{ from, to int }
 	coveredBy := map[string][]matchedSpan{}
 	var compactionResults []SearchResult
-	compRows, compErr := s.readDB.Query(`
-		SELECT c.id, c.session_id, c.summary, c.entry_id_from, c.entry_id_to, f.rank
-		FROM compactions c
-		JOIN compactions_fts f ON f.rowid = c.id
-		WHERE compactions_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?
-	`, ftsQuery, fetchLimit)
+	cfilt := filt
+	cfilt.shape = "compaction"
+	chits, compErr := s.searchCorpus("compaction", "compactions_fts", "compactions_fts_stem", query, limit, cfilt)
 	if compErr != nil {
 		slog.Warn("compaction FTS query failed", "err", compErr)
 	} else {
-		for compRows.Next() {
-			var id int64
+		for _, h := range chits {
 			var sid, summary string
 			var from, to int
-			var rank float64
-			if err := compRows.Scan(&id, &sid, &summary, &from, &to, &rank); err != nil {
+			if err := s.readDB.QueryRow(
+				`SELECT session_id, summary, entry_id_from, entry_id_to FROM compactions WHERE id = ?`, h.rowid,
+			).Scan(&sid, &summary, &from, &to); err != nil {
 				continue
-			}
-			if needSessionFilter {
-				var st string
-				if err := s.readDB.QueryRow("SELECT session_type FROM session_summary WHERE session_id = ?", sid).Scan(&st); err != nil || st != sessionType {
-					continue
-				}
-			}
-			if needRepoFilter {
-				var cnt int
-				pattern := "%" + repoFilter + "%"
-				if err := s.readDB.QueryRow("SELECT COUNT(*) FROM session_meta WHERE session_id = ? AND (cwd LIKE ? OR repo LIKE ?)", sid, pattern, pattern).Scan(&cnt); err != nil || cnt == 0 {
-					continue
-				}
 			}
 			coveredBy[sid] = append(coveredBy[sid], matchedSpan{from: from, to: to})
 			if len(summary) > 500 {
 				summary = summary[:497] + "..."
 			}
 			compactionResults = append(compactionResults, SearchResult{
-				MessageID: int(id), // compaction id; Role distinguishes it
-				SessionID: sid,
-				Role:      "compaction",
-				Text:      summary,
-				Rank:      rank,
+				MessageID:    int(h.rowid), // compaction id; Role distinguishes it
+				SessionID:    sid,
+				Role:         "compaction",
+				Text:         summary,
+				Rank:         h.rank,
+				UseFairScore: h.useFair,
+				FairScore:    h.fair,
 			})
 			if len(compactionResults) >= limit {
 				break
 			}
 		}
-		compRows.Close()
 	}
 	// Suppress transcript hits covered by a matched compaction span.
 	if len(coveredBy) > 0 {
@@ -4892,36 +4888,34 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	// Vault annotations live in the docs table (kind='vault') and are indexed
 	// alongside transcript messages so search surfaces both at once.
 	// repoFilter and sessionType are not applied — annotations are cross-repo.
-	vaultRows, vaultErr := s.readDB.Query(`
-		SELECT d.id, d.file_path, mnemo_text(d.content, d.content_z), f.rank
-		FROM docs d
-		JOIN docs_fts f ON f.rowid = d.id
-		WHERE docs_fts MATCH ? AND d.kind = 'vault'
-		ORDER BY rank
-		LIMIT ?
-	`, ftsQuery, limit)
+	// The kind constraint is inside the FTS query, and the corpus follows the
+	// docs stem boundary so a finished migration stems vault text too.
+	vhits, vaultErr := s.searchCorpus("doc", "docs_fts", "docs_fts_stem", query, limit, hitFilter{shape: "vault"})
 	if vaultErr != nil {
 		slog.Warn("vault FTS query failed", "err", vaultErr)
 	} else {
-		for vaultRows.Next() {
+		for _, h := range vhits {
 			var docID int64
 			var filePath, content string
-			var rank float64
-			if err := vaultRows.Scan(&docID, &filePath, &content, &rank); err != nil {
+			if err := s.readDB.QueryRow(
+				`SELECT d.id, d.file_path, mnemo_text(d.content, d.content_z) FROM docs d WHERE d.id = ? AND d.kind = 'vault'`,
+				h.rowid,
+			).Scan(&docID, &filePath, &content); err != nil {
 				continue
 			}
 			if len(content) > 500 {
 				content = content[:497] + "..."
 			}
 			results = append(results, SearchResult{
-				MessageID: int(-docID), // negative distinguishes from message row IDs
-				SessionID: filePath,
-				Role:      "vault",
-				Text:      content,
-				Rank:      rank,
+				MessageID:    int(-docID), // negative distinguishes from message row IDs
+				SessionID:    filePath,
+				Role:         "vault",
+				Text:         content,
+				Rank:         h.rank,
+				UseFairScore: h.useFair,
+				FairScore:    h.fair,
 			})
 		}
-		vaultRows.Close()
 	}
 
 	results = mergeBySourcePercentile(results)
@@ -4930,7 +4924,7 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	// shared limit truncate the long tail.
 	if len(compactionResults) > 0 {
 		sort.SliceStable(compactionResults, func(i, j int) bool {
-			return compactionResults[i].Rank < compactionResults[j].Rank
+			return betterHit(compactionResults[i], compactionResults[j])
 		})
 		results = append(compactionResults, results...)
 	}
@@ -4961,6 +4955,18 @@ func (s *Store) Search(query string, limit int, sessionType, repoFilter string, 
 	return results, nil
 }
 
+// betterHit reports whether a should rank above b. During a stem
+// migration FairScore is the comparable value (higher is better); a
+// finished index still orders by FTS rank (more negative is better).
+func betterHit(a, b SearchResult) bool {
+	if a.UseFairScore || b.UseFairScore {
+		if a.FairScore != b.FairScore {
+			return a.FairScore > b.FairScore
+		}
+	}
+	return a.Rank < b.Rank
+}
+
 // mergeBySourcePercentile re-orders a mixed slice of transcript and vault
 // search hits so that BM25 ranks are compared on a source-relative scale
 // rather than as raw scores.
@@ -4989,7 +4995,7 @@ func mergeBySourcePercentile(results []SearchResult) []SearchResult {
 			}
 		}
 		sort.SliceStable(idxs, func(a, b int) bool {
-			return results[idxs[a]].Rank < results[idxs[b]].Rank
+			return betterHit(results[idxs[a]], results[idxs[b]])
 		})
 		n := len(idxs)
 		for pos, i := range idxs {
@@ -5011,7 +5017,7 @@ func mergeBySourcePercentile(results []SearchResult) []SearchResult {
 		if percentile[order[a]] != percentile[order[b]] {
 			return percentile[order[a]] < percentile[order[b]]
 		}
-		return results[order[a]].Rank < results[order[b]].Rank
+		return betterHit(results[order[a]], results[order[b]])
 	})
 	sorted := make([]SearchResult, len(results))
 	for i, idx := range order {

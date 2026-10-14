@@ -544,6 +544,19 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		// 🎯T97.2: newer release available (warn). Uses the last
 		// Detector snapshot so the diag path itself does not force a
 		// network call — the detector worker owns polling.
+		// search.stem reports the porter migration's published snapshot.
+		// It does no SQL and it does not add a mode to /health: the
+		// check is informational and always OK. Progress stays visible
+		// on the existing endpoint while a multi-million-row backfill
+		// runs (🎯T197).
+		diag.Check{Name: "search.stem", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("store not started yet")
+			}
+			return diag.Healthy(s.StemStatus().Detail())
+		}},
+
 		diag.Check{Name: "upgrade.available", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			d := r.UpgradeDetector()
 			if d == nil {
