@@ -1,5 +1,9 @@
 .PHONY: bullseye build test test-scale snapshot vet fmt-check
 
+# Recipes use bash so pipefail / $$status preserve go test's exit
+# through the output-trimming step (🎯T194).
+SHELL := /bin/bash
+
 # Parent ~/work/github.com/marcelocantos/go.work only lists claudia and
 # jevons. Go walks up to it, then `./...` in this module fails with
 # "directory prefix . does not contain modules listed in go.work".
@@ -16,7 +20,17 @@ bullseye:
 	 (echo "✗ gofmt issues:"; gofmt -l .; exit 1)
 	@go vet -tags "$(BUILD_TAGS)" ./... && echo "✓ vet"
 	@go build -tags "$(BUILD_TAGS)" -o bin/mnemo . && echo "✓ build"
-	@go test -tags "$(BUILD_TAGS)" ./... 2>&1 | tail -20 && echo "✓ tests"
+	@set -o pipefail; \
+	  log=$$(mktemp -t mnemo-bullseye-tests.XXXXXX); \
+	  go test -tags "$(BUILD_TAGS)" ./... >$$log 2>&1; \
+	  status=$$?; \
+	  tail -20 $$log; \
+	  if [ $$status -ne 0 ]; then \
+	    echo "--- failing tests ---"; \
+	    grep -E '^(--- FAIL|FAIL[[:space:]])' $$log || true; \
+	  fi; \
+	  rm -f $$log; \
+	  [ $$status -eq 0 ] && echo "✓ tests" || exit $$status
 	@if [ -z "$$(git status --porcelain | grep -vE 'bullseye\.yaml$$' || true)" ]; then \
 	  echo "✓ clean tree"; \
 	else \
