@@ -30,6 +30,15 @@ type CallContext struct {
 	// allowed and means "the daemon's own user" — which the
 	// resolver rejects on Windows-Service deployments.
 	Username string
+
+	// Meta is params._meta from the tools/call, minus progressToken.
+	// Clients that know their transcript session put it here.
+	Meta map[string]any
+
+	// Header is the HTTP header set from the MCP request. A session
+	// hook can inject the transcript session id without waiting for
+	// the client to grow a _meta key.
+	Header http.Header
 }
 
 // sessionIDHeader is the header name defined by the MCP spec for
@@ -135,6 +144,8 @@ func (h *Handler) LocalHandler(name string) func(ctx context.Context, req mcp.Ca
 		cc := CallContext{
 			MCPSessionID: req.Header.Get(sessionIDHeader),
 			Username:     UsernameFromContext(ctx),
+			Meta:         requestMeta(req),
+			Header:       req.Header,
 		}
 		text, isError, err := h.Call(ctx, cc, name, req.GetArguments())
 		if err != nil {

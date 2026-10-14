@@ -193,28 +193,30 @@ type callHandler struct {
 func Definitions() []mcp.Tool {
 	return []mcp.Tool{
 		mcp.NewTool("mnemo_search",
-			mcp.WithDescription(`Search across Claude Code session transcripts. FTS5 full-text search over exact tokens: there is no stemming and no fuzzy matching, so "deploy" does not match "deployment" and a misspelling matches nothing.
+			mcp.WithDescription(`Search across Claude Code session transcripts. FTS5 full-text search. A porter stem index is filled beside the original one: reached rows match inflections ("deploy" matches "deployment"); unreached rows match exact tokens. A misspelling matches nothing. On the unstemmed side a quoted phrase is still a prefix phrase so plurals match; on the stemmed side that star is not added, because porter covers inflection and a trailing * would over-match ("the cat"* matches "the catalog").
 
 Plain word queries use OR matching — "QR code pairing protocol" finds messages containing ANY of those words, ranked by how many match (BM25). This means partial matches surface instead of returning nothing. Messages matching more/rarer terms rank higher.
 
 For precise control, use explicit FTS5 operators:
 - Require all terms: "QR AND transfer"
-- Phrase: "\"QR transfer\"" — words adjacent, in order. A quoted phrase is run as the prefix phrase "\"QR transfer\"*" automatically (when its last word has 3+ characters), so the last word also matches its plural and other inflections: "\"QR transfer\"" finds "QR transfers". Write the trailing * yourself to make any word a prefix: "deploy*".
+- Phrase: "\"QR transfer\"" — words adjacent, in order. Write a trailing * to force a prefix: "deploy*".
 - Exclude terms: "QR NOT test"
 - Proximity: NEAR(QR transfer, 5)
 
 mnemo's own tool calls and their results are not indexed, so a search never returns mnemo's echo of an earlier search.
 
+CALLING SESSION. The session making this call is left out by default, so its own command output and assistant text quoting the query do not crowd out other sessions. The exclusion is inside the FTS query, before the per-corpus candidate limit. Pass include_caller=true to include it. The caller's session is taken from params._meta (claudecode/sessionId, and the same kind of key from Cursor, Codex and Grok), then from X-Claude-Code-Session-Id and the other documented session headers, then from a claudecode/toolUseId looked up in the index. When none of those identify a session, nothing is excluded and the result says so. Mcp-Session-Id is the transport session and is not used.
+
 TOOL OUTPUT. A tool result Claude Code persisted to disk (the <persisted-output> preview in the transcript) is indexed in full as a tool_output hit; the hit names the preview message (msg:<id>) and its session, so mnemo_read_session gives the surrounding context.
 
-By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.
+By default searches only interactive sessions (excludes subagents, worktrees, ephemeral). That filter, and the repo filter, are applied inside the FTS query for messages, tool outputs and compaction summaries — before the candidate limit — so a flood of subagent or worktree output cannot push the interactive hits out of the window. Noise messages (interrupts, compaction summaries, tool-loaded markers) are excluded from the index.
 
 SPANS THE INDEX (🎯T144). One search covers messages AND the other indexed corpora, returning typed hits each labelled with the corpus they came from. Default kinds: message, tool_output, segment, decision, doc, target, commit, pr, memory. On request: plan, config, skill, audit. (These are the exact values the kinds parameter accepts.) Use the kinds parameter to scope. This replaces the per-corpus search tools that were removed: their content is reachable here rather than only through raw SQL.
 
 RANKING ACROSS CORPORA. BM25 scores are not comparable between indexes (the length-normalisation baseline is per-index), so hits are ranked by CALIBRATED QUANTILE: a score maps to its position within its own corpus's distribution, and quantiles compete. Each hit reports a "ranking" field — "calibrated", or "fusion" when that corpus has no fresh distribution yet, in which case "degraded" names the corpus and why. Never raw score comparison.
 
 COST. One FTS query per corpus in scope: 9 by default. Narrow kinds when you know where to look.`),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words are ORed; exact tokens, no stemming. Use AND/NOT/NEAR/quotes for precise control; a quoted phrase matches inflections of its last word.")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — plain words are ORed. Use AND/NOT/NEAR/quotes for precise control. Stemmed rows match inflections.")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 			mcp.WithString("session_type", mcp.Description(`Filter by session type (default "interactive"). Values: "interactive", "subagent", "worktree", "ephemeral", "all"`)),
 			mcp.WithString("repo", mcp.Description(`Filter by repo. Flexible matching against session working directory and extracted repo name. Accepts: bare name ("mnemo"), org/repo ("marcelocantos/mnemo"), host/org/repo ("github.com/marcelocantos/mnemo"), or a path fragment ("~/work/myproject").`)),
@@ -223,6 +225,7 @@ COST. One FTS query per corpus in scope: 9 by default. Narrow kinds when you kno
 			mcp.WithString("context_filter", mcp.Description(`Filter for context messages. "substantive" (default): only non-noise user/assistant messages. "all": include everything (tool calls, system messages, noise).`)),
 			mcp.WithString("expand", mcp.Description(`Expand each hit to a topic segment (🎯T64.10). "none" (default): ±N context only. "segment": smallest enclosing sealed segment. "segment:coarse": top-level span. Default remains "none" until boundary-quality gates clear.`)),
 			mcp.WithString("kinds", mcp.Description("Comma-separated corpora to search (\U0001F3AFT144). Omit for the default set: message, tool_output, segment, decision, doc, target, commit, pr, memory. Also available on request: plan, config, skill, audit \u2014 outside the default because each corpus is another FTS query on the most-called tool in the product. Message hits keep their full shape (context, session, repo filters) and carry the enclosing topic span when one exists.")),
+			mcp.WithBoolean("include_caller", mcp.Description("Include hits from the session making this call. Default false: that session is excluded when it can be identified, so its own tool output does not crowd out other sessions. When the caller cannot be identified, nothing is excluded.")),
 		),
 		mcp.NewTool("mnemo_sessions",
 			mcp.WithDescription("List transcript sessions, sorted by most recent activity. By default shows only interactive sessions with at least 6 substantive messages."),
@@ -461,6 +464,21 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 }
 
 func (h *callHandler) search(args map[string]any) (string, bool, error) {
+	caller, how := h.identifyCaller()
+	include := includeCallerArg(args)
+	exclude := ""
+	if caller != "" && !include {
+		exclude = caller
+	}
+	note := callerResultNote(caller, include, how)
+	text, isErr, err := h.searchWith(args, exclude, caller, include)
+	if err != nil || isErr || note == "" {
+		return text, isErr, err
+	}
+	return note + "\n" + text, false, nil
+}
+
+func (h *callHandler) searchWith(args map[string]any, exclude, caller string, include bool) (string, bool, error) {
 	query, _ := args["query"].(string)
 	limit := 20
 	if l, ok := args["limit"].(float64); ok && l > 0 {
@@ -503,10 +521,20 @@ func (h *callHandler) search(args map[string]any) (string, bool, error) {
 	if expand == store.SegmentExpandNone || expand == "" {
 		kinds, _ := args["kinds"].(string)
 		return h.unifiedSearch(query, kinds, limit, sessionType, repoFilter,
-			contextBefore, contextAfter, substantiveOnly)
+			contextBefore, contextAfter, substantiveOnly, exclude, caller, include)
 	}
 
-	results, err := h.mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly)
+	var (
+		results []store.SearchResult
+		err     error
+	)
+	if ex, ok := h.mem.(interface {
+		SearchExcluding(query string, limit int, sessionType, repoFilter string, contextBefore, contextAfter int, substantiveOnly bool, excludeSession string) ([]store.SearchResult, error)
+	}); ok {
+		results, err = ex.SearchExcluding(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly, exclude)
+	} else {
+		results, err = h.mem.Search(query, limit, sessionType, repoFilter, contextBefore, contextAfter, substantiveOnly)
+	}
 	if err != nil {
 		return fmt.Sprintf("search failed: %v", err), true, nil
 	}

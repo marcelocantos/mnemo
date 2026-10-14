@@ -46,6 +46,8 @@ func (h *Handler) RegisterFederatedTools(s *mcpserver.MCPServer) {
 			cc := CallContext{
 				MCPSessionID: req.Header.Get(sessionIDHeader),
 				Username:     UsernameFromContext(ctx),
+				Meta:         requestMeta(req),
+				Header:       req.Header,
 			}
 			text, isError, err := h.Call(ctx, cc, name, req.GetArguments())
 			if err != nil {

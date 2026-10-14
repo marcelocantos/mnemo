@@ -68,6 +68,12 @@ type UnifiedSearchResult struct {
 	// a property of the result rather than of a hit because the two scales
 	// cannot be mixed within one ordering.
 	Ranking string `json:"ranking,omitempty"`
+	// CallerSession is the transcript session identified as the caller,
+	// when one could be identified. CallerExcluded is true when that
+	// session was left out of the query. IncludeCaller is the opt-in.
+	CallerSession  string `json:"caller_session,omitempty"`
+	CallerExcluded bool   `json:"caller_excluded,omitempty"`
+	IncludeCaller  bool   `json:"include_caller,omitempty"`
 }
 
 // rrfK is the reciprocal-rank-fusion damping constant. 60 is the value
@@ -127,6 +133,13 @@ type UnifiedOpts struct {
 	ContextBefore   int
 	ContextAfter    int
 	SubstantiveOnly bool
+	// ExcludeSession drops that session inside each session-shaped
+	// query, before the per-corpus LIMIT (🎯T195). Empty means do not
+	// exclude. CallerSession is the identified session even when it is
+	// not excluded, so the tool can say which case it is in.
+	ExcludeSession string
+	CallerSession  string
+	IncludeCaller  bool
 }
 
 // UnifiedSearch queries every corpus in scope and merges the results.
@@ -150,6 +163,13 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 	if limit <= 0 {
 		limit = 20
 	}
+	// Messages already treat an empty session type as interactive.
+	// tool_output used to leave it meaning "every session", then drop
+	// rows after the top 50 were fetched, so the two corpora disagreed
+	// and the filter lost to truncation (🎯T196).
+	if opts.SessionType == "" {
+		opts.SessionType = "interactive"
+	}
 	specs, err := resolveCorpora(opts.Kinds)
 	if err != nil {
 		return nil, err
@@ -159,12 +179,16 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 		return nil, err
 	}
 
-	ftsQuery := relaxQuery(query)
 	// Per-term normalisation, matching how the distribution was sampled.
 	// See queryTermCount: without it a hit's quantile tracks the query's
 	// width rather than the hit's quality.
 	terms := float64(queryTermCount(query))
-	out := &UnifiedSearchResult{Degraded: map[string]string{}}
+	out := &UnifiedSearchResult{
+		Degraded:       map[string]string{},
+		CallerSession:  opts.CallerSession,
+		CallerExcluded: opts.ExcludeSession != "",
+		IncludeCaller:  opts.IncludeCaller,
+	}
 	var all []UnifiedHit
 
 	// Scoring happens in a second pass because the choice of scale is a
@@ -177,6 +201,7 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 		mags     []float64
 		cal      *Calibration
 		evidence float64
+		preset   []bool
 	}
 	var collected []corpusHits
 
@@ -184,60 +209,65 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 		out.Corpora = append(out.Corpora, spec.kind)
 
 		type scored struct {
-			id  int64
-			mag float64
-			msg *SearchResult
+			id     int64
+			mag    float64
+			msg    *SearchResult
+			preset bool
 		}
 		var raw []scored
 
+		filt := hitFilter{repo: opts.Repo, excludeSession: opts.ExcludeSession}
+		if opts.SessionType != "all" {
+			filt.sessionType = opts.SessionType
+		}
 		if spec.kind == "message" {
 			// The message corpus keeps its pre-🎯T144 path: session-type
 			// and repo filtering, context expansion, noise handling. Only
-			// its ranking is new.
-			msgs, merr := s.Search(query, unifiedFetchPerCorpus, opts.SessionType,
-				opts.Repo, opts.ContextBefore, opts.ContextAfter, opts.SubstantiveOnly)
+			// its ranking is new. Exclusion of the caller is inside that
+			// query (🎯T195).
+			msgs, merr := s.SearchExcluding(query, unifiedFetchPerCorpus, opts.SessionType,
+				opts.Repo, opts.ContextBefore, opts.ContextAfter, opts.SubstantiveOnly, opts.ExcludeSession)
 			if merr != nil {
 				out.Degraded[spec.kind] = "query failed: " + merr.Error()
 				continue
 			}
 			for i := range msgs {
 				m := msgs[i]
-				raw = append(raw, scored{id: int64(m.MessageID), mag: -m.Rank / terms, msg: &m})
+				sc := scored{id: int64(m.MessageID), mag: -m.Rank / terms, msg: &m}
+				if m.UseFairScore {
+					sc.mag = m.FairScore
+					sc.preset = true
+				}
+				raw = append(raw, sc)
 			}
 		} else {
-			//nolint:gosec // table name comes from the internal corpus registry
-			rows, qerr := s.readDB.Query(
-				`SELECT rowid, rank FROM `+spec.fts+` WHERE `+spec.fts+` MATCH ? ORDER BY rank LIMIT ?`,
-				ftsQuery, unifiedFetchPerCorpus)
+			switch spec.kind {
+			case "tool_output":
+				filt.shape = "tool_output"
+			case "segment":
+				filt.shape = "segment"
+				filt.sessionType = ""
+				filt.repo = ""
+			default:
+				filt = hitFilter{}
+			}
+			// Session filters and the stem split both have to run before
+			// LIMIT. A post-filter on the top 50 dropped interactive tool
+			// output once subagent rows filled the window (🎯T196).
+			hits, qerr := s.searchCorpus(spec.kind, spec.fts, spec.stemFTS, query, unifiedFetchPerCorpus, filt)
 			if qerr != nil {
 				// A corpus that cannot be queried must not fail the whole
 				// search — the other corpora still have answers.
 				out.Degraded[spec.kind] = "query failed: " + qerr.Error()
 				continue
 			}
-			for rows.Next() {
-				var id int64
-				var rank float64
-				if err := rows.Scan(&id, &rank); err == nil {
-					raw = append(raw, scored{id: id, mag: -rank / terms})
+			for _, h := range hits {
+				sc := scored{id: h.rowid, mag: -h.rank / terms}
+				if h.useFair {
+					sc.mag = h.fair
+					sc.preset = true
 				}
-			}
-			rows.Close()
-			// A tool output belongs to a session, so it honours the
-			// session_type and repo filters the message corpus does
-			// (🎯T192). Other corpora are not session-shaped.
-			if spec.kind == "tool_output" && (opts.SessionType != "all" || opts.Repo != "") {
-				kept := raw[:0]
-				for _, r := range raw {
-					var sessionID string
-					if err := s.readDB.QueryRow(`SELECT session_id FROM tool_outputs WHERE id = ?`, r.id).Scan(&sessionID); err != nil {
-						continue
-					}
-					if s.sessionMatches(sessionID, opts.SessionType, opts.Repo) {
-						kept = append(kept, r)
-					}
-				}
-				raw = kept
+				raw = append(raw, sc)
 			}
 		}
 		if len(raw) == 0 {
@@ -276,10 +306,26 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 			cal:      effective,
 			evidence: effective.Evidence(),
 		}
+		hasPreset := false
 		for _, r := range raw {
 			ch.ids = append(ch.ids, r.id)
 			ch.msgs = append(ch.msgs, r.msg)
 			ch.mags = append(ch.mags, r.mag)
+			ch.preset = append(ch.preset, r.preset)
+			if r.preset {
+				hasPreset = true
+			}
+		}
+		// A split corpus already mapped each side through its own
+		// distribution. The merge may trust that only as far as the
+		// weaker side's evidence, otherwise a stem hit scored at the
+		// neutral prior would be reported as fully calibrated.
+		if hasPreset {
+			ev := ch.evidence
+			if stemEv := cals[spec.kind+"#stem"].Evidence(); stemEv < ev {
+				ev = stemEv
+			}
+			ch.evidence = ev
 		}
 		collected = append(collected, ch)
 	}
@@ -331,6 +377,9 @@ func (s *Store) UnifiedSearchOpts(query string, opts UnifiedOpts, now time.Time)
 	for _, ch := range collected {
 		for i := range ch.ids {
 			score := ch.cal.Score(ch.mags[i], i)
+			if i < len(ch.preset) && ch.preset[i] {
+				score = ch.mags[i]
+			}
 			if fuse {
 				score = rrfScore(i)
 			}

@@ -300,6 +300,20 @@ func (s *Store) saveCalibration(c *Calibration) error {
 // term distribution, and borrowing another corpus's terms would measure
 // the wrong thing.
 func (s *Store) CalibrateCorpus(ctx context.Context, spec corpusSpec, now time.Time) (*Calibration, error) {
+	fts := spec.fts
+	stemmed := false
+	// Once a corpus has finished the porter migration, its distribution
+	// has to be sampled from the index search actually queries. Probing
+	// the unicode61 table would store a scale the stemmed ranks do not
+	// lie on.
+	if spec.stemFTS != "" && s.stemBoundary(spec.kind).mode == stemDone {
+		fts = spec.stemFTS
+		stemmed = true
+	}
+	return s.calibrateCorpusInto(ctx, spec, fts, stemmed, spec.kind, now)
+}
+
+func (s *Store) calibrateCorpusInto(ctx context.Context, spec corpusSpec, fts string, stemmed bool, key string, now time.Time) (*Calibration, error) {
 	docs := 0
 	//nolint:gosec // table name comes from the internal corpus registry
 	_ = s.readDB.QueryRow(`SELECT COUNT(*) FROM ` + spec.source).Scan(&docs)
@@ -346,9 +360,13 @@ func (s *Store) CalibrateCorpus(ctx context.Context, spec corpusSpec, now time.T
 			probe = strings.Join(terms[i:end], " ")
 		}
 		//nolint:gosec // table name comes from the internal corpus registry
+		rewrite := relaxQuery
+		if stemmed {
+			rewrite = relaxQueryStemmed
+		}
 		rows, err := s.readDB.Query(
-			`SELECT rank FROM `+spec.fts+` WHERE `+spec.fts+` MATCH ? ORDER BY rank LIMIT ?`,
-			relaxQuery(probe), calibrationTopK)
+			`SELECT rank FROM `+fts+` WHERE `+fts+` MATCH ? ORDER BY rank LIMIT ?`,
+			rewrite(probe), calibrationTopK)
 		if err != nil {
 			continue // a probe term that FTS rejects is not a failure
 		}
@@ -368,7 +386,7 @@ func (s *Store) CalibrateCorpus(ctx context.Context, spec corpusSpec, now time.T
 
 	sort.Float64s(magnitudes)
 	cal := &Calibration{
-		Corpus:     spec.kind,
+		Corpus:     key,
 		Quantiles:  extractQuantiles(magnitudes, calibrationQuantiles),
 		SampleSize: len(magnitudes),
 		DocCount:   docs,

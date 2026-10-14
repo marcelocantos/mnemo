@@ -53,12 +53,15 @@ type corpusSpec struct {
 	// inDefault marks membership of the default search set. Corpora
 	// outside it are reachable via the `kinds` filter.
 	inDefault bool
+	// stemFTS is the porter sibling filled by the 🎯T197 migration.
+	// Empty means this corpus is not stemmed.
+	stemFTS string
 }
 
 // searchCorpora is the registry. Order is stable so output ordering is
 // deterministic when quantiles tie.
 func searchCorpora() []corpusSpec {
-	return []corpusSpec{
+	specs := []corpusSpec{
 		{
 			kind:   "message",
 			fts:    "messages_fts",
@@ -188,6 +191,10 @@ func searchCorpora() []corpusSpec {
 			sampleExpr: "COALESCE(summary,'') || ' ' || COALESCE(raw_text,'')",
 		},
 	}
+	for i := range specs {
+		specs[i].stemFTS = stemFTSName(specs[i].kind)
+	}
+	return specs
 }
 
 // corpusByKind returns the spec for a kind.

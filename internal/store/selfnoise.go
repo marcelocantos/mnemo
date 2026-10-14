@@ -187,10 +187,23 @@ func (s *Store) selfNoiseFlipBatch(ctx context.Context) (uses, results int64, er
 		INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
 		SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
 		FROM messages_v m WHERE m.id = ? AND m.is_noise = 0`
+	// The stem index only contains rows the migration or the stem
+	// trigger has written. Deleting a row that was never indexed
+	// corrupts an external-content FTS table. A bare rowid probe of
+	// the FTS table reads the content table, so membership is the
+	// docsize shadow row the index keeps per document.
+	const ftsDeleteStem = `
+		INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
+		SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
+		FROM messages_v m WHERE m.id = ? AND m.is_noise = 0
+		  AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`
 	perSession := map[string]int64{}
 	for _, v := range victims {
 		if _, err = tx.ExecContext(ctx, ftsDelete, v.id); err != nil {
 			return 0, 0, fmt.Errorf("fts delete for message %d: %w", v.id, err)
+		}
+		if _, err = tx.ExecContext(ctx, ftsDeleteStem, v.id); err != nil {
+			return 0, 0, fmt.Errorf("stem fts delete for message %d: %w", v.id, err)
 		}
 		var r sql.Result
 		if r, err = tx.ExecContext(ctx, `UPDATE messages SET is_noise = 1 WHERE id = ? AND is_noise = 0`, v.id); err != nil {

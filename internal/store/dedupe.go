@@ -177,10 +177,18 @@ func (s *Store) dedupeDeleteBatch(ctx context.Context, victims []int64) (entries
 		INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
 		SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
 		FROM messages_v m WHERE m.entry_id = ? AND m.is_noise = 0`
+	const ftsDeleteStem = `
+		INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
+		SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
+		FROM messages_v m WHERE m.entry_id = ? AND m.is_noise = 0
+		  AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`
 
 	for _, id := range victims {
 		if _, err = tx.ExecContext(ctx, ftsDelete, id); err != nil {
 			return 0, 0, fmt.Errorf("fts delete for entry %d: %w", id, err)
+		}
+		if _, err = tx.ExecContext(ctx, ftsDeleteStem, id); err != nil {
+			return 0, 0, fmt.Errorf("stem fts delete for entry %d: %w", id, err)
 		}
 		var r sql.Result
 		if r, err = tx.ExecContext(ctx, `DELETE FROM messages WHERE entry_id = ?`, id); err != nil {

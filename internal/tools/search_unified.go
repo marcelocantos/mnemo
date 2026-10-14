@@ -20,7 +20,7 @@ import (
 // rather than on raw BM25 scores that mean different things per index.
 func (h *callHandler) unifiedSearch(query, kindsArg string, limit int,
 	sessionType, repoFilter string, contextBefore, contextAfter int,
-	substantiveOnly bool,
+	substantiveOnly bool, exclude, caller string, include bool,
 ) (string, bool, error) {
 	var kinds []string
 	for _, k := range strings.Split(kindsArg, ",") {
@@ -42,6 +42,9 @@ func (h *callHandler) unifiedSearch(query, kindsArg string, limit int,
 		ContextBefore:   contextBefore,
 		ContextAfter:    contextAfter,
 		SubstantiveOnly: substantiveOnly,
+		ExcludeSession:  exclude,
+		CallerSession:   caller,
+		IncludeCaller:   include,
 	}, time.Now())
 	if err != nil {
 		return fmt.Sprintf("search failed: %v", err), true, nil
