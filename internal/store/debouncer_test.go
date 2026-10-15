@@ -4,6 +4,7 @@
 package store
 
 import (
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,5 +76,44 @@ func TestDebouncerTrailingEdge(t *testing.T) {
 	time.Sleep(window * 5)
 	if got := calls.Load(); got != 2 {
 		t.Errorf("after second burst: want 2, got %d", got)
+	}
+}
+
+// While a key's callback is stalled (ingest blocked on the writer),
+// further appends must not park a goroutine each. Before the fix every
+// fired timer waited on the semaphore: a 4-minute append storm on a
+// copy of the store parked 64k goroutines.
+func TestDebouncerStalledCallbackDoesNotPileUp(t *testing.T) {
+	d := newDebouncerWithConcurrency(time.Millisecond, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	fn := func() {
+		if calls.Add(1) == 1 {
+			<-release
+		}
+	}
+	base := runtime.NumGoroutine()
+	d.enqueue("file-a", fn)
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < 2000; i++ {
+		d.enqueue("file-a", fn)
+		if i%100 == 0 {
+			time.Sleep(2 * time.Millisecond) // let timers fire
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if g := runtime.NumGoroutine() - base; g > 5 {
+		t.Fatalf("goroutines grew by %d while the callback was stalled, want <= 5", g)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for d.invocations() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("callback ran %d times, want 2 (the stalled one plus one coalesced rerun)", n)
 	}
 }
