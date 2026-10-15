@@ -90,6 +90,8 @@ func IsCompactorMarker(text string) bool {
 
 // Store is a searchable index of Claude Code transcripts.
 type Store struct {
+	imgQ imageQueue // session-image scans, bounded (image_queue.go)
+
 	writeDB    *sql.DB // SetMaxOpenConns(1) — Go-pool serialises writers
 	readDB     *sql.DB // default pool — many concurrent readers
 	dbPath     string
@@ -7334,28 +7336,8 @@ func (s *Store) ingestFile(path string) error {
 
 	// Extract and store any images from newly ingested entries.
 	// Uses a targeted query so only new entries need scanning.
-	s.goOnce("session-images", func(context.Context) error {
-		rows, err := s.readDB.Query(`
-			SELECT e.id, e.raw, COALESCE(e.timestamp, datetime('now'))
-			FROM entries_v e
-			WHERE e.session_id = ? AND e.raw LIKE '%"type":"image"%'
-			ORDER BY e.id DESC LIMIT 100`, sessionID)
-		if err != nil {
-			// Before 🎯T154 this was a bare return with no log, so a
-			// failure here was invisible.
-			return fmt.Errorf("scan session %s for images: %w", sessionID, err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id int64
-			var raw []byte
-			var ts string
-			if rows.Scan(&id, &raw, &ts) == nil {
-				ingestImagesForEntry(s, id, sessionID, raw, ts)
-			}
-		}
-		return rows.Err()
-	})
+	// Bounded and coalesced per session; see image_queue.go.
+	s.enqueueSessionImages(sessionID)
 
 	return nil
 }
@@ -8971,4 +8953,32 @@ func (s *Store) runEntriesMaterialisePhase(ctx context.Context) error {
 		slog.Info("entries usage fields materialised", "rows", ures.Rows, "updated", ures.Compressed)
 	}
 	return nil
+}
+
+// scanSessionImages extracts images from a session's newest entries.
+func (s *Store) scanSessionImages(sessionID string) error {
+	if imageScanHook != nil {
+		imageScanHook(sessionID)
+		return nil
+	}
+	rows, err := s.readDB.Query(`
+		SELECT e.id, e.raw, COALESCE(e.timestamp, datetime('now'))
+		FROM entries_v e
+		WHERE e.session_id = ? AND e.raw LIKE '%"type":"image"%'
+		ORDER BY e.id DESC LIMIT 100`, sessionID)
+	if err != nil {
+		// Before 🎯T154 this was a bare return with no log, so a
+		// failure here was invisible.
+		return fmt.Errorf("scan session %s for images: %w", sessionID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var raw []byte
+		var ts string
+		if rows.Scan(&id, &raw, &ts) == nil {
+			ingestImagesForEntry(s, id, sessionID, raw, ts)
+		}
+	}
+	return rows.Err()
 }

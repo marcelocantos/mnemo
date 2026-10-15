@@ -871,6 +871,7 @@ func runServe(ctx context.Context, addr string, implicitDefault bool, federatedA
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+	setupCrashOutput()
 
 	localListeners, err := openLocalListeners(addr, implicitDefault)
 	if err != nil {
