@@ -1882,7 +1882,11 @@ CREATE TRIGGER patterns_au AFTER UPDATE ON patterns
 			VALUES (new.rowid, new.pattern_type, new.signature, new.representative_excerpts);
 		END;
 
--- 🎯T197 stem triggers. New triggers only: the legacy trigger bodies are
+-- 🎯T197 stem triggers. Every 'delete' is gated on membership in the
+-- stem index (its docsize shadow): a row the backfill has not reached is
+-- not in the index, and an FTS5 'delete' of an unindexed rowid corrupts
+-- it ('database disk image is malformed').
+-- New triggers only: the legacy trigger bodies are
 -- untouched, so both indexes are written from the moment the schema
 -- applies. Text columns go through mnemo_text, the same expression the
 -- legacy triggers use, because an FTS rebuild would index the empty
@@ -1906,7 +1910,8 @@ CREATE TRIGGER tool_outputs_ad_stem AFTER DELETE ON tool_outputs
 		BEGIN
 			INSERT INTO tool_outputs_fts_stem(tool_outputs_fts_stem, rowid, text, session_id)
 			SELECT 'delete', old.id, mnemo_text(old.text, old.text_z), old.session_id
-			WHERE old.source != 'none';
+			WHERE old.source != 'none'
+			  AND EXISTS (SELECT 1 FROM tool_outputs_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER topic_segments_ai_stem AFTER INSERT ON topic_segments
@@ -1918,13 +1923,15 @@ CREATE TRIGGER topic_segments_ai_stem AFTER INSERT ON topic_segments
 CREATE TRIGGER topic_segments_ad_stem AFTER DELETE ON topic_segments
 		BEGIN
 			INSERT INTO topic_segments_fts_stem(topic_segments_fts_stem, rowid, label, summary)
-			VALUES ('delete', old.rowid, old.label, old.summary);
+			SELECT 'delete', old.rowid, old.label, old.summary
+			WHERE EXISTS (SELECT 1 FROM topic_segments_fts_stem_docsize ds WHERE ds.id = old.rowid);
 		END;
 
 CREATE TRIGGER topic_segments_au_stem AFTER UPDATE ON topic_segments
 		BEGIN
 			INSERT INTO topic_segments_fts_stem(topic_segments_fts_stem, rowid, label, summary)
-			VALUES ('delete', old.rowid, old.label, old.summary);
+			SELECT 'delete', old.rowid, old.label, old.summary
+			WHERE EXISTS (SELECT 1 FROM topic_segments_fts_stem_docsize ds WHERE ds.id = old.rowid);
 			INSERT INTO topic_segments_fts_stem(rowid, label, summary)
 			VALUES (new.rowid, new.label, new.summary);
 		END;
@@ -1938,13 +1945,15 @@ CREATE TRIGGER decisions_ai_stem AFTER INSERT ON decisions
 CREATE TRIGGER decisions_ad_stem AFTER DELETE ON decisions
 		BEGIN
 			INSERT INTO decisions_fts_stem(decisions_fts_stem, rowid, proposal_text, confirmation_text, repo)
-			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
+			SELECT 'delete', old.id, old.proposal_text, old.confirmation_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM decisions_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER decisions_au_stem AFTER UPDATE ON decisions
 		BEGIN
 			INSERT INTO decisions_fts_stem(decisions_fts_stem, rowid, proposal_text, confirmation_text, repo)
-			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
+			SELECT 'delete', old.id, old.proposal_text, old.confirmation_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM decisions_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO decisions_fts_stem(rowid, proposal_text, confirmation_text, repo)
 			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
 		END;
@@ -1958,13 +1967,15 @@ CREATE TRIGGER docs_ai_stem AFTER INSERT ON docs
 CREATE TRIGGER docs_ad_stem AFTER DELETE ON docs
 		BEGIN
 			INSERT INTO docs_fts_stem(docs_fts_stem, rowid, title, content, repo, kind, taxonomy)
-			VALUES ('delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy);
+			SELECT 'delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy
+			WHERE EXISTS (SELECT 1 FROM docs_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER docs_au_stem AFTER UPDATE ON docs
 		BEGIN
 			INSERT INTO docs_fts_stem(docs_fts_stem, rowid, title, content, repo, kind, taxonomy)
-			VALUES ('delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy);
+			SELECT 'delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy
+			WHERE EXISTS (SELECT 1 FROM docs_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO docs_fts_stem(rowid, title, content, repo, kind, taxonomy)
 			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
 		END;
@@ -1978,13 +1989,15 @@ CREATE TRIGGER targets_ai_stem AFTER INSERT ON targets
 CREATE TRIGGER targets_ad_stem AFTER DELETE ON targets
 		BEGIN
 			INSERT INTO targets_fts_stem(targets_fts_stem, rowid, name, description, raw_text, repo)
-			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
+			SELECT 'delete', old.id, old.name, old.description, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM targets_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER targets_au_stem AFTER UPDATE ON targets
 		BEGIN
 			INSERT INTO targets_fts_stem(targets_fts_stem, rowid, name, description, raw_text, repo)
-			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
+			SELECT 'delete', old.id, old.name, old.description, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM targets_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO targets_fts_stem(rowid, name, description, raw_text, repo)
 			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
 		END;
@@ -1998,13 +2011,15 @@ CREATE TRIGGER git_commits_ai_stem AFTER INSERT ON git_commits
 CREATE TRIGGER git_commits_ad_stem AFTER DELETE ON git_commits
 		BEGIN
 			INSERT INTO git_commits_fts_stem(git_commits_fts_stem, rowid, subject, body, repo, author_name)
-			VALUES ('delete', old.id, old.subject, old.body, old.repo, old.author_name);
+			SELECT 'delete', old.id, old.subject, old.body, old.repo, old.author_name
+			WHERE EXISTS (SELECT 1 FROM git_commits_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER git_commits_au_stem AFTER UPDATE ON git_commits
 		BEGIN
 			INSERT INTO git_commits_fts_stem(git_commits_fts_stem, rowid, subject, body, repo, author_name)
-			VALUES ('delete', old.id, old.subject, old.body, old.repo, old.author_name);
+			SELECT 'delete', old.id, old.subject, old.body, old.repo, old.author_name
+			WHERE EXISTS (SELECT 1 FROM git_commits_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO git_commits_fts_stem(rowid, subject, body, repo, author_name)
 			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
 		END;
@@ -2018,13 +2033,15 @@ CREATE TRIGGER github_prs_ai_stem AFTER INSERT ON github_prs
 CREATE TRIGGER github_prs_ad_stem AFTER DELETE ON github_prs
 		BEGIN
 			INSERT INTO github_prs_fts_stem(github_prs_fts_stem, rowid, title, body, repo, author)
-			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+			SELECT 'delete', old.id, old.title, old.body, old.repo, old.author
+			WHERE EXISTS (SELECT 1 FROM github_prs_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER github_prs_au_stem AFTER UPDATE ON github_prs
 		BEGIN
 			INSERT INTO github_prs_fts_stem(github_prs_fts_stem, rowid, title, body, repo, author)
-			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+			SELECT 'delete', old.id, old.title, old.body, old.repo, old.author
+			WHERE EXISTS (SELECT 1 FROM github_prs_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO github_prs_fts_stem(rowid, title, body, repo, author)
 			VALUES (new.id, new.title, new.body, new.repo, new.author);
 		END;
@@ -2038,13 +2055,15 @@ CREATE TRIGGER memories_ai_stem AFTER INSERT ON memories
 CREATE TRIGGER memories_ad_stem AFTER DELETE ON memories
 		BEGIN
 			INSERT INTO memories_fts_stem(memories_fts_stem, rowid, name, description, content, project)
-			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+			SELECT 'delete', old.id, old.name, old.description, old.content, old.project
+			WHERE EXISTS (SELECT 1 FROM memories_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER memories_au_stem AFTER UPDATE ON memories
 		BEGIN
 			INSERT INTO memories_fts_stem(memories_fts_stem, rowid, name, description, content, project)
-			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+			SELECT 'delete', old.id, old.name, old.description, old.content, old.project
+			WHERE EXISTS (SELECT 1 FROM memories_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO memories_fts_stem(rowid, name, description, content, project)
 			VALUES (new.id, new.name, new.description, new.content, new.project);
 		END;
@@ -2058,13 +2077,15 @@ CREATE TRIGGER plans_ai_stem AFTER INSERT ON plans
 CREATE TRIGGER plans_ad_stem AFTER DELETE ON plans
 		BEGIN
 			INSERT INTO plans_fts_stem(plans_fts_stem, rowid, content, repo, phase)
-			VALUES ('delete', old.id, old.content, old.repo, old.phase);
+			SELECT 'delete', old.id, old.content, old.repo, old.phase
+			WHERE EXISTS (SELECT 1 FROM plans_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER plans_au_stem AFTER UPDATE ON plans
 		BEGIN
 			INSERT INTO plans_fts_stem(plans_fts_stem, rowid, content, repo, phase)
-			VALUES ('delete', old.id, old.content, old.repo, old.phase);
+			SELECT 'delete', old.id, old.content, old.repo, old.phase
+			WHERE EXISTS (SELECT 1 FROM plans_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO plans_fts_stem(rowid, content, repo, phase)
 			VALUES (new.id, new.content, new.repo, new.phase);
 		END;
@@ -2078,13 +2099,15 @@ CREATE TRIGGER claude_configs_ai_stem AFTER INSERT ON claude_configs
 CREATE TRIGGER claude_configs_ad_stem AFTER DELETE ON claude_configs
 		BEGIN
 			INSERT INTO claude_configs_fts_stem(claude_configs_fts_stem, rowid, content, repo)
-			VALUES ('delete', old.id, old.content, old.repo);
+			SELECT 'delete', old.id, old.content, old.repo
+			WHERE EXISTS (SELECT 1 FROM claude_configs_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER claude_configs_au_stem AFTER UPDATE ON claude_configs
 		BEGIN
 			INSERT INTO claude_configs_fts_stem(claude_configs_fts_stem, rowid, content, repo)
-			VALUES ('delete', old.id, old.content, old.repo);
+			SELECT 'delete', old.id, old.content, old.repo
+			WHERE EXISTS (SELECT 1 FROM claude_configs_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO claude_configs_fts_stem(rowid, content, repo)
 			VALUES (new.id, new.content, new.repo);
 		END;
@@ -2098,13 +2121,15 @@ CREATE TRIGGER skills_ai_stem AFTER INSERT ON skills
 CREATE TRIGGER skills_ad_stem AFTER DELETE ON skills
 		BEGIN
 			INSERT INTO skills_fts_stem(skills_fts_stem, rowid, name, description, content)
-			VALUES ('delete', old.id, old.name, old.description, old.content);
+			SELECT 'delete', old.id, old.name, old.description, old.content
+			WHERE EXISTS (SELECT 1 FROM skills_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER skills_au_stem AFTER UPDATE ON skills
 		BEGIN
 			INSERT INTO skills_fts_stem(skills_fts_stem, rowid, name, description, content)
-			VALUES ('delete', old.id, old.name, old.description, old.content);
+			SELECT 'delete', old.id, old.name, old.description, old.content
+			WHERE EXISTS (SELECT 1 FROM skills_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO skills_fts_stem(rowid, name, description, content)
 			VALUES (new.id, new.name, new.description, new.content);
 		END;
@@ -2118,13 +2143,15 @@ CREATE TRIGGER audit_entries_ai_stem AFTER INSERT ON audit_entries
 CREATE TRIGGER audit_entries_ad_stem AFTER DELETE ON audit_entries
 		BEGIN
 			INSERT INTO audit_entries_fts_stem(audit_entries_fts_stem, rowid, summary, raw_text, repo)
-			VALUES ('delete', old.id, old.summary, old.raw_text, old.repo);
+			SELECT 'delete', old.id, old.summary, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM audit_entries_fts_stem_docsize ds WHERE ds.id = old.id);
 		END;
 
 CREATE TRIGGER audit_entries_au_stem AFTER UPDATE ON audit_entries
 		BEGIN
 			INSERT INTO audit_entries_fts_stem(audit_entries_fts_stem, rowid, summary, raw_text, repo)
-			VALUES ('delete', old.id, old.summary, old.raw_text, old.repo);
+			SELECT 'delete', old.id, old.summary, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM audit_entries_fts_stem_docsize ds WHERE ds.id = old.id);
 			INSERT INTO audit_entries_fts_stem(rowid, summary, raw_text, repo)
 			VALUES (new.id, new.summary, new.raw_text, new.repo);
 		END;

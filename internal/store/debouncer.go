@@ -23,12 +23,24 @@ type debouncer struct {
 	window  time.Duration
 	counter int64         // counts actual callback invocations; used in tests
 	sem     chan struct{} // nil = unbounded concurrency
+	// fired holds keys whose callback is waiting for a slot or running.
+	// A timer that fires for such a key marks it dirty instead of
+	// starting another goroutine; the running callback re-arms once.
+	// Without this, every append during an ingest stall parked one more
+	// goroutine on sem (64k in a 4-minute run on a copy of the store).
+	fired   map[string]bool
+	dirty   map[string]bool
+	fns     map[string]func()
+	stopped bool
 }
 
 func newDebouncer(window time.Duration) *debouncer {
 	return &debouncer{
 		timers: make(map[string]*time.Timer),
 		window: window,
+		fired:  make(map[string]bool),
+		dirty:  make(map[string]bool),
+		fns:    make(map[string]func()),
 	}
 }
 
@@ -41,6 +53,9 @@ func newDebouncerWithConcurrency(window time.Duration, maxConcurrent int) *debou
 		timers: make(map[string]*time.Timer),
 		window: window,
 		sem:    make(chan struct{}, maxConcurrent),
+		fired:  make(map[string]bool),
+		dirty:  make(map[string]bool),
+		fns:    make(map[string]func()),
 	}
 }
 
@@ -51,22 +66,64 @@ func newDebouncerWithConcurrency(window time.Duration, maxConcurrent int) *debou
 func (d *debouncer) enqueue(key string, fn func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.stopped {
+		return
+	}
+	d.fns[key] = fn // the latest fn wins, as with a reset timer
+	if d.fired[key] {
+		// A callback for key is queued or running; it reruns once.
+		d.dirty[key] = true
+		return
+	}
+	d.armLocked(key)
+}
 
+func (d *debouncer) armLocked(key string) {
 	if t, ok := d.timers[key]; ok {
 		t.Stop()
 	}
-	d.timers[key] = time.AfterFunc(d.window, func() {
+	var t *time.Timer
+	t = time.AfterFunc(d.window, func() {
+		d.mu.Lock()
+		if d.timers[key] != t || d.stopped {
+			d.mu.Unlock()
+			return // superseded or stopped
+		}
+		delete(d.timers, key)
+		d.fired[key] = true
+		d.mu.Unlock()
+		d.run(key)
+	})
+	d.timers[key] = t
+}
+
+func (d *debouncer) run(key string) {
+	for {
 		if d.sem != nil {
 			d.sem <- struct{}{}
-			defer func() { <-d.sem }()
 		}
-		fn()
-
 		d.mu.Lock()
-		delete(d.timers, key)
-		d.counter++
+		fn := d.fns[key]
 		d.mu.Unlock()
-	})
+		if fn != nil {
+			fn()
+		}
+		if d.sem != nil {
+			<-d.sem
+		}
+		d.mu.Lock()
+		d.counter++
+		if d.dirty[key] && !d.stopped {
+			delete(d.dirty, key)
+			d.mu.Unlock()
+			continue
+		}
+		delete(d.dirty, key)
+		delete(d.fired, key)
+		delete(d.fns, key)
+		d.mu.Unlock()
+		return
+	}
 }
 
 // stop cancels every pending timer so no debounced callback fires after the
@@ -76,9 +133,13 @@ func (d *debouncer) enqueue(key string, fn func()) {
 func (d *debouncer) stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.stopped = true
 	for key, t := range d.timers {
 		t.Stop()
 		delete(d.timers, key)
+	}
+	for key := range d.dirty {
+		delete(d.dirty, key)
 	}
 }
 

@@ -444,6 +444,8 @@ func (s *Store) stemOne(ctx context.Context, job stemJob, sinceCk *int64) error 
 		if stemNoYield {
 			continue
 		}
+		// Session-image scans go first: they run on ingest's behalf.
+		s.yieldToImages(ctx)
 		// 50% duty: pause about as long as the batch took, so ingest
 		// and search get the write lock back between batches.
 		pause := time.Since(start)
