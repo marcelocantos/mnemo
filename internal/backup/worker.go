@@ -206,16 +206,7 @@ func (w *Worker) attemptBackup(ctx context.Context) {
 	}
 
 	res, removed, err := CreateAndRetain(w.src, w.dir, TagDaily, w.keep, nil)
-	if err != nil {
-		slog.Error("backup worker: snapshot failed", "err", err)
-		return
-	}
-	slog.Info("backup worker: snapshot complete",
-		"path", res.Path,
-		"raw_mb", res.RawSize/(1<<20),
-		"compressed_mb", res.CompressedSize/(1<<20),
-		"elapsed", res.Elapsed.Round(time.Second),
-		"retention_removed", len(removed))
+	LogResult("backup worker", res, removed, err)
 }
 
 // isQuiescent reports whether enough time has passed since the last

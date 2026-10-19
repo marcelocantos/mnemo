@@ -568,6 +568,16 @@ hours old, and the `backup.disk` check in
 `op=backup_now`, pre-migration — prunes to the configured retention,
 which defaults to one.
 
+`op=backup_now` starts the snapshot and returns at once; a 40 GB store
+takes about 14 minutes, longer than tool-call timeouts. Poll
+`op=backup_status`, which shows the snapshot in progress and the last
+attempt's outcome; the daemon log records `backup_now: snapshot
+complete` or `snapshot failed`. Every snapshot first checks that the
+backup volume has 1.75x the database plus 1 GiB free, and skips with
+`backup: snapshot skipped` if not. The `backup.recent` check warns when
+there is no backup, the newest is over 30 hours old, or the last
+attempt failed or was skipped.
+
 `op=compactor` is the compaction diagnostic: tick counts include
 `deferred` vs `failed`, and the quarantined count excludes deferrals
 (🎯T163). A deferred tick (summariser returned a well-formed

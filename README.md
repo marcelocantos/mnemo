@@ -272,6 +272,16 @@ before the previous one is retired, and **one** snapshot is kept
 (🎯T158, 🎯T159). Older `.db.gz` snapshots stay restorable. Backups are
 reachable through `mnemo_ops` (`op=backup_status`, `op=backup_now`).
 
+`op=backup_now` starts the snapshot and returns at once; a 40 GB store
+takes about 14 minutes, longer than tool-call timeouts. Poll
+`op=backup_status`, which shows the snapshot in progress and the last
+attempt's outcome; the daemon log records `backup_now: snapshot
+complete` or `snapshot failed`. Every snapshot first checks that the
+backup volume has 1.75x the database plus 1 GiB free, and skips with
+`backup: snapshot skipped` if not. The `backup.recent` check warns when
+there is no backup, the newest is over 30 hours old, or the last
+attempt failed or was skipped.
+
 Every path that takes a snapshot applies retention — the daily worker,
 `op=backup_now`, and the pre-migration backup — and retention also runs
 on its own at startup and each cycle, so a run of failed backups or a

@@ -23,8 +23,10 @@ package backup
 import (
 	"compress/gzip"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,7 +100,49 @@ func Backup(srcPath, destPath string) (Result, error) {
 }
 
 // BackupWith is Backup plus optional progress callbacks (see BackupArgs).
-func BackupWith(srcPath, destPath string, args *BackupArgs) (_ Result, err error) {
+//
+// Before writing anything it sweeps stale scratch from the destination
+// directory and checks the volume can hold the snapshot; a snapshot that
+// cannot fit fails fast with ErrInsufficientSpace instead of filling the
+// disk. Every attempt, including a refused one, is recorded in the
+// directory's StatusFile for /health.
+func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
+	dir := filepath.Dir(destPath)
+	tag, _, _ := parseFilename(filepath.Base(destPath))
+	at := time.Now()
+	record := func(a Attempt) {
+		a.At, a.Tag = at, tag
+		if err := RecordAttempt(dir, a); err != nil {
+			slog.Warn("backup: cannot record attempt", "dir", dir, "err", err)
+		}
+	}
+	if _, err := SweepOrphans(dir, DefaultOrphanAge); err != nil {
+		slog.Warn("backup: orphan sweep before snapshot failed", "dir", dir, "err", err)
+	}
+	if err := checkSpace(srcPath, dir); err != nil {
+		slog.Error("backup: snapshot skipped", "dir", dir, "err", err)
+		record(Attempt{Skipped: errors.Is(err, ErrInsufficientSpace), Error: err.Error()})
+		return Result{}, err
+	}
+	setRunning(&Running{Path: destPath, Started: at})
+	defer setRunning(nil)
+	inner := &BackupArgs{OnStep: func(s string) {
+		setRunningStep(s)
+		if args != nil && args.OnStep != nil {
+			args.OnStep(s)
+		}
+	}}
+	res, err := backupWith(srcPath, destPath, inner)
+	if err != nil {
+		record(Attempt{Path: destPath, Error: err.Error(), Elapsed: time.Since(at)})
+		return res, err
+	}
+	record(Attempt{Path: res.Path, OK: true, RawSize: res.RawSize,
+		CompressedSize: res.CompressedSize, Elapsed: res.Elapsed})
+	return res, nil
+}
+
+func backupWith(srcPath, destPath string, args *BackupArgs) (_ Result, err error) {
 	start := time.Now()
 	step := func(s string) {
 		if args != nil && args.OnStep != nil {

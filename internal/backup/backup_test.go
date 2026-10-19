@@ -360,7 +360,14 @@ func TestInterruptedBackupLeavesNothingBehind(t *testing.T) {
 				t.Fatal("expected the injected failure to surface")
 			}
 
-			after := dirSnapshot(t, dir)
+			// The attempt record is the one file a failure is meant to
+			// leave: it is how /health learns the backup failed.
+			var after []string
+			for _, n := range dirSnapshot(t, dir) {
+				if n != StatusFile {
+					after = append(after, n)
+				}
+			}
 			if len(after) != len(before) {
 				t.Errorf("directory changed after a failed backup:\nbefore %v\nafter  %v",
 					before, after)
