@@ -472,6 +472,24 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 				u.String(), float64(u.TotalBytes)/(1<<30)))
 		}},
 
+		// Whether a usable backup exists, not what the directory costs
+		// (backup.disk). On 19 Oct 2026 the nightly run failed on a full
+		// disk, a cleanup then deleted the only snapshot, and backup.disk
+		// went on saying "backup directory is empty" as Healthy. This is
+		// the check that would have said so: no backup, a stale one, or
+		// a last attempt that failed or was skipped for lack of space.
+		diag.Check{Name: "backup.recent", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
+			s, _ := state()
+			if s == nil {
+				return diag.Healthy("no default-user store yet")
+			}
+			if cfg, err := store.LoadConfig(); err == nil && !cfg.Backup.IsEnabled() {
+				return diag.Healthy("backups disabled by config")
+			}
+			dir := filepath.Join(filepath.Dir(s.DBPath()), "backups")
+			return backupRecent(dir, time.Now())
+		}},
+
 		// 🎯T121: whether the image embedder ran or was skipped, and why,
 		// without reading the daemon log. Never fails — an absent embedder
 		// is a normal deployment, not a fault.
@@ -779,4 +797,27 @@ func walStuckDetail(s *store.Store, size int64, now time.Time) (string, bool) {
 		"WAL is %d MiB and growing, and no checkpoint has copied a single frame in %s — "+
 			"a reader is pinning the log and space cannot be reclaimed",
 		size>>20, blocked.Round(time.Minute)), true
+}
+
+// backupRecent is the backup.recent check body, split out for tests.
+func backupRecent(dir string, now time.Time) diag.CheckResult {
+	list, err := backup.List(dir)
+	if err != nil {
+		return diag.Warning(fmt.Sprintf("cannot list backups in %s: %v", dir, err),
+			"check the path exists and is readable by the daemon")
+	}
+	var last *backup.Attempt
+	if a, ok, err := backup.LastAttempt(dir); err == nil && ok {
+		last = &a
+	}
+	if r, ok := backup.InProgress(); ok && len(list) == 0 {
+		return diag.Warning(fmt.Sprintf("no backups yet; one is in progress (%s, started %s ago)",
+			filepath.Base(r.Path), now.Sub(r.Started).Round(time.Second)),
+			"wait for it to finish; `mnemo ops backup_status` shows progress")
+	}
+	healthy, detail, remediation := backup.Freshness(list, last, now, backup.MaxAge)
+	if healthy {
+		return diag.Healthy(detail)
+	}
+	return diag.Warning(detail, remediation)
 }

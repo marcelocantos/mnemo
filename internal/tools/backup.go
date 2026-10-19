@@ -5,9 +5,11 @@ package tools
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/backup"
@@ -49,10 +51,12 @@ func (h *callHandler) backupStatus() (string, bool, error) {
 	if err != nil {
 		return fmt.Sprintf("backup status failed: %v", err), true, nil
 	}
+	head := backupProgress(dir)
 	if len(list) == 0 {
-		return fmt.Sprintf("No backups found in %s.\nThe daemon's daily worker runs in the 03:00-04:00 local window; pre-migration backups fire when sqlift.Apply has a non-empty plan. Use mnemo_backup_now to trigger one manually.", dir), false, nil
+		return head + fmt.Sprintf("No backups found in %s.\nThe daemon's daily worker runs in the 03:00-04:00 local window; pre-migration backups fire when sqlift.Apply has a non-empty plan. Use mnemo_backup_now to trigger one manually.", dir), false, nil
 	}
 	var b strings.Builder
+	b.WriteString(head)
 	fmt.Fprintf(&b, "Backups in %s\n\n", dir)
 	fmt.Fprintf(&b, "%-32s %-14s %10s %12s\n", "Filename", "Tag", "Size", "Age")
 	fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 72))
@@ -82,12 +86,16 @@ func (h *callHandler) backupStatus() (string, bool, error) {
 	return b.String(), false, nil
 }
 
-// backupNow implements mnemo_backup_now: trigger an immediate backup,
+// backupNow implements mnemo_backup_now: start a snapshot and return,
 // with hourly idempotency unless force=true. Tagged Manual.
 //
-// Blocking call (~1-2 min on a multi-GB DB). The MCP framing already
-// handles long-running tool calls via JSON-RPC; the caller waits for
-// the result.
+// It returns as soon as the snapshot has started. A snapshot of a 40 GB
+// store takes about 14 minutes, longer than the CLI's 5-minute tool
+// timeout and than the tool-call timeouts of most MCP clients, so a
+// blocking call reported a timeout while the daemon carried on and
+// finished the backup unobserved (19 Oct 2026). Progress and the
+// outcome are in op=backup_status; the outcome is also logged as
+// "backup_now: snapshot complete" or "backup_now: snapshot failed".
 func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	force := false
 	if v, ok := args["force"].(bool); ok {
@@ -95,6 +103,11 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	}
 
 	dir := h.backupDir()
+	if r, ok := backup.InProgress(); ok {
+		return fmt.Sprintf("A backup is already running: %s (started %s ago, %s). "+
+			"Poll mnemo_ops op=backup_status.", filepath.Base(r.Path),
+			humanAge(time.Since(r.Started).Round(time.Second)), r.Step), false, nil
+	}
 	if !force {
 		list, err := backup.List(dir)
 		if err == nil && len(list) > 0 {
@@ -113,24 +126,40 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	if err := ensureDir(dir); err != nil {
 		return fmt.Sprintf("backup_now: cannot ensure backup dir %s: %v", dir, err), true, nil
 	}
+	// Refuse a doomed run here, synchronously, so the caller sees why.
+	// BackupWith checks again (and records the skip) for every path.
+	if need, err := backup.RequiredSpace(src); err == nil {
+		if free, ferr := backup.FreeBytes(dir); ferr == nil && free < need {
+			msg := fmt.Sprintf("backup_now: not started: %s free in %s, a snapshot needs %s",
+				humanSize(free), dir, humanSize(need))
+			slog.Error("backup_now: snapshot skipped", "err", fmt.Errorf("%w: %s", backup.ErrInsufficientSpace, msg))
+			_ = backup.RecordAttempt(dir, backup.Attempt{At: time.Now(), Tag: backup.TagManual,
+				Skipped: true, Error: msg})
+			return msg, true, nil
+		}
+	}
 
 	// CreateAndRetain, not Backup: this path used to snapshot and prune
 	// nothing, so repeated manual backups grew the directory without
 	// bound while the daily worker's retention looked healthy (🎯T158).
 	keep := backupKeep()
-	res, removed, err := backup.CreateAndRetain(src, dir, backup.TagManual, keep, nil)
-	if err != nil {
-		return fmt.Sprintf("backup_now failed: %v", err), true, nil
+	if !manualRunning.CompareAndSwap(false, true) {
+		return "A backup_now snapshot is already starting. Poll mnemo_ops op=backup_status.", false, nil
 	}
-	out := fmt.Sprintf("Backup written: %s\nRaw: %s | Compressed: %s | Elapsed: %s",
-		res.Path,
-		humanSize(res.RawSize), humanSize(res.CompressedSize),
-		res.Elapsed.Round(time.Second))
-	if len(removed) > 0 {
-		out += fmt.Sprintf("\nRetention (keep=%d) removed %d older snapshot(s).", keep, len(removed))
-	}
-	return out, false, nil
+	go func() {
+		defer manualRunning.Store(false)
+		res, removed, err := backupCreate(src, dir, backup.TagManual, keep, nil)
+		backup.LogResult("backup_now", res, removed, err)
+	}()
+	return fmt.Sprintf("Backup started in %s (keep=%d). A snapshot of this store takes several "+
+		"minutes; poll mnemo_ops op=backup_status for progress and the result.", dir, keep), false, nil
 }
+
+// manualRunning keeps two backup_now calls from racing to start.
+var manualRunning atomic.Bool
+
+// backupCreate is backup.CreateAndRetain; a var so tests can stub it.
+var backupCreate = backup.CreateAndRetain
 
 // ensureDir creates dir with 0755 if missing. Returns nil on success or
 // if dir already exists.
@@ -180,4 +209,31 @@ func humanAge(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	}
+}
+
+// backupProgress renders the running snapshot and the last recorded
+// attempt, the two things a caller of backup_now polls for.
+func backupProgress(dir string) string {
+	var b strings.Builder
+	if r, ok := backup.InProgress(); ok {
+		fmt.Fprintf(&b, "In progress: %s, started %s ago, step: %s\n",
+			filepath.Base(r.Path), humanAge(time.Since(r.Started).Round(time.Second)), r.Step)
+	}
+	if a, ok, err := backup.LastAttempt(dir); err == nil && ok {
+		ago := humanAge(time.Since(a.At).Round(time.Second))
+		switch {
+		case a.OK:
+			fmt.Fprintf(&b, "Last attempt: complete %s ago, %s (raw %s, compressed %s, %s)\n",
+				ago, filepath.Base(a.Path), humanSize(a.RawSize), humanSize(a.CompressedSize),
+				a.Elapsed.Round(time.Second))
+		case a.Skipped:
+			fmt.Fprintf(&b, "Last attempt: SKIPPED %s ago: %s\n", ago, a.Error)
+		default:
+			fmt.Fprintf(&b, "Last attempt: FAILED %s ago: %s\n", ago, a.Error)
+		}
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
 }

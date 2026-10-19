@@ -168,6 +168,9 @@ func Usage(dir string) (DiskUsage, error) {
 		if e.IsDir() {
 			continue
 		}
+		if e.Name() == StatusFile {
+			continue // a few hundred bytes of bookkeeping, not a stray
+		}
 		fi, err := e.Info()
 		if err != nil {
 			continue
