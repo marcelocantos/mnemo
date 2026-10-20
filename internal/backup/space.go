@@ -55,10 +55,33 @@ func checkSpace(srcPath, dir string) error {
 		return nil
 	}
 	if free < need {
-		return fmt.Errorf("%w: %.1f GiB free in %s, need %.1f GiB (%.2fx the database plus 1 GiB)",
-			ErrInsufficientSpace, gib(free), dir, gib(need), spaceFactor)
+		return fmt.Errorf("%w: %.1f GiB free in %s, need %.1f GiB (%.2fx the database plus 1 GiB)%s",
+			ErrInsufficientSpace, gib(free), dir, gib(need), spaceFactor, HeldBy(dir))
 	}
 	return nil
+}
+
+// HeldBy describes what the retained snapshots in dir already occupy,
+// split by pool, for a refusal message. Retention deletes the old
+// snapshot only after the new one is verified, so nothing retained
+// counts as reclaimable here: the free-space reading already has every
+// snapshot subtracted, manual ones included. Manual snapshots are no
+// longer pruned by nightly retention, so when they are what fills the
+// volume the message has to say so — no amount of waiting for the
+// schedule will free that space. Empty when dir holds no snapshots.
+func HeldBy(dir string) string {
+	u, err := Usage(dir)
+	if err != nil || u.RetainedCount == 0 {
+		return ""
+	}
+	sched := u.RetainedCount - u.ManualCount
+	s := fmt.Sprintf("; retained snapshots already hold %.1f GiB: %d daily/pre-migration",
+		gib(u.RetainedBytes), sched)
+	if u.ManualCount > 0 {
+		s += fmt.Sprintf(", %d manual (%.1f GiB, kept by keep_manual and never pruned by the "+
+			"nightly run — delete one by hand to make room)", u.ManualCount, gib(u.ManualBytes))
+	}
+	return s
 }
 
 // FreeBytes reports free bytes on the volume holding dir.

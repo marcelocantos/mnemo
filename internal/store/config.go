@@ -901,11 +901,11 @@ type BackupConfig struct {
 	// Empty → ~/.mnemo/backups.
 	Dir string `json:"dir,omitempty"`
 
-	// KeepDailies caps the number of snapshots retained across ALL tags —
-	// daily, pre-migration and manual share one pool. Older backups
-	// beyond this count are deleted after a successful run, never
-	// before, so the replacement always exists before its predecessor
-	// is removed. 0 or unset → 1.
+	// KeepDailies caps the number of daily and pre-migration snapshots
+	// retained (manual ones have their own pool, KeepManual). Older
+	// backups beyond this count are deleted after a successful run,
+	// never before, so the replacement always exists before its
+	// predecessor is removed. 0 or unset → 1.
 	//
 	// One is deliberate. At 7 the directory held ~81 GB against an
 	// 18.9 GB database — 4.3x the data it protects, scaling with it.
@@ -914,6 +914,14 @@ type BackupConfig struct {
 	// the next snapshot has already run, which is a different problem
 	// from the one this solves. Raise it if you want that window.
 	KeepDailies int `json:"keep_dailies,omitempty"`
+
+	// KeepManual caps the number of manual snapshots (mnemo_ops
+	// op=backup_now) retained, in a pool separate from KeepDailies so
+	// the nightly run can never delete one: only a newer manual
+	// snapshot pushes the oldest out. Bounded rather than unlimited
+	// because an unpruned snapshot path grows without bound at ~24 GB a
+	// time (🎯T158). 0 or unset → 2.
+	KeepManual int `json:"keep_manual,omitempty"`
 
 	// WindowStart and WindowEnd bound the local time-of-day during
 	// which the worker may take its daily snapshot. Format "HH:MM"
@@ -955,6 +963,15 @@ func (b BackupConfig) EffectiveKeepDailies() int {
 		return b.KeepDailies
 	}
 	return 1
+}
+
+// EffectiveKeepManual returns KeepManual or backup.DefaultKeepManual (2)
+// when unset.
+func (b BackupConfig) EffectiveKeepManual() int {
+	if b.KeepManual > 0 {
+		return b.KeepManual
+	}
+	return 2
 }
 
 // EffectiveWindow returns the [start, end) local time-of-day window for

@@ -6,6 +6,8 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"github.com/marcelocantos/mnemo/internal/backup"
 )
 
 // TestConfigDocsCoverEveryKey is the anti-drift ratchet for 🎯T156.
@@ -73,5 +75,21 @@ func TestDefaultRetentionIsOne(t *testing.T) {
 	// An explicit value still wins, so more history stays one edit away.
 	if got := (BackupConfig{KeepDailies: 5}).EffectiveKeepDailies(); got != 5 {
 		t.Errorf("explicit keep_dailies = %d, want 5", got)
+	}
+}
+
+// TestDefaultManualRetention pins keep_manual: manual snapshots get a
+// pool of their own, two deep by default, so the nightly run can never
+// delete one, and the config default agrees with the backup package's.
+func TestDefaultManualRetention(t *testing.T) {
+	if got := (BackupConfig{}).EffectiveKeepManual(); got != backup.DefaultKeepManual {
+		t.Errorf("default keep_manual = %d, want %d", got, backup.DefaultKeepManual)
+	}
+	if got := (BackupConfig{KeepManual: 4}).EffectiveKeepManual(); got != 4 {
+		t.Errorf("explicit keep_manual = %d, want 4", got)
+	}
+	r := (BackupConfig{KeepDailies: 3, KeepManual: 5}).Retention()
+	if r.Keep != 3 || r.KeepManual != 5 {
+		t.Errorf("Retention() = %+v, want {3 5}", r)
 	}
 }

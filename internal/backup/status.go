@@ -32,10 +32,39 @@ type Attempt struct {
 	RawSize        int64         `json:"raw_size,omitempty"`
 	CompressedSize int64         `json:"compressed_size,omitempty"`
 	Elapsed        time.Duration `json:"elapsed,omitempty"`
+	// LastDailySuccess is when the most recent successful DAILY snapshot
+	// started. Unlike the fields above it is carried forward across
+	// attempts — a later manual snapshot or a failed run does not erase
+	// it — because the worker reads it at startup to tell whether the
+	// current window has already produced its snapshot. Without it a
+	// daemon restarting inside the window (as on 20 Oct 2026, at 03:00)
+	// has no memory of the run it just made.
+	LastDailySuccess time.Time `json:"last_daily_success,omitzero"`
 }
 
-// RecordAttempt writes a to dir/StatusFile atomically.
+// lastDailySuccess reports when the most recent successful daily
+// snapshot started, as far as this record knows. A record written
+// before LastDailySuccess existed still answers when it is itself a
+// daily success.
+func (a Attempt) lastDailySuccess() time.Time {
+	t := a.LastDailySuccess
+	if a.OK && a.Tag == TagDaily && a.At.After(t) {
+		t = a.At
+	}
+	return t
+}
+
+// RecordAttempt writes a to dir/StatusFile atomically, carrying
+// LastDailySuccess forward from the previous record.
 func RecordAttempt(dir string, a Attempt) error {
+	if prev, ok, err := LastAttempt(dir); err == nil && ok {
+		if t := prev.lastDailySuccess(); t.After(a.LastDailySuccess) {
+			a.LastDailySuccess = t
+		}
+	}
+	if t := a.lastDailySuccess(); t.After(a.LastDailySuccess) {
+		a.LastDailySuccess = t
+	}
 	b, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
 		return err

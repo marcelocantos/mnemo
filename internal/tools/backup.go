@@ -29,16 +29,15 @@ func (h *callHandler) backupDir() string {
 	return filepath.Join(filepath.Dir(h.mem.DBPath()), "backups")
 }
 
-// backupKeep resolves the retention count the same way the worker does,
+// backupKeep resolves the retention policy the same way the worker does,
 // so a manual backup prunes to the configured depth rather than to a
-// number of its own. An unreadable config falls back to the same default
-// EffectiveKeepDailies applies.
-func backupKeep() int {
+// number of its own. An unreadable config falls back to the defaults.
+func backupKeep() backup.Retention {
 	cfg, err := store.LoadConfig()
 	if err != nil {
-		return store.BackupConfig{}.EffectiveKeepDailies()
+		return store.BackupConfig{}.Retention()
 	}
-	return cfg.Backup.EffectiveKeepDailies()
+	return cfg.Backup.Retention()
 }
 
 // backupStatus implements mnemo_backup_status: list backups newest-first
@@ -130,8 +129,8 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	// BackupWith checks again (and records the skip) for every path.
 	if need, err := backup.RequiredSpace(src); err == nil {
 		if free, ferr := backup.FreeBytes(dir); ferr == nil && free < need {
-			msg := fmt.Sprintf("backup_now: not started: %s free in %s, a snapshot needs %s",
-				humanSize(free), dir, humanSize(need))
+			msg := fmt.Sprintf("backup_now: not started: %s free in %s, a snapshot needs %s%s",
+				humanSize(free), dir, humanSize(need), backup.HeldBy(dir))
 			slog.Error("backup_now: snapshot skipped", "err", fmt.Errorf("%w: %s", backup.ErrInsufficientSpace, msg))
 			_ = backup.RecordAttempt(dir, backup.Attempt{At: time.Now(), Tag: backup.TagManual,
 				Skipped: true, Error: msg})
@@ -151,8 +150,9 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 		res, removed, err := backupCreate(src, dir, backup.TagManual, keep, nil)
 		backup.LogResult("backup_now", res, removed, err)
 	}()
-	return fmt.Sprintf("Backup started in %s (keep=%d). A snapshot of this store takes several "+
-		"minutes; poll mnemo_ops op=backup_status for progress and the result.", dir, keep), false, nil
+	return fmt.Sprintf("Backup started in %s (keep_manual=%d: manual snapshots are pruned only "+
+		"by newer manual ones). A snapshot of this store takes several minutes; poll mnemo_ops "+
+		"op=backup_status for progress and the result.", dir, keep.KeepManual), false, nil
 }
 
 // manualRunning keeps two backup_now calls from racing to start.

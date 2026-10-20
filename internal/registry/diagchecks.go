@@ -441,14 +441,19 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			// the files are well-formed backups, just too many of them.
 			// One extra is normal — a snapshot in flight, or one taken
 			// between prunes — so only flag a real overshoot.
-			keep := store.BackupConfig{}.EffectiveKeepDailies()
+			// Each pool is judged against its own limit: manual
+			// snapshots have a pool of their own (keep_manual).
+			r := store.BackupConfig{}.Retention()
 			if cfg, err := store.LoadConfig(); err == nil {
-				keep = cfg.Backup.EffectiveKeepDailies()
+				r = cfg.Backup.Retention()
 			}
-			if u.RetainedCount > keep+1 {
+			scheduled := u.RetainedCount - u.ManualCount
+			if scheduled > r.Keep+1 || u.ManualCount > r.KeepManual+1 {
 				return diag.Warning(
-					fmt.Sprintf("backup directory holds %d snapshots (%.1f GiB) with retention "+
-						"set to keep=%d", u.RetainedCount, float64(u.RetainedBytes)/(1<<30), keep),
+					fmt.Sprintf("backup directory holds %d snapshots (%.1f GiB: %d daily/pre-migration, "+
+						"%d manual) with retention set to keep=%d, keep_manual=%d",
+						u.RetainedCount, float64(u.RetainedBytes)/(1<<30), scheduled, u.ManualCount,
+						r.Keep, r.KeepManual),
 					"every snapshot path prunes on completion and the worker prunes again each "+
 						"cycle, so a persistent overshoot means retention is failing — check the "+
 						"daemon log for 'retention failed', and file permissions on the directory")

@@ -64,7 +64,7 @@ func TestBackupInsufficientSpaceSkipsAndRecords(t *testing.T) {
 	freeBytesFn = func(string) (int64, error) { return 1 << 20, nil }
 	defer func() { freeBytesFn = freeBytes }()
 
-	_, _, err := CreateAndRetain(src, dir, TagDaily, 1, nil)
+	_, _, err := CreateAndRetain(src, dir, TagDaily, Retention{Keep: 1}, nil)
 	if !errors.Is(err, ErrInsufficientSpace) {
 		t.Fatalf("err = %v, want ErrInsufficientSpace", err)
 	}
@@ -91,7 +91,7 @@ func TestBackupRecordsSuccessAndLogsComplete(t *testing.T) {
 	src := seedDB(t, 50)
 	dir := t.TempDir()
 	logs := captureLog(t)
-	res, removed, err := CreateAndRetain(src, dir, TagManual, 1, nil)
+	res, removed, err := CreateAndRetain(src, dir, TagManual, Retention{Keep: 1}, nil)
 	LogResult("backup_now", res, removed, err)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestBackupFailureRecorded(t *testing.T) {
 	if err := os.WriteFile(src, []byte("generic bytes that are not sqlite"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := CreateAndRetain(src, dir, TagDaily, 1, nil); err == nil {
+	if _, _, err := CreateAndRetain(src, dir, TagDaily, Retention{Keep: 1}, nil); err == nil {
 		t.Fatal("snapshot of a non-database succeeded")
 	}
 	a, ok, _ := LastAttempt(dir)
@@ -154,7 +154,7 @@ func TestBackupSweepsOrphanJournalBeforeSnapshot(t *testing.T) {
 	}
 	fresh := filepath.Join(dir, ".backup-777.db-journal") // too young to touch
 	os.WriteFile(fresh, nil, 0o644)
-	if _, _, err := CreateAndRetain(src, dir, TagDaily, 1, nil); err != nil {
+	if _, _, err := CreateAndRetain(src, dir, TagDaily, Retention{Keep: 1}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range []string{".backup-186272418.db-journal", ".backup-555.db"} {

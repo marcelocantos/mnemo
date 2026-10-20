@@ -7,6 +7,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -181,7 +183,7 @@ func TestGCKeepsOnlyMostRecent(t *testing.T) {
 		}
 	}
 
-	removed, err := GCOldest(dir, 3)
+	removed, err := GCOldest(dir, Retention{Keep: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +210,7 @@ func TestGCNoOpWhenUnderKeep(t *testing.T) {
 		path := filepath.Join(dir, Filename(TagDaily, time.Now().Add(time.Duration(i)*time.Hour)))
 		os.WriteFile(path, []byte("fake"), 0o644)
 	}
-	removed, err := GCOldest(dir, 7)
+	removed, err := GCOldest(dir, Retention{Keep: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +230,7 @@ func TestGCMixedTagsSharedPool(t *testing.T) {
 	}
 
 	// Keep 3 — the pre-migration (oldest) and one daily should go.
-	removed, err := GCOldest(dir, 3)
+	removed, err := GCOldest(dir, Retention{Keep: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,11 +330,13 @@ func TestParseFilenameSplitsLastDash(t *testing.T) {
 // ones only covers damage noticed after the next snapshot has run.
 func TestGCKeepsOneAndOnlyTheNewest(t *testing.T) {
 	dir := t.TempDir()
-	// Oldest to newest, across tags, since all tags share one pool.
+	// Oldest to newest, across tags. Daily and pre-migration share the
+	// keep pool; the manual snapshot is in a pool of its own and is
+	// checked separately (window_test.go), so it is left out here.
 	names := []string{
 		"mnemo-daily-20260101T000000Z.db.gz",
 		"mnemo-pre-migration-20260102T000000Z.db.gz",
-		"mnemo-manual-20260103T000000Z.db.gz",
+		"mnemo-daily-20260103T000000Z.db.gz",
 		"mnemo-daily-20260104T000000Z.db.gz",
 	}
 	for _, n := range names {
@@ -340,7 +344,7 @@ func TestGCKeepsOneAndOnlyTheNewest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	removed, err := GCOldest(dir, 1)
+	removed, err := GCOldest(dir, Retention{Keep: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +395,7 @@ func TestRetentionSpansBothFormats(t *testing.T) {
 			"one retention will never delete", len(list), len(names), namesOf(list))
 	}
 
-	removed, err := GCOldest(dir, 1)
+	removed, err := GCOldest(dir, Retention{Keep: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +442,7 @@ func TestCreateAndRetainPrunes(t *testing.T) {
 		}
 	}
 
-	res, removed, err := CreateAndRetain(src, dir, TagManual, 1, nil)
+	res, removed, err := CreateAndRetain(src, dir, TagDaily, Retention{Keep: 1}, nil)
 	if err != nil {
 		t.Fatalf("CreateAndRetain: %v", err)
 	}
@@ -457,6 +461,32 @@ func TestCreateAndRetainPrunes(t *testing.T) {
 	if list[0].Path != res.Path {
 		t.Errorf("kept %s, want the snapshot just written (%s)", list[0].Path, res.Path)
 	}
+
+	// A manual snapshot prunes too — its own pool, not the daily one.
+	for _, n := range []string{
+		"mnemo-manual-20260103T000000Z.db.zst",
+		"mnemo-manual-20260104T000000Z.db.zst",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	man, removed, err := CreateAndRetain(src, dir, TagManual, Retention{Keep: 1, KeepManual: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || filepath.Base(removed[0]) != "mnemo-manual-20260103T000000Z.db.zst" {
+		t.Errorf("manual retention removed %v, want only the oldest manual", removed)
+	}
+	list, _ = List(dir)
+	got := namesOf(list)
+	want := []string{filepath.Base(man.Path), filepath.Base(res.Path), "mnemo-manual-20260104T000000Z.db.zst"}
+	// The two new snapshots can share a second, so compare as sets.
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("after manual snapshot kept %v, want %v", got, want)
+	}
 }
 
 // TestCreateAndRetainKeepFloor stops a zero or negative keep from being
@@ -465,7 +495,7 @@ func TestCreateAndRetainKeepFloor(t *testing.T) {
 	src := seedDB(t, 5)
 	for _, keep := range []int{0, -1} {
 		dir := t.TempDir()
-		res, _, err := CreateAndRetain(src, dir, TagDaily, keep, nil)
+		res, _, err := CreateAndRetain(src, dir, TagDaily, Retention{Keep: keep}, nil)
 		if err != nil {
 			t.Fatalf("keep=%d: %v", keep, err)
 		}
@@ -501,7 +531,7 @@ func TestHousekeepRunsWithoutABackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := &Worker{dir: dir, keep: 1}
+	w := &Worker{dir: dir, retention: Retention{Keep: 1}}
 	w.housekeep() // no backup taken, deliberately
 
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
@@ -525,11 +555,11 @@ func TestBackupsInTheSameSecondDoNotCollide(t *testing.T) {
 	src := seedDB(t, 10)
 	dir := t.TempDir()
 
-	first, _, err := CreateAndRetain(src, dir, TagManual, 5, nil)
+	first, _, err := CreateAndRetain(src, dir, TagManual, Retention{Keep: 5}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := CreateAndRetain(src, dir, TagManual, 5, nil)
+	second, _, err := CreateAndRetain(src, dir, TagManual, Retention{Keep: 5}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
