@@ -986,11 +986,13 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		return
 	}
 	keep := bcfg.EffectiveKeepDailies()
+	keepManual := bcfg.EffectiveKeepManual()
 
 	w, err := backup.NewWorker(backup.Config{
 		SrcPath:     e.store.DBPath(),
 		Dir:         dir,
 		Keep:        keep,
+		KeepManual:  keepManual,
 		WindowStart: winStart,
 		WindowEnd:   winEnd,
 		Quiescence:  quiescence,
@@ -1001,7 +1003,7 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		return
 	}
 	logger.Info("backup: worker starting",
-		"dir", dir, "keep", keep,
+		"dir", dir, "keep", keep, "keep_manual", keepManual,
 		"window_start", winStart, "window_end", winEnd,
 		"quiescence_min", quiescence)
 	e.workers.Add(1)

@@ -150,6 +150,8 @@ type DiskUsage struct {
 	TotalBytes    int64 // every file in the directory
 	RetainedBytes int64 // files retention recognises as backups
 	RetainedCount int
+	ManualBytes   int64 // the part of RetainedBytes in manual snapshots
+	ManualCount   int
 	OtherBytes    int64 // TotalBytes - RetainedBytes: scratch, orphans, strays
 	OtherCount    int
 }
@@ -176,9 +178,13 @@ func Usage(dir string) (DiskUsage, error) {
 			continue
 		}
 		u.TotalBytes += fi.Size()
-		if _, _, ok := parseFilename(e.Name()); ok {
+		if tag, _, ok := parseFilename(e.Name()); ok {
 			u.RetainedBytes += fi.Size()
 			u.RetainedCount++
+			if tag == TagManual {
+				u.ManualBytes += fi.Size()
+				u.ManualCount++
+			}
 		} else {
 			u.OtherBytes += fi.Size()
 			u.OtherCount++

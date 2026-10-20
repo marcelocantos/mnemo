@@ -1039,16 +1039,21 @@ var preMigrationBackup = func(srcPath, destPath string, args *backup.BackupArgs)
 	return backup.BackupWith(srcPath, destPath, args)
 }
 
-// backupKeepFromConfig resolves the retention depth for backups taken
-// outside the worker. Reading config here rather than threading it down
-// keeps the migration path independent of daemon wiring; an unreadable
-// config falls back to the same default the worker would use.
-func backupKeepFromConfig() int {
+// backupRetentionFromConfig resolves the retention policy for backups
+// taken outside the worker. Reading config here rather than threading it
+// down keeps the migration path independent of daemon wiring; an
+// unreadable config falls back to the same defaults the worker would use.
+func backupRetentionFromConfig() backup.Retention {
 	cfg, err := LoadConfig()
 	if err != nil {
-		return BackupConfig{}.EffectiveKeepDailies()
+		cfg = Config{}
 	}
-	return cfg.Backup.EffectiveKeepDailies()
+	return cfg.Backup.Retention()
+}
+
+// Retention is the backup.Retention policy this config describes.
+func (b BackupConfig) Retention() backup.Retention {
+	return backup.Retention{Keep: b.EffectiveKeepDailies(), KeepManual: b.EffectiveKeepManual()}
 }
 
 // schemaPrep is the cheap result of prepareSchema: either the DB is at the
@@ -1185,7 +1190,7 @@ func upgradeSchemaWithGate(dbPath, desiredSQL string, applyMu *sync.Mutex) error
 				// never (🎯T158). The snapshot just written is the
 				// newest, so retention cannot discard the insurance it
 				// was taken for.
-				keep := backupKeepFromConfig()
+				keep := backupRetentionFromConfig()
 				if removed, gcErr := backup.GCOldest(backupDir, keep); gcErr != nil {
 					slog.Warn("pre-migration retention failed; old backups may accumulate",
 						"dir", backupDir, "err", gcErr)

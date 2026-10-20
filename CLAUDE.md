@@ -244,9 +244,16 @@ default, and neither reclaims disk without a VACUUM.
 
 ## Backups
 
-One snapshot is retained (`backup.keep_dailies`, default 1), written as
-multithreaded-zstd `.db.zst` and verified by decompression before the
-previous one is retired. `backup.Decompress` reads both `.db.zst` and
+One daily snapshot is retained (`backup.keep_dailies`, default 1,
+shared with pre-migration snapshots), written as multithreaded-zstd
+`.db.zst` and verified by decompression before the previous one is
+retired. Manual snapshots (`op=backup_now`) are a separate pool
+(`backup.keep_manual`, default 2): the nightly run never deletes one,
+only a newer manual snapshot does. The worker takes one snapshot per
+nightly window; the start of the last daily success is persisted as
+`last_daily_success` in `.last-attempt.json`, so a restart inside the
+window does not run it again, while a failure inside the window is still
+retried in what remains of it. `backup.Decompress` reads both `.db.zst` and
 `.db.gz`, so restoring never needs the zstd CLI.
 
 Retention is not optional per call site: take snapshots through

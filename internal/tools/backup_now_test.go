@@ -24,7 +24,7 @@ func TestBackupNowReturnsImmediatelyAndLogs(t *testing.T) {
 
 	release := make(chan struct{})
 	done := make(chan struct{})
-	backupCreate = func(src, dir string, tag backup.Tag, keep int, args *backup.BackupArgs) (backup.Result, []string, error) {
+	backupCreate = func(src, dir string, tag backup.Tag, keep backup.Retention, args *backup.BackupArgs) (backup.Result, []string, error) {
 		<-release
 		return backup.Result{Path: dir + "/mnemo-manual-generic.db.zst", RawSize: 3 << 20, CompressedSize: 1 << 20, Elapsed: time.Second}, nil, nil
 	}

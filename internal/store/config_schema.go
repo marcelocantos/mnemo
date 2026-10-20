@@ -135,10 +135,13 @@ var configDocs = map[string]configFieldDoc{
 	},
 	"backup": {
 		summary: "Daily backup snapshots: retention, window, quiescence.",
-		detail: "keep_dailies defaults to 1 and is shared across all tags " +
-			"(daily, pre-migration, manual). The replacement is always written " +
-			"and verified before its predecessor is deleted, so the peak on " +
-			"disk is two snapshots plus the uncompressed VACUUM temp.",
+		detail: "keep_dailies defaults to 1 and covers daily and pre-migration " +
+			"snapshots; keep_manual defaults to 2 and is a separate pool for " +
+			"backup_now snapshots, which the nightly run never deletes. The " +
+			"replacement is always written and verified before its predecessor " +
+			"is deleted, so the peak on disk is the retained snapshots plus one " +
+			"more and the uncompressed VACUUM temp. The nightly worker takes one " +
+			"snapshot per window, remembered across restarts.",
 	},
 	"connection_sweep": {
 		summary: "Sweep interval and staleness threshold for daemon connection records.",
