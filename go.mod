@@ -2,6 +2,8 @@ module github.com/marcelocantos/mnemo
 
 go 1.26.1
 
+toolchain go1.27.3
+
 require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0 // indirect
