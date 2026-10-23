@@ -4440,7 +4440,7 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 
 // Watch watches transcript and context trees for new/modified files and
 // ingests them in realtime (🎯T142). It uses platform tree watching
-// (FSEvents on Darwin; fsnotify dir watches on Linux/Windows) plus a
+// (FSEvents on Darwin; fsnotify dir watches on Windows) plus a
 // bounded safety poll — never recursive kqueue open-every-file.
 //
 // It runs until ctx is cancelled (graceful drain, 🎯T97.1). Returning

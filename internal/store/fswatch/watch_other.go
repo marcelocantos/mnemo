@@ -17,7 +17,7 @@ import (
 )
 
 // fsnotifyWatcher walks roots and Add's directories up to MaxDirWatches.
-// On Linux this is inotify (no per-file FD). On Windows, ReadDirectoryChangesW.
+// On Windows this is ReadDirectoryChangesW (no per-file FD).
 // Cap fail-soft: stop adding dirs, set CapHit, keep running.
 type fsnotifyWatcher struct {
 	cfg      Config

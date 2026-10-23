@@ -1,4 +1,4 @@
-.PHONY: bullseye build test test-scale snapshot vet fmt-check
+.PHONY: bullseye build test test-scale e2e snapshot vet fmt-check release
 
 # Recipes use bash so pipefail / $$status preserve go test's exit
 # through the output-trimming step (🎯T194).
@@ -51,8 +51,8 @@ build:
 	go build -tags "$(BUILD_TAGS)" -o bin/mnemo .
 
 # 🎯T73: `make test` runs Tier 1 + Tier 2 (default build tag set).
-# Tier 3 scale tests are deliberately excluded so default CI stays
-# fast and never reaches at the user's real data.
+# Tier 3 scale tests are deliberately excluded so the default gate
+# stays fast and never reaches at the user's real data.
 test:
 	go test -tags "$(BUILD_TAGS)" ./...
 
@@ -66,6 +66,21 @@ test-scale:
 	  echo "Run \`make snapshot\` first and export the resulting path."; \
 	fi
 	go test -tags "$(SCALE_TAGS)" ./...
+
+# Daemon-subprocess e2e suite (internal/e2e), gated behind MNEMO_E2E=1
+# so `go test ./...` stays fast. The harness builds its own mnemo
+# binary. Run it locally before releases or after touching the
+# transport/daemon lifecycle; nothing schedules it.
+e2e:
+	MNEMO_E2E=1 go test -tags "$(BUILD_TAGS)" -timeout=10m -v -run . ./internal/e2e/
+
+# Local release (replaces the GitHub Actions release workflow). See
+# docs/releasing.md. DRY_RUN=1 builds and packages every artifact into
+# dist/vVERSION/ but never tags, uploads or pushes the Homebrew tap.
+# (Not `make --dry-run`: that is make's own flag.)
+release:
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=x.y.z [DRY_RUN=1] [NOTES=file]" >&2; exit 2; }
+	scripts/release.sh $(if $(DRY_RUN),--dry-run) $(if $(NOTES),--notes $(NOTES)) $(VERSION)
 
 # 🎯T73: invoke the snapshot helper. Prints `MNEMO_HOME=<path>` on
 # its last stdout line for `eval $(make snapshot)` workflows.

@@ -93,7 +93,7 @@ func (r *checkResult) add(line string) { r.lines = append(r.lines, line) }
 func cmdDiagnose(args []string) {
 	fs := flag.NewFlagSet("diagnose", flag.ExitOnError)
 	addr := fs.String("addr", defaultAddr, "HTTP listen address to probe")
-	logPath := fs.String("log", "", "mnemo log path to tail (default: brew prefix on macOS, /var/log on Linux)")
+	logPath := fs.String("log", "", "mnemo log path to tail (default: brew prefix on macOS, %ProgramData% on Windows)")
 	_ = fs.Parse(args)
 
 	fmt.Printf("mnemo diagnose — %s/%s, %s\n",
@@ -152,7 +152,7 @@ func checkDaemon(addr string) checkResult {
 	if listener.pid == 0 {
 		r.status = statusFail
 		r.add(fmt.Sprintf("nothing listening on %s — daemon is not running", addr))
-		r.add("start with `brew services start mnemo` (macOS/Linux) or check the Windows Service")
+		r.add("start with `brew services start mnemo` (macOS) or check the Windows Service")
 		return r
 	}
 	r.add(fmt.Sprintf("PID %d listening on %s", listener.pid, addr))
@@ -186,7 +186,7 @@ type listenerInfo struct {
 }
 
 // findListener returns the first PID listening on the given TCP port,
-// plus local addresses when detectable. Uses lsof (macOS/Linux) and
+// plus local addresses when detectable. Uses lsof (macOS) and
 // netstat on Windows.
 func findListener(addr string) listenerInfo {
 	port := listenPort(addr)
@@ -259,20 +259,10 @@ func isWildcardListenAddr(addr string) bool {
 }
 
 // readProcessEnv extracts a single env var from a running process.
-// macOS: `ps eww PID`. Linux: /proc/PID/environ. Windows: skipped.
+// macOS: `ps eww PID`. Windows: skipped.
 func readProcessEnv(pid int, key string) string {
 	prefix := key + "="
 	switch runtime.GOOS {
-	case "linux":
-		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
-		if err != nil {
-			return ""
-		}
-		for _, entry := range bytes.Split(raw, []byte{0}) {
-			if bytes.HasPrefix(entry, []byte(prefix)) {
-				return string(entry[len(prefix):])
-			}
-		}
 	case "darwin":
 		out, err := exec.Command("ps", "eww", "-o", "command=", fmt.Sprintf("%d", pid)).Output()
 		if err != nil {
@@ -842,15 +832,6 @@ func guessLogPath() string {
 		for _, p := range []string{
 			"/opt/homebrew/var/log/mnemo.log",
 			"/usr/local/var/log/mnemo.log",
-		} {
-			if pathExists(p) {
-				return p
-			}
-		}
-	case "linux":
-		for _, p := range []string{
-			"/home/linuxbrew/.linuxbrew/var/log/mnemo.log",
-			"/var/log/mnemo.log",
 		} {
 			if pathExists(p) {
 				return p

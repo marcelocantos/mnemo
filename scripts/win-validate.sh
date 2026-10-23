@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 🎯T100: "local vm ci" — build + test mnemo on Windows on the Parallels
-# VM, used as the windows-vm-validated pre-merge gate (replacing the slow
-# required Windows cloud-CI check).
+# VM. This is the windows-vm-validated gate of the PR-free flow: a commit
+# goes to master only after `make bullseye` (macOS) and this both pass.
 #
 # Validates the *pushed* current commit: push your branch first, then run
 # this. It scp's scripts/win-validate.ps1 to the VM and runs it (clone the
@@ -18,7 +18,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 sha="$(git rev-parse HEAD)"
 
-# The gate validates what will merge, so the commit must be on origin.
+# The VM clones the commit from GitHub, so it must be on origin.
 if [ -z "$(git branch -r --contains "$sha" 2>/dev/null)" ]; then
   echo "win-validate: HEAD ${sha:0:12} is not on any remote branch — push first." >&2
   exit 2
