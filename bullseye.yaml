@@ -2597,7 +2597,7 @@ targets:
     value: 0.0
     cost: 0.0
     acceptance:
-    - mnemo serve listens on a second configurable address (default :19420; flag `--federated-addr`; `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
+    - mnemo serve listens on a second configurable address (opt-in via `--federated-addr=:19420`; default `""` disables) using the same MCP streamable-HTTP transport but wrapped in mTLS using the endpoint material from T15.1.
     - 'Only read-shaped tools are exposed on the federated endpoint: mnemo_search, mnemo_sessions, mnemo_read_session, mnemo_recent_activity, mnemo_decisions, mnemo_commits, mnemo_prs, mnemo_memories, mnemo_skills, mnemo_configs, mnemo_usage, mnemo_audit, mnemo_targets, mnemo_plans, mnemo_who_ran, mnemo_ci, mnemo_query, mnemo_repos, mnemo_stats, mnemo_chain, mnemo_decisions, mnemo_images, mnemo_discover_patterns, mnemo_status. Write-shaped / control tools (mnemo_self, template writes, describers control, etc.) are absent from the federated tool set.'
     - TLS layer rejects connections whose client cert is not in the trusted-peer set (config from T15.1).
     - mnemo_self nonce binding is NOT exposed — federated clients are a different identity domain.

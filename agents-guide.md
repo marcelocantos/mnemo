@@ -747,7 +747,8 @@ tools whose result format does not merge into buckets (`mnemo_ops`,
 `mnemo_query`, `mnemo_stats`, `mnemo_status`, `mnemo_vault`,
 `mnemo_thread`, `mnemo_repos`, `mnemo_read_session`).
 
-Setup is documented in the README under "Federation across linked
+The inbound mTLS listener is off by default; enable it with
+`--federated-addr=:19420`. Setup is documented in the README under "Federation across linked
 instances" — `mnemo print-endpoint`, `mnemo print-federated-addr`,
 `mnemo ping-peer <name>` are the operator-facing CLI tools.
 

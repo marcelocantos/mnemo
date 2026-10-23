@@ -519,7 +519,9 @@ degradation under peer failure.
 
 ### Setup
 
-On each host:
+On each host, start the daemon with `mnemo --federated-addr=:19420` to enable
+the mTLS listener (disabled by default). Choose a different bind address if
+needed, and use the same port when sharing the URL below.
 
 1. Generate the local mTLS material and print the public cert:
 
@@ -590,7 +592,7 @@ plus read-shaped ones whose result format does not merge into buckets
 (`mnemo_ops`, `mnemo_query`, `mnemo_stats`, `mnemo_status`,
 `mnemo_vault`, `mnemo_thread`, `mnemo_repos`, `mnemo_read_session`).
 
-When `linked_instances` is empty or absent, federation is disabled and
+When `linked_instances` is empty or absent, outbound federation is disabled and
 all tools return their original local-only response shape unchanged
 (backwards-compatible).
 
