@@ -14,15 +14,15 @@ schema_version: 1
 repo: mnemo
 aspires: 3
 floors:            # per-dimension held-tier ratchet; below floor => DRIFT
-  correctness: 2   # CI go test (ubuntu+windows) + e2e nightly + local scale/win-validate
+  correctness: 2   # make bullseye (macOS) + win-validate (Windows VM) per push; make e2e / test-scale
   security: 2      # go.sum pin + Apple Developer ID codesign step; no scanners
-  quality: 1       # make vet exists; gofmt locally clean via make bullseye, not CI-gated
+  quality: 1       # make vet exists; gofmt + vet gated by make bullseye before every push
   deps: 2          # go.sum committed; no Dependabot
-  release: 2       # CI-built multi-arch + Homebrew + Windows installer; no CHANGELOG
-  governance: 2    # Apache-2.0 + NOTICE + squash-only; no SECURITY.md / branch protection
+  release: 2       # local make release: darwin-arm64 + windows zips/installers + Homebrew; no CHANGELOG
+  governance: 2    # Apache-2.0 + NOTICE; PR-free direct-to-master flow; no SECURITY.md
   build: 2         # Makefile + pinned Go + go.sum + make bullseye
   docs: 2          # agents-guide + STABILITY.md + testing.md; no md-link check
-  perf: 0          # one Benchmark + live scanbench; no make bench / CI bench
+  perf: 0          # one Benchmark + live scanbench; no make bench
   vcs: 1           # Git LFS for image fixtures; no committed git hooks
   agent: 2         # CLAUDE.md + bullseye.yaml + --help-agent; no AGENTS.md
 
@@ -36,12 +36,12 @@ items:
   # ============================== CORRECTNESS =============================
   - id: correctness.tests
     dim: correctness
-    desc: go test -tags sqlite_fts5 ./... runs on every push/PR (ci.yml Test step)
-    state: enforced
+    desc: go test -tags sqlite_fts5 ./... runs in `make bullseye` before every push to master
+    state: present
     cadence: continuous
     enforce: blocking
     tier: 1
-    evidence: {ci_step: {workflow: ci.yml, name: Test}}
+    evidence: {make_target: bullseye}
 
   - id: correctness.make-test
     dim: correctness
@@ -52,23 +52,23 @@ items:
     tier: 1
     evidence: {make_target: test}
 
-  - id: correctness.ci-matrix
+  - id: correctness.platform-matrix
     dim: correctness
-    desc: CI test job runs on ubuntu-latest and windows-latest
+    desc: Tests run on darwin/arm64 (make bullseye) and windows/arm64 (scripts/win-validate.sh) before every push
     state: present
     cadence: continuous
     enforce: blocking
     tier: 2
-    evidence: {ci_job: "ci.yml#test"}
+    evidence: {file: {path: scripts/win-validate.ps1, matches: 'go test -tags sqlite_fts5'}}
 
-  - id: correctness.e2e-nightly
+  - id: correctness.e2e
     dim: correctness
-    desc: Daemon-subprocess e2e suite runs on a nightly schedule (MNEMO_E2E=1)
+    desc: Daemon-subprocess e2e suite runs locally via `make e2e` (MNEMO_E2E=1); not scheduled
     state: present
-    cadence: periodic:1d
-    enforce: warning
+    cadence: per-release
+    enforce: informational
     tier: 2
-    evidence: {ci_job: "e2e-nightly.yml#e2e"}
+    evidence: {make_target: e2e}
 
   - id: correctness.scale
     dim: correctness
@@ -81,44 +81,40 @@ items:
 
   - id: correctness.win-validate
     dim: correctness
-    desc: Local Windows ARM64 VM gate (scripts/win-validate.sh) for the pre-merge path
+    desc: Local Windows ARM64 VM gate (scripts/win-validate.sh) before every push to master
     state: present
     cadence: continuous
-    enforce: warning
+    enforce: blocking
     tier: 2
     evidence: {file: {path: scripts/win-validate.sh}}
 
   - id: correctness.release-multitarget
     dim: correctness
-    desc: Release builds darwin-arm64, linux-amd64/arm64, windows-amd64/arm64
+    desc: Release builds darwin-arm64 and windows-amd64/arm64 (Linux is not a target)
     state: present
     cadence: per-release
     enforce: warning
     tier: 2
-    evidence: {ci_job: "release.yml#build"}
+    evidence: {file: {path: scripts/release.sh, matches: 'windows-arm64-setup\.exe'}}
 
-  - id: correctness.macos-ci
+  - id: correctness.macos-tests
     dim: correctness
-    desc: Unit tests run on macos-latest in GitHub Actions (primary Homebrew target)
-    state: planned
+    desc: Unit tests run on darwin/arm64 (primary Homebrew target) via make bullseye on the dev host
+    state: present
     cadence: continuous
-    enforce: warning
+    enforce: blocking
     tier: 3
-    reason: >-
-      CI test matrix is ubuntu-latest + windows-latest only. darwin/arm64 is the
-      primary Homebrew ship target and is tested locally, not in GHA.
-    evidence:
-      absent: {file: {path: .github/workflows/ci.yml, matches: 'macos-latest'}}
+    evidence: {make_target: bullseye}
 
   - id: correctness.race
     dim: correctness
-    desc: go test -race runs in CI
+    desc: go test -race runs in the local gate
     state: planned
     cadence: continuous
     enforce: warning
     tier: 3
-    reason: CI runs go test -tags sqlite_fts5 without -race (CGO SQLite; long pole already).
-    evidence: {absent: {ci_step: {workflow: ci.yml, name: Race}}}
+    reason: make bullseye runs go test -tags sqlite_fts5 without -race (CGO SQLite; long pole already).
+    evidence: {absent: {file: {path: Makefile, matches: 'go test .*-race'}}}
 
   - id: correctness.fuzz
     dim: correctness
@@ -147,7 +143,7 @@ items:
     cadence: per-release
     enforce: warning
     tier: 2
-    evidence: {ci_step: {workflow: release.yml, name: Sign macOS binary (Developer ID)}}
+    evidence: {file: {path: scripts/release.sh, matches: 'codesign --force --options runtime'}}
 
   - id: security.secret-scan-github
     dim: security
@@ -163,17 +159,17 @@ items:
 
   - id: security.gitleaks
     dim: security
-    desc: Secret scanning (gitleaks) in pre-commit and/or CI
+    desc: Secret scanning (gitleaks) in pre-commit or the local gate
     state: planned
     cadence: continuous
     enforce: blocking
     tier: 3
-    reason: No gitleaks config or CI job; GitHub secret scanning is also off.
+    reason: No gitleaks config or hook; GitHub secret scanning is also off.
     evidence: {absent: {scanner: {tool: gitleaks}}}
 
   - id: security.dep-vuln-scan
     dim: security
-    desc: govulncheck (or equivalent) scans the module graph in CI
+    desc: govulncheck (or equivalent) scans the module graph
     state: planned
     cadence: periodic:30d
     enforce: warning
@@ -189,20 +185,20 @@ items:
     enforce: warning
     tier: 3
     reason: CodeQL is not enabled; go vet is the only static check, and only locally.
-    evidence: {absent: {ci_job: "ci.yml#codeql"}}
+    evidence: {absent: {scanner: {tool: codeql}}}
 
   - id: security.actions-perms
     dim: security
     desc: GitHub Actions default token permissions scoped to least privilege
-    state: planned
+    state: skipped
     cadence: once-must-hold
-    enforce: warning
+    enforce: informational
     tier: 3
     reason: >-
-      ci.yml has no top-level permissions block (inherits repo default).
-      release.yml sets contents: write for asset upload.
+      No GitHub Actions workflows: gates, e2e and releases all run locally
+      (PR-free flow). Re-evaluate if a workflow is ever reintroduced.
     evidence:
-      absent: {file: {path: .github/workflows/ci.yml, matches: '(?m)^permissions:'}}
+      absent: {file: {path: .github/workflows}}
 
   - id: security.signed-releases
     dim: security
@@ -212,15 +208,15 @@ items:
     enforce: informational
     tier: 3
     reason: >-
-      Apple Developer ID codesign covers the darwin binary only (and is a
-      no-op until secrets exist). No cosign/sigstore attestation; Homebrew
-      skip_checksum is true.
-    evidence: {absent: {ci_step: {workflow: release.yml, name: Cosign}}}
+      Apple Developer ID codesign covers the darwin binary only (and is
+      skipped when the release host keychain has no Developer ID identity).
+      No cosign/sigstore attestation; the Homebrew formula pins sha256.
+    evidence: {absent: {file: {path: scripts/release.sh, matches: 'cosign'}}}
 
   # ============================== CODE QUALITY ============================
   - id: quality.vet
     dim: quality
-    desc: "`make vet` exists (go vet -tags sqlite_fts5 ./...); not a CI step"
+    desc: "`make vet` exists (go vet -tags sqlite_fts5 ./...); also run by make bullseye"
     state: present
     cadence: continuous
     enforce: warning
@@ -229,24 +225,21 @@ items:
 
   - id: quality.format
     dim: quality
-    desc: Sources are gofmt-clean, enforced in CI
-    state: planned
+    desc: Sources are gofmt-clean, gated by make bullseye before every push
+    state: present
     cadence: continuous
-    enforce: warning
+    enforce: blocking
     tier: 2
-    reason: >-
-      Makefile has fmt-check and make bullseye runs gofmt -l, but CI has no
-      Format step. Sources are gofmt-clean locally; the gap is CI enforcement.
-    evidence: {absent: {ci_step: {workflow: ci.yml, name: Format}}}
+    evidence: {file: {path: Makefile, matches: 'gofmt -l'}}
 
   - id: quality.golangci
     dim: quality
-    desc: golangci-lint (or staticcheck) is a CI gate
+    desc: golangci-lint (or staticcheck) is part of the local gate
     state: planned
     cadence: continuous
     enforce: warning
     tier: 3
-    reason: No .golangci.yml; golangci-lint/staticcheck are not invoked in CI.
+    reason: No .golangci.yml; golangci-lint/staticcheck are not invoked by make bullseye.
     evidence: {absent: {scanner: {tool: golangci-lint}}}
 
   # =========================== DEPENDENCY HEALTH ==========================
@@ -280,14 +273,17 @@ items:
     evidence:
       command: test "$(git describe --tags --abbrev=0 | grep -oE '[0-9]+$')" = "0"
 
-  - id: release.ci-built
+  - id: release.clean-built
     dim: release
-    desc: Release binaries are built by CI, never locally
+    desc: >-
+      Release binaries are built by `make release` from a fresh clone of the
+      released commit (darwin on the release host, windows on the VM), never
+      from a working tree
     state: present
     cadence: per-release
     enforce: warning
     tier: 2
-    evidence: {ci_job: "release.yml#build"}
+    evidence: {make_target: release}
 
   - id: release.homebrew
     dim: release
@@ -296,7 +292,7 @@ items:
     cadence: per-release
     enforce: informational
     tier: 2
-    evidence: {ci_job: "release.yml#homebrew"}
+    evidence: {file: {path: scripts/release.sh, matches: 'homebrew-tap'}}
 
   - id: release.windows-installer
     dim: release
@@ -305,7 +301,7 @@ items:
     cadence: per-release
     enforce: informational
     tier: 2
-    evidence: {ci_step: {workflow: release.yml, name: Build Windows installer}}
+    evidence: {file: {path: scripts/win-release.ps1, matches: 'mnemo\.iss'}}
 
   - id: release.changelog
     dim: release
@@ -376,11 +372,16 @@ items:
   - id: governance.branch-protection
     dim: governance
     desc: Default branch requires a PR and a green CI check before merge
-    state: planned
+    state: skipped
     cadence: once-must-hold
-    enforce: warning
+    enforce: informational
     tier: 3
-    reason: master is not branch-protected (gh 404); CI is advisory. Cloud Windows job is non-required.
+    reason: >-
+      PR-free flow: commits go straight to master after the local gates
+      (make bullseye + scripts/win-validate.sh). There is no CI to require.
+      Classic protection is off (gh 404); the "master" ruleset (deletion,
+      non-fast-forward, linear history) still carries pull_request and a
+      required ubuntu check from the GHA era, which admins bypass.
     evidence:
       absent:
         command: gh api repos/marcelocantos/mnemo/branches/master/protection --jq .url
@@ -407,7 +408,7 @@ items:
 
   - id: build.go-version-pin
     dim: build
-    desc: Go toolchain version pinned in go.mod (setup-go uses go-version-file)
+    desc: Go toolchain version pinned in go.mod (GOTOOLCHAIN=auto selects it on the host and the VM)
     state: present
     cadence: once-must-hold
     enforce: warning
@@ -434,19 +435,19 @@ items:
 
   - id: build.sqldeep-pin
     dim: build
-    desc: CI, e2e, release, and win-validate pin the same sqldeep ref
+    desc: Release and win-validate pin the same sqldeep ref
     state: planned
     cadence: once-must-hold
     enforce: warning
     tier: 3
     reason: >-
-      ci.yml and win-validate.sh default to sqldeep v0.22.0; release.yml and
-      e2e-nightly.yml clone v0.23.0. Entropy audit ENT-002.
+      win-validate.sh defaults to sqldeep v0.22.0; scripts/release.sh builds
+      against v0.23.0. Entropy audit ENT-002.
     evidence:
       absent:
         command: >-
-          test "$(grep -E 'ref: v[0-9]' .github/workflows/ci.yml | awk '{print $2}' | sort -u)"
-          = "$(grep -E 'ref: v[0-9]' .github/workflows/release.yml | awk '{print $2}' | sort -u)"
+          test "$(grep -oE 'WINCI_SQLDEEP_REF:-v[0-9.]+' scripts/win-validate.sh | cut -d- -f2)"
+          = "$(grep -oE '^SQLDEEP_REF=.*:-v[0-9.]+' scripts/release.sh | grep -oE 'v[0-9.]+$')"
 
   # ============================ DOCUMENTATION ============================
   - id: docs.agents-guide
@@ -483,7 +484,7 @@ items:
     cadence: continuous
     enforce: informational
     tier: 3
-    reason: No make target or CI step checks markdown links.
+    reason: No make target checks markdown links.
     evidence: {absent: {make_target: check-md-links}}
 
   - id: docs.todo
@@ -507,7 +508,7 @@ items:
     tier: 3
     reason: >-
       One Benchmark in store_test.go and a build-tagged live scanbench
-      (internal/store/scanbench_test.go) exist; no make bench or CI bench job.
+      (internal/store/scanbench_test.go) exist; no make bench target.
     evidence: {absent: {make_target: bench}}
 
   # ============================== VCS / HISTORY =========================

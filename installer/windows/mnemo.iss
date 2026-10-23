@@ -11,7 +11,7 @@
 ; AppVersion  — version string shown in Add/Remove Programs
 ;               and in the installer window title.
 ; SourceDir   — directory containing the freshly-built mnemo.exe
-;               (the CI uses the same dir it extracts the zip into).
+;               (scripts/win-release.ps1 stages it in installer\windows\dist).
 ;
 ; The installer:
 ;   - Requires admin elevation (mandatory for service install +

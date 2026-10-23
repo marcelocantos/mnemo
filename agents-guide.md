@@ -79,28 +79,10 @@ invocation), make sure `PATH` includes the directory containing
 binary on `PATH`, compaction fails and mnemo logs an ERROR:
 `compact: claude subprocess spawn failed — executable not found in PATH`.
 
-**Linux (systemd)** — create `~/.config/systemd/user/mnemo.service`:
-
-```ini
-[Unit]
-Description=mnemo MCP server
-
-[Service]
-ExecStart=%h/.local/bin/mnemo
-Restart=always
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.claude/local
-
-[Install]
-WantedBy=default.target
-```
-
-Then: `systemctl --user enable --now mnemo`
-
-> **Note for service deployments**: launchd and systemd both start
+> **Note for service deployments**: launchd and supervisord both start
 > processes with a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`).
-> The `Environment=` line above adds `~/.claude/local` (Anthropic's
-> official install path). Add `/usr/local/bin` or other prefixes as
-> needed for your setup.
+> Add `~/.claude/local` (Anthropic's official install path),
+> `/opt/homebrew/bin` or other prefixes as needed for your setup.
 
 **Manual** (any platform):
 
@@ -840,7 +822,7 @@ Three surfaces expose the same report:
   `checked_at`, and the `X-Mnemo-Health` header says `snapshot` or `live`.
   `GET /health?fresh=1` runs every check now.
 - **OS notifications** — on a transition *into* fail severity, a native
-  notification (macOS `osascript`, Linux `notify-send`; local-only, no
+  notification (macOS `osascript` / `terminal-notifier`; local-only, no
   network) deep-links the health page. **Opt-out**: enabled by default,
   fail-only, deduped with a 6h re-notify cooldown. Silence with
   `"disable_health_notifications": true` in `~/.mnemo/config.json`.

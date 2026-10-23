@@ -562,24 +562,42 @@ read `bullseye.yaml`, so mnemo's own targets are invisible to it — use
 ## Gates
 
 profile: mnemo
+override:
+  - pr-workflow: skip
+  - ci-green: skip
 
-The `mnemo` gate profile (`~/.claude/gates/mnemo.yaml`, merged over
-`base.yaml`) adds a **`windows-vm-validated`** pre-merge gate: the
-Windows build + test suite is validated on the local Parallels VM
-(`ssh hms-vm`, Win11 ARM64) by `scripts/win-validate.sh`, not by the
-cloud CI Windows job. Cloud `test (windows-latest …)` still runs on
-every PR but is **non-required** (removed from the master ruleset's
-required checks) — it's the slow ~15-18 min CGO/SQLite long pole, so
-it no longer gates the merge.
+**PR-free flow.** There is no GitHub Actions CI and no PR step: commits
+go straight to `master` once the local gates pass. The `mnemo` gate
+profile (`~/.claude/gates/mnemo.yaml`, merged over `base.yaml`) keeps
+its **`windows-vm-validated`** gate; the `pr-workflow` and `ci-green`
+gates from `base.yaml` are skipped above because there is no PR and no
+CI to be green.
 
-Flow is **push-first**: push the branch, then run
-`scripts/win-validate.sh` (it validates the *pushed* commit), which
-builds mnemo + sqldeep with the clang/ARM64 CGO toolchain on the VM
-and runs `go test -tags sqlite_fts5 ./...` — far faster than the cloud
-job (native ARM64, ~1-2 min). One-time VM provisioning: Go, MSYS2
-CLANGARM64 toolchain (`clang`/`llvm-ar`), and
-`mingw-w64-clang-aarch64-sqlite3`.
+Local gates, both required before pushing to `master`:
+
+1. **`make bullseye`** on macOS (gofmt, vet, build, `go test ./...`).
+   This is the darwin/arm64 test run; nothing else runs it.
+2. **`scripts/win-validate.sh` → PASS** on the Parallels VM
+   (`ssh hms-vm`, Win11 ARM64). It validates the *pushed* commit, so
+   push the commit to a scratch branch first (or validate after the
+   push and fix forward immediately). It builds mnemo + sqldeep with
+   the clang/ARM64 CGO toolchain and runs `go test -tags sqlite_fts5
+   ./...` (~1-2 min). One-time VM provisioning: Go, MSYS2 CLANGARM64
+   toolchain (`clang`/`llvm-ar`), and `mingw-w64-clang-aarch64-sqlite3`.
+   The VM is shared: check that no other `go`/win-validate job is
+   running before starting one, and leave it running if another job
+   still needs it.
+
+Optional, not gates: `make e2e` (daemon-subprocess suite behind
+`MNEMO_E2E=1`; run before releases or after touching the daemon
+lifecycle/transport) and `make test-scale` (Tier 3, snapshot-gated).
+
+Linux is not a supported platform: only darwin/arm64 and
+windows/{amd64,arm64} are built, tested and released.
 
 ## Delivery
 
-Merged to master via squash PR.
+Direct push to `master` after the local gates above pass (no PR, no
+CI). Releases are cut locally from Colossus with
+`make release VERSION=x.y.z` after the "Release prep: vX.Y.Z" commit
+lands; see `docs/releasing.md`.
