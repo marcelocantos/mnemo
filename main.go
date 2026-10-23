@@ -69,9 +69,10 @@ var agentsGuide string
 var dashboardHTML []byte
 
 const (
-	version              = "0.114.0"
-	defaultAddr          = "localhost:19419"
-	defaultFederatedAddr = ":19420"
+	version                   = "0.114.0"
+	defaultAddr               = "localhost:19419"
+	defaultFederatedAddr      = ""
+	conventionalFederatedAddr = ":19420"
 
 	// drainIntakeGrace bounds the *courtesy* half of shutdown: letting
 	// in-flight HTTP requests finish before the listener is torn down
@@ -209,7 +210,7 @@ func main() {
 	helpConfig := flag.Bool("help-config", false, "print the configuration schema and exit")
 	addr := flag.String("addr", defaultAddr, "HTTP listen address")
 	federatedAddr := flag.String("federated-addr", defaultFederatedAddr,
-		"mTLS federated listen address (empty disables federation)")
+		"mTLS federated listen address (default off; e.g. :19420 to enable)")
 	homeFlag := flag.String("home", "",
 		"daemon home directory (overrides $MNEMO_HOME; defaults to OS user home). "+
 			"Routes ~/.mnemo and the default-user data tree to this root. (🎯T73)")
@@ -357,7 +358,7 @@ func cmdPingPeer(args []string) {
 // listens on a non-default port or the public name differs).
 func cmdPrintFederatedAddr(args []string) {
 	fs := flag.NewFlagSet("print-federated-addr", flag.ExitOnError)
-	addrFlag := fs.String("addr", defaultFederatedAddr,
+	addrFlag := fs.String("addr", conventionalFederatedAddr,
 		"federated listen address — port portion is used as-is, host portion defaults to os.Hostname()")
 	_ = fs.Parse(args)
 

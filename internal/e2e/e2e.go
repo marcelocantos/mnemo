@@ -94,7 +94,7 @@ type Options struct {
 	Env []string
 
 	// Args appends extra CLI flags to the daemon invocation.
-	// Useful for tests that want to disable federation, change
+	// Useful for tests that want to enable federation, change
 	// log level, etc.
 	Args []string
 }
@@ -131,7 +131,7 @@ func Start(t *testing.T, opts ...Options) *Daemon {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	args := append([]string{"--addr", addr, "--federated-addr", ""}, o.Args...)
+	args := append([]string{"--addr", addr}, o.Args...)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append(os.Environ(),
 		"MNEMO_HOME="+o.Home,
