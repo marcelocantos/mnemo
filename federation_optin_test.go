@@ -57,9 +57,18 @@ func TestFederationExplicitAddrStartsListener(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(d.Home, ".mnemo", "endpoint", "cert.pem")); err != nil {
 		t.Fatalf("enabled federation did not generate certificate: %v", err)
 	}
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err != nil {
-		t.Fatalf("federated listener at %s: %v", addr, err)
+	// The local /health and MCP endpoints can become ready before the
+	// optional TLS listener has finished binding, especially on Windows.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("federated listener at %s: %v", addr, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	_ = conn.Close()
 }
