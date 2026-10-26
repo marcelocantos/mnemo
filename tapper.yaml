@@ -1,0 +1,44 @@
+# Homebrew tap publication for mnemo. `tapper push` runs from the dev
+# Mac after the GitHub release exists; the token lives in the macOS
+# keychain, so there is no Actions secret and no CI step.
+repo: marcelocantos/mnemo
+tap:
+  owner: marcelocantos
+  name: homebrew-tap
+push:
+  darwin_arm64: true
+  linux_amd64: true
+  linux_arm64: true
+  skip_checksum: true
+  update_readme_table: true
+install: 'bin.install "mnemo" => "mnemo"'
+test: 'system bin/"mnemo", "--version"'
+formula_includes: |
+  depends_on "gh"
+  depends_on "mupdf"
+  depends_on "poppler"
+  depends_on "tesseract"
+  depends_on "uv"
+
+  service do
+    run [opt_bin/"mnemo"]
+    keep_alive true
+    log_path var/"log/mnemo.log"
+    error_log_path var/"log/mnemo.log"
+    working_dir HOMEBREW_PREFIX
+    # std_service_path_env FIRST. The compactor spawns `claude`,
+    # which Homebrew does not package and which lives in a per-user
+    # directory, so those two stay on the daemon's PATH — but behind
+    # the system path, or anything planted in a user-writable dir
+    # would win for a background service. Everything else mnemo
+    # spawns (uv, gh, tesseract, poppler, mupdf) is a declared
+    # dependency and resolves from HOMEBREW_PREFIX.
+    environment_variables PATH: [
+      std_service_path_env,
+      "#{Dir.home}/.local/bin",
+      "#{Dir.home}/.claude/local",
+    ].join(":")
+  end
+token:
+  env: HOMEBREW_TAP_TOKEN
+  op: op://Personal/GitHub Homebrew Tap PAT/token
