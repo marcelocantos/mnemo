@@ -424,6 +424,7 @@ func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry,
 	s.SetGrokRoots(store.GrokRootsFor(home))             // 🎯T110: index ~/.grok sessions
 	s.SetCursorRoots(store.CursorRootsFor(home))         // 🎯T149: index ~/.cursor agent-transcripts
 	s.SetCursorChatRoots(store.CursorChatRootsFor(home)) // 🎯T149.1: store.db tool_result fidelity
+	s.SetOmpRoots(store.OmpRootsFor(home))               // 🎯T198: index ~/.omp Oh My Pi sessions
 	s.SetTodoGlobs(cfg.TodoGlobs)
 
 	synthRoots := cfg.ResolvedSynthesisRoots()

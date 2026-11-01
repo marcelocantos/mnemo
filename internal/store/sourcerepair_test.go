@@ -27,6 +27,8 @@ func TestSourceFromPath(t *testing.T) {
 			"claude", "84369401-74e5-4d5e-834d-6732e8988328"},
 		{"/Users/a/.cursor/projects/Users-a-work-github-com-acme-webapp/agent-transcripts/32cc2bac-0bc4-4f7b-8de7-164d6b9f46c6/32cc2bac-0bc4-4f7b-8de7-164d6b9f46c6.jsonl",
 			"cursor", "32cc2bac-0bc4-4f7b-8de7-164d6b9f46c6"},
+		{"/Users/a/.omp/agent/sessions/-work-proj/2026-10-25T21-37-47-176Z_01a174ff-8ca8-70bb-bd0f-520fc6d13c43.jsonl",
+			"omp", "01a174ff-8ca8-70bb-bd0f-520fc6d13c43"},
 	}
 	for _, tc := range tests {
 		src, id, ok := sourceFromPath(tc.path)

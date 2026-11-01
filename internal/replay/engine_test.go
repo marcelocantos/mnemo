@@ -162,6 +162,14 @@ func TestOpFromToolRowWriteEdit(t *testing.T) {
 	if reason != "" || ops[0].Kind != KindPatch {
 		t.Fatalf("edit: %+v reason=%q", ops, reason)
 	}
+	ops, reason = OpFromToolRow(ToolRow{
+		ToolName:  "edit",
+		ToolInput: []byte(`{"path":"/x.go","stream_content":"package main"}`),
+		FilePath:  "/x.go",
+	})
+	if reason != "" || len(ops) != 1 || ops[0].Kind != KindWrite || string(ops[0].Body) != "package main" {
+		t.Fatalf("omp edit: %+v reason=%q", ops, reason)
+	}
 	trueVal := true
 	_, reason = OpFromToolRow(ToolRow{
 		ToolName:    "Write",

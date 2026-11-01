@@ -4487,6 +4487,32 @@ targets:
     origin: search inflection report, 2026-10-14
     discovered: 2026-10-14
     achieved: 2026-10-14
+  T198:
+    name: Oh My Pi sessions are indexed and resumable the same way Claude, Grok, and Cursor ones are
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    attestation: '2026-11-01: Oh My Pi JSONL under ~/.omp/agent/sessions/<encoded>/<timestamp>_<uuid>.jsonl ingested with source=omp. Header cwd; repo via extractRepo. OMP_HOME, PI_CODING_AGENT_DIR, and profiles present at startup. toolCall ids with an embedded newline join via ''|''; path normalised to file_path; usage input/output/cacheRead/cacheWrite copied onto the Claude token columns; per-message model wins. custom/label/unknown types stay entries and are not projected. Compaction keeps its type and projects [omp compaction]. IngestAll, Watch, and ingestFile route isOmpSession to parseOmpFile (no phantom claude row). ResumeCommand is `omp --resume <id>`. T3 Code is not a source: ACP host, transcript is the provider store (Grok → ~/.grok/sessions); ~/.t3 provider logs are method traces. Design: docs/design/omp-ingest.md. Oracle: GOWORK=off go test -tags sqlite_fts5 -count=1 ./internal/store/ ./internal/replay/ ./internal/registry/ — ok (store 44.537s, replay 0.897s, registry 5.327s), including TestIsOmpSession, TestOmpRootsForHonoursEnv, TestOmpRootsForProfiles, TestParseOmpFile, TestOmpIngestEndToEnd, TestResumeCommand omp case, TestSourceFromPath omp case, TestOpFromToolRowWriteEdit.'
+    acceptance:
+    - JSONL under ~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl is ingested with session_meta.source='omp'. OMP_HOME and PI_CODING_AGENT_DIR are honoured. Profiles under ~/.omp/profiles/<name>/agent/sessions are included when they exist at startup. Cwd comes from the session header; repo is derived via extractRepo.
+    - User text, assistant text, thinking, tool_use, and tool_result are searchable. A toolCall id that embeds a newline still joins its toolResult. path arguments are normalised to file_path. Usage input/output/cacheRead/cacheWrite fills the Claude token columns, and a per-message model wins over the session model_change.
+    - Records that are not model context (custom, label, mode_change, credential_pin, and any type this version has not seen) stay in the entry log and are not projected into search. Compaction and branch_summary keep their own entry type and project the summary as text. custom_message and synthetic developer prompts are noise.
+    - IngestAll, Watch, and ingestFile route these paths to the Oh My Pi parser. A cache index such as recent-sessions.jsonl does not become a session, and an omp file does not create a phantom session_meta.source='claude' row.
+    - ResumeCommand for source=omp is `omp --resume <id>`, using the filename uuid, which matches the session header id.
+    - 'docs/design/omp-ingest.md exists. CLAUDE.md, README.md, STABILITY.md, and agents-guide.md list Oh My Pi as a source. T3 Code is not a separate source: it is an ACP host, and the conversation lives in the provider store mnemo already indexes.'
+    - Tests cover path routing, roots, a parse fixture (including compaction, an unknown type, and provider kept on the raw entry), IngestAll end-to-end (source, repo, search, tokens, idempotency, no phantom claude row), ResumeCommand, and sourceFromPath.
+    context: |-
+      Continued from Oh My Pi session 01a174ff-8ca8-70bb-bd0f-520fc6d13c43 (model grok-4.7, cwd this repo, title "Add Oh My Pi support"). That session wrote the parser, the watch/ingest routing, resume, and the design note, and left them uncommitted. T3 Code was checked the same day: a T3 thread on the Grok harness is a ~/.grok/sessions transcript (this one is 01a196c9), and ~/.t3/userdata/logs/provider is an ACP method trace with no message text. No t3 source.
+
+      Achieved 2026-11-01: 2026-11-01: Oh My Pi JSONL under ~/.omp/agent/sessions/<encoded>/<timestamp>_<uuid>.jsonl ingested with source=omp. Header cwd; repo via extractRepo. OMP_HOME, PI_CODING_AGENT_DIR, and profiles present at startup. toolCall ids with an embedded newline join via '|'; path normalised to file_path; usage input/output/cacheRead/cacheWrite copied onto the Claude token columns; per-message model wins. custom/label/unknown types stay entries and are not projected. Compaction keeps its type and projects [omp compaction]. IngestAll, Watch, and ingestFile route isOmpSession to parseOmpFile (no phantom claude row). ResumeCommand is `omp --resume <id>`. T3 Code is not a source: ACP host, transcript is the provider store (Grok → ~/.grok/sessions); ~/.t3 provider logs are method traces. Design: docs/design/omp-ingest.md. Oracle: GOWORK=off go test -tags sqlite_fts5 -count=1 ./internal/store/ ./internal/replay/ ./internal/registry/ — ok (store 44.537s, replay 0.897s, registry 5.327s), including TestIsOmpSession, TestOmpRootsForHonoursEnv, TestOmpRootsForProfiles, TestParseOmpFile, TestOmpIngestEndToEnd, TestResumeCommand omp case, TestSourceFromPath omp case, TestOpFromToolRowWriteEdit.
+    tags:
+    - ingest
+    - omp
+    - sessions
+    - resume
+    origin: manual
+    discovered: 2026-11-01
+    achieved: 2026-11-01
   T2:
     name: Smarter session classification
     status: achieved

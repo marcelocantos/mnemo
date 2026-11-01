@@ -30,6 +30,13 @@ model come from the sibling Agent CLI `~/.cursor/chats/**/store.db`
 (🎯T149.1). Resume is `agent --resume <id>`. See
 `docs/design/cursor-ingest.md`.
 
+Also ingests **Oh My Pi** (`omp`) sessions from
+`~/.omp/agent/sessions/` (honours `OMP_HOME` and `PI_CODING_AGENT_DIR`,
+and indexes `~/.omp/profiles/*/agent/sessions` when those profiles
+exist at startup) — session JSONL transformed into the same content
+model, tagged `session_meta.source = 'omp'`. Resume is
+`omp --resume <id>`. See `docs/design/omp-ingest.md`.
+
 ## Build & Run
 
 ```bash

@@ -762,8 +762,9 @@ config schema may still grow. The level may remain after 1.0.
 
 - Database location: `~/.mnemo/mnemo.db`
 - Transcript source: `~/.claude/projects/` (JSONL files); also
-  `~/.codex/sessions/`, `~/.grok/sessions/`, and
-  `~/.cursor/projects/**/agent-transcripts/` (tagged `session_meta.source`)
+  `~/.codex/sessions/`, `~/.grok/sessions/`,
+  `~/.cursor/projects/**/agent-transcripts/`, and
+  `~/.omp/agent/sessions/` (tagged `session_meta.source`)
 - Federation endpoint material: `~/.mnemo/endpoint/{cert.pem,key.pem}`
   (key mode 0600). Self-signed ECDSA P-256, 10-year validity,
   regenerated automatically on corruption or expiry. Generated lazily

@@ -15,6 +15,10 @@ ingests:
   title / model fidelity (🎯T149.1) (`source=cursor`; honour
   `CURSOR_HOME`; see `docs/design/cursor-ingest.md`). Resume:
   `agent --resume <id>`.
+- **Oh My Pi (omp)** — `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`
+  (`source=omp`; honour `OMP_HOME` and `PI_CODING_AGENT_DIR`; profiles
+  under `~/.omp/profiles/*/agent/sessions` are indexed when present at
+  startup; see `docs/design/omp-ingest.md`). Resume: `omp --resume <id>`.
 
 Filter or inspect provenance via `session_meta.source` (`mnemo_query`).
 

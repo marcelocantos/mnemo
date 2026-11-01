@@ -4,8 +4,9 @@ Searchable memory across coding-agent session transcripts. Runs as a
 persistent MCP server — available in every agent session.
 
 mnemo indexes Claude Code (`~/.claude/projects/`), Codex CLI
-(`~/.codex/sessions/`), Grok CLI (`~/.grok/sessions/`), and Cursor
-Agent (`~/.cursor/projects/**/agent-transcripts/`) transcripts
+(`~/.codex/sessions/`), Grok CLI (`~/.grok/sessions/`), Cursor
+Agent (`~/.cursor/projects/**/agent-transcripts/`), and Oh My Pi
+(`~/.omp/agent/sessions/`) transcripts
 into a realtime SQLite FTS5 index, and exposes a deliberately small
 set of MCP tools — 16, sized to what agents actually use (🎯T143,
 🎯T143.1, 🎯T156).
@@ -15,8 +16,8 @@ browser dashboard is served on the same port at `http://localhost:19419`
 
 **What it indexes:**
 
-- **Session transcripts** — Claude, Codex, Grok, and Cursor (tagged
-  `session_meta.source`); all content block types (text, tool use,
+- **Session transcripts** — Claude, Codex, Grok, Cursor, and Oh My Pi
+  (tagged `session_meta.source`); all content block types (text, tool use,
   tool results, thinking), with full-text search and surrounding context
 - **Images** — inline and file-path images from transcripts, with AI
   descriptions, Apple Vision OCR, and CLIP embeddings for semantic and
@@ -217,9 +218,9 @@ conversation is about a working tree, and resuming it somewhere else
 hands the agent context that contradicts its own transcript. A directory
 that has since been deleted is reported rather than silently substituted.
 
-Claude Code, Grok CLI, and Cursor Agent (`agent --resume`) sessions
-resume. Codex/ChatGPT sessions are indexed but refused by name — they
-have no verified terminal resume.
+Claude Code, Grok CLI, Cursor Agent (`agent --resume`), and Oh My Pi
+(`omp --resume`) sessions resume. Codex/ChatGPT sessions are indexed
+but refused by name — they have no verified terminal resume.
 
 The same resolution is available over HTTP at `POST /api/session/go`, which is
 usually the better route: ask mnemo to find the conversation, then ask it

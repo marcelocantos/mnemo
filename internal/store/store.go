@@ -196,6 +196,12 @@ type Store struct {
 	// store.db fidelity (🎯T149.1). Set via SetCursorChatRoots.
 	cursorChatRoots []string
 
+	// ompRoots are Oh My Pi session roots (~/.omp/agent/sessions, plus
+	// profile trees). Only sessions/<encoded>/<timestamp>_<uuid>.jsonl
+	// under these roots is indexed. Mutated only via SetOmpRoots;
+	// existence is checked lazily in ompDirs.
+	ompRoots []string
+
 	// todoGlobs are extra repo-relative globs that IngestTodos matches
 	// when discovering TODO files, beyond the default TODO.md / todos.md
 	// names (🎯T78). Mutated only via SetTodoGlobs, read under
@@ -442,6 +448,35 @@ func (s *Store) cursorDirs() []string {
 func (s *Store) cursorChatDirs() []string {
 	s.rootsMu.RLock()
 	roots := append([]string(nil), s.cursorChatRoots...)
+	s.rootsMu.RUnlock()
+	var out []string
+	for _, d := range roots {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// SetOmpRoots configures the Oh My Pi session roots ingested alongside
+// the other agent dirs. Pass the candidate directories (OmpRootsFor);
+// existence is checked lazily by ompDirs so a later install is still
+// picked up. Call once after Store.New.
+func (s *Store) SetOmpRoots(roots []string) {
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	if len(roots) == 0 {
+		s.ompRoots = nil
+		return
+	}
+	s.ompRoots = append(s.ompRoots[:0:0], roots...)
+}
+
+// ompDirs returns the configured Oh My Pi session roots that currently
+// exist on disk. Empty when not configured or ~/.omp isn't present.
+func (s *Store) ompDirs() []string {
+	s.rootsMu.RLock()
+	roots := append([]string(nil), s.ompRoots...)
 	s.rootsMu.RUnlock()
 	var out []string
 	for _, d := range roots {
@@ -3625,7 +3660,7 @@ type parsedFile struct {
 	branch    string
 	topic     string
 	newOffset int64
-	// source is the producing agent ('claude', 'codex', 'grok', or 'cursor').
+	// source is the producing agent ('claude', 'codex', 'grok', 'cursor', or 'omp').
 	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
 	// parentSessionID + chainMechanism, when set, cause writeParsedFile
@@ -3781,6 +3816,35 @@ func (s *Store) IngestAll() error {
 			return nil
 		})
 	}
+	// Oh My Pi session roots: only sessions/<encoded>/<timestamp>_<uuid>.jsonl.
+	for _, dir := range s.ompDirs() {
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				slog.Warn("omp dir unavailable, skipping", "dir", dir)
+			} else {
+				slog.Warn("omp dir stat failed, skipping", "dir", dir, "err", err)
+			}
+			continue
+		}
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !isOmpSession(path) {
+				return nil
+			}
+			s.mu.Lock()
+			offset := s.offsets[path]
+			s.mu.Unlock()
+			if offset >= info.Size() {
+				return nil
+			}
+			files = append(files, fileEntry{
+				path:   path,
+				mtime:  info.ModTime(),
+				size:   info.Size(),
+				offset: offset,
+			})
+			return nil
+		})
+	}
 
 	if len(files) == 0 {
 		return nil
@@ -3814,6 +3878,8 @@ func (s *Store) IngestAll() error {
 					parse = parseCursorFile
 				case isCursorStore(fe.path):
 					parse = parseCursorStoreFile
+				case isOmpSession(fe.path):
+					parse = parseOmpFile
 				}
 				if pf, err := parse(fe.path, fe.offset); err == nil {
 					parsedCh <- pf
@@ -4475,6 +4541,7 @@ func (s *Store) Watch(ctx context.Context) error {
 	roots = append(roots, s.grokDirs()...)
 	roots = append(roots, s.cursorDirs()...)
 	roots = append(roots, s.cursorChatDirs()...)
+	roots = append(roots, s.ompDirs()...)
 	if sdir, err := skillsDir(); err == nil {
 		roots = append(roots, sdir)
 	}
@@ -4564,6 +4631,12 @@ func (s *Store) Watch(ctx context.Context) error {
 				if isCursorStore(name) {
 					if err := s.ingestCursorStoreFile(name); err != nil {
 						slog.Error("ingest cursor store failed", "file", name, "err", err)
+					}
+					return
+				}
+				if isOmpSession(name) {
+					if err := s.ingestOmpFile(name); err != nil {
+						slog.Error("ingest omp failed", "file", name, "err", err)
 					}
 					return
 				}
@@ -4750,6 +4823,12 @@ func (s *Store) ingestJSONLPath(path string) {
 	if isCursorStore(path) {
 		if err := s.ingestCursorStoreFile(path); err != nil {
 			slog.Error("ingest cursor store failed", "file", path, "err", err)
+		}
+		return
+	}
+	if isOmpSession(path) {
+		if err := s.ingestOmpFile(path); err != nil {
+			slog.Error("ingest omp failed", "file", path, "err", err)
 		}
 		return
 	}
@@ -7105,6 +7184,9 @@ func (s *Store) ingestFile(path string) error {
 	}
 	if isCursorStore(path) {
 		return s.ingestCursorStoreFile(path)
+	}
+	if isOmpSession(path) {
+		return s.ingestOmpFile(path)
 	}
 
 	s.mu.Lock()

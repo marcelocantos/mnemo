@@ -21,7 +21,7 @@ type SessionRef struct {
 	SessionID string `json:"session_id"`
 	Repo      string `json:"repo,omitempty"`
 	CWD       string `json:"cwd,omitempty"`
-	// Source is the agent that produced the session: claude, codex, grok, cursor.
+	// Source is the agent that produced the session: claude, codex, grok, cursor, omp.
 	// Resume invocations differ per source, so callers must branch on it.
 	Source  string `json:"source,omitempty"`
 	LastMsg string `json:"last_msg,omitempty"`
@@ -223,6 +223,13 @@ func (r SessionRef) ResumeCommand() (string, error) {
 		// not the `cursor` editor shim. mnemo's Cursor session ids are
 		// the transcript-directory UUIDs, which are the chatIds.
 		return "agent --resume " + r.SessionID, nil
+	case "omp":
+		// `omp --resume=<id>` (omp v18.12.1 --help): "Resume a session
+		// (by ID prefix, path, or picker if omitted)". mnemo's ids are
+		// the filename uuid, which matches the session header id.
+		// --restore is deliberately not used: it continues unfinished
+		// work instead of reopening the conversation.
+		return "omp --resume " + r.SessionID, nil
 	default:
 		return "", fmt.Errorf(
 			"no known resume command for %s sessions — mnemo can reopen Claude Code sessions today; "+

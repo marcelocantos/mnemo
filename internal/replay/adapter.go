@@ -88,6 +88,36 @@ func OpFromToolRow(row ToolRow) ([]Op, string) {
 		}
 		return []Op{base}, ""
 
+	case "edit":
+		// Oh My Pi's edit tool sends the full new file as stream_content,
+		// not an old_string/new_string patch. A lowercase edit that does
+		// carry a patch still takes the patch path below.
+		if body, ok := writeBody(row.ToolInput); ok && len(body) > 0 && hasStreamContent(row.ToolInput) {
+			base.Kind = KindWrite
+			base.Body = body
+			if base.Path == "" {
+				base.Path = pathFromInput(row.ToolInput)
+			}
+			return []Op{base}, ""
+		}
+		oldS, newS, path, ok := patchFields(row.ToolInput)
+		if !ok && (row.OldString != "" || row.NewString != "") {
+			oldS, newS, path, ok = row.OldString, row.NewString, row.FilePath, true
+		}
+		if !ok {
+			return nil, ReasonTruncatedPayload
+		}
+		base.Kind = KindPatch
+		base.OldString = oldS
+		base.NewString = newS
+		if path != "" {
+			base.Path = path
+		}
+		if base.Path == "" {
+			base.Path = row.FilePath
+		}
+		return []Op{base}, ""
+
 	case "write":
 		body, ok := writeBody(row.ToolInput)
 		if !ok && row.ToolContent != "" {
@@ -134,6 +164,15 @@ func OpFromToolRow(row ToolRow) ([]Op, string) {
 	}
 }
 
+func hasStreamContent(raw []byte) bool {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	s, _ := m["stream_content"].(string)
+	return s != ""
+}
+
 func writeBody(raw []byte) ([]byte, bool) {
 	if len(raw) == 0 {
 		return nil, false
@@ -142,7 +181,7 @@ func writeBody(raw []byte) ([]byte, bool) {
 	if json.Unmarshal(raw, &m) != nil {
 		return nil, false
 	}
-	for _, k := range []string{"content", "file_text", "contents", "text", "body"} {
+	for _, k := range []string{"content", "file_text", "contents", "stream_content", "text", "body"} {
 		if v, ok := m[k].(string); ok && v != "" {
 			return []byte(v), true
 		}
@@ -181,6 +220,6 @@ func patchFields(raw []byte) (old, new, path string, ok bool) {
 func ReplayToolNames() []string {
 	return []string{
 		"Write", "Edit", "StrReplace", "Delete",
-		"write", "search_replace", "apply_patch",
+		"write", "edit", "search_replace", "apply_patch",
 	}
 }
