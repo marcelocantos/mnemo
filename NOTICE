@@ -66,8 +66,10 @@ Third-party C source vendored directly into this repository:
   which is compatible with this project's Apache 2.0 licence. The GPLv2
   alternative is not exercised, and upstream's COPYING (GPLv2) is
   deliberately not vendored. The full BSD licence text is retained at
-  internal/zstdc/LICENSE.zstd, and internal/zstdc/UPSTREAM.md records the
-  version and the exact steps to regenerate it.
+  internal/zstdc/LICENSE.zstd and is shipped beside this file as
+  LICENSE.zstd in release archives (LICENSE.zstd.txt in the Windows
+  installer). internal/zstdc/UPSTREAM.md records the version and the
+  exact steps to regenerate the amalgamation.
 
 The optional CLIP image-embedding feature (off by default; see
 `image_embeddings` in the config) shells out to a Python script that

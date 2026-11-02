@@ -236,12 +236,15 @@ jobs:
           else
             VERSION="0.0.0-dryrun"
           fi
+          # BSD-3 (zstd) requires its conditions and disclaimer to travel
+          # with the binary. NOTICE names the licence; LICENSE.zstd is the text.
+          cp internal/zstdc/LICENSE.zstd LICENSE.zstd
           case "${{ matrix.archive }}" in
             tar.gz)
-              tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "mnemo${{ matrix.ext }}" NOTICE
+              tar czf "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "mnemo${{ matrix.ext }}" NOTICE LICENSE.zstd
               ;;
             zip)
-              7z a "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "mnemo${{ matrix.ext }}" NOTICE
+              7z a "mnemo-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "mnemo${{ matrix.ext }}" NOTICE LICENSE.zstd
               ;;
           esac
 
@@ -268,6 +271,7 @@ jobs:
           cp "mnemo.exe" "$STAGE/"
           cp LICENSE "$STAGE/LICENSE.txt"
           cp NOTICE "$STAGE/NOTICE.txt"
+          cp internal/zstdc/LICENSE.zstd "$STAGE/LICENSE.zstd.txt"
           # Inno Setup 6 is preinstalled on windows-latest amd64 runners
           # but not on the windows-11-arm image. Install via Chocolatey
           # when missing so both matrix legs work identically. Inno
