@@ -6,7 +6,7 @@
 # CLANGARM64 toolchain (clang/llvm-ar) + mingw-w64-clang-aarch64-sqlite3.
 param(
   [string]$Sha = "origin/master",
-  [string]$SqldeepRef = "v0.22.0",
+  [string]$SqldeepRef = "v0.23.0",
   [string]$Work = "C:\Users\marcelo\winci"
 )
 
