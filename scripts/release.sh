@@ -58,7 +58,7 @@ cd "$ROOT"
 die() { echo "release: $*" >&2; exit 1; }
 say() { echo "release: $*"; }
 
-code_version="$(sed -nE 's/^const version = "([^"]+)".*/\1/p' main.go)"
+code_version="$(sed -nE 's/^[[:space:]]*(const[[:space:]]+)?version[[:space:]]*=[[:space:]]*"([^"]+)".*/\2/p' main.go | head -1)"
 [ -n "$VERSION" ] || VERSION="$code_version"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION must be x.y.z (got '$VERSION')"
 TAG="v$VERSION"
