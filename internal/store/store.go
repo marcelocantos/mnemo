@@ -3398,7 +3398,12 @@ func detectDecisions(db *sql.DB, sessionID string, repo string) {
 // path regex, so it needs the same correction: a session in a worktree
 // resolves to the parent repo, and a session in a directory that is not
 // a GitHub checkout resolves to nothing and is dropped.
-func (s *Store) ciRepos() ([]string, error) {
+//
+// Each checkout's remote is read through boundedFS (see fsbound.go): a
+// .git/config that blocks in open(2) costs this pass its deadline, not
+// the rest of the daemon's life, and the root is skipped while that
+// read stays parked.
+func (s *Store) ciRepos(ctx context.Context) ([]string, error) {
 	sessionNames, err := s.sessionRepoNames()
 	if err != nil || len(sessionNames) == 0 {
 		return nil, nil
@@ -3418,7 +3423,17 @@ func (s *Store) ciRepos() ([]string, error) {
 			continue
 		}
 		resolved[pathName] = true
-		repo := resolveGitHubRepo(rr.root)
+		repo, err := boundedFS(ctx, "git-remote:"+rr.root, func() string {
+			return resolveGitHubRepo(rr.root)
+		})
+		if err != nil {
+			if errors.Is(err, errFSStillBlocked) {
+				slog.Debug("mirror: skipping checkout whose remote read is still blocked",
+					"root", rr.root)
+				continue
+			}
+			return repos, err
+		}
 		if repo == "" || !strings.Contains(repo, "/") || seen[repo] {
 			continue
 		}

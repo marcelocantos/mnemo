@@ -809,9 +809,11 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 			if pm := r.PluginManager(); pm != nil {
 				reconcilers = append(reconcilers, pm.StreamReconcilers()...)
 			}
-			// Circuit breakers still gate which streams enter this tick;
-			// DriveStreamReconcilers isolates passes so one blocked stream
-			// cannot starve the rest (🎯T145).
+			// Circuit breakers still gate which streams enter this tick.
+			// LaunchStreamReconcilers schedules each stream on its own and
+			// returns at once: a stream still mid-pass is skipped, and no
+			// stream's pass — however long, or stuck — holds up this tick
+			// or any other stream's next one (🎯T145).
 			var allowed []store.StreamReconciler
 			for _, sr := range reconcilers {
 				b := breakers[sr.Name()]
@@ -824,7 +826,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 				}
 				allowed = append(allowed, wrapBreakerRecord(sr, b))
 			}
-			store.DriveStreamReconcilers(r.baseCtx, allowed, now, e.store.ReconcilerTracker())
+			store.LaunchStreamReconcilers(r.baseCtx, allowed, now, e.store.ReconcilerTracker())
 			select {
 			case <-r.baseCtx.Done():
 				return

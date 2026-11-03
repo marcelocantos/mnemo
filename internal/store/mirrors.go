@@ -24,7 +24,7 @@ type mirrorReconciler struct {
 	stream    string
 	interval  time.Duration
 	needsGh   bool
-	listRepos func() ([]string, error)
+	listRepos func(ctx context.Context) ([]string, error)
 	reconcile func(ctx context.Context, ghPath, repo string) error
 }
 
@@ -78,7 +78,7 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 			stream:    "commits",
 			interval:  30 * time.Minute,
 			needsGh:   false,
-			listRepos: func() ([]string, error) { return commitNames, nil },
+			listRepos: func(context.Context) ([]string, error) { return commitNames, nil },
 			reconcile: func(ctx context.Context, _, repo string) error {
 				root := commitRoots[repo]
 				if root == "" {
@@ -90,7 +90,7 @@ func (s *Store) mirrorReconcilers() []mirrorReconciler {
 					return nil
 				}
 				var lastDate string
-				_ = s.readDB.QueryRow(
+				_ = s.readDB.QueryRowContext(ctx,
 					`SELECT MAX(commit_date) FROM git_commits WHERE repo = ?`, repo).Scan(&lastDate)
 				if _, err := ingestGitCommits(ctx, s.writeDB, root, repo, lastDate); err != nil {
 					if errors.Is(err, errNotGitCheckout) {
@@ -133,8 +133,11 @@ func (s *Store) ReconcileStaleMirrors(ctx context.Context, now time.Time) (int, 
 			}
 			ghPath = p
 		}
-		repos, err := mr.listRepos()
+		repos, err := mr.listRepos(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return reconciled, ctx.Err()
+			}
 			slog.Warn("mirror: list repos failed", "stream", mr.stream, "err", err)
 			continue
 		}
@@ -365,13 +368,14 @@ func (s *Store) mirrorDue(repo, stream string, interval time.Duration, now time.
 // converted mirror streams whose reconcile cursor is missing or stale,
 // plus the most recent reconcile timestamp across all of them.
 func (s *Store) MirrorBacklog(now time.Time) (gap int, lastReconciled string) {
+	ctx := context.Background()
 	for _, mr := range s.mirrorReconcilers() {
 		if mr.needsGh {
 			if _, err := exec.LookPath("gh"); err != nil {
 				continue
 			}
 		}
-		repos, err := mr.listRepos()
+		repos, err := mr.listRepos(ctx)
 		if err != nil {
 			continue
 		}

@@ -107,9 +107,13 @@ query that needs the index reads the base table under `INDEXED BY`.
 
 Named, not hidden:
 
-- `DriveStreamReconcilers` abandons a stream that overruns its deadline;
-  an abandoned pass can still write after the drive returns. Bounded by
-  the pass deadline, allowlisted with that reason.
+- `runStreamPass` stops waiting on a stream pass at its deadline and
+  reports it timed out; a pass that ignored cancellation can still write
+  after that. The stream is not relaunched until the call returns, so at
+  most one such pass per stream exists. Allowlisted with that reason.
+- `boundedFS` abandons a filesystem read blocked in the kernel past its
+  caller's deadline. The read cannot be interrupted; it is deduplicated by
+  key so a stuck path parks one goroutine, not one per pass.
 - `internal/registry` workers are on WaitGroups but do not yet declare
   capability requirements; four use the older `AwaitSchemaUpgrade`. The
   graph is the intended destination.
