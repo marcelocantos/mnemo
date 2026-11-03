@@ -14,9 +14,9 @@ import (
 //
 // The producing agent is knowable from the file's location — the roots are
 // disjoint (~/.claude/projects, ~/.codex/{sessions,archived_sessions},
-// ~/.grok/sessions, ~/.cursor/projects) — and mnemo already records that
-// location in ingest_state. So a session's source never has to be guessed;
-// it can be recomputed from evidence at any time.
+// ~/.grok/sessions, ~/.cursor/projects, ~/.omp/agent/sessions) — and mnemo
+// already records that location in ingest_state. So a session's source
+// never has to be guessed; it can be recomputed from evidence at any time.
 //
 // It needs recomputing because two historical facts combine badly:
 //
@@ -48,6 +48,8 @@ func sourceFromPath(path string) (source, sessionID string, ok bool) {
 		return "cursor", cursorStoreSessionID(path), true
 	case strings.Contains(slashed, "/.cursor/"), isCursorTranscript(path):
 		return "cursor", cursorSessionID(path), true
+	case isOmpSession(path):
+		return "omp", ompSessionID(path), true
 	case strings.Contains(slashed, "/.claude/projects/"):
 		return "claude", strings.TrimSuffix(filepath.Base(path), ".jsonl"), true
 	}
@@ -74,6 +76,7 @@ func sessionIDFromPath(path string) (string, bool) {
 	// tagging for them. Codex and Grok are recognised by filename shape
 	// as well as by root, so they never reach here. Cursor is recognised
 	// by agent-transcripts/<id>/<id>.jsonl and by chats/<hash>/<id>/store.db.
+	// Oh My Pi is recognised by sessions/<encoded>/<timestamp>_<uuid>.jsonl.
 	base := filepath.Base(path)
 	stem := strings.TrimSuffix(base, ".jsonl")
 	if stem == "" || stem == base {

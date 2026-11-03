@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -578,7 +579,7 @@ func TestCIRepos_DrivenBySessionDiscovery(t *testing.T) {
 		}
 	}
 
-	repos, err := s.ciRepos()
+	repos, err := s.ciRepos(context.Background())
 	if err != nil {
 		t.Fatalf("ciRepos failed: %v", err)
 	}
@@ -615,7 +616,7 @@ func TestCIRepos_DrivenBySessionDiscovery(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	repos, err = s.ciRepos()
+	repos, err = s.ciRepos(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -194,6 +194,19 @@ func TestResumeCommandIsSourceAware(t *testing.T) {
 		t.Errorf("cursor resume command = %q, want `agent --resume <id>`", cursor)
 	}
 
+	// Oh My Pi (omp v18.12.1): `-r, --resume=<value>` resumes by id prefix.
+	ompID := "01a174ff-8ca8-70bb-bd0f-520fc6d13c43"
+	ompCmd, err := (SessionRef{SessionID: ompID, Source: "omp"}).ResumeCommand()
+	if err != nil {
+		t.Fatalf("omp sessions are resumable: %v", err)
+	}
+	if ompCmd != "omp --resume "+ompID {
+		t.Errorf("omp resume command = %q, want `omp --resume <id>`", ompCmd)
+	}
+	if strings.Contains(ompCmd, "--restore") {
+		t.Errorf("resume must reopen the session, not continue unfinished work: %q", ompCmd)
+	}
+
 	// Codex/ChatGPT has no verified terminal resume (🎯T128) — the indexed
 	// sessions look like Desktop/IDE conversations, not CLI ones. Refusing
 	// by name beats inventing a command that runs and does something else.

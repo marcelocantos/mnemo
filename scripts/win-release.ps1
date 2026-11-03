@@ -128,7 +128,8 @@ foreach ($arch in $Archs.Split(",")) {
   Remove-Item -Recurse -Force $pkg -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $pkg | Out-Null
   Copy-Item mnemo.exe, NOTICE $pkg
-  Compress-Archive -Path "$pkg\mnemo.exe", "$pkg\NOTICE" -DestinationPath "$Out\$base.zip" -Force
+  Copy-Item internal\zstdc\LICENSE.zstd "$pkg\LICENSE.zstd"
+  Compress-Archive -Path "$pkg\mnemo.exe", "$pkg\NOTICE", "$pkg\LICENSE.zstd" -DestinationPath "$Out\$base.zip" -Force
   if (-not (Test-Path "$Out\$base.zip")) { Fail "zip_$arch" 22 }
 
   # Inno Setup resolves Source: paths relative to the .iss, so stage there.
@@ -138,6 +139,7 @@ foreach ($arch in $Archs.Split(",")) {
   Copy-Item mnemo.exe "$stage\mnemo.exe"
   Copy-Item LICENSE "$stage\LICENSE.txt"
   Copy-Item NOTICE "$stage\NOTICE.txt"
+  Copy-Item internal\zstdc\LICENSE.zstd "$stage\LICENSE.zstd.txt"
   & $Iscc /Q "/DAppVersion=$Version" "/DSourceDir=dist" "/DArch=$arch" "/O$Out" installer\windows\mnemo.iss
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$Out\$base-setup.exe")) { Fail "iscc_$arch" 23 }
   "built $base (.zip, -setup.exe)" | Write-Host

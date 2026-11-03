@@ -75,6 +75,7 @@ LicenseFile={#SourceDir}\LICENSE.txt
 Source: "{#SourceDir}\mnemo.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\LICENSE.zstd.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
 ; Install the mnemo Windows Service (elevated — default installer

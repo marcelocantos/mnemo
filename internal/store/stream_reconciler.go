@@ -36,7 +36,7 @@ type StreamReconciler interface {
 // should drive on each tick (🎯T68.7). Adding a new periodic stream is
 // one entry in this slice; the registry worker stays the same.
 func (s *Store) StreamReconcilers() []StreamReconciler {
-	// Order is not load-bearing: DriveStreamReconcilers runs each pass
+	// Order is not load-bearing: LaunchStreamReconcilers schedules each pass
 	// with its own deadline in parallel so one slow stream cannot starve
 	// the rest (🎯T145). Keep a stable, readable order for logs/doctor.
 	return []StreamReconciler{

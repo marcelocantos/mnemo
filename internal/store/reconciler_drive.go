@@ -73,6 +73,12 @@ type streamPassRecord struct {
 	lastCompleted time.Time
 	lastErr       string
 	inFlightSince time.Time
+	// running is true from launch until the stream's Reconcile call
+	// actually returns — including after the driver has stopped waiting
+	// on it at its pass deadline. While it is set the stream is not
+	// launched again, so a pass that ignores cancellation costs one
+	// parked goroutine, not one more every tick.
+	running bool
 }
 
 type reconcilerTracker struct {
@@ -92,13 +98,24 @@ func (t *reconcilerTracker) ensure() {
 }
 
 func (t *reconcilerTracker) markStarted(name string, now time.Time) {
+	t.tryStart(name, now)
+}
+
+// tryStart marks name as started at now unless an earlier pass of it is
+// still running, in which case it reports false and changes nothing.
+func (t *reconcilerTracker) tryStart(name string, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.ensure()
 	r := t.records[name]
+	if r.running {
+		return false
+	}
+	r.running = true
 	r.lastStarted = now
 	r.inFlightSince = now
 	t.records[name] = r
+	return true
 }
 
 func (t *reconcilerTracker) markFinished(name string, now time.Time, err error) {
@@ -106,6 +123,7 @@ func (t *reconcilerTracker) markFinished(name string, now time.Time, err error) 
 	defer t.mu.Unlock()
 	t.ensure()
 	r := t.records[name]
+	r.running = false
 	r.lastCompleted = now
 	r.inFlightSince = time.Time{}
 	if err != nil {
@@ -116,10 +134,49 @@ func (t *reconcilerTracker) markFinished(name string, now time.Time, err error) 
 	t.records[name] = r
 }
 
-// DriveStreamReconcilers runs one tick of the given streams with per-pass
-// deadlines. Each stream runs in its own goroutine so a blocked pass cannot
-// starve the others; registration order is not load-bearing (🎯T145).
+// markAbandoned records that name's pass outran its deadline without
+// returning. It is deliberately not a completion: lastCompleted and
+// inFlightSince stay as they are, so health keeps reporting the stream
+// as in flight past its pass timeout for as long as it really is.
+func (t *reconcilerTracker) markAbandoned(name string, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ensure()
+	r := t.records[name]
+	if !r.running {
+		return // it returned in the meantime; its own record stands
+	}
+	r.lastErr = err.Error()
+	t.records[name] = r
+}
+
+// LaunchStreamReconcilers starts one pass of each given stream and
+// returns without waiting for any of them (🎯T145). Each stream is
+// scheduled on its own: a stream whose previous pass is still running
+// is skipped this tick, and nothing one stream does can delay another
+// stream's next launch. This is what the daemon's minute tick calls.
+//
+// Every pass runs under its own deadline (StreamPassTimeout). A pass
+// that honours ctx ends there. One that does not — a read parked in
+// the kernel, say — is reported as having exceeded its pass timeout at
+// the deadline, and its stream is not relaunched until the call
+// finally returns.
+func LaunchStreamReconcilers(ctx context.Context, streams []StreamReconciler, now time.Time, track *reconcilerTracker) {
+	launchStreamPasses(ctx, streams, now, track, nil)
+}
+
+// DriveStreamReconcilers runs one tick of the given streams and waits
+// until each launched pass has either returned or reached its own
+// deadline. Scheduling is the same as LaunchStreamReconcilers; the wait
+// is bounded per stream by that stream's pass timeout, never by a
+// shared budget.
 func DriveStreamReconcilers(ctx context.Context, streams []StreamReconciler, now time.Time, track *reconcilerTracker) {
+	var wg sync.WaitGroup
+	launchStreamPasses(ctx, streams, now, track, &wg)
+	wg.Wait()
+}
+
+func launchStreamPasses(ctx context.Context, streams []StreamReconciler, now time.Time, track *reconcilerTracker, wg *sync.WaitGroup) {
 	if len(streams) == 0 {
 		return
 	}
@@ -128,62 +185,93 @@ func DriveStreamReconcilers(ctx context.Context, streams []StreamReconciler, now
 		track.ensure()
 		track.mu.Unlock()
 	}
-
-	var wg sync.WaitGroup
 	for _, sr := range streams {
-		sr := sr
-		wg.Add(1)
+		if ctx.Err() != nil {
+			return
+		}
+		if track != nil && !track.tryStart(sr.Name(), now) {
+			slog.Debug("reconcile tick: previous pass still running, not relaunching",
+				"stream", sr.Name())
+			continue
+		}
+		if wg != nil {
+			wg.Add(1)
+		}
 		go func() {
-			defer wg.Done()
-			if ctx.Err() != nil {
-				return
+			if wg != nil {
+				defer wg.Done()
 			}
-			timeout := StreamPassTimeout(sr)
-			passCtx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
-			if track != nil {
-				track.markStarted(sr.Name(), now)
-			}
-			n, err := sr.Reconcile(passCtx, now)
-			// If the pass outran its budget, prefer a clear timeout error.
-			if passCtx.Err() != nil && (err == nil || errorsIsContext(err)) {
-				err = fmtPassTimeout(sr.Name(), timeout)
-			}
-			if track != nil {
-				track.markFinished(sr.Name(), time.Now(), err)
-			}
-			if err != nil {
-				slog.Warn("reconcile failed", "stream", sr.Name(), "err", err)
-				return
-			}
-			if n > 0 {
-				slog.Info("reconciled", "stream", sr.Name(), "count", n)
-			}
+			runStreamPass(ctx, sr, now, track)
 		}()
 	}
+}
 
-	// Bound how long we wait for all wrappers. Streams that ignore cancel
-	// are abandoned after maxTimeout; their goroutines may still run until
-	// they honour ctx (cluster/calibration already check ctx).
-	maxTimeout := DefaultMaxPassTimeout
-	for _, sr := range streams {
-		if t := StreamPassTimeout(sr); t > maxTimeout {
-			maxTimeout = t
-		}
-	}
-	done := make(chan struct{})
+type streamPassResult struct {
+	n   int
+	err error
+}
+
+// runStreamPass runs one already-started pass of sr and returns when the
+// pass returns or its deadline passes, whichever is first. Reconcile is
+// called on a goroutine of its own so the deadline holds even when the
+// stream ignores ctx; that goroutine finishes the tracker record if and
+// when the call returns.
+func runStreamPass(ctx context.Context, sr StreamReconciler, now time.Time, track *reconcilerTracker) {
+	name := sr.Name()
+	timeout := StreamPassTimeout(sr)
+	passCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	abandoned := make(chan struct{})
+	result := make(chan streamPassResult, 1)
 	go func() {
-		wg.Wait()
-		close(done)
+		n, err := sr.Reconcile(passCtx, now)
+		// If the pass outran its budget, prefer a clear timeout error.
+		if passCtx.Err() != nil && ctx.Err() == nil && (err == nil || errorsIsContext(err)) {
+			err = fmtPassTimeout(name, timeout)
+		}
+		if track != nil {
+			track.markFinished(name, time.Now(), err)
+		}
+		select {
+		case result <- streamPassResult{n, err}:
+		case <-abandoned:
+			slog.Info("reconcile: abandoned pass returned", "stream", name, "err", err)
+		}
 	}()
-	timer := time.NewTimer(maxTimeout + time.Second)
-	defer timer.Stop()
+
 	select {
-	case <-done:
-	case <-timer.C:
-		slog.Warn("reconcile tick: abandoned still-running streams after max pass budget",
-			"budget", maxTimeout)
-	case <-ctx.Done():
+	case res := <-result:
+		logStreamPass(name, res)
+		return
+	case <-passCtx.Done():
+	}
+	// A result ready at the deadline wins over reporting a timeout.
+	select {
+	case res := <-result:
+		logStreamPass(name, res)
+		return
+	default:
+	}
+	close(abandoned)
+	if ctx.Err() != nil {
+		return // shutdown, not a fault of the stream
+	}
+	err := fmtPassTimeout(name, timeout)
+	if track != nil {
+		track.markAbandoned(name, err)
+	}
+	slog.Warn("reconcile failed", "stream", name, "err", err,
+		"detail", "pass ignored cancellation; not relaunched until it returns")
+}
+
+func logStreamPass(name string, res streamPassResult) {
+	if res.err != nil {
+		slog.Warn("reconcile failed", "stream", name, "err", res.err)
+		return
+	}
+	if res.n > 0 {
+		slog.Info("reconciled", "stream", name, "count", res.n)
 	}
 }
 

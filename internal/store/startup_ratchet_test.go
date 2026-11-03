@@ -86,10 +86,16 @@ var supervisionExemptions = map[string]string{
 		"its result channel; owns no DB writes",
 	"StartImageDescriber": "worker fan-out inside a goOnce that joins it with " +
 		"wg.Wait() before returning, so AwaitStartup covers the whole backfill",
-	"DriveStreamReconcilers": "per-stream passes with their own deadline; the " +
-		"bounded wait deliberately abandons a stream that overruns rather than " +
-		"holding the reconciler loop (see the abandon path). Residue: an " +
-		"abandoned stream can still write after the drive returns",
+	"launchStreamPasses": "per-stream reconcile passes, scheduled independently " +
+		"by the daemon's tick; each pass is bounded by its own deadline in " +
+		"runStreamPass, and DriveStreamReconcilers joins them with wg.Wait()",
+	"runStreamPass": "runs Reconcile on its own goroutine so the pass deadline " +
+		"holds even when a stream ignores ctx. Residue: a pass abandoned at " +
+		"its deadline can still write after it is reported timed out; its " +
+		"stream is not relaunched until that call returns",
+	"boundedFS": "a filesystem read that may block uncancellably in the kernel; " +
+		"abandoned at ctx's end and deduplicated by key so a stuck path parks " +
+		"at most one goroutine. Owns no DB writes",
 }
 
 // TestStartupCapabilitiesAreDeclared pins the capability set: a

@@ -287,12 +287,12 @@ items:
 
   - id: release.homebrew
     dim: release
-    desc: Published to the Homebrew tap on release
+    desc: Published to the Homebrew tap on release via tapper (make release → scripts/release-tap.sh → tapper push)
     state: present
     cadence: per-release
     enforce: informational
     tier: 2
-    evidence: {file: {path: scripts/release.sh, matches: 'homebrew-tap'}}
+    evidence: {file: {path: scripts/release-tap.sh, matches: 'tapper push'}}
 
   - id: release.windows-installer
     dim: release
@@ -436,18 +436,14 @@ items:
   - id: build.sqldeep-pin
     dim: build
     desc: Release and win-validate pin the same sqldeep ref
-    state: planned
+    state: present
     cadence: once-must-hold
     enforce: warning
     tier: 3
-    reason: >-
-      win-validate.sh defaults to sqldeep v0.22.0; scripts/release.sh builds
-      against v0.23.0. Entropy audit ENT-002.
     evidence:
-      absent:
-        command: >-
-          test "$(grep -oE 'WINCI_SQLDEEP_REF:-v[0-9.]+' scripts/win-validate.sh | cut -d- -f2)"
-          = "$(grep -oE '^SQLDEEP_REF=.*:-v[0-9.]+' scripts/release.sh | grep -oE 'v[0-9.]+$')"
+      command: >-
+        test "$(grep -oE 'WINCI_SQLDEEP_REF:-v[0-9.]+' scripts/win-validate.sh | cut -d- -f2)"
+        = "$(grep -oE '^SQLDEEP_REF=.*:-v[0-9.]+' scripts/release.sh | grep -oE 'v[0-9.]+$')"
 
   # ============================ DOCUMENTATION ============================
   - id: docs.agents-guide

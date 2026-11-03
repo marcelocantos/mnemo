@@ -30,6 +30,13 @@ model come from the sibling Agent CLI `~/.cursor/chats/**/store.db`
 (🎯T149.1). Resume is `agent --resume <id>`. See
 `docs/design/cursor-ingest.md`.
 
+Also ingests **Oh My Pi** (`omp`) sessions from
+`~/.omp/agent/sessions/` (honours `OMP_HOME` and `PI_CODING_AGENT_DIR`,
+and indexes `~/.omp/profiles/*/agent/sessions` when those profiles
+exist at startup) — session JSONL transformed into the same content
+model, tagged `session_meta.source = 'omp'`. Resume is
+`omp --resume <id>`. See `docs/design/omp-ingest.md`.
+
 ## Build & Run
 
 ```bash
@@ -595,9 +602,19 @@ lifecycle/transport) and `make test-scale` (Tier 3, snapshot-gated).
 Linux is not a supported platform: only darwin/arm64 and
 windows/{amd64,arm64} are built, tested and released.
 
+## Homebrew
+
+The formula in `marcelocantos/homebrew-tap` is published by
+[tapper](https://github.com/marcelocantos/tapper) from the release host, not by CI.
+`make release` runs it (via `scripts/release-tap.sh`) once the release assets
+have uploaded; to re-publish by hand, run `make release-tap TAG=vX.Y.Z` (or
+`tapper push --version vX.Y.Z`). Config lives in `tapper.yaml` (darwin/arm64
+only); the tap token is read from the macOS keychain, so no Actions secret is
+needed. Docker must be running.
+
 ## Delivery
 
 Direct push to `master` after the local gates above pass (no PR, no
-CI). Releases are cut locally from Colossus with
+CI). Releases are cut locally from the macOS/arm64 release host with
 `make release VERSION=x.y.z` after the "Release prep: vX.Y.Z" commit
 lands; see `docs/releasing.md`.

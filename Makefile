@@ -70,9 +70,15 @@ test-scale:
 # Daemon-subprocess e2e suite (internal/e2e), gated behind MNEMO_E2E=1
 # so `go test ./...` stays fast. The harness builds its own mnemo
 # binary. Run it locally before releases or after touching the
-# transport/daemon lifecycle; nothing schedules it.
+# transport/daemon lifecycle; nothing schedules it. The daemons get a
+# throwaway HOME (Go's caches are pinned to the real ones) so the suite
+# never reads or writes the developer's ~/.claude or ~/.mnemo.
 e2e:
-	MNEMO_E2E=1 go test -tags "$(BUILD_TAGS)" -timeout=10m -v -run . ./internal/e2e/
+	@h="$$(mktemp -d -t mnemo-e2e-home)"; trap 'rm -rf "$$h"' EXIT; \
+	GOENV="$$(go env GOENV)" GOCACHE="$$(go env GOCACHE)" \
+	GOMODCACHE="$$(go env GOMODCACHE)" GOPATH="$$(go env GOPATH)" \
+	HOME="$$h" MNEMO_E2E=1 \
+	go test -tags "$(BUILD_TAGS)" -count=1 -timeout=10m -v -run . ./internal/e2e/
 
 # Local release (replaces the GitHub Actions release workflow). See
 # docs/releasing.md. DRY_RUN=1 builds and packages every artifact into
@@ -92,3 +98,10 @@ vet:
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || (gofmt -l .; exit 1)
+
+# Publish the formula to the Homebrew tap for an existing release. Run after
+# the release assets exist — tapper reads them to build the formula.
+release-tap:
+	./scripts/release-tap.sh $(TAG)
+
+.PHONY: release-tap

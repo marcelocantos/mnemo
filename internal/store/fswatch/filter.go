@@ -46,7 +46,8 @@ func Interest(path string, mode WatchMode) bool {
 			return false
 		}
 		if strings.HasSuffix(base, ".jsonl") {
-			// Claude session jsonl, Codex rollout-*.jsonl, Grok updates.jsonl, etc.
+			// Claude session jsonl, Codex rollout-*.jsonl, Grok updates.jsonl,
+			// Oh My Pi session jsonl, etc.
 			return true
 		}
 		// Cursor Agent CLI store.db (🎯T149.1) — not JSONL; still a transcript source.
