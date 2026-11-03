@@ -30,10 +30,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,13 +45,60 @@ import (
 
 // buildOnce caches the daemon binary across all tests in a single
 // `go test` invocation. The first Start triggers `go build`; every
-// subsequent Start reuses the cached path. The binary lives under
-// the test cache dir and is removed when the test process exits.
+// subsequent Start reuses the cached path. The binary lives in a
+// mnemo-e2e-bin-* temp dir that Main removes when the test process
+// exits.
 var (
 	buildOnce sync.Once
 	binPath   string
 	buildErr  error
+
+	binDirMu sync.Mutex
+	binDir   string // temp dir holding binPath; "" once removed
 )
+
+// Main runs the package's tests and then removes the temp dir holding
+// the cached daemon binary. Every package that calls Start must route
+// its TestMain through it:
+//
+//	func TestMain(m *testing.M) { os.Exit(e2e.Main(m)) }
+//
+// The dir is removed after m.Run returns (pass or fail) and on SIGINT
+// or SIGTERM. A panic or `go test -timeout` expiry kills the process
+// without running any cleanup, so those can still leak one dir.
+func Main(m *testing.M) int {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case s := <-sig:
+			removeBinDir()
+			fmt.Fprintf(os.Stderr, "e2e: %v: removed daemon binary dir, exiting\n", s)
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	code := m.Run()
+	signal.Stop(sig)
+	close(done)
+	removeBinDir()
+	return code
+}
+
+// removeBinDir deletes the cached binary's temp dir, if one was made.
+func removeBinDir() {
+	binDirMu.Lock()
+	defer binDirMu.Unlock()
+	if binDir == "" {
+		return
+	}
+	if err := os.RemoveAll(binDir); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: removing %s: %v\n", binDir, err)
+		return
+	}
+	binDir = ""
+}
 
 // Daemon is a running mnemo daemon subprocess plus its MCP client.
 // Call Stop to cancel it; t.Cleanup is wired in Start so most callers
@@ -306,6 +355,9 @@ func ensureBinary() (string, error) {
 			buildErr = err
 			return
 		}
+		binDirMu.Lock()
+		binDir = dir
+		binDirMu.Unlock()
 		out := filepath.Join(dir, "mnemo")
 		if runtime.GOOS == "windows" {
 			out += ".exe"
