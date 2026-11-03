@@ -80,7 +80,6 @@ func TestNeverInstallsItselfAsAService(t *testing.T) {
 		{`"services", "install"`, "installs a brew service for itself"},
 		{`"launchctl", "load"`, "installs a launchd job for itself"},
 		{`"launchctl", "bootstrap"`, "installs a launchd job for itself"},
-		{`"systemctl", "enable"`, "installs a systemd unit for itself"},
 	}
 	for _, path := range goFilesInPackage(t) {
 		if strings.HasSuffix(path, "_test.go") {

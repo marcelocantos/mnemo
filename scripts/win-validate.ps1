@@ -1,8 +1,7 @@
 # 🎯T100: Windows build+test of mnemo on the Parallels VM (windows/arm64,
 # clang CGO). Driven by scripts/win-validate.sh; run on the VM via
-# `powershell -File`. Mirrors .github/workflows/ci.yml's Windows job:
-# check out the commit + sqldeep, build libsqldeep.a with clang, then
-# `go test -tags sqlite_fts5`. Prereqs (provisioned once): Go, MSYS2
+# `powershell -File`. Checks out the commit + sqldeep, builds
+# libsqldeep.a with clang, then runs `go test -tags sqlite_fts5`. Prereqs (provisioned once): Go, MSYS2
 # CLANGARM64 toolchain (clang/llvm-ar) + mingw-w64-clang-aarch64-sqlite3.
 param(
   [string]$Sha = "origin/master",

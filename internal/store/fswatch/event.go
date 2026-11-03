@@ -40,7 +40,7 @@ const (
 )
 
 // MaxDirWatches is the hard cap on recursive directory watches for fsnotify
-// backends (Linux/Windows). Darwin FSEvents does not use per-dir watches.
+// backends (Windows). Darwin FSEvents does not use per-dir watches.
 // Exceeding the cap fails soft: further dirs are not added; safety poll and
 // already-watched subtrees continue.
 const MaxDirWatches = 4096

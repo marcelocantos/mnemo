@@ -1,5 +1,6 @@
-# Homebrew tap publication for mnemo. `tapper push` runs from the dev
-# Mac after the GitHub release exists; the token lives in the macOS
+# Homebrew tap publication for mnemo. scripts/release.sh runs
+# `tapper push` (via scripts/release-tap.sh) on the release host after
+# the GitHub release assets upload; the token lives in the macOS
 # keychain, so there is no Actions secret and no CI step.
 repo: marcelocantos/mnemo
 tap:
@@ -7,8 +8,6 @@ tap:
   name: homebrew-tap
 push:
   darwin_arm64: true
-  linux_amd64: true
-  linux_arm64: true
   skip_checksum: true
   update_readme_table: true
 install: 'bin.install "mnemo" => "mnemo"'

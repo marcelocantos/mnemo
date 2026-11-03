@@ -110,7 +110,7 @@ clients: see [Registering as an MCP server](#registering-as-an-mcp-server).
 
 ## Install
 
-### macOS / Linux
+### macOS
 
 ```bash
 brew install marcelocantos/tap/mnemo
@@ -156,7 +156,7 @@ on Windows; transcript indexing and all query tools work identically.
 **As a service** (recommended — survives reboots):
 
 ```bash
-brew services start mnemo       # macOS / Linuxbrew
+brew services start mnemo       # macOS
 # or, if supervisord already runs other MCP daemons:
 # ./supervisor/install.sh       # evicts brew services; supervisorctl status mnemo
 ```
@@ -171,11 +171,11 @@ installer.
 Logs on macOS: `$(brew --prefix)/var/log/mnemo.log`.
 
 > **PATH note for service deployments**: mnemo's compactor shells out
-> to `claude -p`. Services (launchd, systemd) inherit a minimal
+> to `claude -p`. Services (launchd, supervisord) inherit a minimal
 > `PATH` that typically excludes the `claude` binary. The Homebrew
 > formula's service block sets `PATH` to include
 > `$(brew --prefix)/bin` and `~/.claude/local` automatically. If you
-> run mnemo via a custom plist or systemd unit, set `PATH` explicitly
+> run mnemo via a custom plist or supervisord program, set `PATH` explicitly
 > to include the directory where `claude` is installed. Without it,
 > compaction will fail with a logged ERROR.
 
@@ -231,7 +231,7 @@ grant), and iTerm2 on macOS.
 
 ## Upgrading
 
-**macOS / Linux (Homebrew)**:
+**macOS (Homebrew)**:
 
 ```bash
 brew upgrade marcelocantos/tap/mnemo

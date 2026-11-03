@@ -6,7 +6,6 @@
 // # Platform backends
 //
 //   - Darwin: FSEvents on configured roots (O(roots) cost; not fsnotify/kqueue).
-//   - Linux:  inotify via fsnotify, recursive directory watches with a hard cap.
 //   - Windows: ReadDirectoryChangesW via fsnotify, recursive directory watches with a hard cap.
 //
 // fsnotify on Darwin uses kqueue, which opens every file in each watched
@@ -18,7 +17,7 @@
 // # Steady-state bound
 //
 // Watch-related open FDs must stay well under 5k for a full corpus (target class
-// O(roots) on Darwin, O(min(dirs, MaxDirWatches)) on Linux/Windows). Historical
+// O(roots) on Darwin, O(min(dirs, MaxDirWatches)) on Windows). Historical
 // files are covered by the tree subscription or by the safety poll, never as
 // individual permanent watches.
 //

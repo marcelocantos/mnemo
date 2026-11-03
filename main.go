@@ -275,7 +275,7 @@ func main() {
 	}
 
 	// Install a signal-driven cancellable context so a foreground
-	// SIGTERM/SIGINT (Ctrl+C, `brew services restart`, systemd stop) drives
+	// SIGTERM/SIGINT (Ctrl+C, `brew services restart`, `supervisorctl stop`) drives
 	// the graceful drain in runServe instead of hard-killing the daemon
 	// mid-request (🎯T97.1). The Windows-Service path handled its own
 	// SCM-driven cancellation above and never reaches here.
@@ -1737,8 +1737,7 @@ func isHomebrewInstall() bool {
 	}
 	exe, _ = filepath.EvalSymlinks(exe)
 	return strings.Contains(exe, "/Cellar/mnemo/") ||
-		strings.Contains(exe, "/homebrew/") ||
-		strings.Contains(exe, "/linuxbrew/")
+		strings.Contains(exe, "/homebrew/")
 }
 
 func runBrewUpgrade(ctx context.Context) error {

@@ -314,10 +314,6 @@ func osSend(title, body, openURL string) {
 		if openURL != "" {
 			runNotify("open", openURL)
 		}
-	case "linux":
-		runNotify("notify-send", title, body)
-		// notify-send has no portable click-action without a desktop
-		// entry; leave the URL in the body for copy/paste.
 	}
 }
 

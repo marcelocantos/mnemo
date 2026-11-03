@@ -11,3 +11,5 @@ bullseye.yaml.lock
 # location; belt-and-braces against the helper or a wayward test
 # ever materialising a clone inside a worktree.
 mnemo-test-snapshots/
+# Local release output (scripts/release.sh).
+/dist/

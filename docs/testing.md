@@ -82,7 +82,7 @@ never the live `~/.mnemo` or `~/.claude/projects`.
   `go test ./...` never sees them. Only `go test -tags 'sqlite_fts5
   scale' ./...` (or `make test-scale`) compiles them.
 - **Env-var gate.** Tier 3 tests skip with a clear message when
-  `MNEMO_TEST_SNAPSHOT` is unset. CI never sets it. A casual
+  `MNEMO_TEST_SNAPSHOT` is unset. `make bullseye` never sets it. A casual
   `make test-scale` on a contributor's machine without a snapshot
   prints skips, not failures.
 - **APFS clone for snapshots.** `cmd/mnemo-test-snapshot` uses

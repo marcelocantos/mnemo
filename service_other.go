@@ -5,8 +5,8 @@
 
 // Non-Windows stubs for the Windows Service hooks declared in
 // service_windows.go. install-service / uninstall-service invocations
-// error out with a helpful pointer at brew services (macOS) or
-// systemd (Linux) rather than silently succeeding.
+// error out with a helpful pointer at brew services (macOS) rather
+// than silently succeeding.
 package main
 
 import "fmt"
