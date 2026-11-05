@@ -66,6 +66,12 @@ var ocrAborts atomic.Int64
 // ocrDisabled latches once the abort limit is hit.
 var ocrDisabled atomic.Bool
 
+// ocrDisabledAtUnixNano is when the abort latch tripped (0 if never).
+var ocrDisabledAtUnixNano atomic.Int64
+
+// ocrDisabledDetail holds the last abort detail that tripped the latch.
+var ocrDisabledDetail atomic.Value // string
+
 // ocrWorkerCommand builds the child invocation. A variable so tests can
 // inject a worker that aborts, which is the one behaviour that matters
 // here and cannot be provoked reliably through the real framework.
@@ -190,9 +196,87 @@ func noteOCRAbort(detail string) {
 		return
 	}
 	if ocrDisabled.CompareAndSwap(false, true) {
+		ocrDisabledAtUnixNano.Store(time.Now().UnixNano())
+		ocrDisabledDetail.Store(detail)
 		slog.Error("apple vision disabled for this process: worker aborted repeatedly, "+
 			"which indicates a broken platform Vision/Metal stack rather than bad images. "+
 			"Image OCR will be skipped; set disable_ocr in ~/.mnemo/config.json to silence this.",
 			"consecutive", n, "detail", detail)
+	}
+}
+
+// OCRProcessStatus is the process-local Apple Vision OCR latch state
+// (🎯T118). It backs the images.ocr /health check: reading it is free
+// (atomics only) and must never run OCR work.
+type OCRProcessSnapshot struct {
+	// Disabled is true when the abort latch has tripped for this process.
+	Disabled bool `json:"disabled"`
+	// Reason is machine-readable: ok, config, abort_latch, or unavailable.
+	Reason string `json:"reason"`
+	// Detail is the human-facing expansion of Reason.
+	Detail string `json:"detail"`
+	// DisabledAt is when the abort latch tripped; zero if not latched.
+	DisabledAt time.Time `json:"disabled_at,omitempty"`
+	// ConsecutiveAborts is the current consecutive abort count.
+	ConsecutiveAborts int64 `json:"consecutive_aborts"`
+}
+
+// OCRProcessStatus reports whether Apple Vision OCR is process-disabled,
+// and if so why and when. Config disable_ocr is reported separately as
+// reason "config" (healthy — the user asked for it). No OCR work is done.
+func OCRProcessStatus() OCRProcessSnapshot {
+	st := OCRProcessSnapshot{
+		ConsecutiveAborts: ocrAborts.Load(),
+	}
+	if ocrDisabledByConfig() {
+		st.Reason = "config"
+		st.Detail = "image OCR disabled by config (disable_ocr)"
+		return st
+	}
+	if ocrDisabled.Load() {
+		st.Disabled = true
+		st.Reason = "abort_latch"
+		detail, _ := ocrDisabledDetail.Load().(string)
+		when := "unknown time"
+		if ns := ocrDisabledAtUnixNano.Load(); ns != 0 {
+			st.DisabledAt = time.Unix(0, ns).UTC()
+			when = st.DisabledAt.Format(time.RFC3339)
+		}
+		if detail == "" {
+			detail = "worker aborted repeatedly"
+		}
+		st.Detail = fmt.Sprintf(
+			"apple vision disabled for this process since %s after %d consecutive worker aborts (%s); broken platform Vision/Metal stack rather than bad images",
+			when, ocrConsecutiveAbortLimit, detail)
+		return st
+	}
+	if !appleVisionAvailable {
+		st.Reason = "unavailable"
+		if _, err := exec.LookPath("tesseract"); err == nil {
+			st.Detail = "Apple Vision unavailable on this platform; using tesseract"
+		} else {
+			st.Detail = "no OCR backend available (Apple Vision is macOS-only, tesseract not installed)"
+		}
+		return st
+	}
+	st.Reason = "ok"
+	st.Detail = "apple vision OCR enabled"
+	return st
+}
+
+// ResetOCRAbortLatchForTest clears the process-wide abort latch (tests only).
+func ResetOCRAbortLatchForTest() {
+	ocrAborts.Store(0)
+	ocrDisabled.Store(false)
+	ocrDisabledAtUnixNano.Store(0)
+	ocrDisabledDetail.Store("")
+}
+
+// TripOCRAbortLatchForTest trips the abort latch as production would
+// after ocrConsecutiveAbortLimit consecutive worker aborts (tests only).
+func TripOCRAbortLatchForTest(detail string) {
+	ResetOCRAbortLatchForTest()
+	for i := 0; i < ocrConsecutiveAbortLimit; i++ {
+		noteOCRAbort(detail)
 	}
 }

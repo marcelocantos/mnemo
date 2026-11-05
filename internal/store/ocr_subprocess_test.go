@@ -18,12 +18,8 @@ import (
 // leak state into each other.
 func resetOCRState(t *testing.T) {
 	t.Helper()
-	ocrAborts.Store(0)
-	ocrDisabled.Store(false)
-	t.Cleanup(func() {
-		ocrAborts.Store(0)
-		ocrDisabled.Store(false)
-	})
+	ResetOCRAbortLatchForTest()
+	t.Cleanup(ResetOCRAbortLatchForTest)
 }
 
 // TestOCRWorkerRoundTrip pins the child-side contract: bytes in, one
@@ -227,5 +223,33 @@ func TestOCRWorkerTimeoutIsContained(t *testing.T) {
 	}
 	if elapsed > 10*time.Second {
 		t.Errorf("worker was not killed at the deadline (took %s)", elapsed)
+	}
+}
+
+// TestOCRProcessStatusReportsAbortLatch is the /health proof for the
+// process-disable latch: after the abort limit trips, OCRProcessStatus
+// reports disabled with why and when, which images.ocr surfaces as warn.
+func TestOCRProcessStatusReportsAbortLatch(t *testing.T) {
+	resetOCRState(t)
+
+	before := time.Now().Add(-time.Second)
+	TripOCRAbortLatchForTest("timeout")
+	after := time.Now().Add(time.Second)
+
+	st := OCRProcessStatus()
+	if !st.Disabled || st.Reason != "abort_latch" {
+		t.Fatalf("status = %+v, want disabled abort_latch", st)
+	}
+	if st.DisabledAt.Before(before) || st.DisabledAt.After(after) {
+		t.Errorf("DisabledAt = %v, want within [%v, %v]", st.DisabledAt, before, after)
+	}
+	if !strings.Contains(st.Detail, "timeout") {
+		t.Errorf("detail missing why: %q", st.Detail)
+	}
+	if !strings.Contains(st.Detail, st.DisabledAt.Format(time.RFC3339)) {
+		t.Errorf("detail missing when: %q", st.Detail)
+	}
+	if st.ConsecutiveAborts < ocrConsecutiveAbortLimit {
+		t.Errorf("ConsecutiveAborts = %d, want >= %d", st.ConsecutiveAborts, ocrConsecutiveAbortLimit)
 	}
 }
