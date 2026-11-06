@@ -62,6 +62,10 @@ const ocrConsecutiveAbortLimit = 5
 // a single half-open recovery trial is permitted.
 var ocrBreakerCooldown = 10 * time.Minute
 
+// ocrNow is the OCR breaker/health clock. Tests freeze it so cooldown
+// transitions do not require sleeping.
+var ocrNow = time.Now
+
 // ocrBreaker gates Apple Vision subprocess work: repeated worker deaths open
 // it for a bounded cooldown, then allow one trial (half-open). Success closes
 // it; another failure reopens with a fresh cooldown — no restart required.
@@ -131,7 +135,7 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 	if len(imageBytes) == 0 {
 		return "", nil, fmt.Errorf("apple_vision: empty image bytes")
 	}
-	now := time.Now()
+	now := ocrNow()
 	if !ocrBreaker.Allow(now) {
 		return "", nil, fmt.Errorf("apple_vision: circuit open — retry after cooldown (%s)", ocrBreakerCooldown)
 	}
@@ -192,10 +196,10 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 		// Worker exited cleanly but reported failure — still a completed trial;
 		// fold into the breaker (half-open failure re-opens; closed increments
 		// toward threshold). Do not treat as success.
-		ocrBreaker.Record(time.Now(), false, res.Error)
+		ocrBreaker.Record(ocrNow(), false, res.Error)
 		return "", nil, fmt.Errorf("%s", res.Error)
 	}
-	ocrBreaker.Record(time.Now(), true, "")
+	ocrBreaker.Record(ocrNow(), true, "")
 	return res.Text, res.Confidence, nil
 }
 
@@ -215,7 +219,7 @@ func ocrDisabledByConfig() bool {
 // Duplicate concurrent attempts for the same image are prevented by singleflight
 // in ocrAndStore, so each death here is one logical failure toward cooldown.
 func noteOCRWorkerDeath(detail string) {
-	now := time.Now()
+	now := ocrNow()
 	ocrBreaker.Record(now, false, detail)
 	snap := ocrBreaker.Snapshot()
 	switch snap.State {
@@ -270,7 +274,7 @@ func OCRProcessStatus() OCRProcessSnapshot {
 		}
 	}
 
-	now := time.Now()
+	now := ocrNow()
 	snap := ocrBreaker.Snapshot()
 	switch snap.State {
 	case breaker.StateOpen:
@@ -372,11 +376,20 @@ func TouchOCRBreakerAllowForTest(now time.Time) bool {
 // TripOCRAbortLatchForTest trips the breaker as after N consecutive worker deaths (tests only).
 func TripOCRAbortLatchForTest(detail string) {
 	ResetOCRAbortLatchForTest()
-	t0 := time.Now()
+	t0 := ocrNow()
 	for i := 0; i < ocrConsecutiveAbortLimit; i++ {
 		ocrBreaker.Record(t0, false, detail)
-		t0 = t0.Add(time.Millisecond)
 	}
+}
+
+// SetOCRNowForTest freezes the OCR clock (tests only). Pass zero to restore time.Now.
+func SetOCRNowForTest(now time.Time) {
+	if now.IsZero() {
+		ocrNow = time.Now
+		return
+	}
+	frozen := now
+	ocrNow = func() time.Time { return frozen }
 }
 
 // OCRBreakerCooldownForTest returns the Apple Vision breaker cooldown (tests only).
@@ -393,4 +406,9 @@ func SetOCRBreakerCooldownForTest(d time.Duration) {
 // RecordOCRBreakerTrialSuccessForTest records a successful half-open trial (tests only).
 func RecordOCRBreakerTrialSuccessForTest(now time.Time) {
 	ocrBreaker.Record(now, true, "")
+}
+
+// RecordOCRBreakerTrialFailureForTest records a failed trial (tests only).
+func RecordOCRBreakerTrialFailureForTest(now time.Time, detail string) {
+	ocrBreaker.Record(now, false, detail)
 }

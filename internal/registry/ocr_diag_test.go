@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,192 +14,174 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
+func freezeOCRClock(t *testing.T, now time.Time) {
+	t.Helper()
+	t.Cleanup(store.OCRBreakerTestLock())
+	store.ResetOCRAbortLatchForTest()
+	t.Cleanup(store.ResetOCRAbortLatchForTest)
+	store.SetOCRNowForTest(now)
+	t.Cleanup(func() { store.SetOCRNowForTest(time.Time{}) })
+}
+
+func imagesOCRResult(t *testing.T, r *Registry) (severity, detail, remediation, tier string) {
+	t.Helper()
+	rep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
+	for _, res := range rep.Results {
+		if res.Name == "images.ocr" {
+			return res.Severity, res.Detail, res.Remediation, res.Tier
+		}
+	}
+	t.Fatal("images.ocr missing from /health report")
+	return "", "", "", ""
+}
+
+func registryWithStore(t *testing.T) *Registry {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := store.New(filepath.Join(dir, "t.db"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	r := NewRegistry(context.Background(), store.Config{}, dir)
+	r.mu.Lock()
+	r.stores["default"] = &userEntry{store: s, homeDir: dir}
+	r.mu.Unlock()
+	return r
+}
+
 // TestImagesOCRHealthWarnsWhenBreakerOpen trips the Apple Vision breaker
 // open and asserts images.ocr warns with why; remediation documents cooldown
 // (not restart-only).
 func TestImagesOCRHealthWarnsWhenBreakerOpen(t *testing.T) {
-	t.Cleanup(store.OCRBreakerTestLock())
-	store.ResetOCRAbortLatchForTest()
-	t.Cleanup(store.ResetOCRAbortLatchForTest)
-
-	dir := t.TempDir()
-	s, err := store.New(filepath.Join(dir, "t.db"), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	freezeOCRClock(t, t0)
 	store.TripOCRAbortLatchForTest("timeout")
 
-	r := NewRegistry(context.Background(), store.Config{}, dir)
-	r.mu.Lock()
-	r.stores["default"] = &userEntry{store: s, homeDir: dir}
-	r.mu.Unlock()
-
-	rep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
-	var saw bool
-	for _, res := range rep.Results {
-		if res.Name != "images.ocr" {
-			continue
-		}
-		saw = true
-		if res.Severity != "warn" {
-			t.Fatalf("images.ocr severity=%s detail=%s, want warn", res.Severity, res.Detail)
-		}
-		if res.Tier != "fast" {
-			t.Errorf("images.ocr tier=%s, want fast", res.Tier)
-		}
-		if !strings.Contains(res.Detail, "timeout") && !strings.Contains(res.Detail, "last error") {
-			t.Errorf("detail missing failure context: %q", res.Detail)
-		}
-		if !strings.Contains(res.Remediation, "cooldown") {
-			t.Errorf("remediation should document cooldown recovery, got %q", res.Remediation)
-		}
+	r := registryWithStore(t)
+	sev, detail, rem, tier := imagesOCRResult(t, r)
+	if sev != "warn" {
+		t.Fatalf("images.ocr severity=%s detail=%s, want warn", sev, detail)
 	}
-	if !saw {
-		t.Fatal("images.ocr missing from /health report")
+	if tier != "fast" {
+		t.Errorf("images.ocr tier=%s, want fast", tier)
+	}
+	if !strings.Contains(detail, "timeout") && !strings.Contains(detail, "last error") {
+		t.Errorf("detail missing failure context: %q", detail)
+	}
+	if !strings.Contains(detail, "circuit open") {
+		t.Errorf("detail missing open phase: %q", detail)
+	}
+	if !strings.Contains(rem, "cooldown") {
+		t.Errorf("remediation should document cooldown recovery, got %q", rem)
 	}
 }
 
-// TestImagesOCRHealthWarnsWhenBreakerHalfOpen path: after cooldown elapses, the breaker is
-// half_open — images.ocr still warns (probing / next trial state in detail).
+// TestImagesOCRHealthWarnsWhenBreakerHalfOpen: after cooldown elapses,
+// images.ocr still warns (probing / next trial). Timer expiry is not recovery.
 func TestImagesOCRHealthWarnsWhenBreakerHalfOpen(t *testing.T) {
-	t.Cleanup(store.OCRBreakerTestLock())
-	store.ResetOCRAbortLatchForTest()
-	t.Cleanup(store.ResetOCRAbortLatchForTest)
-
-	prevCD := store.OCRBreakerCooldownForTest()
-	store.SetOCRBreakerCooldownForTest(50 * time.Millisecond)
-	t.Cleanup(func() { store.SetOCRBreakerCooldownForTest(prevCD) })
-
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	freezeOCRClock(t, t0)
 	store.TripOCRAbortLatchForTest("timeout")
-	time.Sleep(ocrBreakerHalfOpenSleep(store.OCRBreakerCooldownForTest())) // → half_open
+	store.SetOCRNowForTest(t0.Add(store.OCRBreakerCooldownForTest()))
 
-	dir := t.TempDir()
-	s, err := store.New(filepath.Join(dir, "t.db"), dir)
-	if err != nil {
-		t.Fatal(err)
+	r := registryWithStore(t)
+	sev, detail, rem, _ := imagesOCRResult(t, r)
+	if sev != "warn" {
+		t.Fatalf("images.ocr severity=%s detail=%s, want warn in half_open", sev, detail)
 	}
-	t.Cleanup(func() { _ = s.Close() })
-
-	r := NewRegistry(context.Background(), store.Config{}, dir)
-	r.mu.Lock()
-	r.stores["default"] = &userEntry{store: s, homeDir: dir}
-	r.mu.Unlock()
-
-	rep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
-	var saw bool
-	for _, res := range rep.Results {
-		if res.Name != "images.ocr" {
-			continue
-		}
-		saw = true
-		if res.Severity != "warn" {
-			t.Fatalf("images.ocr severity=%s detail=%s, want warn in half_open", res.Severity, res.Detail)
-		}
-		if !strings.Contains(res.Detail, "half_open") {
-			t.Errorf("detail should mention half_open probing: %q", res.Detail)
-		}
-		if !strings.Contains(res.Remediation, "successful trial") {
-			t.Errorf("remediation should say expiry alone is not recovery: %q", res.Remediation)
-		}
+	if !strings.Contains(detail, "half_open") {
+		t.Errorf("detail should mention half_open probing: %q", detail)
 	}
-	if !saw {
-		t.Fatal("images.ocr missing from /health report")
+	if !strings.Contains(rem, "successful trial") {
+		t.Errorf("remediation should say expiry alone is not recovery: %q", rem)
 	}
-}
-
-func ocrBreakerHalfOpenSleep(cd time.Duration) time.Duration {
-	return cd + 30*time.Millisecond
 }
 
 // TestImagesOCRHealthSequenceOpenToClosed exercises open WARN → half-open WARN → closed OK
 // after a successful recovery Record (without running native Vision).
 func TestImagesOCRHealthSequenceOpenToClosed(t *testing.T) {
-	t.Cleanup(store.OCRBreakerTestLock())
-	store.ResetOCRAbortLatchForTest()
-	t.Cleanup(store.ResetOCRAbortLatchForTest)
-
-	prevCD := store.OCRBreakerCooldownForTest()
-	// Cooldown must exceed temp-store startup so the first images.ocr sample is still
-	// in the true "open (cooldown active)" phase (not yet effective half_open).
-	store.SetOCRBreakerCooldownForTest(500 * time.Millisecond)
-	t.Cleanup(func() { store.SetOCRBreakerCooldownForTest(prevCD) })
-
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	freezeOCRClock(t, t0)
 	store.TripOCRAbortLatchForTest("boom")
 
-	dir := t.TempDir()
-	s, err := store.New(filepath.Join(dir, "t.db"), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-
-	r := NewRegistry(context.Background(), store.Config{}, dir)
-	r.mu.Lock()
-	r.stores["default"] = &userEntry{store: s, homeDir: dir}
-	r.mu.Unlock()
-
-	openRep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
-	var openWarn bool
-	for _, res := range openRep.Results {
-		if res.Name == "images.ocr" && res.Severity == "warn" && strings.Contains(res.Detail, "circuit open (cooldown active)") {
-			openWarn = true
-		}
-	}
-	if !openWarn {
-		t.Fatal("want images.ocr warn while breaker open")
+	r := registryWithStore(t)
+	sev, detail, _, _ := imagesOCRResult(t, r)
+	if sev != "warn" || !strings.Contains(detail, "circuit open (cooldown active)") {
+		t.Fatalf("want images.ocr warn while breaker open, got %s %s", sev, detail)
 	}
 
-	time.Sleep(ocrBreakerHalfOpenSleep(store.OCRBreakerCooldownForTest()))
-	tHalf := time.Now()
+	tHalf := t0.Add(store.OCRBreakerCooldownForTest())
+	store.SetOCRNowForTest(tHalf)
 	if !store.TouchOCRBreakerAllowForTest(tHalf) {
 		t.Fatal("expected transition to half_open after cooldown")
 	}
-	halfRep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
-	var halfWarn bool
-	for _, res := range halfRep.Results {
-		if res.Name == "images.ocr" && res.Severity == "warn" && strings.Contains(res.Detail, "half_open") {
-			halfWarn = true
-		}
-	}
-	if !halfWarn {
-		t.Fatal("want images.ocr warn in half_open (probing)")
+	sev, detail, _, _ = imagesOCRResult(t, r)
+	if sev != "warn" || !strings.Contains(detail, "half_open") {
+		t.Fatalf("want images.ocr warn in half_open (probing), got %s %s", sev, detail)
 	}
 
 	store.RecordOCRBreakerTrialSuccessForTest(tHalf)
+	sev, detail, _, _ = imagesOCRResult(t, r)
+	if sev != "ok" {
+		t.Fatalf("after successful trial want ok, got %s %s", sev, detail)
+	}
+}
 
-	finalRep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
-	for _, res := range finalRep.Results {
-		if res.Name == "images.ocr" && res.Severity != "ok" {
-			t.Fatalf("after successful trial want ok, got %s %s", res.Severity, res.Detail)
-		}
+// TestImagesOCRHealthSequenceFailedTrialReopens: half-open failure → open WARN again.
+func TestImagesOCRHealthSequenceFailedTrialReopens(t *testing.T) {
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	freezeOCRClock(t, t0)
+	store.TripOCRAbortLatchForTest("boom")
+	tHalf := t0.Add(store.OCRBreakerCooldownForTest())
+	store.SetOCRNowForTest(tHalf)
+	if !store.TouchOCRBreakerAllowForTest(tHalf) {
+		t.Fatal("expected half_open")
+	}
+
+	r := registryWithStore(t)
+	store.RecordOCRBreakerTrialFailureForTest(tHalf, "half_open_fail")
+
+	sev, detail, _, _ := imagesOCRResult(t, r)
+	if sev != "warn" || !strings.Contains(detail, "circuit open") {
+		t.Fatalf("failed trial must reopen with open WARN, got %s %s", sev, detail)
 	}
 }
 
 // TestImagesOCRHealthOkWhenEnabled keeps the happy path green so the
 // new check does not warn on a healthy daemon.
 func TestImagesOCRHealthOkWhenEnabled(t *testing.T) {
-	t.Cleanup(store.OCRBreakerTestLock())
-	store.ResetOCRAbortLatchForTest()
-	t.Cleanup(store.ResetOCRAbortLatchForTest)
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	freezeOCRClock(t, t0)
 
-	dir := t.TempDir()
-	s, err := store.New(filepath.Join(dir, "t.db"), dir)
-	if err != nil {
+	r := registryWithStore(t)
+	sev, detail, _, _ := imagesOCRResult(t, r)
+	if sev != "ok" {
+		t.Fatalf("images.ocr want ok when enabled, got %s %s", sev, detail)
+	}
+}
+
+// TestImagesOCRHealthOkWhenConfigDisabled: deliberate disable_ocr stays healthy.
+func TestImagesOCRHealthOkWhenConfigDisabled(t *testing.T) {
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+	freezeOCRClock(t, t0)
+
+	home := t.TempDir()
+	t.Setenv(store.MnemoHomeEnv, home)
+	if err := os.MkdirAll(filepath.Join(home, ".mnemo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
+	if err := os.WriteFile(filepath.Join(home, ".mnemo", "config.json"),
+		[]byte(`{"disable_ocr": true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	r := NewRegistry(context.Background(), store.Config{}, dir)
-	r.mu.Lock()
-	r.stores["default"] = &userEntry{store: s, homeDir: dir}
-	r.mu.Unlock()
-
-	rep := r.BuildDiagRegistry("default", time.Now()).Run(context.Background(), false, time.Now())
-	for _, res := range rep.Results {
-		if res.Name == "images.ocr" && res.Severity != "ok" {
-			t.Fatalf("images.ocr want ok when enabled, got %s %s", res.Severity, res.Detail)
-		}
+	r := registryWithStore(t)
+	sev, detail, _, _ := imagesOCRResult(t, r)
+	if sev != "ok" {
+		t.Fatalf("config-disabled OCR must stay healthy, got %s %s", sev, detail)
+	}
+	if !strings.Contains(detail, "disable_ocr") && !strings.Contains(detail, "config") {
+		t.Errorf("detail should name config disable, got %q", detail)
 	}
 }
