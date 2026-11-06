@@ -11,6 +11,7 @@ require (
 	github.com/mark3labs/mcp-go v0.47.0
 	github.com/mattn/go-sqlite3 v1.14.41
 	golang.org/x/image v0.39.0
+	golang.org/x/sync v0.20.0
 )
 
 require gopkg.in/yaml.v3 v3.0.1

@@ -10,11 +10,15 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/marcelocantos/mnemo/internal/breaker"
 )
 
-// resetOCRState clears the process-wide abort latch so tests do not
+// resetOCRState clears the process-wide OCR breaker so tests do not
 // leak state into each other.
 func resetOCRState(t *testing.T) {
 	t.Helper()
@@ -40,56 +44,50 @@ func TestOCRWorkerRoundTrip(t *testing.T) {
 	}
 }
 
-// TestOCRAbortLatchDisablesAfterLimit covers the systemic case: a
-// platform whose Vision stack is broken aborts on every image. Isolation
-// alone would then spawn a doomed process per image forever, so repeated
-// aborts must latch OCR off (🎯T118).
-func TestOCRAbortLatchDisablesAfterLimit(t *testing.T) {
+// TestOCRCircuitBreakerOpensAfterLimit covers the systemic case: repeated
+// isolated worker deaths trip the breaker open (bounded cooldown, not
+// restart-only permanent latch).
+func TestOCRCircuitBreakerOpensAfterLimit(t *testing.T) {
 	resetOCRState(t)
 
 	for i := 1; i < ocrConsecutiveAbortLimit; i++ {
 		noteOCRAbort("signal: abort trap")
-		if ocrDisabled.Load() {
-			t.Fatalf("disabled early, after %d aborts (limit %d)", i, ocrConsecutiveAbortLimit)
+		snap := ocrBreaker.Snapshot()
+		if snap.State == breaker.StateOpen {
+			t.Fatalf("breaker opened early after %d failures", i)
 		}
-		if ocrBackend() == "" && appleVisionAvailable {
-			t.Fatalf("backend withdrawn early, after %d aborts", i)
+		if appleVisionAvailable && ocrBackend() == "" {
+			t.Fatalf("backend withdrawn early, after %d failures", i)
 		}
 	}
 	noteOCRAbort("signal: abort trap")
-	if !ocrDisabled.Load() {
-		t.Errorf("expected OCR disabled after %d consecutive aborts", ocrConsecutiveAbortLimit)
+	if ocrBreaker.Snapshot().State != breaker.StateOpen {
+		t.Errorf("expected breaker open after %d consecutive worker deaths", ocrConsecutiveAbortLimit)
 	}
 
-	// Once latched, the isolated path refuses without spawning anything.
-	if _, _, err := runAppleVisionOCRIsolated([]byte("x")); err == nil ||
-		!strings.Contains(err.Error(), "disabled") {
-		t.Errorf("expected a disabled error once latched, got %v", err)
-	}
-	// And the backend selection reflects it, so callers stop trying.
+	// While in cooldown, Apple Vision must not be selected as backend.
 	if appleVisionAvailable && ocrBackend() == "apple_vision" {
-		t.Error("apple_vision still selected after the abort latch tripped")
+		t.Error("apple_vision still selected immediately after breaker tripped")
 	}
 }
 
-// TestOCRSuccessResetsAbortCounter: the latch must track *consecutive*
-// aborts, so an occasional bad image never accumulates toward disabling
-// an otherwise healthy backend.
-func TestOCRSuccessResetsAbortCounter(t *testing.T) {
+// TestOCRSuccessResetsBreakerRun: successes clear the consecutive failure
+// run so intermittent worker deaths do not trip the breaker.
+func TestOCRSuccessResetsBreakerRun(t *testing.T) {
 	resetOCRState(t)
 
 	noteOCRAbort("signal: abort trap")
 	noteOCRAbort("signal: abort trap")
-	if got := ocrAborts.Load(); got != 2 {
-		t.Fatalf("abort count = %d, want 2", got)
+	if got := ocrBreaker.Snapshot().Failures; got != 2 {
+		t.Fatalf("failure count = %d, want 2", got)
 	}
-	ocrAborts.Store(0) // what a successful worker run does
+	ocrBreaker.Record(time.Now(), true, "")
 	noteOCRAbort("signal: abort trap")
-	if got := ocrAborts.Load(); got != 1 {
-		t.Errorf("abort count = %d after a success, want 1", got)
+	if got := ocrBreaker.Snapshot().Failures; got != 1 {
+		t.Errorf("failure count = %d after a recorded success, want 1", got)
 	}
-	if ocrDisabled.Load() {
-		t.Error("intermittent aborts must not disable OCR")
+	if ocrBreaker.Snapshot().State != breaker.StateClosed {
+		t.Error("intermittent deaths must leave the breaker closed")
 	}
 }
 
@@ -100,8 +98,8 @@ func TestOCREmptyBytesRejectedWithoutSpawn(t *testing.T) {
 	if _, _, err := runAppleVisionOCRIsolated(nil); err == nil {
 		t.Error("expected an error for empty image bytes")
 	}
-	if ocrAborts.Load() != 0 {
-		t.Error("empty input must not count as a platform abort")
+	if ocrBreaker.Snapshot().Failures != 0 {
+		t.Error("empty input must not count as a platform worker death")
 	}
 }
 
@@ -154,8 +152,8 @@ func TestOCRWorkerAbortIsContained(t *testing.T) {
 	if !strings.Contains(err.Error(), "worker died") {
 		t.Errorf("error should name the worker death, got %q", err)
 	}
-	if ocrAborts.Load() != 1 {
-		t.Errorf("abort counter = %d, want 1", ocrAborts.Load())
+	if ocrBreaker.Snapshot().Failures != 1 {
+		t.Errorf("breaker failures = %d, want 1", ocrBreaker.Snapshot().Failures)
 	}
 }
 
@@ -226,10 +224,9 @@ func TestOCRWorkerTimeoutIsContained(t *testing.T) {
 	}
 }
 
-// TestOCRProcessStatusReportsAbortLatch is the /health proof for the
-// process-disable latch: after the abort limit trips, OCRProcessStatus
-// reports disabled with why and when, which images.ocr surfaces as warn.
-func TestOCRProcessStatusReportsAbortLatch(t *testing.T) {
+// TestOCRProcessStatusReportsOpenBreaker is the /health proof: after the
+// trip threshold, OCRProcessStatus reports apple_vision_breaker + open.
+func TestOCRProcessStatusReportsOpenBreaker(t *testing.T) {
 	resetOCRState(t)
 
 	before := time.Now().Add(-time.Second)
@@ -237,19 +234,93 @@ func TestOCRProcessStatusReportsAbortLatch(t *testing.T) {
 	after := time.Now().Add(time.Second)
 
 	st := OCRProcessStatus()
-	if !st.Disabled || st.Reason != "abort_latch" {
-		t.Fatalf("status = %+v, want disabled abort_latch", st)
+	if !st.Disabled || st.Reason != "apple_vision_breaker" || st.BreakerState != "open" {
+		t.Fatalf("status = %+v, want disabled apple_vision_breaker open", st)
 	}
-	if st.DisabledAt.Before(before) || st.DisabledAt.After(after) {
-		t.Errorf("DisabledAt = %v, want within [%v, %v]", st.DisabledAt, before, after)
+	if st.OpenedAt.Before(before) || st.OpenedAt.After(after) {
+		t.Errorf("OpenedAt = %v, want within [%v, %v]", st.OpenedAt, before, after)
 	}
 	if !strings.Contains(st.Detail, "timeout") {
 		t.Errorf("detail missing why: %q", st.Detail)
 	}
-	if !strings.Contains(st.Detail, st.DisabledAt.Format(time.RFC3339)) {
-		t.Errorf("detail missing when: %q", st.Detail)
+	if st.ConsecutiveFailures < ocrConsecutiveAbortLimit {
+		t.Errorf("ConsecutiveFailures = %d, want >= %d", st.ConsecutiveFailures, ocrConsecutiveAbortLimit)
 	}
-	if st.ConsecutiveAborts < ocrConsecutiveAbortLimit {
-		t.Errorf("ConsecutiveAborts = %d, want >= %d", st.ConsecutiveAborts, ocrConsecutiveAbortLimit)
+}
+
+// TestOCRCircuitBreakerRecoversAfterCooldown exercises half-open → closed.
+func TestOCRCircuitBreakerRecoversAfterCooldown(t *testing.T) {
+	resetOCRState(t)
+
+	prevCD := ocrBreakerCooldown
+	ocrBreakerCooldown = 50 * time.Millisecond
+	t.Cleanup(func() { ocrBreakerCooldown = prevCD })
+
+	TripOCRAbortLatchForTest("boom")
+	if ocrBreaker.Snapshot().State != breaker.StateOpen {
+		t.Fatal("expected open")
 	}
+
+	time.Sleep(ocrBreakerCooldown + 30*time.Millisecond)
+	now := time.Now()
+	if !ocrBreaker.Allow(now) {
+		t.Fatal("expected half-open trial after cooldown")
+	}
+	ocrBreaker.Record(now, true, "")
+	if ocrBreaker.Snapshot().State != breaker.StateClosed {
+		t.Fatalf("success should close breaker, got %+v", ocrBreaker.Snapshot())
+	}
+}
+
+// TestOCRSingleFlightDedupesConcurrentWorkers guards the bug where many
+// sidecars for the same image each spawned a cold OCR run and each timeout
+// incremented the consecutive counter — only one runOCR body executes.
+func TestOCRSingleFlightDedupesConcurrentWorkers(t *testing.T) {
+	resetOCRState(t)
+	var calls atomic.Int32
+	prev := testRunOCRHook
+	testRunOCRHook = func() { calls.Add(1) }
+	t.Cleanup(func() { testRunOCRHook = prev })
+
+	backend := ""
+	switch {
+	case appleVisionAvailable:
+		requirePOSIXShell(t)
+		withWorker(t, `printf '%s\n' '{"text":"ok","confidence":0.99}'`)
+		backend = "apple_vision"
+	case lookPathOK("tesseract"):
+		backend = "tesseract"
+	default:
+		t.Skip("need apple_vision (darwin) or tesseract for this OCR path")
+	}
+
+	s := newTestStore(t, t.TempDir())
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO images (id, content_hash, bytes, mime_type, width, height,
+		                     pixel_format, byte_size, created_at)
+		 VALUES (1, 'hash-sf', ?, 'image/png', 10, 10, 'rgba', 10, '2026-07-26T00:00:00Z')`,
+		[]byte("fake image"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			ocrAndStore(s.writeDB, 1, []byte("fake image"), backend)
+		}()
+	}
+	wg.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("runOCR hook calls = %d, want 1 (single-flight per image)", got)
+	}
+}
+
+func lookPathOK(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }

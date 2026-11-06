@@ -13,10 +13,10 @@ import (
 	"github.com/marcelocantos/mnemo/internal/store"
 )
 
-// TestImagesOCRHealthWarnsWhenProcessDisabled trips the Apple Vision
-// abort latch and asserts the shipped images.ocr /health check warns
-// with why and when. Restart is the documented fix.
-func TestImagesOCRHealthWarnsWhenProcessDisabled(t *testing.T) {
+// TestImagesOCRHealthWarnsWhenBreakerOpen trips the Apple Vision breaker
+// open and asserts images.ocr warns with why; remediation documents cooldown
+// (not restart-only).
+func TestImagesOCRHealthWarnsWhenBreakerOpen(t *testing.T) {
 	store.ResetOCRAbortLatchForTest()
 	t.Cleanup(store.ResetOCRAbortLatchForTest)
 
@@ -47,14 +47,11 @@ func TestImagesOCRHealthWarnsWhenProcessDisabled(t *testing.T) {
 		if res.Tier != "fast" {
 			t.Errorf("images.ocr tier=%s, want fast", res.Tier)
 		}
-		if !strings.Contains(res.Detail, "timeout") {
-			t.Errorf("detail missing why: %q", res.Detail)
+		if !strings.Contains(res.Detail, "timeout") && !strings.Contains(res.Detail, "last error") {
+			t.Errorf("detail missing failure context: %q", res.Detail)
 		}
-		if !strings.Contains(res.Detail, "disabled for this process since") {
-			t.Errorf("detail missing when: %q", res.Detail)
-		}
-		if !strings.Contains(res.Remediation, "restart") {
-			t.Errorf("remediation should document restart, got %q", res.Remediation)
+		if !strings.Contains(res.Remediation, "cooldown") {
+			t.Errorf("remediation should document cooldown recovery, got %q", res.Remediation)
 		}
 	}
 	if !saw {

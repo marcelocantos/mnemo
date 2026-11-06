@@ -13,8 +13,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"sync/atomic"
 	"time"
+
+	"github.com/marcelocantos/mnemo/internal/breaker"
 )
 
 // Apple Vision runs in a subprocess, never in the daemon (🎯T118).
@@ -52,25 +53,23 @@ var ocrWorkerTimeout = 60 * time.Second
 // than enforced.
 var ocrWorkerWaitDelay = 5 * time.Second
 
-// ocrConsecutiveAbortLimit is how many consecutive worker aborts are
-// tolerated before Apple Vision is disabled for the lifetime of the
-// process. Repeated aborts mean the platform's Vision stack is broken,
-// not that these particular images are odd, and each one costs a
-// process spawn. Disabling converts a systemic fault into a single
-// loud message instead of one warning per image forever.
+// ocrConsecutiveAbortLimit is how many consecutive isolated worker deaths
+// (timeout, SIGABRT, etc.) trip the Apple Vision circuit breaker open.
 const ocrConsecutiveAbortLimit = 5
 
-// ocrAborts counts consecutive worker aborts; any success resets it.
-var ocrAborts atomic.Int64
+// ocrBreakerCooldown is how long Apple Vision stays off after a trip before
+// a single half-open recovery trial is permitted.
+var ocrBreakerCooldown = 10 * time.Minute
 
-// ocrDisabled latches once the abort limit is hit.
-var ocrDisabled atomic.Bool
+// ocrBreaker gates Apple Vision subprocess work: repeated worker deaths open
+// it for a bounded cooldown, then allow one trial (half-open). Success closes
+// it; another failure reopens with a fresh cooldown — no restart required.
+// Re-built when ocrBreakerCooldown changes (tests) via ResetOCRAbortLatchForTest.
+var ocrBreaker = newOCRBreaker()
 
-// ocrDisabledAtUnixNano is when the abort latch tripped (0 if never).
-var ocrDisabledAtUnixNano atomic.Int64
-
-// ocrDisabledDetail holds the last abort detail that tripped the latch.
-var ocrDisabledDetail atomic.Value // string
+func newOCRBreaker() *breaker.Breaker {
+	return breaker.New(ocrConsecutiveAbortLimit, ocrBreakerCooldown)
+}
 
 // ocrWorkerCommand builds the child invocation. A variable so tests can
 // inject a worker that aborts, which is the one behaviour that matters
@@ -116,9 +115,9 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 	if len(imageBytes) == 0 {
 		return "", nil, fmt.Errorf("apple_vision: empty image bytes")
 	}
-	if ocrDisabled.Load() {
-		return "", nil, fmt.Errorf("apple_vision: disabled after %d consecutive worker aborts",
-			ocrConsecutiveAbortLimit)
+	now := time.Now()
+	if !ocrBreaker.Allow(now) {
+		return "", nil, fmt.Errorf("apple_vision: circuit open — retry after cooldown (%s)", ocrBreakerCooldown)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ocrWorkerTimeout)
@@ -142,13 +141,13 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 
 	runErr := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		noteOCRAbort("timeout")
+		noteOCRWorkerDeath("timeout")
 		return "", nil, fmt.Errorf("apple_vision: worker timed out after %s", ocrWorkerTimeout)
 	}
 	if runErr != nil {
 		// The child died rather than reporting. This is the case the
 		// isolation exists for: attribute it to this image, keep the
-		// daemon alive, and let the abort counter notice a pattern.
+		// daemon alive, and let the breaker notice a pattern.
 		var ee *exec.ExitError
 		detail := runErr.Error()
 		if errors.As(runErr, &ee) {
@@ -157,17 +156,17 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 		if msg := firstLine(stderr.String()); msg != "" {
 			detail += ": " + msg
 		}
-		noteOCRAbort(detail)
+		noteOCRWorkerDeath(detail)
 		return "", nil, fmt.Errorf("apple_vision: worker died (%s)", detail)
 	}
 
 	var res ocrWorkerResult
 	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
 		// A clean exit with unreadable output is a protocol fault, not a
-		// platform abort, so it does not count toward the abort limit.
+		// platform abort, so it does not count toward the breaker.
 		return "", nil, fmt.Errorf("apple_vision: unreadable worker output: %w", err)
 	}
-	ocrAborts.Store(0)
+	ocrBreaker.Record(time.Now(), true, "")
 	if res.Error != "" {
 		return "", nil, fmt.Errorf("%s", res.Error)
 	}
@@ -186,97 +185,118 @@ func ocrDisabledByConfig() bool {
 	return cfg.DisableOCR
 }
 
-// noteOCRAbort records a worker death and disables Apple Vision once the
-// consecutive limit is reached.
-func noteOCRAbort(detail string) {
-	n := ocrAborts.Add(1)
-	if n < ocrConsecutiveAbortLimit {
+// noteOCRWorkerDeath records one isolated worker death on the circuit breaker.
+// Duplicate concurrent attempts for the same image are prevented by singleflight
+// in ocrAndStore, so each death here is one logical failure toward cooldown.
+func noteOCRWorkerDeath(detail string) {
+	now := time.Now()
+	ocrBreaker.Record(now, false, detail)
+	snap := ocrBreaker.Snapshot()
+	switch snap.State {
+	case breaker.StateOpen:
+		slog.Error("apple vision OCR circuit breaker OPEN: repeated worker deaths — cooling down before one recovery trial",
+			"cooldown", ocrBreakerCooldown, "last_error", snap.LastError, "trips", snap.TripCount)
+	case breaker.StateHalfOpen:
+		slog.Warn("apple vision worker died during half-open recovery trial",
+			"detail", detail, "will_reopen", true)
+	default:
 		slog.Warn("apple vision worker aborted; image skipped, daemon unaffected",
-			"consecutive", n, "limit", ocrConsecutiveAbortLimit, "detail", detail)
-		return
-	}
-	if ocrDisabled.CompareAndSwap(false, true) {
-		ocrDisabledAtUnixNano.Store(time.Now().UnixNano())
-		ocrDisabledDetail.Store(detail)
-		slog.Error("apple vision disabled for this process: worker aborted repeatedly, "+
-			"which indicates a broken platform Vision/Metal stack rather than bad images. "+
-			"Image OCR will be skipped; set disable_ocr in ~/.mnemo/config.json to silence this.",
-			"consecutive", n, "detail", detail)
+			"consecutive_failures", snap.Failures, "threshold", ocrConsecutiveAbortLimit, "detail", detail)
 	}
 }
 
-// OCRProcessStatus is the process-local Apple Vision OCR latch state
-// (🎯T118). It backs the images.ocr /health check: reading it is free
-// (atomics only) and must never run OCR work.
+// noteOCRAbort is the legacy name kept for tests; it matches noteOCRWorkerDeath.
+func noteOCRAbort(detail string) {
+	noteOCRWorkerDeath(detail)
+}
+
+// OCRProcessSnapshot backs images.ocr /health: atomics + one breaker snapshot only.
 type OCRProcessSnapshot struct {
-	// Disabled is true when the abort latch has tripped for this process.
+	// Disabled is true when Apple Vision subprocess OCR is not offered
+	// (config off, breaker open in cooldown, or non-darwin without tess).
 	Disabled bool `json:"disabled"`
-	// Reason is machine-readable: ok, config, abort_latch, or unavailable.
+	// Reason is machine-readable: ok, config, apple_vision_breaker, unavailable, ...
 	Reason string `json:"reason"`
 	// Detail is the human-facing expansion of Reason.
 	Detail string `json:"detail"`
-	// DisabledAt is when the abort latch tripped; zero if not latched.
-	DisabledAt time.Time `json:"disabled_at,omitempty"`
-	// ConsecutiveAborts is the current consecutive abort count.
-	ConsecutiveAborts int64 `json:"consecutive_aborts"`
+	// BreakerState is set when Apple Vision uses the subprocess breaker.
+	BreakerState string `json:"breaker_state,omitempty"`
+	// ConsecutiveFailures is the breaker's consecutive failure count while closed.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+	// OpenedAt is when the breaker last tripped open (cooldown anchor).
+	OpenedAt time.Time `json:"opened_at,omitempty"`
+	// CooldownRemaining is positive while the breaker is open before half-open.
+	CooldownRemaining time.Duration `json:"cooldown_remaining,omitempty"`
 }
 
-// OCRProcessStatus reports whether Apple Vision OCR is process-disabled,
-// and if so why and when. Config disable_ocr is reported separately as
-// reason "config" (healthy — the user asked for it). No OCR work is done.
+// OCRProcessStatus reports Apple Vision + subprocess breaker state for /health.
 func OCRProcessStatus() OCRProcessSnapshot {
-	st := OCRProcessSnapshot{
-		ConsecutiveAborts: ocrAborts.Load(),
-	}
 	if ocrDisabledByConfig() {
-		st.Reason = "config"
-		st.Detail = "image OCR disabled by config (disable_ocr)"
-		return st
-	}
-	if ocrDisabled.Load() {
-		st.Disabled = true
-		st.Reason = "abort_latch"
-		detail, _ := ocrDisabledDetail.Load().(string)
-		when := "unknown time"
-		if ns := ocrDisabledAtUnixNano.Load(); ns != 0 {
-			st.DisabledAt = time.Unix(0, ns).UTC()
-			when = st.DisabledAt.Format(time.RFC3339)
+		return OCRProcessSnapshot{
+			Disabled: true,
+			Reason:   "config",
+			Detail:   "image OCR disabled by config (disable_ocr)",
 		}
-		if detail == "" {
-			detail = "worker aborted repeatedly"
-		}
-		st.Detail = fmt.Sprintf(
-			"apple vision disabled for this process since %s after %d consecutive worker aborts (%s); broken platform Vision/Metal stack rather than bad images",
-			when, ocrConsecutiveAbortLimit, detail)
-		return st
 	}
+
+	now := time.Now()
+	snap := ocrBreaker.Snapshot()
+	switch snap.State {
+	case breaker.StateOpen:
+		rem := ocrBreakerCooldown - now.Sub(snap.OpenedAt)
+		if rem < 0 {
+			rem = 0
+		}
+		return OCRProcessSnapshot{
+			Disabled:            true,
+			Reason:              "apple_vision_breaker",
+			BreakerState:        string(snap.State),
+			ConsecutiveFailures: snap.Failures,
+			OpenedAt:            snap.OpenedAt,
+			CooldownRemaining:   rem,
+			Detail: fmt.Sprintf(
+				"Apple Vision OCR paused after repeated worker failures — cooldown %s remaining (opened at %s); last error: %s",
+				rem.Round(time.Second), snap.OpenedAt.UTC().Format(time.RFC3339), snap.LastError,
+			),
+		}
+	case breaker.StateHalfOpen:
+		return OCRProcessSnapshot{
+			Reason:       "apple_vision_breaker",
+			BreakerState: string(snap.State),
+			Detail:       "Apple Vision OCR attempting one recovery trial after cooldown",
+		}
+	}
+
 	if !appleVisionAvailable {
-		st.Reason = "unavailable"
+		detail := "no OCR backend available (Apple Vision is macOS-only, tesseract not installed)"
 		if _, err := exec.LookPath("tesseract"); err == nil {
-			st.Detail = "Apple Vision unavailable on this platform; using tesseract"
-		} else {
-			st.Detail = "no OCR backend available (Apple Vision is macOS-only, tesseract not installed)"
+			detail = "Apple Vision unavailable on this platform; using tesseract"
 		}
-		return st
+		return OCRProcessSnapshot{
+			Reason: "unavailable",
+			Detail: detail,
+		}
 	}
-	st.Reason = "ok"
-	st.Detail = "apple vision OCR enabled"
-	return st
+
+	return OCRProcessSnapshot{
+		Reason:              "ok",
+		Detail:              "apple vision OCR enabled",
+		BreakerState:        string(breaker.StateClosed),
+		ConsecutiveFailures: snap.Failures,
+	}
 }
 
-// ResetOCRAbortLatchForTest clears the process-wide abort latch (tests only).
+// ResetOCRAbortLatchForTest resets breaker state (tests only).
 func ResetOCRAbortLatchForTest() {
-	ocrAborts.Store(0)
-	ocrDisabled.Store(false)
-	ocrDisabledAtUnixNano.Store(0)
-	ocrDisabledDetail.Store("")
+	ocrBreaker = newOCRBreaker()
 }
 
-// TripOCRAbortLatchForTest trips the abort latch as production would
-// after ocrConsecutiveAbortLimit consecutive worker aborts (tests only).
+// TripOCRAbortLatchForTest trips the breaker as after N consecutive worker deaths (tests only).
 func TripOCRAbortLatchForTest(detail string) {
 	ResetOCRAbortLatchForTest()
+	t0 := time.Now()
 	for i := 0; i < ocrConsecutiveAbortLimit; i++ {
-		noteOCRAbort(detail)
+		ocrBreaker.Record(t0, false, detail)
+		t0 = t0.Add(time.Millisecond)
 	}
 }

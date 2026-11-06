@@ -12,12 +12,26 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const ocrBatchSize = 50
 
 // ocrOnce ensures the "no OCR backend" warning is logged only once.
 var ocrOnce sync.Once
+
+// ocrImageFlight ensures at most one in-flight OCR attempt per image id
+// (duplicate ingest sidecars collapse to a single worker).
+var ocrImageFlight singleflight.Group
+
+func ocrAppleVisionAvailable() bool {
+	return ocrBreaker.ShouldAttempt(time.Now())
+}
+
+// testRunOCRHook, when set, runs at the start of runOCR (tests only).
+var testRunOCRHook func()
 
 // ocrBackend returns the backend to use: "apple_vision", "tesseract", or "".
 // Both shell out — apple_vision to this binary re-executed as a worker
@@ -27,7 +41,7 @@ func ocrBackend() string {
 	if ocrDisabledByConfig() {
 		return ""
 	}
-	if appleVisionAvailable && !ocrDisabled.Load() {
+	if appleVisionAvailable && ocrAppleVisionAvailable() {
 		return "apple_vision"
 	}
 	if _, err := exec.LookPath("tesseract"); err == nil {
@@ -39,6 +53,9 @@ func ocrBackend() string {
 // runOCR extracts text from imageBytes using the given backend.
 // Returns (text, confidence pointer, error).
 func runOCR(imageBytes []byte, backend string) (string, *float64, error) {
+	if testRunOCRHook != nil {
+		testRunOCRHook()
+	}
 	switch backend {
 	case "apple_vision":
 		// Isolated in a child process: Vision aborts the caller when the
@@ -160,17 +177,21 @@ func processPendingOCR(db *sql.DB, backend string) {
 
 // ocrAndStore runs OCR on image bytes and persists the result.
 func ocrAndStore(db *sql.DB, imageID int64, data []byte, backend string) {
-	text, confidence, err := runOCR(data, backend)
+	key := fmt.Sprintf("%d", imageID)
+	ocrImageFlight.Do(key, func() (any, error) {
+		text, confidence, err := runOCR(data, backend)
 
-	var errMsg string
-	if err != nil {
-		errMsg = err.Error()
-		slog.Warn("image OCR failed", "image_id", imageID, "backend", backend, "err", err)
-	} else {
-		slog.Debug("image OCR complete", "image_id", imageID, "backend", backend, "chars", len(text))
-	}
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+			slog.Warn("image OCR failed", "image_id", imageID, "backend", backend, "err", err)
+		} else {
+			slog.Debug("image OCR complete", "image_id", imageID, "backend", backend, "chars", len(text))
+		}
 
-	storeOCR(db, imageID, text, backend, confidence, errMsg)
+		storeOCR(db, imageID, text, backend, confidence, errMsg)
+		return nil, nil
+	})
 }
 
 // storeOCR inserts (or replaces) an image_ocr row.
