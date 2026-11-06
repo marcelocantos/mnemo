@@ -519,17 +519,18 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			return diag.Healthy(detail)
 		}},
 
-		// Apple Vision subprocess + circuit breaker (🎯T118). Reads in-memory
-		// state only — never runs OCR. Open breaker (cooldown) warns; half-open
-		// recovery trial is healthy; config disable is healthy.
+		// Apple Vision subprocess + circuit breaker (🎯T118). Fast tier, in-memory
+		// snapshot only — never runs OCR. Open (cooldown) and half_open (probing)
+		// both warn; config disable is an explicit healthy path.
 		diag.Check{Name: "images.ocr", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			st := store.OCRProcessStatus()
 			switch st.Reason {
 			case "apple_vision_breaker":
-				if st.BreakerState == "open" {
+				if st.BreakerState == "open" || st.BreakerState == "half_open" {
 					return diag.Warning(st.Detail,
-						"Apple Vision OCR cools down and retries automatically after the cooldown; "+
-							"set disable_ocr in ~/.mnemo/config.json to silence if the Vision/Metal stack stays broken")
+						"Apple Vision OCR uses a bounded cooldown and a single half-open recovery trial; "+
+							"cooldown expiry alone does not close the breaker — a successful trial does. "+
+							"After repeated failures, set disable_ocr in ~/.mnemo/config.json to silence if the Vision/Metal stack stays broken")
 				}
 				return diag.Healthy(st.Detail)
 			case "config":

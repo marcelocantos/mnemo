@@ -22,6 +22,8 @@ import (
 // leak state into each other.
 func resetOCRState(t *testing.T) {
 	t.Helper()
+	unlock := OCRBreakerTestLock()
+	t.Cleanup(unlock)
 	ResetOCRAbortLatchForTest()
 	t.Cleanup(ResetOCRAbortLatchForTest)
 }
@@ -240,8 +242,8 @@ func TestOCRProcessStatusReportsOpenBreaker(t *testing.T) {
 	if st.OpenedAt.Before(before) || st.OpenedAt.After(after) {
 		t.Errorf("OpenedAt = %v, want within [%v, %v]", st.OpenedAt, before, after)
 	}
-	if !strings.Contains(st.Detail, "timeout") {
-		t.Errorf("detail missing why: %q", st.Detail)
+	if !strings.Contains(st.Detail, "timeout") || !strings.Contains(st.Detail, "circuit open") {
+		t.Errorf("detail missing why / open phase: %q", st.Detail)
 	}
 	if st.ConsecutiveFailures < ocrConsecutiveAbortLimit {
 		t.Errorf("ConsecutiveFailures = %d, want >= %d", st.ConsecutiveFailures, ocrConsecutiveAbortLimit)
@@ -317,6 +319,129 @@ func TestOCRSingleFlightDedupesConcurrentWorkers(t *testing.T) {
 
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("runOCR hook calls = %d, want 1 (single-flight per image)", got)
+	}
+}
+
+// TestOCRSingleFlightOneFailedRunOneBreakerCount: N concurrent waiters for one
+// failed image — one actual worker path, one isolated failure toward the breaker.
+func TestOCRSingleFlightOneFailedRunOneBreakerCount(t *testing.T) {
+	resetOCRState(t)
+	requirePOSIXShell(t)
+	withWorker(t, "kill -ABRT $$")
+
+	var calls atomic.Int32
+	prev := testRunOCRHook
+	testRunOCRHook = func() { calls.Add(1) }
+	t.Cleanup(func() { testRunOCRHook = prev })
+
+	s := newTestStore(t, t.TempDir())
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO images (id, content_hash, bytes, mime_type, width, height,
+		                     pixel_format, byte_size, created_at)
+		 VALUES (1, 'hash-sf-fail', ?, 'image/png', 10, 10, 'rgba', 10, '2026-07-26T00:00:00Z')`,
+		[]byte("generic-bytes"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			ocrAndStore(s.writeDB, 1, []byte("generic-bytes"), "apple_vision")
+		}()
+	}
+	wg.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("runOCR calls = %d, want 1 (single-flight)", got)
+	}
+	if ocrBreaker.Snapshot().Failures != 1 {
+		t.Fatalf("breaker consecutive_failures = %d, want 1", ocrBreaker.Snapshot().Failures)
+	}
+}
+
+// TestOCRJSONReportedErrorCountsTowardBreaker: worker exits 0 with error JSON — still a trial outcome.
+func TestOCRJSONReportedErrorCountsTowardBreaker(t *testing.T) {
+	resetOCRState(t)
+	requirePOSIXShell(t)
+	withWorker(t, `printf '%s\n' '{"error":"generic native failure"}'`)
+
+	_, _, err := runAppleVisionOCRIsolated([]byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "generic native failure") {
+		t.Fatalf("want reported error, got %v", err)
+	}
+	if ocrBreaker.Snapshot().Failures != 1 {
+		t.Fatalf("breaker failures = %d, want 1", ocrBreaker.Snapshot().Failures)
+	}
+}
+
+// TestOCRHalfOpenFailedTrialReopensWithCooldown: half-open failure starts a new open cooldown.
+func TestOCRHalfOpenFailedTrialReopensWithCooldown(t *testing.T) {
+	resetOCRState(t)
+
+	prevCD := ocrBreakerCooldown
+	ocrBreakerCooldown = 50 * time.Millisecond
+	t.Cleanup(func() { ocrBreakerCooldown = prevCD })
+
+	TripOCRAbortLatchForTest("trip1")
+	t1 := time.Now().Add(ocrBreakerCooldown + 10*time.Millisecond)
+	if !TouchOCRBreakerAllowForTest(t1) {
+		t.Fatal("expected transition to half_open after cooldown")
+	}
+	noteOCRAbort("half_open_fail")
+	if ocrBreaker.Snapshot().State != breaker.StateOpen {
+		t.Fatalf("want open after failed half-open trial, got %+v", ocrBreaker.Snapshot())
+	}
+}
+
+// TestOCRHalfOpenSerializesConcurrentTrials: only one subprocess runs while half_open.
+func TestOCRHalfOpenSerializesConcurrentTrials(t *testing.T) {
+	resetOCRState(t)
+	requirePOSIXShell(t)
+
+	prevCD := ocrBreakerCooldown
+	ocrBreakerCooldown = time.Second
+	t.Cleanup(func() { ocrBreakerCooldown = prevCD })
+
+	TripOCRAbortLatchForTest("open_for_half_open")
+
+	var inside, peakInside atomic.Int32
+	prev := ocrWorkerCommand
+	ocrWorkerCommand = func(ctx context.Context) (*exec.Cmd, error) {
+		n := inside.Add(1)
+		defer inside.Add(-1)
+		for {
+			cur := peakInside.Load()
+			if n <= cur {
+				break
+			}
+			if peakInside.CompareAndSwap(cur, n) {
+				break
+			}
+		}
+		return exec.CommandContext(ctx, "sh", "-c", `sleep 0.15; printf '%s\n' '{"text":"ok"}'`), nil
+	}
+	t.Cleanup(func() { ocrWorkerCommand = prev })
+
+	tEnter := time.Now().Add(ocrBreakerCooldown + 5*time.Millisecond)
+	_ = TouchOCRBreakerAllowForTest(tEnter)
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_, _, _ = runAppleVisionOCRIsolated([]byte("generic"))
+		}()
+	}
+	wg.Wait()
+
+	if got := int(peakInside.Load()); got != 1 {
+		t.Fatalf("peak concurrent worker spawns in half_open = %d, want 1", got)
 	}
 }
 

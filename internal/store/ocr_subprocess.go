@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/marcelocantos/mnemo/internal/breaker"
@@ -67,6 +68,21 @@ var ocrBreakerCooldown = 10 * time.Minute
 // Re-built when ocrBreakerCooldown changes (tests) via ResetOCRAbortLatchForTest.
 var ocrBreaker = newOCRBreaker()
 
+// ocrHalfOpenTrial serializes Apple Vision work while the breaker is half-open
+// so at most one recovery/probing subprocess runs at a time (ShouldAttempt stays
+// true for half-open, so without this many waiters could start parallel trials).
+var ocrHalfOpenTrial sync.Mutex
+
+// ocrBreakerTestMu serializes tests that mutate the process-wide OCR breaker
+// (shared across packages in the same test binary).
+var ocrBreakerTestMu sync.Mutex
+
+// OCRBreakerTestLock acquires ocrBreakerTestMu; returned unlock must run in t.Cleanup (tests only).
+func OCRBreakerTestLock() (unlock func()) {
+	ocrBreakerTestMu.Lock()
+	return ocrBreakerTestMu.Unlock
+}
+
 func newOCRBreaker() *breaker.Breaker {
 	return breaker.New(ocrConsecutiveAbortLimit, ocrBreakerCooldown)
 }
@@ -119,6 +135,12 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 	if !ocrBreaker.Allow(now) {
 		return "", nil, fmt.Errorf("apple_vision: circuit open — retry after cooldown (%s)", ocrBreakerCooldown)
 	}
+	if ocrBreaker.Snapshot().State == breaker.StateHalfOpen {
+		if !ocrHalfOpenTrial.TryLock() {
+			return "", nil, fmt.Errorf("apple_vision: recovery trial already in progress")
+		}
+		defer ocrHalfOpenTrial.Unlock()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ocrWorkerTimeout)
 	defer cancel()
@@ -166,10 +188,14 @@ func runAppleVisionOCRIsolated(imageBytes []byte) (string, *float64, error) {
 		// platform abort, so it does not count toward the breaker.
 		return "", nil, fmt.Errorf("apple_vision: unreadable worker output: %w", err)
 	}
-	ocrBreaker.Record(time.Now(), true, "")
 	if res.Error != "" {
+		// Worker exited cleanly but reported failure — still a completed trial;
+		// fold into the breaker (half-open failure re-opens; closed increments
+		// toward threshold). Do not treat as success.
+		ocrBreaker.Record(time.Now(), false, res.Error)
 		return "", nil, fmt.Errorf("%s", res.Error)
 	}
+	ocrBreaker.Record(time.Now(), true, "")
 	return res.Text, res.Confidence, nil
 }
 
@@ -210,7 +236,7 @@ func noteOCRAbort(detail string) {
 	noteOCRWorkerDeath(detail)
 }
 
-// OCRProcessSnapshot backs images.ocr /health: atomics + one breaker snapshot only.
+// OCRProcessSnapshot backs images.ocr /health: in-memory breaker snapshot only (fast tier).
 type OCRProcessSnapshot struct {
 	// Disabled is true when Apple Vision subprocess OCR is not offered
 	// (config off, breaker open in cooldown, or non-darwin without tess).
@@ -223,10 +249,15 @@ type OCRProcessSnapshot struct {
 	BreakerState string `json:"breaker_state,omitempty"`
 	// ConsecutiveFailures is the breaker's consecutive failure count while closed.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
-	// OpenedAt is when the breaker last tripped open (cooldown anchor).
+	// OpenedAt is when the breaker last tripped open (cooldown anchor; "trip time").
 	OpenedAt time.Time `json:"opened_at,omitempty"`
 	// CooldownRemaining is positive while the breaker is open before half-open.
 	CooldownRemaining time.Duration `json:"cooldown_remaining,omitempty"`
+	// NextTrialAt is when the first recovery attempt is permitted (OpenedAt+cooldown)
+	// while open; while half-open it is the start of the probing window (RFC3339 in Detail).
+	NextTrialAt time.Time `json:"next_trial_at,omitempty"`
+	// LastError is the breaker's last failure detail (worker death or reported error).
+	LastError string `json:"last_error,omitempty"`
 }
 
 // OCRProcessStatus reports Apple Vision + subprocess breaker state for /health.
@@ -247,6 +278,30 @@ func OCRProcessStatus() OCRProcessSnapshot {
 		if rem < 0 {
 			rem = 0
 		}
+		nextAt := snap.OpenedAt.Add(ocrBreakerCooldown)
+		if rem <= 0 {
+			// Cooldown window has expired. The underlying breaker still reports "open"
+			// until Allow() runs — for diagnostics we surface the effective half_open
+			// probing phase so /health matches next-trial semantics.
+			return OCRProcessSnapshot{
+				Reason:              "apple_vision_breaker",
+				BreakerState:        string(breaker.StateHalfOpen),
+				ConsecutiveFailures: snap.Failures,
+				OpenedAt:            snap.OpenedAt,
+				CooldownRemaining:   0,
+				NextTrialAt:         nextAt,
+				LastError:           snap.LastError,
+				Detail: fmt.Sprintf(
+					"half_open (probing): next trial state is an in-process Apple Vision attempt after cooldown ended at %s; "+
+						"trip at %s; last error: %s; successful trial closes the breaker; "+
+						"expiry of cooldown alone is not recovery; a failed trial reopens with a new bounded cooldown (%s)",
+					nextAt.UTC().Format(time.RFC3339),
+					snap.OpenedAt.UTC().Format(time.RFC3339),
+					snap.LastError,
+					ocrBreakerCooldown,
+				),
+			}
+		}
 		return OCRProcessSnapshot{
 			Disabled:            true,
 			Reason:              "apple_vision_breaker",
@@ -254,16 +309,34 @@ func OCRProcessStatus() OCRProcessSnapshot {
 			ConsecutiveFailures: snap.Failures,
 			OpenedAt:            snap.OpenedAt,
 			CooldownRemaining:   rem,
+			NextTrialAt:         nextAt,
+			LastError:           snap.LastError,
 			Detail: fmt.Sprintf(
-				"Apple Vision OCR paused after repeated worker failures — cooldown %s remaining (opened at %s); last error: %s",
-				rem.Round(time.Second), snap.OpenedAt.UTC().Format(time.RFC3339), snap.LastError,
+				"circuit open (cooldown active): Apple Vision paused after repeated worker failures; trip at %s; last error: %s; "+
+					"cooldown %s remaining; next trial state half_open at %s (expiry alone is not recovery — a successful trial closes the breaker)",
+				snap.OpenedAt.UTC().Format(time.RFC3339), snap.LastError,
+				rem.Round(time.Second), nextAt.UTC().Format(time.RFC3339),
 			),
 		}
 	case breaker.StateHalfOpen:
+		cooldownEnded := snap.OpenedAt.Add(ocrBreakerCooldown)
 		return OCRProcessSnapshot{
-			Reason:       "apple_vision_breaker",
-			BreakerState: string(snap.State),
-			Detail:       "Apple Vision OCR attempting one recovery trial after cooldown",
+			Reason:              "apple_vision_breaker",
+			BreakerState:        string(snap.State),
+			ConsecutiveFailures: snap.Failures,
+			OpenedAt:            snap.OpenedAt,
+			// Probing window starts when cooldown elapses; same instant a trial may run.
+			NextTrialAt: cooldownEnded,
+			LastError:   snap.LastError,
+			Detail: fmt.Sprintf(
+				"half_open (probing): next trial state is an in-process Apple Vision attempt after cooldown ended at %s; "+
+					"trip at %s; last error: %s; successful trial closes the breaker; "+
+					"expiry of cooldown alone is not recovery; a failed trial reopens with a new bounded cooldown (%s)",
+				cooldownEnded.UTC().Format(time.RFC3339),
+				snap.OpenedAt.UTC().Format(time.RFC3339),
+				snap.LastError,
+				ocrBreakerCooldown,
+			),
 		}
 	}
 
@@ -280,7 +353,7 @@ func OCRProcessStatus() OCRProcessSnapshot {
 
 	return OCRProcessSnapshot{
 		Reason:              "ok",
-		Detail:              "apple vision OCR enabled",
+		Detail:              "apple vision OCR enabled (breaker closed)",
 		BreakerState:        string(breaker.StateClosed),
 		ConsecutiveFailures: snap.Failures,
 	}
@@ -291,6 +364,11 @@ func ResetOCRAbortLatchForTest() {
 	ocrBreaker = newOCRBreaker()
 }
 
+// TouchOCRBreakerAllowForTest runs Allow on the Apple Vision breaker (tests / health probes only).
+func TouchOCRBreakerAllowForTest(now time.Time) bool {
+	return ocrBreaker.Allow(now)
+}
+
 // TripOCRAbortLatchForTest trips the breaker as after N consecutive worker deaths (tests only).
 func TripOCRAbortLatchForTest(detail string) {
 	ResetOCRAbortLatchForTest()
@@ -299,4 +377,20 @@ func TripOCRAbortLatchForTest(detail string) {
 		ocrBreaker.Record(t0, false, detail)
 		t0 = t0.Add(time.Millisecond)
 	}
+}
+
+// OCRBreakerCooldownForTest returns the Apple Vision breaker cooldown (tests only).
+func OCRBreakerCooldownForTest() time.Duration {
+	return ocrBreakerCooldown
+}
+
+// SetOCRBreakerCooldownForTest sets the Apple Vision breaker cooldown and rebuilds the breaker (tests only).
+func SetOCRBreakerCooldownForTest(d time.Duration) {
+	ocrBreakerCooldown = d
+	ocrBreaker = newOCRBreaker()
+}
+
+// RecordOCRBreakerTrialSuccessForTest records a successful half-open trial (tests only).
+func RecordOCRBreakerTrialSuccessForTest(now time.Time) {
+	ocrBreaker.Record(now, true, "")
 }
