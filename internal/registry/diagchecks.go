@@ -519,16 +519,20 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			return diag.Healthy(detail)
 		}},
 
-		// Apple Vision process-disable latch (🎯T118). Reads in-memory
-		// atomics only — never runs OCR. A tripped latch is a warn with
-		// why and when; restart restores OCR for now.
+		// Apple Vision subprocess + circuit breaker (🎯T118). Fast tier, in-memory
+		// snapshot only — never runs OCR. Open (cooldown) and half_open (probing)
+		// both warn; config disable is an explicit healthy path.
 		diag.Check{Name: "images.ocr", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			st := store.OCRProcessStatus()
 			switch st.Reason {
-			case "abort_latch":
-				return diag.Warning(st.Detail,
-					"restart the mnemo daemon to re-enable Apple Vision OCR; "+
-						"set disable_ocr in ~/.mnemo/config.json to silence this if the Vision/Metal stack stays broken")
+			case "apple_vision_breaker":
+				if st.BreakerState == "open" || st.BreakerState == "half_open" {
+					return diag.Warning(st.Detail,
+						"Apple Vision OCR uses a bounded cooldown and a single half-open recovery trial; "+
+							"cooldown expiry alone does not close the breaker — a successful trial does. "+
+							"After repeated failures, set disable_ocr in ~/.mnemo/config.json to silence if the Vision/Metal stack stays broken")
+				}
+				return diag.Healthy(st.Detail)
 			case "config":
 				return diag.Healthy(st.Detail)
 			default:

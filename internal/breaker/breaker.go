@@ -74,6 +74,35 @@ func (b *Breaker) Allow(now time.Time) bool {
 	return true
 }
 
+// ShouldAttempt reports whether a task should plan to run without mutating
+// breaker state. It matches Allow's decision for whether the next attempt
+// is permitted: closed and half-open are true; open is true only after the
+// cooldown window has elapsed (the transition to half-open still happens in
+// Allow when work actually runs).
+func (b *Breaker) ShouldAttempt(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case StateClosed, StateHalfOpen:
+		return true
+	case StateOpen:
+		return now.Sub(b.openedAt) >= b.cooldown
+	default:
+		return true
+	}
+}
+
+// Reset clears breaker state (tests and process-local emergency hooks only).
+func (b *Breaker) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.state = StateClosed
+	b.failures = 0
+	b.openedAt = time.Time{}
+	b.lastErr = ""
+	b.tripCount = 0
+}
+
 // Record folds an attempt's outcome into the breaker. errMsg is retained
 // for diagnostics when success is false; it is ignored on success.
 func (b *Breaker) Record(now time.Time, success bool, errMsg string) {
