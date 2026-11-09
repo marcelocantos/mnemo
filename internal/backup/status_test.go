@@ -19,10 +19,12 @@ func info(name string, at time.Time) Info { return Info{Name: name, Time: at} }
 func TestFreshnessStates(t *testing.T) {
 	now := time.Date(2026, 10, 19, 21, 0, 0, 0, time.Local)
 	fresh := []Info{info("mnemo-daily-a.db.zst", now.Add(-18*time.Hour))}
-	stale := []Info{info("mnemo-daily-b.db.zst", now.Add(-31*time.Hour))}
+	successAt := now.Add(-18 * time.Hour)
+	staleAt := now.Add(-31 * time.Hour)
 	failed := &Attempt{At: now.Add(-17 * time.Hour), Error: "write: no space left on device"}
 	skipped := &Attempt{At: now.Add(-17 * time.Hour), Skipped: true, Error: "insufficient free space for backup: 3.0 GiB free"}
-	okAfter := &Attempt{At: now.Add(-18 * time.Hour), OK: true}
+	okAfter := &Attempt{At: successAt, Tag: TagDaily, OK: true, LastDailySuccess: successAt}
+	staleSuccess := &Attempt{At: staleAt, Tag: TagDaily, OK: true, LastDailySuccess: staleAt}
 	cases := []struct {
 		name    string
 		list    []Info
@@ -30,13 +32,13 @@ func TestFreshnessStates(t *testing.T) {
 		healthy bool
 		want    string
 	}{
-		{"none", nil, nil, false, "no backups exist"},
-		{"stale", stale, nil, false, "31h0m0s old (threshold 30h0m0s)"},
+		{"none", nil, nil, false, "no successful daily backup recorded"},
+		{"stale", nil, staleSuccess, false, "31h0m0s old (threshold 30h0m0s)"},
 		{"failed with no backups", nil, failed, false, "last backup attempt failed"},
-		{"failed after the newest backup", fresh, &Attempt{At: now.Add(-1 * time.Hour), Error: "boom"}, false, "failed 1h0m0s ago: boom"},
-		{"insufficient space", fresh[:0], skipped, false, "was skipped"},
+		{"failed after a recorded success", nil, &Attempt{At: now.Add(-1 * time.Hour), Error: "boom", LastDailySuccess: successAt}, false, "failed 1h0m0s ago: boom"},
+		{"insufficient space", nil, skipped, false, "was skipped"},
 		{"fresh", fresh, okAfter, true, "18h0m0s old"},
-		{"failure superseded by a later good backup", fresh, &Attempt{At: now.Add(-20 * time.Hour), Error: "old"}, true, "18h0m0s old"},
+		{"failed latest attempt warns even if a snapshot file remains", fresh, &Attempt{At: now.Add(-20 * time.Hour), Error: "old"}, false, "failed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

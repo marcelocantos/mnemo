@@ -280,8 +280,11 @@ attempt's outcome; the daemon log records `backup_now: snapshot
 complete` or `snapshot failed`. Every snapshot first checks that the
 backup volume has 1.75x the database plus 1 GiB free, and skips with
 `backup: snapshot skipped` if not. The `backup.recent` check warns when
-there is no backup, the newest is over 30 hours old, or the last
-attempt failed or was skipped.
+no successful daily backup is recorded, the last success is over 30
+hours old, or the last attempt failed or was skipped. Freshness is
+`last_daily_success` in `.last-attempt.json`, not a snapshot file in
+the backup directory, so an offloaded nightly snapshot does not look
+like a missing backup.
 
 Every path that takes a snapshot applies retention — the daily worker,
 `op=backup_now`, and the pre-migration backup — and retention also runs

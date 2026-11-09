@@ -28,8 +28,11 @@ func TestBackupRecentCheck(t *testing.T) {
 		sev   diag.Severity
 		want  string
 	}{
-		{"none", func(string) {}, diag.Warn, "no backups exist"},
-		{"stale", func(d string) { snap(d, now.Add(-40*time.Hour)) }, diag.Warn, "threshold"},
+		{"none", func(string) {}, diag.Warn, "no successful daily backup recorded"},
+		{"stale", func(d string) {
+			at := now.Add(-40 * time.Hour)
+			backup.RecordAttempt(d, backup.Attempt{At: at, Tag: backup.TagDaily, OK: true, LastDailySuccess: at})
+		}, diag.Warn, "threshold"},
 		{"failed", func(d string) {
 			backup.RecordAttempt(d, backup.Attempt{At: now.Add(-time.Hour), Error: "write: no space left on device"})
 		}, diag.Warn, "last backup attempt failed"},
@@ -39,9 +42,14 @@ func TestBackupRecentCheck(t *testing.T) {
 				Error: "insufficient free space for backup: 2.0 GiB free, need 70.0 GiB"})
 		}, diag.Warn, "was skipped"},
 		{"fresh", func(d string) {
-			snap(d, now.Add(-2*time.Hour))
-			backup.RecordAttempt(d, backup.Attempt{At: now.Add(-2 * time.Hour), OK: true})
-		}, diag.OK, "newest backup"},
+			at := now.Add(-2 * time.Hour)
+			snap(d, at)
+			backup.RecordAttempt(d, backup.Attempt{At: at, Tag: backup.TagDaily, OK: true, LastDailySuccess: at})
+		}, diag.OK, "last successful daily backup"},
+		{"offloaded", func(d string) {
+			at := now.Add(-2 * time.Hour)
+			backup.RecordAttempt(d, backup.Attempt{At: at, Tag: backup.TagDaily, OK: true, LastDailySuccess: at})
+		}, diag.OK, "last successful daily backup"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
