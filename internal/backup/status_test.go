@@ -32,7 +32,7 @@ func TestFreshnessStates(t *testing.T) {
 		healthy bool
 		want    string
 	}{
-		{"none", nil, nil, false, "no successful daily backup recorded"},
+		{"none", nil, nil, false, "no successful backup recorded"},
 		{"stale", nil, staleSuccess, false, "31h0m0s old (threshold 30h0m0s)"},
 		{"failed with no backups", nil, failed, false, "last backup attempt failed"},
 		{"failed after a recorded success", nil, &Attempt{At: now.Add(-1 * time.Hour), Error: "boom", LastDailySuccess: successAt}, false, "failed 1h0m0s ago: boom"},
