@@ -260,7 +260,9 @@ only a newer manual snapshot does. The worker takes one snapshot per
 nightly window; the start of the last daily success is persisted as
 `last_daily_success` in `.last-attempt.json`, so a restart inside the
 window does not run it again, while a failure inside the window is still
-retried in what remains of it. `backup.Decompress` reads both `.db.zst` and
+retried in what remains of it. The `backup.recent` health check reads
+that same pointer rather than looking for a snapshot file, so an
+offloaded nightly snapshot does not look like a missing backup. `backup.Decompress` reads both `.db.zst` and
 `.db.gz`, so restoring never needs the zstd CLI.
 
 Retention is not optional per call site: take snapshots through

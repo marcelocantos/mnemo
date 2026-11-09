@@ -480,9 +480,11 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		// Whether a usable backup exists, not what the directory costs
 		// (backup.disk). On 19 Oct 2026 the nightly run failed on a full
 		// disk, a cleanup then deleted the only snapshot, and backup.disk
-		// went on saying "backup directory is empty" as Healthy. This is
-		// the check that would have said so: no backup, a stale one, or
-		// a last attempt that failed or was skipped for lack of space.
+		// went on saying "backup directory is empty" as Healthy. Freshness
+		// is last_daily_success in .last-attempt.json, not a snapshot file
+		// in the directory: nightly snapshots may be offloaded, so a
+		// missing file is not a missing backup. Missing or stale success
+		// time still warns; a failed or skipped latest attempt still warns.
 		diag.Check{Name: "backup.recent", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {
@@ -823,21 +825,24 @@ func walStuckDetail(s *store.Store, size int64, now time.Time) (string, bool) {
 
 // backupRecent is the backup.recent check body, split out for tests.
 func backupRecent(dir string, now time.Time) diag.CheckResult {
-	list, err := backup.List(dir)
+	a, ok, err := backup.LastAttempt(dir)
 	if err != nil {
-		return diag.Warning(fmt.Sprintf("cannot list backups in %s: %v", dir, err),
+		return diag.Warning(fmt.Sprintf("cannot read last backup attempt in %s: %v", dir, err),
 			"check the path exists and is readable by the daemon")
 	}
 	var last *backup.Attempt
-	if a, ok, err := backup.LastAttempt(dir); err == nil && ok {
+	if ok {
 		last = &a
 	}
-	if r, ok := backup.InProgress(); ok && len(list) == 0 {
+	// InProgress is only a stand-in when nothing has ever been recorded.
+	// After a success the snapshot may already have been offloaded, so an
+	// empty directory plus a running snapshot is not "no backups yet".
+	if r, running := backup.InProgress(); running && last == nil {
 		return diag.Warning(fmt.Sprintf("no backups yet; one is in progress (%s, started %s ago)",
 			filepath.Base(r.Path), now.Sub(r.Started).Round(time.Second)),
 			"wait for it to finish; `mnemo ops backup_status` shows progress")
 	}
-	healthy, detail, remediation := backup.Freshness(list, last, now, backup.MaxAge)
+	healthy, detail, remediation := backup.Freshness(nil, last, now, backup.MaxAge)
 	if healthy {
 		return diag.Healthy(detail)
 	}

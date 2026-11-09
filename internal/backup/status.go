@@ -144,7 +144,8 @@ func setRunningStep(step string) {
 	runMu.Unlock()
 }
 
-// MaxAge is how old the newest snapshot may be before /health warns.
+// MaxAge is how old the last successful daily backup may be before
+// /health warns.
 //
 // The nightly worker picks a random instant in the 03:00-04:00 window and
 // then waits up to an hour for a quiet moment, and a snapshot of a ~40 GB
@@ -155,35 +156,51 @@ func setRunningStep(step string) {
 // this check exists to report.
 const MaxAge = 30 * time.Hour
 
-// Freshness judges whether the backups in a directory protect the store.
-// list is newest first (List's order); last is the recorded attempt.
+// Freshness judges whether the store is protected by a recent successful
+// daily backup.
+//
+// last is the recorded attempt (StatusFile). The verdict is the age of
+// last_daily_success, not of a snapshot file in the backup directory:
+// nightly snapshots may be offloaded, so a missing file is not a missing
+// backup. list is ignored and may be nil; it remains in the signature so
+// existing callers compile.
+//
+// A missing or stale success time warns. A failed or skipped latest
+// attempt warns even when last_daily_success is still within maxAge —
+// that is a genuine failed night, which is what this check exists to
+// catch once offload made "no backups exist" a daily false alarm.
 func Freshness(list []Info, last *Attempt, now time.Time, maxAge time.Duration) (healthy bool, detail, remediation string) {
-	if last != nil && !last.OK && (len(list) == 0 || last.At.After(list[0].Time)) {
+	_ = list
+	if last != nil && !last.OK {
 		what := "failed"
 		if last.Skipped {
 			what = "was skipped"
 		}
 		detail = fmt.Sprintf("last backup attempt %s %s ago: %s", what,
 			now.Sub(last.At).Round(time.Minute), last.Error)
-		if len(list) == 0 {
-			detail += "; no backups exist"
+		if t := last.lastDailySuccess(); !t.IsZero() {
+			detail += fmt.Sprintf("; last successful daily backup %s ago",
+				now.Sub(t).Round(time.Minute))
 		} else {
-			detail += fmt.Sprintf("; newest backup %s is %s old", list[0].Name,
-				now.Sub(list[0].Time).Round(time.Minute))
+			detail += "; no successful daily backup recorded"
 		}
 		return false, detail, "free space on the backup volume if that was the cause, then run " +
 			"`mnemo ops backup_now` and watch `mnemo ops backup_status`"
 	}
-	if len(list) == 0 {
-		return false, "no backups exist", "run `mnemo ops backup_now`; check that backups are " +
+	var success time.Time
+	if last != nil {
+		success = last.lastDailySuccess()
+	}
+	if success.IsZero() {
+		return false, "no successful daily backup recorded", "run `mnemo ops backup_now`; check that backups are " +
 			"enabled in config.json and the daemon log for 'backup worker'"
 	}
-	age := now.Sub(list[0].Time)
+	age := now.Sub(success)
 	if age > maxAge {
-		return false, fmt.Sprintf("newest backup %s is %s old (threshold %s)", list[0].Name,
+		return false, fmt.Sprintf("last successful daily backup is %s old (threshold %s)",
 				age.Round(time.Minute), maxAge),
 			"the nightly worker has missed at least one run: check the daemon log for " +
 				"'backup worker', then run `mnemo ops backup_now`"
 	}
-	return true, fmt.Sprintf("newest backup %s is %s old", list[0].Name, age.Round(time.Minute)), ""
+	return true, fmt.Sprintf("last successful daily backup is %s old", age.Round(time.Minute)), ""
 }
