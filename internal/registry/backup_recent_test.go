@@ -28,7 +28,7 @@ func TestBackupRecentCheck(t *testing.T) {
 		sev   diag.Severity
 		want  string
 	}{
-		{"none", func(string) {}, diag.Warn, "no successful daily backup recorded"},
+		{"none", func(string) {}, diag.Warn, "no successful backup recorded"},
 		{"stale", func(d string) {
 			at := now.Add(-40 * time.Hour)
 			backup.RecordAttempt(d, backup.Attempt{At: at, Tag: backup.TagDaily, OK: true, LastDailySuccess: at})
@@ -45,11 +45,11 @@ func TestBackupRecentCheck(t *testing.T) {
 			at := now.Add(-2 * time.Hour)
 			snap(d, at)
 			backup.RecordAttempt(d, backup.Attempt{At: at, Tag: backup.TagDaily, OK: true, LastDailySuccess: at})
-		}, diag.OK, "last successful daily backup"},
+		}, diag.OK, "last successful backup"},
 		{"offloaded", func(d string) {
 			at := now.Add(-2 * time.Hour)
 			backup.RecordAttempt(d, backup.Attempt{At: at, Tag: backup.TagDaily, OK: true, LastDailySuccess: at})
-		}, diag.OK, "last successful daily backup"},
+		}, diag.OK, "last successful backup"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

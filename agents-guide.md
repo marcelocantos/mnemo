@@ -561,11 +561,12 @@ attempt's outcome; the daemon log records `backup_now: snapshot
 complete` or `snapshot failed`. Every snapshot first checks that the
 backup volume has 1.75x the database plus 1 GiB free, and skips with
 `backup: snapshot skipped` if not. The `backup.recent` check warns when
-no successful daily backup is recorded, the last success is over 30
-hours old, or the last attempt failed or was skipped. Freshness is
-`last_daily_success` in `.last-attempt.json`, not a snapshot file in
-the backup directory, so an offloaded nightly snapshot does not look
-like a missing backup.
+no successful backup is recorded, the last success is over 30 hours
+old, or the last attempt failed or was skipped. Freshness is
+`last_success` in `.last-attempt.json` (daily, `backup_now`, or
+pre-migration), not a snapshot file in the backup directory, so an
+offloaded nightly snapshot does not look like a missing backup and a
+successful `backup_now` after a missed night clears the warning.
 
 `op=compactor` is the compaction diagnostic: tick counts include
 `deferred` vs `failed`, and the quarantined count excludes deferrals

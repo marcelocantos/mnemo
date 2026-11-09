@@ -481,10 +481,12 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 		// (backup.disk). On 19 Oct 2026 the nightly run failed on a full
 		// disk, a cleanup then deleted the only snapshot, and backup.disk
 		// went on saying "backup directory is empty" as Healthy. Freshness
-		// is last_daily_success in .last-attempt.json, not a snapshot file
-		// in the directory: nightly snapshots may be offloaded, so a
-		// missing file is not a missing backup. Missing or stale success
-		// time still warns; a failed or skipped latest attempt still warns.
+		// is last_success in .last-attempt.json (any tag: daily, manual
+		// backup_now, pre-migration), not a snapshot file in the directory:
+		// nightly snapshots may be offloaded, so a missing file is not a
+		// missing backup. Missing or stale success time still warns; a
+		// failed or skipped latest attempt still warns. last_daily_success
+		// stays daily-only for the worker's once-per-window rule.
 		diag.Check{Name: "backup.recent", Tier: diag.Fast, Run: func(context.Context) diag.CheckResult {
 			s, _ := state()
 			if s == nil {

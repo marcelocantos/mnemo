@@ -295,6 +295,33 @@ func TestRecordAttemptCarriesLastDailySuccess(t *testing.T) {
 	inWindow(t, w.scheduleNext(at(20, 3, 55)), 21)
 }
 
+// LastSuccess tracks any-tag success so backup.recent can honour a
+// backup_now, while LastDailySuccess stays daily-only for the window.
+func TestRecordAttemptCarriesLastSuccess(t *testing.T) {
+	dir := t.TempDir()
+	steps := []struct {
+		a           Attempt
+		wantDaily   time.Time
+		wantSuccess time.Time
+	}{
+		{Attempt{At: at(20, 3, 29), Tag: TagDaily, OK: true}, at(20, 3, 29), at(20, 3, 29)},
+		{Attempt{At: at(20, 12, 0), Tag: TagManual, OK: true}, at(20, 3, 29), at(20, 12, 0)},
+		{Attempt{At: at(20, 13, 0), Tag: TagManual, Error: "boom"}, at(20, 3, 29), at(20, 12, 0)},
+	}
+	for _, step := range steps {
+		if err := RecordAttempt(dir, step.a); err != nil {
+			t.Fatal(err)
+		}
+		got, _, _ := LastAttempt(dir)
+		if !got.LastDailySuccess.Equal(step.wantDaily) {
+			t.Fatalf("after %+v: last_daily_success = %v, want %v", step.a, got.LastDailySuccess, step.wantDaily)
+		}
+		if !got.LastSuccess.Equal(step.wantSuccess) {
+			t.Fatalf("after %+v: last_success = %v, want %v", step.a, got.LastSuccess, step.wantSuccess)
+		}
+	}
+}
+
 // A manual snapshot inside the window does not stand in for the daily:
 // they are different pools.
 func TestManualSuccessDoesNotSpendWindow(t *testing.T) {
