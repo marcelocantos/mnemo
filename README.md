@@ -287,6 +287,20 @@ pre-migration), not a snapshot file in the backup directory, so an
 offloaded nightly snapshot does not look like a missing backup and a
 successful `backup_now` after a missed night clears the warning.
 
+`backup.dir` in `~/.mnemo/config.json` moves snapshots to another
+directory, for example one on an external volume, and every backup path
+uses it: the nightly worker, `op=backup_now`, the pre-migration backup,
+`op=backup_status` and both health checks (🎯T199).
+`.last-attempt.json` stays in `~/.mnemo/backups`, so the last attempt
+and the last success remain readable while that volume is away. A
+destination that is away never causes a snapshot to be written
+anywhere else. The attempt is recorded as a skip, and the nightly
+snapshot is taken at the first quiet moment after the destination
+returns, without waiting for the next window. Meanwhile
+`op=backup_status` and `backup.recent` report `backup destination not
+available`, not a missing backup, and `backup.recent` stays healthy
+until a night has been missed.
+
 Every path that takes a snapshot applies retention — the daily worker,
 `op=backup_now`, and the pre-migration backup — and retention also runs
 on its own at startup and each cycle, so a run of failed backups or a

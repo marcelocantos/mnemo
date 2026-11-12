@@ -23,11 +23,16 @@ const StatusFile = ".last-attempt.json"
 
 // Attempt is one snapshot attempt, successful, failed or skipped.
 type Attempt struct {
-	At             time.Time     `json:"at"`
-	Tag            Tag           `json:"tag,omitempty"`
-	Path           string        `json:"path,omitempty"`
-	OK             bool          `json:"ok"`
-	Skipped        bool          `json:"skipped,omitempty"` // precheck refused to start
+	At      time.Time `json:"at"`
+	Tag     Tag       `json:"tag,omitempty"`
+	Path    string    `json:"path,omitempty"`
+	OK      bool      `json:"ok"`
+	Skipped bool      `json:"skipped,omitempty"` // precheck refused to start
+	// Unavailable marks a skip caused by the destination being away
+	// (ErrDestinationUnavailable). The worker reads it to know a daily
+	// snapshot is owed once the destination returns, and /health uses it
+	// to say "reconnect the volume" rather than "free some space".
+	Unavailable    bool          `json:"unavailable,omitempty"`
 	Error          string        `json:"error,omitempty"`
 	RawSize        int64         `json:"raw_size,omitempty"`
 	CompressedSize int64         `json:"compressed_size,omitempty"`
@@ -74,9 +79,18 @@ func (a Attempt) lastSuccess() time.Time {
 	return t
 }
 
+// SuccessAt reports when the most recent successful snapshot of any tag
+// started, as far as this record knows; zero when none is recorded.
+func (a Attempt) SuccessAt() time.Time { return a.lastSuccess() }
+
 // RecordAttempt writes a to dir/StatusFile atomically, carrying
-// LastDailySuccess and LastSuccess forward from the previous record.
+// LastDailySuccess and LastSuccess forward from the previous record. dir
+// is created if missing: with a custom `backup.dir` the record lives in
+// the default directory beside the database, which nothing else creates.
 func RecordAttempt(dir string, a Attempt) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	if prev, ok, err := LastAttempt(dir); err == nil && ok {
 		if t := prev.lastDailySuccess(); t.After(a.LastDailySuccess) {
 			a.LastDailySuccess = t
@@ -208,6 +222,11 @@ func Freshness(list []Info, last *Attempt, now time.Time, maxAge time.Duration) 
 				now.Sub(t).Round(time.Minute))
 		} else {
 			detail += "; no successful backup recorded"
+		}
+		if last.Unavailable {
+			return false, detail, "the backup destination was missing when the snapshot was due; " +
+				"reconnect its volume and the nightly snapshot is taken at the first quiet " +
+				"moment after it returns, or run `mnemo ops backup_now`"
 		}
 		return false, detail, "free space on the backup volume if that was the cause, then run " +
 			"`mnemo ops backup_now` and watch `mnemo ops backup_status`"

@@ -77,6 +77,11 @@ type BackupArgs struct {
 	// (vacuum_into, integrity_check, gzip). Used by pre-migration so
 	// /health can show which multi-minute step is in progress. Nil is OK.
 	OnStep func(step string)
+	// StatusDir is where the attempt is recorded (StatusFile). Empty means
+	// the destination's own directory. Callers with a custom `backup.dir`
+	// pass DefaultDir(dbPath), so the record stays beside the database and
+	// remains readable while the destination is away.
+	StatusDir string
 }
 
 // Backup snapshots the SQLite database at srcPath into destPath. destPath
@@ -104,16 +109,17 @@ func Backup(srcPath, destPath string) (Result, error) {
 // Before writing anything it sweeps stale scratch from the destination
 // directory and checks the volume can hold the snapshot; a snapshot that
 // cannot fit fails fast with ErrInsufficientSpace instead of filling the
-// disk. Every attempt, including a refused one, is recorded in the
-// directory's StatusFile for /health.
+// disk. Every attempt, including a refused one, is recorded in StatusFile
+// for /health (in args.StatusDir, or the destination's directory).
 func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 	dir := filepath.Dir(destPath)
+	statusDir := statusDirFor(dir, args)
 	tag, _, _ := parseFilename(filepath.Base(destPath))
 	at := time.Now()
 	record := func(a Attempt) {
 		a.At, a.Tag = at, tag
-		if err := RecordAttempt(dir, a); err != nil {
-			slog.Warn("backup: cannot record attempt", "dir", dir, "err", err)
+		if err := RecordAttempt(statusDir, a); err != nil {
+			slog.Warn("backup: cannot record attempt", "dir", statusDir, "err", err)
 		}
 	}
 	if _, err := SweepOrphans(dir, DefaultOrphanAge); err != nil {

@@ -426,6 +426,9 @@ func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry,
 	s.SetCursorChatRoots(store.CursorChatRootsFor(home)) // 🎯T149.1: store.db tool_result fidelity
 	s.SetOmpRoots(store.OmpRootsFor(home))               // 🎯T198: index ~/.omp Oh My Pi sessions
 	s.SetTodoGlobs(cfg.TodoGlobs)
+	// 🎯T199: one resolved backup directory for the worker, backup_now,
+	// backup_status and /health.
+	s.SetBackupDir(cfg.Backup.EffectiveDir(home))
 
 	synthRoots := cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
@@ -953,7 +956,11 @@ func (r *Registry) stopReconcilerWorker(e *userEntry) {
 // worker — backup failures should never block the rest of the daemon.
 func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog.Logger) {
 	bcfg := r.cfg.Backup
-	dir := bcfg.EffectiveDir(e.homeDir)
+	dir := e.store.BackupDir()
+	// The record of the last attempt stays beside the database even when
+	// snapshots go to a custom directory, so it is readable while that
+	// destination is away (🎯T199).
+	statusDir := backup.DefaultDir(e.store.DBPath())
 
 	// Sweep before the enabled check, and before any config validation
 	// can bail out. Stranded VACUUM temps are the residue of backups
@@ -994,6 +1001,7 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	w, err := backup.NewWorker(backup.Config{
 		SrcPath:     e.store.DBPath(),
 		Dir:         dir,
+		StatusDir:   statusDir,
 		Keep:        keep,
 		KeepManual:  keepManual,
 		WindowStart: winStart,
@@ -1006,7 +1014,7 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		return
 	}
 	logger.Info("backup: worker starting",
-		"dir", dir, "keep", keep, "keep_manual", keepManual,
+		"dir", dir, "status_dir", statusDir, "keep", keep, "keep_manual", keepManual,
 		"window_start", winStart, "window_end", winEnd,
 		"quiescence_min", quiescence)
 	e.workers.Add(1)

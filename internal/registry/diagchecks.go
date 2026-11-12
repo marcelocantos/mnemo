@@ -427,7 +427,12 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			if s == nil {
 				return diag.Healthy("no default-user store yet")
 			}
-			dir := filepath.Join(filepath.Dir(s.DBPath()), "backups")
+			dir := s.BackupDir()
+			// A destination that is away has nothing to measure, and the
+			// reason belongs to one check, not two: backup.recent says so.
+			if err := backup.Away(dir, backup.DefaultDir(s.DBPath())); err != nil {
+				return diag.Healthy(fmt.Sprintf("not measured: %v (see backup.recent)", err))
+			}
 			u, err := backup.Usage(dir)
 			if err != nil {
 				return diag.Warning(
@@ -495,8 +500,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			if cfg, err := store.LoadConfig(); err == nil && !cfg.Backup.IsEnabled() {
 				return diag.Healthy("backups disabled by config")
 			}
-			dir := filepath.Join(filepath.Dir(s.DBPath()), "backups")
-			return backupRecent(dir, time.Now())
+			return backupRecent(s.BackupDir(), backup.DefaultDir(s.DBPath()), time.Now())
 		}},
 
 		// 🎯T121: whether the image embedder ran or was skipped, and why,
@@ -826,10 +830,17 @@ func walStuckDetail(s *store.Store, size int64, now time.Time) (string, bool) {
 }
 
 // backupRecent is the backup.recent check body, split out for tests.
-func backupRecent(dir string, now time.Time) diag.CheckResult {
-	a, ok, err := backup.LastAttempt(dir)
+// dir is where snapshots go; statusDir is where the record of the last
+// attempt lives (the same directory unless `backup.dir` is custom).
+//
+// A destination that is away — an external volume, unplugged — is not
+// "no backups exist" (🎯T199). While the last success is still fresh the
+// store is protected and the check stays healthy, noting the absence;
+// once a night has been missed it warns and names the destination.
+func backupRecent(dir, statusDir string, now time.Time) diag.CheckResult {
+	a, ok, err := backup.LastAttempt(statusDir)
 	if err != nil {
-		return diag.Warning(fmt.Sprintf("cannot read last backup attempt in %s: %v", dir, err),
+		return diag.Warning(fmt.Sprintf("cannot read last backup attempt in %s: %v", statusDir, err),
 			"check the path exists and is readable by the daemon")
 	}
 	var last *backup.Attempt
@@ -845,6 +856,15 @@ func backupRecent(dir string, now time.Time) diag.CheckResult {
 			"wait for it to finish; `mnemo ops backup_status` shows progress")
 	}
 	healthy, detail, remediation := backup.Freshness(nil, last, now, backup.MaxAge)
+	if away := backup.Away(dir, statusDir); away != nil {
+		if healthy {
+			return diag.Healthy(fmt.Sprintf("%s; %v", detail, away))
+		}
+		return diag.Warning(fmt.Sprintf("%v; %s", away, detail),
+			"reconnect the volume that holds "+dir+". A nightly snapshot skipped because it was "+
+				"missing is taken at the first quiet moment after it returns; `mnemo ops "+
+				"backup_now` takes one on demand")
+	}
 	if healthy {
 		return diag.Healthy(detail)
 	}

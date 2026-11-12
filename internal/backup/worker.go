@@ -5,6 +5,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -30,6 +31,7 @@ type ActivityProvider interface {
 type Worker struct {
 	src         string
 	dir         string
+	statusDir   string // where StatusFile lives; dir unless Config.StatusDir says otherwise
 	retention   Retention
 	windowStart time.Duration // offset from midnight, e.g. 3h for 03:00
 	windowEnd   time.Duration // offset from midnight, e.g. 4h for 04:00
@@ -46,6 +48,12 @@ type Worker struct {
 	// produced its snapshot is not used again — by this process, or by
 	// one that restarted inside the window.
 	lastSuccess time.Time
+	// owedSince is when a daily attempt was skipped because the
+	// destination was away, or zero when nothing is owed. While it is
+	// set the worker polls for the destination and takes the snapshot
+	// once it is back, without waiting for the next window. Loaded from
+	// StatusFile at startup, so the debt survives a restart.
+	owedSince time.Time
 }
 
 // Config bundles the parameters a Worker needs. Resolved from
@@ -54,6 +62,7 @@ type Worker struct {
 type Config struct {
 	SrcPath      string           // path to mnemo.db
 	Dir          string           // backup directory
+	StatusDir    string           // where StatusFile lives (empty → Dir); see BackupArgs.StatusDir
 	Keep         int              // daily + pre-migration backups to retain
 	KeepManual   int              // manual backups to retain, in their own pool (0 → DefaultKeepManual)
 	WindowStart  time.Duration    // offset from midnight (e.g. 3h)
@@ -90,9 +99,14 @@ func NewWorker(cfg Config) (*Worker, error) {
 	if seed == 0 {
 		seed = uint64(time.Now().UnixNano())
 	}
+	statusDir := cfg.StatusDir
+	if statusDir == "" {
+		statusDir = cfg.Dir
+	}
 	return &Worker{
 		src:          cfg.SrcPath,
 		dir:          cfg.Dir,
+		statusDir:    statusDir,
 		retention:    Retention{Keep: cfg.Keep, KeepManual: cfg.KeepManual}.normalized(),
 		windowStart:  cfg.WindowStart,
 		windowEnd:    cfg.WindowEnd,
@@ -132,12 +146,21 @@ func NewWorker(cfg Config) (*Worker, error) {
 // run only after a SUCCESSFUL DAILY backup, so a run of failed backups,
 // a disabled schedule, or a day of migrations pruned nothing while
 // snapshots kept arriving (🎯T158).
+//
+// A destination that is away — `backup.dir` on an external volume, and
+// the laptop is not at its desk — neither stops the worker nor loses the
+// night (🎯T199). The attempt is recorded as a skip, nothing is written
+// anywhere else, and the worker then polls for the destination and takes
+// the snapshot at the first quiescent moment after it returns. Run used
+// to exit for the life of the process when it could not create the
+// directory at startup, so a daemon started away from the desk never
+// backed up again until it was restarted.
 func (w *Worker) Run(ctx context.Context) {
-	if err := os.MkdirAll(w.dir, 0o755); err != nil {
-		slog.Error("backup worker: cannot create backup dir; worker exiting",
-			"dir", w.dir, "err", err)
-		return
+	if err := EnsureDir(w.dir); err != nil {
+		slog.Warn("backup worker: destination not available at startup; the worker keeps "+
+			"running and uses it once it is back", "dir", w.dir, "err", err)
 	}
+	w.adoptLegacyStatus()
 	// At startup, before waiting a day for the first window: an orphan
 	// from the crash that just happened should not survive until
 	// tomorrow morning, and a directory over retention should come down
@@ -146,11 +169,19 @@ func (w *Worker) Run(ctx context.Context) {
 	w.loadLastSuccess()
 	for {
 		next := w.scheduleNext(time.Now())
-		slog.Info("backup worker: next attempt scheduled", "at", next)
-		select {
-		case <-ctx.Done():
+		if w.owedSince.IsZero() {
+			slog.Info("backup worker: next attempt scheduled", "at", next)
+		} else {
+			slog.Info("backup worker: next attempt scheduled; a snapshot is owed and is taken "+
+				"sooner if the destination returns", "at", next, "owed_since", w.owedSince)
+		}
+		catchUp, ok := w.waitForAttempt(ctx, next)
+		if !ok {
 			return
-		case <-time.After(time.Until(next)):
+		}
+		if catchUp {
+			slog.Info("backup worker: destination is back; taking the snapshot it missed",
+				"dir", w.dir, "owed_since", w.owedSince)
 		}
 		// Housekeeping first, so it happens even on a day the backup
 		// itself is skipped for lack of a quiescent window.
@@ -159,10 +190,95 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
+// waitForAttempt blocks until next. While a snapshot is owed to a
+// destination that was away it also polls, every pollInterval, for that
+// destination's return, and reports catchUp when the owed snapshot
+// should be taken now. ok is false when ctx ended first.
+func (w *Worker) waitForAttempt(ctx context.Context, next time.Time) (catchUp, ok bool) {
+	if !w.owedSince.IsZero() {
+		tick := time.NewTicker(w.pollInterval)
+		defer tick.Stop()
+		for !w.owedSince.IsZero() {
+			if !time.Now().Before(next) {
+				return false, true
+			}
+			if EnsureDir(w.dir) == nil && w.stillOwed() {
+				return true, true
+			}
+			select {
+			case <-ctx.Done():
+				return false, false
+			case <-tick.C:
+			}
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return false, false
+	case <-time.After(time.Until(next)):
+		return false, true
+	}
+}
+
+// stillOwed re-reads StatusFile before a catch-up run. A snapshot of any
+// tag that succeeded after the skip — a manual backup_now taken when the
+// volume was plugged back in — has already protected the store, so the
+// debt is cleared and no second snapshot follows.
+func (w *Worker) stillOwed() bool {
+	a, ok, err := LastAttempt(w.statusDir)
+	if err == nil && ok && a.lastSuccess().After(w.owedSince) {
+		slog.Info("backup worker: a snapshot was taken since the destination returned; "+
+			"nothing is owed", "last_success", a.lastSuccess())
+		w.owedSince = time.Time{}
+		if t := a.lastDailySuccess(); t.After(w.lastSuccess) {
+			w.lastSuccess = t
+		}
+		return false
+	}
+	return true
+}
+
+// adoptLegacyStatus moves a StatusFile left in a custom destination into
+// statusDir. Releases up to v0.116.0 kept the record beside the
+// snapshots, so on the first start after an upgrade the newest attempt
+// is there; without this the worker would forget last night's success
+// and /health would report the older record beside the database.
+func (w *Worker) adoptLegacyStatus() {
+	if w.statusDir == w.dir {
+		return
+	}
+	legacy, ok, err := LastAttempt(w.dir)
+	if err != nil || !ok {
+		return
+	}
+	rec := legacy
+	if cur, have, err := LastAttempt(w.statusDir); err == nil && have && cur.At.After(legacy.At) {
+		rec = cur
+		if t := legacy.lastDailySuccess(); t.After(rec.LastDailySuccess) {
+			rec.LastDailySuccess = t
+		}
+		if t := legacy.lastSuccess(); t.After(rec.LastSuccess) {
+			rec.LastSuccess = t
+		}
+	}
+	if err := RecordAttempt(w.statusDir, rec); err != nil {
+		slog.Warn("backup worker: cannot move the status record beside the database",
+			"from", w.dir, "to", w.statusDir, "err", err)
+		return
+	}
+	if err := os.Remove(filepath.Join(w.dir, StatusFile)); err != nil {
+		slog.Warn("backup worker: cannot remove the old status record", "dir", w.dir, "err", err)
+	}
+}
+
 // housekeep sweeps stranded scratch files and enforces retention,
 // independently of whether a backup succeeds. Both steps log their own
-// failures and neither is fatal to the worker.
+// failures and neither is fatal to the worker. A destination that is
+// away has nothing to sweep or prune.
 func (w *Worker) housekeep() {
+	if Away(w.dir, w.statusDir) != nil {
+		return
+	}
 	if _, err := SweepOrphans(w.dir, DefaultOrphanAge); err != nil {
 		slog.Warn("backup worker: orphan sweep failed", "dir", w.dir, "err", err)
 	}
@@ -181,11 +297,15 @@ func (w *Worker) housekeep() {
 // restarts inside a window which has already produced its snapshot does
 // not take another. An unreadable or absent file means "no record",
 // which errs towards taking a backup.
+//
+// It also restores the debt: when the latest recorded attempt is a daily
+// snapshot skipped because the destination was away, that snapshot is
+// still owed by this process.
 func (w *Worker) loadLastSuccess() {
-	a, ok, err := LastAttempt(w.dir)
+	a, ok, err := LastAttempt(w.statusDir)
 	if err != nil {
 		slog.Warn("backup worker: cannot read last attempt; assuming no prior success",
-			"dir", w.dir, "err", err)
+			"dir", w.statusDir, "err", err)
 		return
 	}
 	if !ok {
@@ -193,6 +313,9 @@ func (w *Worker) loadLastSuccess() {
 	}
 	if t := a.lastDailySuccess(); t.After(w.lastSuccess) {
 		w.lastSuccess = t
+	}
+	if !a.OK && a.Unavailable && a.Tag == TagDaily {
+		w.owedSince = a.At
 	}
 }
 
@@ -232,14 +355,29 @@ func (w *Worker) scheduleNext(now time.Time) time.Time {
 // snapshot was written; failures are logged and the worker loop
 // continues regardless. A success is recorded in lastSuccess (and, via
 // BackupWith, in StatusFile) so the window is not used twice.
+//
+// A destination that is away defers the snapshot: the skip is recorded,
+// owedSince is set, and the run loop takes the snapshot when the
+// destination returns. Any other failure clears the debt, so a returned
+// volume that is, say, too full is not retried every poll interval; the
+// usual rule applies (the rest of the window, then tomorrow).
 func (w *Worker) attemptBackup(ctx context.Context) bool {
+	// Before the wait for quiescence, not after: there is no point
+	// waiting up to an hour for a quiet moment to write to a volume that
+	// is not there.
+	if err := EnsureDir(w.dir); err != nil {
+		slog.Warn("backup worker: snapshot deferred until the destination returns", "err", err)
+		RecordUnavailable(w.statusDir, TagDaily, err)
+		w.owedSince = time.Now()
+		return false
+	}
 	deadline := time.Now().Add(time.Hour) // bail if not quiescent within an hour past window_end
 	for {
 		if w.isQuiescent() {
 			break
 		}
 		if time.Now().After(deadline) {
-			slog.Warn("backup worker: no quiescent moment observed within deadline; skipping today",
+			slog.Warn("backup worker: no quiescent moment observed within deadline; skipping this attempt",
 				"last_write_at", w.activity.LastWriteAt())
 			return false
 		}
@@ -251,8 +389,16 @@ func (w *Worker) attemptBackup(ctx context.Context) bool {
 	}
 
 	started := time.Now()
-	res, removed, err := CreateAndRetain(w.src, w.dir, TagDaily, w.retention, nil)
+	res, removed, err := CreateAndRetain(w.src, w.dir, TagDaily, w.retention,
+		&BackupArgs{StatusDir: w.statusDir})
 	LogResult("backup worker", res, removed, err)
+	if errors.Is(err, ErrDestinationUnavailable) {
+		// Went away during the wait for quiescence; CreateAndRetain
+		// recorded the skip.
+		w.owedSince = started
+		return false
+	}
+	w.owedSince = time.Time{}
 	if err != nil {
 		return false
 	}
@@ -456,10 +602,14 @@ func parseFilename(name string) (Tag, time.Time, bool) {
 // Retention failure is reported but does not fail the backup: a snapshot
 // that exists and was verified is worth more than a tidy directory, and
 // the caller has already paid for it.
+//
+// A destination that cannot be reached or created is recorded as a skip
+// and returned as ErrDestinationUnavailable; nothing is written elsewhere.
 func CreateAndRetain(srcPath, dir string, tag Tag, r Retention, args *BackupArgs) (Result, []string, error) {
 	r = r.normalized()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return Result{}, nil, fmt.Errorf("create backup dir: %w", err)
+	if err := EnsureDir(dir); err != nil {
+		RecordUnavailable(statusDirFor(dir, args), tag, err)
+		return Result{}, nil, err
 	}
 	destPath, err := uniqueDest(dir, tag, time.Now().UTC())
 	if err != nil {

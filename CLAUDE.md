@@ -268,6 +268,22 @@ warning's `backup_now` remediation actually clears it.
 `last_daily_success` stays daily-only for the worker window. `backup.Decompress` reads both `.db.zst` and
 `.db.gz`, so restoring never needs the zstd CLI.
 
+`backup.dir` is resolved once, by the registry, into
+`Store.BackupDir()`; the worker, `op=backup_now`, `op=backup_status`
+and the `backup.disk` / `backup.recent` checks all read that, and the
+pre-migration backup (which runs inside `store.New`, before the
+registry) resolves the same value from the config beside the database.
+Do not rebuild the path from `DBPath()` (🎯T199). The status file does
+**not** follow `backup.dir`: it lives in `backup.DefaultDir(dbPath)`
+(`~/.mnemo/backups`), passed down as `BackupArgs.StatusDir` /
+`Config.StatusDir`, so it is readable and writable while a custom
+destination is away. An unreachable destination is
+`backup.ErrDestinationUnavailable`: recorded as a skip with
+`Attempt.Unavailable`, never redirected to the database's volume. The
+worker does not exit on it; a daily skip sets `owedSince`, restored
+from the status file on restart, and the snapshot is taken when the
+destination returns unless a snapshot of any tag has succeeded since.
+
 Retention is not optional per call site: take snapshots through
 `backup.CreateAndRetain`, which snapshots *and* prunes. A ratchet
 (`retention_ratchet_test.go`) fails the build on a caller that reaches

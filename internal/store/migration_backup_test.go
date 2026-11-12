@@ -192,12 +192,7 @@ func TestUpgradeSkipsBackupForMetadataOnlyPlan(t *testing.T) {
 	}
 
 	// A column change must still be insured.
-	withCol := strings.Replace(withView,
-		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER"+eol+"		);",
-		"			content_z BLOB,"+eol+"			-- Stored lengths for status/membership. Status must never"+eol+"			-- SUM(length(blob)): that pulls overflow pages of every row."+eol+"			plain_len INTEGER,"+eol+"			z_len INTEGER,"+eol+"			t155_col TEXT"+eol+"		);", 1)
-	if withCol == withView {
-		t.Fatal("fixture is stale: docs.z_len is no longer the last column")
-	}
+	withCol := schemaWithExtraDocsColumn(t, withView, "t155_col")
 	if err := upgradeSchemaWith(dbPath, withCol); err != nil {
 		t.Fatalf("column upgrade: %v", err)
 	}

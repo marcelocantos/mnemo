@@ -20,13 +20,20 @@ import (
 // in tests without needing build tags.
 func osMkdirAll(dir string, mode os.FileMode) error { return os.MkdirAll(dir, mode) }
 
-// backupDir returns the conventional backup directory for the user's
-// mnemo.db: ~/.mnemo/backups (or wherever the daemon was pointed). The
-// MCP tools don't (yet) read BackupConfig themselves — config-driven
-// custom dirs are inspectable via direct filesystem access. v1 punts on
-// that to keep the tool surface small.
+// backupDir returns the directory snapshots are written to and listed
+// from: the configured `backup.dir`, or ~/.mnemo/backups. It is the
+// value the nightly worker uses; these tools used to hardcode the
+// default, so with a custom directory backup_status reported on a folder
+// the worker had stopped using and backup_now wrote to it (🎯T199).
 func (h *callHandler) backupDir() string {
-	return filepath.Join(filepath.Dir(h.mem.DBPath()), "backups")
+	return h.mem.BackupDir()
+}
+
+// statusDir returns where the record of the last attempt lives: always
+// beside the database, so it can be read and written while a custom
+// destination is away.
+func (h *callHandler) statusDir() string {
+	return backup.DefaultDir(h.mem.DBPath())
 }
 
 // backupKeep resolves the retention policy the same way the worker does,
@@ -46,11 +53,19 @@ func backupKeep() backup.Retention {
 // user, or the user running it directly).
 func (h *callHandler) backupStatus() (string, bool, error) {
 	dir := h.backupDir()
+	head := backupProgress(h.statusDir())
+	// Not "No backups found": the snapshots are on a volume that is not
+	// attached, which is a different fact with a different remedy.
+	if err := backup.Away(dir, h.statusDir()); err != nil {
+		return head + fmt.Sprintf("Snapshots not listed: %v.\n"+
+			"A nightly snapshot skipped because "+
+			"the destination was missing is taken at the first quiet moment after it returns; "+
+			"nothing is written anywhere else in the meantime.", err), false, nil
+	}
 	list, err := backup.List(dir)
 	if err != nil {
 		return fmt.Sprintf("backup status failed: %v", err), true, nil
 	}
-	head := backupProgress(dir)
 	if len(list) == 0 {
 		return head + fmt.Sprintf("No backups found in %s.\nThe daemon's daily worker runs in the 03:00-04:00 local window; pre-migration backups fire when sqlift.Apply has a non-empty plan. Use mnemo_backup_now to trigger one manually.", dir), false, nil
 	}
@@ -102,6 +117,7 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	}
 
 	dir := h.backupDir()
+	statusDir := h.statusDir()
 	if r, ok := backup.InProgress(); ok {
 		return fmt.Sprintf("A backup is already running: %s (started %s ago, %s). "+
 			"Poll mnemo_ops op=backup_status.", filepath.Base(r.Path),
@@ -120,10 +136,14 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 
 	src := h.mem.DBPath()
 
-	// Best-effort ensure dir exists; CreateAndRetain does this too, but
-	// failing here gives a clearer message than failing mid-backup.
+	// Ensure dir exists; CreateAndRetain does this too, but failing here,
+	// synchronously, tells the caller why. A destination that is away is
+	// recorded as a skip and nothing is written anywhere else.
 	if err := ensureDir(dir); err != nil {
-		return fmt.Sprintf("backup_now: cannot ensure backup dir %s: %v", dir, err), true, nil
+		uerr := fmt.Errorf("%w: %s (%v)", backup.ErrDestinationUnavailable, dir, err)
+		slog.Error("backup_now: snapshot skipped", "err", uerr)
+		backup.RecordUnavailable(statusDir, backup.TagManual, uerr)
+		return fmt.Sprintf("backup_now: not started: %v. Reconnect the volume and run it again.", uerr), true, nil
 	}
 	// Refuse a doomed run here, synchronously, so the caller sees why.
 	// BackupWith checks again (and records the skip) for every path.
@@ -132,7 +152,7 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 			msg := fmt.Sprintf("backup_now: not started: %s free in %s, a snapshot needs %s%s",
 				humanSize(free), dir, humanSize(need), backup.HeldBy(dir))
 			slog.Error("backup_now: snapshot skipped", "err", fmt.Errorf("%w: %s", backup.ErrInsufficientSpace, msg))
-			_ = backup.RecordAttempt(dir, backup.Attempt{At: time.Now(), Tag: backup.TagManual,
+			_ = backup.RecordAttempt(statusDir, backup.Attempt{At: time.Now(), Tag: backup.TagManual,
 				Skipped: true, Error: msg})
 			return msg, true, nil
 		}
@@ -147,7 +167,8 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	}
 	go func() {
 		defer manualRunning.Store(false)
-		res, removed, err := backupCreate(src, dir, backup.TagManual, keep, nil)
+		res, removed, err := backupCreate(src, dir, backup.TagManual, keep,
+			&backup.BackupArgs{StatusDir: statusDir})
 		backup.LogResult("backup_now", res, removed, err)
 	}()
 	return fmt.Sprintf("Backup started in %s (keep_manual=%d: manual snapshots are pruned only "+
@@ -212,14 +233,17 @@ func humanAge(d time.Duration) string {
 }
 
 // backupProgress renders the running snapshot and the last recorded
-// attempt, the two things a caller of backup_now polls for.
-func backupProgress(dir string) string {
+// attempt, the two things a caller of backup_now polls for. statusDir is
+// where the record lives (callHandler.statusDir). After an attempt that
+// did not produce a snapshot it also says when the last one did, which
+// is the answer still wanted while the destination is away.
+func backupProgress(statusDir string) string {
 	var b strings.Builder
 	if r, ok := backup.InProgress(); ok {
 		fmt.Fprintf(&b, "In progress: %s, started %s ago, step: %s\n",
 			filepath.Base(r.Path), humanAge(time.Since(r.Started).Round(time.Second)), r.Step)
 	}
-	if a, ok, err := backup.LastAttempt(dir); err == nil && ok {
+	if a, ok, err := backup.LastAttempt(statusDir); err == nil && ok {
 		ago := humanAge(time.Since(a.At).Round(time.Second))
 		switch {
 		case a.OK:
@@ -230,6 +254,13 @@ func backupProgress(dir string) string {
 			fmt.Fprintf(&b, "Last attempt: SKIPPED %s ago: %s\n", ago, a.Error)
 		default:
 			fmt.Fprintf(&b, "Last attempt: FAILED %s ago: %s\n", ago, a.Error)
+		}
+		if !a.OK {
+			if t := a.SuccessAt(); t.IsZero() {
+				b.WriteString("Last success: none recorded\n")
+			} else {
+				fmt.Fprintf(&b, "Last success: %s ago\n", humanAge(time.Since(t).Round(time.Second)))
+			}
 		}
 	}
 	if b.Len() > 0 {

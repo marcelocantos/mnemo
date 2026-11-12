@@ -222,6 +222,7 @@ func (f *fakeBackend) ReworkHistory(targetID string, repo string, limit int) ([]
 }
 
 func (f *fakeBackend) DBPath() string                              { return "" }
+func (f *fakeBackend) BackupDir() string                           { return "" }
 func (f *fakeBackend) StreamDivergences() []store.StreamDivergence { return nil }
 func (f *fakeBackend) SourceDrift() store.SourceDriftReport        { return store.SourceDriftReport{} }
 func (f *fakeBackend) RecordVaultOutput(notePath, entityKind, entityID, contentHash string, writtenAt time.Time) error {

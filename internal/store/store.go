@@ -153,6 +153,12 @@ type Store struct {
 	// user has not configured a vault. Guarded by mu.
 	vaultPath string
 
+	// backupDir is where snapshots go: the configured `backup.dir`,
+	// mirrored from registry/config by SetBackupDir so every backup path
+	// (worker, backup_now, backup_status, /health) reads one value. ""
+	// means the default directory beside the database. Guarded by mu.
+	backupDir string
+
 	rootsMu sync.RWMutex // protects in-memory state: workspaceRoots, extraProjectDirs, synthesisRoots
 
 	// workspaceRoots is the set of filesystem roots under which repo-level
@@ -310,6 +316,32 @@ func (s *Store) LastWriteAt() time.Time {
 // file without re-deriving the path.
 func (s *Store) DBPath() string {
 	return s.dbPath
+}
+
+// SetBackupDir records the resolved `backup.dir` for this store. The
+// registry calls it once, before starting the backup worker, with the
+// same value it hands the worker.
+func (s *Store) SetBackupDir(dir string) {
+	s.mu.Lock()
+	s.backupDir = dir
+	s.mu.Unlock()
+}
+
+// BackupDir is the directory snapshots are written to and listed from:
+// the configured `backup.dir`, or the default directory beside the
+// database. backup_now, backup_status and the backup health checks used
+// to hardcode the default, so with a custom directory they reported on,
+// and wrote to, a folder the nightly worker no longer used (🎯T199).
+//
+// The record of the last attempt is not here when the directory is
+// custom: it stays in backup.DefaultDir(DBPath()).
+func (s *Store) BackupDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.backupDir != "" {
+		return s.backupDir
+	}
+	return backup.DefaultDir(s.dbPath)
 }
 
 // SetWorkspaceRoots configures the filesystem roots under which repo-
@@ -1091,6 +1123,29 @@ func (b BackupConfig) Retention() backup.Retention {
 	return backup.Retention{Keep: b.EffectiveKeepDailies(), KeepManual: b.EffectiveKeepManual()}
 }
 
+// backupDirFromConfig resolves the snapshot directory for the
+// pre-migration backup, which runs inside New before the registry can
+// call SetBackupDir.
+//
+// config.json applies only to the database it sits beside
+// (<home>/.mnemo/mnemo.db). Any other database — a test fixture, a copy
+// opened with a different path — gets the default directory beside
+// itself: honouring the daemon's `backup.dir` there would write a
+// stranger's snapshot into the owner's backup volume and run retention
+// over the owner's real snapshots.
+func backupDirFromConfig(dbPath string) string {
+	def := backup.DefaultDir(dbPath)
+	home, err := EffectiveHome()
+	if err != nil || filepath.Clean(dbPath) != filepath.Join(home, ".mnemo", "mnemo.db") {
+		return def
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		return def
+	}
+	return cfg.Backup.EffectiveDir(home)
+}
+
 // schemaPrep is the cheap result of prepareSchema: either the DB is at the
 // desired shape, or an upgrade (backup + apply) is still required.
 type schemaPrep struct {
@@ -1195,10 +1250,17 @@ func upgradeSchemaWithGate(dbPath, desiredSQL string, applyMu *sync.Mutex) error
 		slog.Info("pre-migration backup required", "db", dbPath, "reason", why)
 	}
 	if len(current.Tables) > 0 && !metadataOnly {
-		backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
-		if err := os.MkdirAll(backupDir, 0o755); err != nil {
-			slog.Warn("backup dir create failed; proceeding without pre-migration backup",
-				"dir", backupDir, "err", err)
+		// The configured `backup.dir`, like every other backup path
+		// (🎯T199). The record of the attempt stays beside the database.
+		backupDir := backupDirFromConfig(dbPath)
+		statusDir := backup.DefaultDir(dbPath)
+		if err := backup.EnsureDir(backupDir); err != nil {
+			// No fallback to the directory beside the database: a custom
+			// destination usually exists because that volume has no room
+			// for a second copy of the store.
+			slog.Warn("pre-migration backup skipped: destination not available; "+
+				"proceeding with migration without it", "err", err)
+			backup.RecordUnavailable(statusDir, backup.TagPreMigration, err)
 		} else {
 			destPath := filepath.Join(backupDir,
 				backup.Filename(backup.TagPreMigration, time.Now()))
@@ -1208,6 +1270,7 @@ func upgradeSchemaWithGate(dbPath, desiredSQL string, applyMu *sync.Mutex) error
 				OnStep: func(step string) {
 					reportUpgrade(boot.PhasePreMigrationBackup, step)
 				},
+				StatusDir: statusDir,
 			})
 			if berr != nil {
 				slog.Warn("pre-migration backup failed; proceeding with migration anyway",
