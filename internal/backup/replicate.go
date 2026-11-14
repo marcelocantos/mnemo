@@ -324,10 +324,19 @@ func (r *Replicator) replicate(ctx context.Context, b Info) (resumed, copied int
 	if err != nil {
 		return 0, 0, err
 	}
-	// Closing can block like any other call on the volume.
-	defer func() {
-		_, _ = answer(r.Dest, "close", answerTimeout, func() (struct{}, error) { return struct{}{}, dst.Close() })
-	}()
+	// Closing can block like any other call on the volume. The copy is
+	// closed explicitly before its rename (Windows refuses to rename an
+	// open file); this covers every earlier return.
+	closed := false
+	closeDst := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		_, err := answer(r.Dest, "close", answerTimeout, func() (struct{}, error) { return struct{}{}, dst.Close() })
+		return err
+	}
+	defer closeDst()
 
 	off, err := r.resumePoint(src, dst, &prog)
 	if err != nil {
@@ -393,13 +402,19 @@ func (r *Replicator) replicate(ctx context.Context, b Info) (resumed, copied int
 		// A copy that does not match is not resumable from any offset we
 		// can trust: start again next pass.
 		_ = os.Remove(progPath)
+		_ = closeDst()
 		_ = removeIn(r.Dest, part)
 		return resumed, copied, err
+	}
+	if err := closeDst(); err != nil {
+		return resumed, copied, unavailable(r.Dest, err)
 	}
 	if err := renameIn(r.Dest, part, final); err != nil {
 		return resumed, copied, unavailable(r.Dest, err)
 	}
 	syncDir(r.Dest)
+	// Closed before deleting: Windows will not delete an open file.
+	src.Close()
 	r.dropStaged(b)
 	slog.Info("backup replicator: snapshot replicated; staged copy deleted",
 		"name", b.Name, "dest", r.Dest, "copied_gib", fmt.Sprintf("%.2f", gib(copied)),
