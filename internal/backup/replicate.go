@@ -42,17 +42,19 @@ import (
 // Design decision: the replicator runs inside the daemon, not as a
 // separate helper with its own code identity. The helper was weighed
 // because macOS ties a removable-volume grant to the binary's code
-// identity, and mnemo releases are ad-hoc signed (🎯T101 is set aside),
-// so every upgrade is a new identity. A helper does not escape that: it
-// would be rebuilt and re-signed by the same release, and Go embeds
-// build and version information, so its identity would change with every
+// identity, and an ad-hoc signed release (as v0.117.0 was) is a new
+// identity on every upgrade. A helper does not escape that: it would be
+// built and signed by the same release, and Go embeds build and version
+// information, so an ad-hoc helper's identity would change with every
 // release too unless it were frozen and built reproducibly across
 // toolchain upgrades. And it would cover only half the problem: the
 // daemon itself writes snapshots straight to `backup.dir` when the
-// volume answers, so it needs the grant regardless. What fixes the grant
-// is a stable signing identity for mnemo itself (🎯T101). Until then a
-// missing grant costs a prompt after an upgrade, and in the meantime the
-// snapshot is staged rather than lost.
+// volume answers, so it needs the grant regardless. What keeps the grant
+// is a stable signing identity for mnemo itself (🎯T101): from v0.118.0
+// `scripts/release.sh` signs the darwin binary with a Developer ID
+// identity whenever one is in the keychain. Without one, a missing grant
+// costs a prompt after an upgrade, and in the meantime the snapshot is
+// staged rather than lost.
 
 // ReplicaChunk is how much is copied between fsyncs and progress
 // records: the most a detach or crash can cost a resumed copy.

@@ -91,20 +91,24 @@ as strays.
 ## Why the replicator is not a separate helper
 
 macOS ties a removable-volume grant to the binary's code identity, and
-mnemo releases are ad-hoc signed while 🎯T101 (stable Developer ID
-signing) is set aside, so each upgrade is a new identity. A helper with
-a stable identity would keep its grant across upgrades, but:
+an ad-hoc signed release (v0.117.0 was one) is a new identity on every
+upgrade. A helper with a stable identity would keep its grant across
+upgrades, but:
 
 - It would be built and signed by the same release process, and Go
-  embeds build and version information, so its identity would change
-  every release too unless it were frozen and built reproducibly across
-  toolchain upgrades.
+  embeds build and version information, so an ad-hoc helper's identity
+  would change every release too unless it were frozen and built
+  reproducibly across toolchain upgrades.
 - It would cover only replication. The daemon writes snapshots straight
   to `backup.dir` when it answers, so it needs the grant anyway.
 
 The fix for the grant is a stable signing identity for mnemo (🎯T101).
-Until then, a missing grant after an upgrade costs a prompt, and the
-snapshots taken before it is answered are staged, not lost.
+v0.118.0 was the first release signed with a Developer ID identity
+(`scripts/release.sh` uses one whenever it is in the keychain), and it
+read and wrote `/Volumes/Storage` straight after the upgrade with no
+prompt. On a release host without the identity, a missing grant after
+an upgrade costs a prompt, and the snapshots taken before it is answered
+are staged, not lost.
 
 ## Tests
 
