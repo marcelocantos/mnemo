@@ -6,7 +6,6 @@ package backup
 import (
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,44 +58,36 @@ func SweepOrphans(dir string, minAge time.Duration) ([]SweptFile, error) {
 	if minAge <= 0 {
 		minAge = DefaultOrphanAge
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
 
 	now := time.Now()
 	var swept []SweptFile
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.isDir || e.infoErr != nil {
 			continue
 		}
-		name := e.Name()
-		reason, ok := orphanReason(name)
+		reason, ok := orphanReason(e.name)
 		if !ok {
 			continue
 		}
-		path := filepath.Join(dir, name)
+		path := filepath.Join(dir, e.name)
 		if tempIsLive(path) {
 			continue
 		}
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
-		age := now.Sub(fi.ModTime())
+		age := now.Sub(e.modTime)
 		if age < minAge {
 			continue
 		}
-		if err := os.Remove(path); err != nil {
+		if err := removeIn(dir, path); err != nil {
 			slog.Warn("backup sweep: failed to remove orphan",
 				"path", path, "err", err)
 			continue
 		}
 		swept = append(swept, SweptFile{
-			Path: path, Size: fi.Size(), Age: age, Reason: reason,
+			Path: path, Size: e.size, Age: age, Reason: reason,
 		})
 	}
 	if len(swept) > 0 {
@@ -152,42 +143,47 @@ type DiskUsage struct {
 	RetainedCount int
 	ManualBytes   int64 // the part of RetainedBytes in manual snapshots
 	ManualCount   int
-	OtherBytes    int64 // TotalBytes - RetainedBytes: scratch, orphans, strays
+	OtherBytes    int64 // TotalBytes - RetainedBytes - ReplicatingBytes: scratch, orphans, strays
 	OtherCount    int
+	// ReplicatingBytes is a staged snapshot partway through being copied
+	// in by the replicator (🎯T201), under its temporary name.
+	ReplicatingBytes int64
+	ReplicatingCount int
 }
 
 // Usage measures dir. A missing directory is zero, not an error.
 func Usage(dir string) (DiskUsage, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return DiskUsage{}, nil
-		}
 		return DiskUsage{}, err
 	}
 	var u DiskUsage
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.isDir || e.infoErr != nil {
 			continue
 		}
-		if e.Name() == StatusFile {
+		if e.name == StatusFile {
 			continue // a few hundred bytes of bookkeeping, not a stray
 		}
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
-		u.TotalBytes += fi.Size()
-		if tag, _, ok := parseFilename(e.Name()); ok {
-			u.RetainedBytes += fi.Size()
-			u.RetainedCount++
-			if tag == TagManual {
-				u.ManualBytes += fi.Size()
-				u.ManualCount++
+		u.TotalBytes += e.size
+		switch {
+		case isReplicaPart(e.name):
+			// A replication in progress (🎯T201): a backup on its way
+			// in, accounted apart so it is not reported as a stray.
+			u.ReplicatingBytes += e.size
+			u.ReplicatingCount++
+		default:
+			if tag, _, ok := parseFilename(e.name); ok {
+				u.RetainedBytes += e.size
+				u.RetainedCount++
+				if tag == TagManual {
+					u.ManualBytes += e.size
+					u.ManualCount++
+				}
+			} else {
+				u.OtherBytes += e.size
+				u.OtherCount++
 			}
-		} else {
-			u.OtherBytes += fi.Size()
-			u.OtherCount++
 		}
 	}
 	return u, nil
@@ -196,6 +192,9 @@ func Usage(dir string) (DiskUsage, error) {
 // String renders a DiskUsage for logs and status output.
 func (u DiskUsage) String() string {
 	s := fmt.Sprintf("%d backups, %.2f GiB", u.RetainedCount, gib(u.RetainedBytes))
+	if u.ReplicatingCount > 0 {
+		s += fmt.Sprintf(" (plus %.2f GiB being replicated in)", gib(u.ReplicatingBytes))
+	}
 	if u.OtherCount > 0 {
 		s += fmt.Sprintf(" (plus %d non-backup files, %.2f GiB)",
 			u.OtherCount, gib(u.OtherBytes))

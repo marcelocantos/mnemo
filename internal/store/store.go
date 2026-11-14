@@ -158,6 +158,9 @@ type Store struct {
 	// (worker, backup_now, backup_status, /health) reads one value. ""
 	// means the default directory beside the database. Guarded by mu.
 	backupDir string
+	// backupStagingDir is where snapshots wait while backupDir does not
+	// answer (🎯T201); "" disables staging. Guarded by mu.
+	backupStagingDir string
 
 	rootsMu sync.RWMutex // protects in-memory state: workspaceRoots, extraProjectDirs, synthesisRoots
 
@@ -325,6 +328,22 @@ func (s *Store) SetBackupDir(dir string) {
 	s.mu.Lock()
 	s.backupDir = dir
 	s.mu.Unlock()
+}
+
+// SetBackupStagingDir records where snapshots wait while BackupDir does
+// not answer (🎯T201). Empty disables staging.
+func (s *Store) SetBackupStagingDir(dir string) {
+	s.mu.Lock()
+	s.backupStagingDir = dir
+	s.mu.Unlock()
+}
+
+// BackupStagingDir is where snapshots wait while BackupDir does not
+// answer; "" when staging is off (BackupDir is the default directory).
+func (s *Store) BackupStagingDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.backupStagingDir
 }
 
 // BackupDir is the directory snapshots are written to and listed from:
@@ -1123,8 +1142,8 @@ func (b BackupConfig) Retention() backup.Retention {
 	return backup.Retention{Keep: b.EffectiveKeepDailies(), KeepManual: b.EffectiveKeepManual()}
 }
 
-// backupDirFromConfig resolves the snapshot directory for the
-// pre-migration backup, which runs inside New before the registry can
+// backupDirFromConfig resolves the snapshot and staging directories for
+// the pre-migration backup, which runs inside New before the registry can
 // call SetBackupDir.
 //
 // config.json applies only to the database it sits beside
@@ -1133,17 +1152,17 @@ func (b BackupConfig) Retention() backup.Retention {
 // itself: honouring the daemon's `backup.dir` there would write a
 // stranger's snapshot into the owner's backup volume and run retention
 // over the owner's real snapshots.
-func backupDirFromConfig(dbPath string) string {
+func backupDirFromConfig(dbPath string) (dir, staging string) {
 	def := backup.DefaultDir(dbPath)
 	home, err := EffectiveHome()
 	if err != nil || filepath.Clean(dbPath) != filepath.Join(home, ".mnemo", "mnemo.db") {
-		return def
+		return def, ""
 	}
 	cfg, err := LoadConfig()
 	if err != nil {
-		return def
+		return def, ""
 	}
-	return cfg.Backup.EffectiveDir(home)
+	return cfg.Backup.EffectiveDir(home), cfg.Backup.EffectiveStagingDir(home)
 }
 
 // schemaPrep is the cheap result of prepareSchema: either the DB is at the
@@ -1252,32 +1271,42 @@ func upgradeSchemaWithGate(dbPath, desiredSQL string, applyMu *sync.Mutex) error
 	if len(current.Tables) > 0 && !metadataOnly {
 		// The configured `backup.dir`, like every other backup path
 		// (🎯T199). The record of the attempt stays beside the database.
-		backupDir := backupDirFromConfig(dbPath)
+		backupDir, stagingDir := backupDirFromConfig(dbPath)
 		statusDir := backup.DefaultDir(dbPath)
-		if err := backup.EnsureDir(backupDir); err != nil {
-			// No fallback to the directory beside the database: a custom
-			// destination usually exists because that volume has no room
-			// for a second copy of the store.
+		// The destination when it answers; otherwise staging beside the
+		// database (🎯T201), whose free-space precheck still applies.
+		// Without staging there is no fallback to the directory beside
+		// the database: a custom destination usually exists because that
+		// volume has no room for a second copy of the store.
+		pl, perr := backup.Place(backupDir, stagingDir)
+		if perr != nil {
 			slog.Warn("pre-migration backup skipped: destination not available; "+
-				"proceeding with migration without it", "err", err)
-			backup.RecordUnavailable(statusDir, backup.TagPreMigration, err)
+				"proceeding with migration without it", "err", perr)
+			backup.RecordUnavailable(statusDir, backup.TagPreMigration, perr)
 		} else {
-			destPath := filepath.Join(backupDir,
+			destPath := filepath.Join(pl.Dir,
 				backup.Filename(backup.TagPreMigration, time.Now()))
 			reportUpgrade(boot.PhasePreMigrationBackup,
 				fmt.Sprintf("pre-migration snapshot of %s", filepath.Base(dbPath)))
-			res, berr := preMigrationBackup(dbPath, destPath, &backup.BackupArgs{
+			bargs := &backup.BackupArgs{
 				OnStep: func(step string) {
 					reportUpgrade(boot.PhasePreMigrationBackup, step)
 				},
 				StatusDir: statusDir,
-			})
+			}
+			if pl.Staged {
+				bargs.StagedBecause = pl.Cause
+				slog.Warn("pre-migration backup: destination not answering; staging the snapshot",
+					"staging", pl.Dir, "cause", pl.Cause)
+			}
+			res, berr := preMigrationBackup(dbPath, destPath, bargs)
 			if berr != nil {
 				slog.Warn("pre-migration backup failed; proceeding with migration anyway",
 					"err", berr)
 			} else {
 				slog.Info("pre-migration backup written",
 					"path", res.Path,
+					"staged", pl.Staged,
 					"raw_mb", res.RawSize/(1<<20),
 					"compressed_mb", res.CompressedSize/(1<<20),
 					"elapsed", res.Elapsed.Round(time.Second))
@@ -1287,11 +1316,12 @@ func upgradeSchemaWithGate(dbPath, desiredSQL string, applyMu *sync.Mutex) error
 				// nightly run — and if backups were disabled or failing,
 				// never (🎯T158). The snapshot just written is the
 				// newest, so retention cannot discard the insurance it
-				// was taken for.
+				// was taken for. A staged snapshot replaces the older
+				// staged one of its tag instead.
 				keep := backupRetentionFromConfig()
-				if removed, gcErr := backup.GCOldest(backupDir, keep); gcErr != nil {
+				if removed, gcErr := backup.RetainPlaced(pl, backup.TagPreMigration, res.Path, keep); gcErr != nil {
 					slog.Warn("pre-migration retention failed; old backups may accumulate",
-						"dir", backupDir, "err", gcErr)
+						"dir", pl.Dir, "err", gcErr)
 				} else if len(removed) > 0 {
 					slog.Info("pre-migration retention removed old snapshots",
 						"count", len(removed), "keep", keep)

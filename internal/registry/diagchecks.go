@@ -478,8 +478,14 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 						"older than 6h at startup and each cycle — if they persist, inspect "+
 						"the directory by hand")
 			}
-			return diag.Healthy(fmt.Sprintf("%s, %.1f GiB on disk",
-				u.String(), float64(u.TotalBytes)/(1<<30)))
+			detail := fmt.Sprintf("%s, %.1f GiB on disk", u.String(), float64(u.TotalBytes)/(1<<30))
+			if sd := s.BackupStagingDir(); sd != "" {
+				if su, err := backup.Usage(sd); err == nil && su.RetainedCount > 0 {
+					detail += fmt.Sprintf("; staging holds %d snapshot(s), %.1f GiB, waiting to "+
+						"be replicated", su.RetainedCount, float64(su.RetainedBytes)/(1<<30))
+				}
+			}
+			return diag.Healthy(detail)
 		}},
 
 		// Whether a usable backup exists, not what the directory costs
@@ -500,7 +506,8 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 			if cfg, err := store.LoadConfig(); err == nil && !cfg.Backup.IsEnabled() {
 				return diag.Healthy("backups disabled by config")
 			}
-			return backupRecent(s.BackupDir(), backup.DefaultDir(s.DBPath()), time.Now())
+			return backupRecentStaged(s.BackupDir(), backup.DefaultDir(s.DBPath()),
+				s.BackupStagingDir(), time.Now())
 		}},
 
 		// 🎯T121: whether the image embedder ran or was skipped, and why,
@@ -838,6 +845,16 @@ func walStuckDetail(s *store.Store, size int64, now time.Time) (string, bool) {
 // store is protected and the check stays healthy, noting the absence;
 // once a night has been missed it warns and names the destination.
 func backupRecent(dir, statusDir string, now time.Time) diag.CheckResult {
+	return backupRecentStaged(dir, statusDir, "", now)
+}
+
+// backupRecentStaged is backupRecent with staging (🎯T201): stagingDir is
+// where snapshots wait while dir does not answer, "" when staging is off.
+// It reports one of three states: written to the destination; staged and
+// waiting for it (healthy while fresh); or staged longer than
+// backup.StagedMaxAge, which warns that the newest backup is still on the
+// same disk as the database.
+func backupRecentStaged(dir, statusDir, stagingDir string, now time.Time) diag.CheckResult {
 	a, ok, err := backup.LastAttempt(statusDir)
 	if err != nil {
 		return diag.Warning(fmt.Sprintf("cannot read last backup attempt in %s: %v", statusDir, err),
@@ -856,14 +873,43 @@ func backupRecent(dir, statusDir string, now time.Time) diag.CheckResult {
 			"wait for it to finish; `mnemo ops backup_status` shows progress")
 	}
 	healthy, detail, remediation := backup.Freshness(nil, last, now, backup.MaxAge)
+
+	// Staging first: a snapshot that has waited too long is the warning
+	// that matters most, whatever the latest attempt says.
+	var staged string
+	if stagingDir != "" {
+		v, serr := backup.Staging(stagingDir)
+		if serr != nil {
+			return diag.Warning(fmt.Sprintf("cannot read backup staging %s: %v; %s", stagingDir, serr, detail),
+				"check the staging directory is readable by the daemon")
+		}
+		staged = v.Summary(now)
+		if v.Verdict(now) == backup.StagedTooLong {
+			cause := ""
+			if away := backup.Away(dir, statusDir); away != nil {
+				cause = fmt.Sprintf("; %v", away)
+			}
+			return diag.Warning(fmt.Sprintf("the newest backup is still on the same disk as the "+
+				"database: %s (threshold %s)%s; %s", staged, backup.StagedMaxAge, cause, detail),
+				"reconnect the volume that holds "+dir+"; if macOS asked whether mnemo may access "+
+					"the volume, allow it. The staged snapshot is copied there and deleted from "+
+					"the database volume once it answers")
+		}
+	}
 	if away := backup.Away(dir, statusDir); away != nil {
 		if healthy {
+			if staged != "" {
+				return diag.Healthy(fmt.Sprintf("%s; %s; %v", detail, staged, away))
+			}
 			return diag.Healthy(fmt.Sprintf("%s; %v", detail, away))
 		}
 		return diag.Warning(fmt.Sprintf("%v; %s", away, detail),
 			"reconnect the volume that holds "+dir+". A nightly snapshot skipped because it was "+
 				"missing is taken at the first quiet moment after it returns; `mnemo ops "+
 				"backup_now` takes one on demand")
+	}
+	if staged != "" {
+		detail += "; " + staged
 	}
 	if healthy {
 		return diag.Healthy(detail)

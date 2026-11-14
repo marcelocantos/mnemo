@@ -901,6 +901,14 @@ type BackupConfig struct {
 	// Empty → ~/.mnemo/backups.
 	Dir string `json:"dir,omitempty"`
 
+	// StagingDir is where a snapshot is written while Dir does not
+	// answer — an external volume unplugged, or withheld by macOS until
+	// a permission prompt is answered (🎯T201). The replicator copies it
+	// to Dir when Dir returns, then deletes it. Supports ~. Empty →
+	// ~/.mnemo/backups/staging. Ignored when Dir is the default, which
+	// is already on the database's volume.
+	StagingDir string `json:"staging_dir,omitempty"`
+
 	// KeepDailies caps the number of daily and pre-migration snapshots
 	// retained (manual ones have their own pool, KeepManual). Older
 	// backups beyond this count are deleted after a successful run,
@@ -955,6 +963,22 @@ func (b BackupConfig) EffectiveDir(userHome string) string {
 		}
 	}
 	return d
+}
+
+// EffectiveStagingDir returns the staging directory for a custom Dir:
+// StagingDir with ~ expanded, or ~/.mnemo/backups/staging. It returns ""
+// when Dir is the default: staging beside the database for a
+// destination that is already beside the database would only copy the
+// snapshot onto the volume it is on.
+func (b BackupConfig) EffectiveStagingDir(userHome string) string {
+	def := filepath.Join(userHome, ".mnemo", "backups")
+	if filepath.Clean(b.EffectiveDir(userHome)) == filepath.Clean(def) {
+		return ""
+	}
+	if b.StagingDir == "" {
+		return filepath.Join(def, "staging")
+	}
+	return BackupConfig{Dir: b.StagingDir}.EffectiveDir(userHome)
 }
 
 // EffectiveKeepDailies returns KeepDailies or 1 when unset.

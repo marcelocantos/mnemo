@@ -141,7 +141,10 @@ var configDocs = map[string]configFieldDoc{
 			"replacement is always written and verified before its predecessor " +
 			"is deleted, so the peak on disk is the retained snapshots plus one " +
 			"more and the uncompressed VACUUM temp. The nightly worker takes one " +
-			"snapshot per window, remembered across restarts.",
+			"snapshot per window, remembered across restarts. With a custom dir, " +
+			"a snapshot taken while dir does not answer is staged in staging_dir " +
+			"(default ~/.mnemo/backups/staging, one per tag) and copied to dir " +
+			"when it returns.",
 	},
 	"connection_sweep": {
 		summary: "Sweep interval and staleness threshold for daemon connection records.",

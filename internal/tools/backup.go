@@ -54,13 +54,22 @@ func backupKeep() backup.Retention {
 func (h *callHandler) backupStatus() (string, bool, error) {
 	dir := h.backupDir()
 	head := backupProgress(h.statusDir())
+	// What is staged on the database volume waiting for the destination
+	// (🎯T201), and which of the three states that puts the store in.
+	head += stagingReport(h.mem.BackupStagingDir(), dir, time.Now())
 	// Not "No backups found": the snapshots are on a volume that is not
-	// attached, which is a different fact with a different remedy.
+	// attached, which is a different fact with a different remedy. Every
+	// call on it is bounded (🎯T200), so a volume that does not answer
+	// lands here within seconds rather than hanging the tool call.
 	if err := backup.Away(dir, h.statusDir()); err != nil {
-		return head + fmt.Sprintf("Snapshots not listed: %v.\n"+
-			"A nightly snapshot skipped because "+
-			"the destination was missing is taken at the first quiet moment after it returns; "+
-			"nothing is written anywhere else in the meantime.", err), false, nil
+		tail := "A nightly snapshot skipped because the destination was missing is taken " +
+			"at the first quiet moment after it returns; nothing is written anywhere else in " +
+			"the meantime."
+		if h.mem.BackupStagingDir() != "" {
+			tail = "Snapshots taken meanwhile are staged on the database volume and copied " +
+				"to the destination when it returns."
+		}
+		return head + fmt.Sprintf("Snapshots not listed: %v.\n%s", err, tail), false, nil
 	}
 	list, err := backup.List(dir)
 	if err != nil {
@@ -90,6 +99,9 @@ func (h *callHandler) backupStatus() (string, bool, error) {
 	// (🎯T158), so the gap is printed rather than left to be inferred.
 	if u, err := backup.Usage(dir); err == nil {
 		fmt.Fprintf(&b, "On disk:  %s total in the directory\n", humanSize(u.TotalBytes))
+		if u.ReplicatingCount > 0 {
+			fmt.Fprintf(&b, "Replicating in: %s under a temporary name\n", humanSize(u.ReplicatingBytes))
+		}
 		if u.OtherCount > 0 {
 			fmt.Fprintf(&b, "\nWARNING: %d file(s) totalling %s are not backups retention "+
 				"recognises — scratch files from an interrupted run, or strays. The "+
@@ -98,6 +110,50 @@ func (h *callHandler) backupStatus() (string, bool, error) {
 		}
 	}
 	return b.String(), false, nil
+}
+
+// stagingReport renders the staging state for backup_status (🎯T201):
+// written to the destination, staged and waiting, or staged too long.
+// Empty when staging is off.
+func stagingReport(stagingDir, dir string, now time.Time) string {
+	if stagingDir == "" {
+		return ""
+	}
+	v, err := backup.Staging(stagingDir)
+	if err != nil {
+		return fmt.Sprintf("Staging: cannot read %s: %v\n\n", stagingDir, err)
+	}
+	var b strings.Builder
+	switch v.Verdict(now) {
+	case backup.NothingStaged:
+		b.WriteString("State: snapshots go to the destination; nothing is staged.\n")
+	case backup.StagedWaiting:
+		fmt.Fprintf(&b, "State: STAGED on the database volume, waiting for %s (healthy while "+
+			"fresh; warns after %s).\n", dir, humanAge(backup.StagedMaxAge))
+	case backup.StagedTooLong:
+		fmt.Fprintf(&b, "State: STAGED FOR %s: the newest backup is still on the same disk as the "+
+			"database. Reconnect %s; if macOS asked whether mnemo may use the volume, allow it.\n",
+			humanAge(now.Sub(v.WaitingSince).Round(time.Minute)), dir)
+	}
+	if len(v.Staged) > 0 {
+		fmt.Fprintf(&b, "Staged in %s (waiting %s):\n", stagingDir,
+			humanAge(now.Sub(v.WaitingSince).Round(time.Minute)))
+		for _, s := range v.Staged {
+			line := fmt.Sprintf("  %-32s %-14s %10s %12s", s.Name, string(s.Tag),
+				humanSize(s.Size), humanAge(now.Sub(s.Time).Round(time.Minute)))
+			if s.Copied > 0 {
+				line += fmt.Sprintf("  replicating: %s copied (%d%%)", humanSize(s.Copied),
+					s.Copied*100/max(s.Size, 1))
+			}
+			b.WriteString(line + "\n")
+		}
+	}
+	if v.LastReplicated != "" {
+		fmt.Fprintf(&b, "Last replicated: %s, %s ago\n", v.LastReplicated,
+			humanAge(now.Sub(v.LastReplicatedAt).Round(time.Second)))
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 // backupNow implements mnemo_backup_now: start a snapshot and return,
@@ -118,42 +174,61 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 
 	dir := h.backupDir()
 	statusDir := h.statusDir()
+	stagingDir := h.mem.BackupStagingDir()
 	if r, ok := backup.InProgress(); ok {
 		return fmt.Sprintf("A backup is already running: %s (started %s ago, %s). "+
 			"Poll mnemo_ops op=backup_status.", filepath.Base(r.Path),
 			humanAge(time.Since(r.Started).Round(time.Second)), r.Step), false, nil
 	}
+
+	// Where the snapshot goes: the destination when it answers, else
+	// staging (🎯T201). Deciding here, synchronously, tells the caller.
+	// Every call on the destination is bounded (🎯T200). A destination
+	// that is away with no staging is recorded as a skip and nothing is
+	// written anywhere else.
+	pl, perr := backup.Place(dir, stagingDir)
+	if perr != nil {
+		slog.Error("backup_now: snapshot skipped", "err", perr)
+		backup.RecordUnavailable(statusDir, backup.TagManual, perr)
+		return fmt.Sprintf("backup_now: not started: %v. Reconnect the volume and run it again.", perr), true, nil
+	}
+
 	if !force {
-		list, err := backup.List(dir)
-		if err == nil && len(list) > 0 {
-			age := time.Since(list[0].Time)
+		// The newest snapshot wherever it is: on the destination, or
+		// still waiting in staging.
+		var newest *backup.Info
+		for _, d := range []string{pl.Dir, stagingDir} {
+			if d == "" {
+				continue
+			}
+			if list, err := backup.List(d); err == nil && len(list) > 0 &&
+				(newest == nil || list[0].Time.After(newest.Time)) {
+				newest = &list[0]
+			}
+		}
+		if newest != nil {
+			age := time.Since(newest.Time)
 			if age < time.Hour {
 				return fmt.Sprintf("Recent backup exists (%s ago, %s). Pass force=true to take another.",
-					humanAge(age.Round(time.Second)), list[0].Name), false, nil
+					humanAge(age.Round(time.Second)), newest.Name), false, nil
 			}
 		}
 	}
 
 	src := h.mem.DBPath()
 
-	// Ensure dir exists; CreateAndRetain does this too, but failing here,
-	// synchronously, tells the caller why. A destination that is away is
-	// recorded as a skip and nothing is written anywhere else.
-	if err := ensureDir(dir); err != nil {
-		uerr := fmt.Errorf("%w: %s (%v)", backup.ErrDestinationUnavailable, dir, err)
-		slog.Error("backup_now: snapshot skipped", "err", uerr)
-		backup.RecordUnavailable(statusDir, backup.TagManual, uerr)
-		return fmt.Sprintf("backup_now: not started: %v. Reconnect the volume and run it again.", uerr), true, nil
-	}
 	// Refuse a doomed run here, synchronously, so the caller sees why.
 	// BackupWith checks again (and records the skip) for every path.
 	if need, err := backup.RequiredSpace(src); err == nil {
-		if free, ferr := backup.FreeBytes(dir); ferr == nil && free < need {
+		if free, ferr := backup.FreeBytes(pl.Dir); ferr == nil && free < need {
 			msg := fmt.Sprintf("backup_now: not started: %s free in %s, a snapshot needs %s%s",
-				humanSize(free), dir, humanSize(need), backup.HeldBy(dir))
+				humanSize(free), pl.Dir, humanSize(need), backup.HeldBy(pl.Dir))
+			if pl.Staged {
+				msg += fmt.Sprintf(" (staging, because %v)", pl.Cause)
+			}
 			slog.Error("backup_now: snapshot skipped", "err", fmt.Errorf("%w: %s", backup.ErrInsufficientSpace, msg))
 			_ = backup.RecordAttempt(statusDir, backup.Attempt{At: time.Now(), Tag: backup.TagManual,
-				Skipped: true, Error: msg})
+				Skipped: true, Unavailable: pl.Staged, Error: msg})
 			return msg, true, nil
 		}
 	}
@@ -168,9 +243,15 @@ func (h *callHandler) backupNow(args map[string]any) (string, bool, error) {
 	go func() {
 		defer manualRunning.Store(false)
 		res, removed, err := backupCreate(src, dir, backup.TagManual, keep,
-			&backup.BackupArgs{StatusDir: statusDir})
+			&backup.BackupArgs{StatusDir: statusDir, StagingDir: stagingDir})
 		backup.LogResult("backup_now", res, removed, err)
 	}()
+	if pl.Staged {
+		return fmt.Sprintf("Backup started, STAGED in %s because the destination is not available "+
+			"(%v). It is copied to %s and the staged copy deleted when that answers again. A "+
+			"snapshot of this store takes several minutes; poll mnemo_ops op=backup_status for "+
+			"progress and the result.", pl.Dir, pl.Cause, dir), false, nil
+	}
 	return fmt.Sprintf("Backup started in %s (keep_manual=%d: manual snapshots are pruned only "+
 		"by newer manual ones). A snapshot of this store takes several minutes; poll mnemo_ops "+
 		"op=backup_status for progress and the result.", dir, keep.KeepManual), false, nil
@@ -246,6 +327,15 @@ func backupProgress(statusDir string) string {
 	if a, ok, err := backup.LastAttempt(statusDir); err == nil && ok {
 		ago := humanAge(time.Since(a.At).Round(time.Second))
 		switch {
+		case a.OK && a.Staged:
+			where := "STAGED on the database volume"
+			if _, err := os.Stat(a.Path); os.IsNotExist(err) {
+				where = "staged on the database volume and since replicated to the destination"
+			}
+			fmt.Fprintf(&b, "Last attempt: complete %s ago, %s, %s "+
+				"(raw %s, compressed %s, %s); staged because %s\n",
+				ago, where, filepath.Base(a.Path), humanSize(a.RawSize), humanSize(a.CompressedSize),
+				a.Elapsed.Round(time.Second), a.StagedBecause)
 		case a.OK:
 			fmt.Fprintf(&b, "Last attempt: complete %s ago, %s (raw %s, compressed %s, %s)\n",
 				ago, filepath.Base(a.Path), humanSize(a.RawSize), humanSize(a.CompressedSize),

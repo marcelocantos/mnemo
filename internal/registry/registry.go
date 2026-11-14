@@ -429,6 +429,8 @@ func (r *Registry) openUserStore(username string, cfg store.Config) (*userEntry,
 	// 🎯T199: one resolved backup directory for the worker, backup_now,
 	// backup_status and /health.
 	s.SetBackupDir(cfg.Backup.EffectiveDir(home))
+	// 🎯T201: where snapshots wait while that directory does not answer.
+	s.SetBackupStagingDir(cfg.Backup.EffectiveStagingDir(home))
 
 	synthRoots := cfg.ResolvedSynthesisRoots()
 	var vaultExp *vault.Exporter
@@ -962,6 +964,8 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	// destination is away (🎯T199).
 	statusDir := backup.DefaultDir(e.store.DBPath())
 
+	stagingDir := e.store.BackupStagingDir()
+
 	// Sweep before the enabled check, and before any config validation
 	// can bail out. Stranded VACUUM temps are the residue of backups
 	// that ALREADY ran, so whether backups are switched on now has no
@@ -970,15 +974,48 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	// carrying a database-sized orphan with no worker coming to collect
 	// it (🎯T158). Only scratch is swept: real snapshots are the user's
 	// data and are never deleted merely because the worker is off.
-	if swept, err := backup.SweepOrphans(dir, backup.DefaultOrphanAge); err != nil {
-		logger.Warn("backup: orphan sweep failed", "dir", dir, "err", err)
-	} else if len(swept) > 0 {
-		var freed int64
-		for _, s := range swept {
-			freed += s.Size
+	//
+	// On its own goroutine, never on the store bring-up path (🎯T200).
+	// v0.117.0 ran it here synchronously against a `backup.dir` whose
+	// open() macOS held indefinitely, and the store never finished
+	// coming up: startup.ready stayed warn and every tool call timed
+	// out. Each call it makes is bounded as well, so a destination that
+	// does not answer costs a logged skip, not a thread per restart.
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		for _, d := range []string{dir, stagingDir} {
+			if d == "" {
+				continue
+			}
+			if swept, err := backup.SweepOrphans(d, backup.DefaultOrphanAge); err != nil {
+				logger.Warn("backup: orphan sweep at startup skipped", "dir", d, "err", err)
+			} else if len(swept) > 0 {
+				var freed int64
+				for _, s := range swept {
+					freed += s.Size
+				}
+				logger.Info("backup: swept stranded scratch files at startup",
+					"count", len(swept), "freed_mb", freed/(1<<20), "dir", d)
+			}
 		}
-		logger.Info("backup: swept stranded scratch files at startup",
-			"count", len(swept), "freed_mb", freed/(1<<20), "dir", dir)
+	}()
+
+	// The replicator runs whether or not the nightly worker does:
+	// snapshots staged before backups were switched off are still the
+	// user's, and still belong on the destination (🎯T201).
+	if stagingDir != "" {
+		rep := &backup.Replicator{
+			Dest:       dir,
+			StagingDir: stagingDir,
+			Retention:  bcfg.Retention(),
+		}
+		logger.Info("backup: replicator starting", "dest", dir, "staging", stagingDir)
+		e.workers.Add(1)
+		go func() {
+			defer e.workers.Done()
+			rep.Run(r.baseCtx)
+		}()
 	}
 
 	if !bcfg.IsEnabled() {
@@ -1002,6 +1039,7 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		SrcPath:     e.store.DBPath(),
 		Dir:         dir,
 		StatusDir:   statusDir,
+		StagingDir:  stagingDir,
 		Keep:        keep,
 		KeepManual:  keepManual,
 		WindowStart: winStart,
@@ -1014,7 +1052,7 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 		return
 	}
 	logger.Info("backup: worker starting",
-		"dir", dir, "status_dir", statusDir, "keep", keep, "keep_manual", keepManual,
+		"dir", dir, "status_dir", statusDir, "staging_dir", stagingDir, "keep", keep, "keep_manual", keepManual,
 		"window_start", winStart, "window_end", winEnd,
 		"quiescence_min", quiescence)
 	e.workers.Add(1)

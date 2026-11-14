@@ -141,3 +141,51 @@ func TestBackupNowDestinationAway(t *testing.T) {
 		t.Errorf("a snapshot was written beside the database: %v", list)
 	}
 }
+
+// 🎯T201: with staging, backup_now on an absent destination stages the
+// snapshot instead of refusing, and backup_status reports the state.
+func TestBackupNowStagesWhenDestinationAway(t *testing.T) {
+	ch := newNoteHandler(t)
+	dir := awayDir(t)
+	withBackupDir(t, ch, dir)
+	staging := filepath.Join(ch.statusDir(), backup.StagingSubdir)
+	ch.mem.(*store.Store).SetBackupStagingDir(staging)
+
+	got := make(chan *backup.BackupArgs, 1)
+	backupCreate = func(src, d string, tag backup.Tag, keep backup.Retention, args *backup.BackupArgs) (backup.Result, []string, error) {
+		got <- args
+		return backup.CreateAndRetain(src, d, tag, keep, args)
+	}
+	defer func() { backupCreate = backup.CreateAndRetain }()
+
+	out, isErr, _ := ch.backupNow(map[string]any{"force": true})
+	if isErr || !strings.Contains(out, "STAGED in "+staging) {
+		t.Fatalf("backup_now = %q isErr=%v, want a staged start", out, isErr)
+	}
+	if args := <-got; args.StagingDir != staging {
+		t.Fatalf("staging dir passed = %q, want %q", args.StagingDir, staging)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if a, ok, _ := backup.LastAttempt(ch.statusDir()); ok && a.OK {
+			if !a.Staged {
+				t.Fatalf("attempt = %+v, want staged", a)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("staged snapshot did not complete")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for manualRunning.Load() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	status, _, _ := ch.backupStatus()
+	for _, want := range []string{"State: STAGED on the database volume", "Staged in " + staging,
+		"Last attempt: complete", "STAGED on the database volume", "not available"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("backup_status lacks %q:\n%s", want, status)
+		}
+	}
+}

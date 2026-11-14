@@ -33,41 +33,47 @@ func DefaultDir(dbPath string) string {
 }
 
 // EnsureDir creates dir if it is missing, and reports
-// ErrDestinationUnavailable when it cannot.
+// ErrDestinationUnavailable when it cannot, or when dir does not answer
+// within AnswerTimeout (🎯T200).
 //
 // On macOS a volume that is not mounted fails here rather than silently
 // landing on the boot disk: /Volumes is root-owned, so creating
 // /Volumes/<name>/... under a missing mount point is refused. A missing
 // drive letter on Windows fails the same way.
 func EnsureDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("%w: %s (%v)", ErrDestinationUnavailable, dir, err)
+	_, err := answer(dir, "mkdir", answerTimeout, func() (struct{}, error) {
+		return struct{}{}, os.MkdirAll(dir, 0o755)
+	})
+	if err == nil {
+		err = probe(dir)
 	}
-	return nil
+	return unavailable(dir, err)
 }
 
 // Away reports, without creating anything, why a custom destination
 // cannot be used right now; nil when it can. dir equal to statusDir is
 // the default directory beside the database: it shares the database's
 // volume and is created on demand, so a missing one is merely empty and
-// is never away.
+// is never away. A destination that does not answer within
+// AnswerTimeout is away (🎯T200).
 func Away(dir, statusDir string) error {
 	if dir == statusDir {
 		return nil
 	}
-	fi, err := os.Stat(dir)
-	if err != nil {
-		// The path is already in the message; keep only the reason.
-		var pe *fs.PathError
-		if errors.As(err, &pe) {
-			err = pe.Err
-		}
-		return fmt.Errorf("%w: %s (%v)", ErrDestinationUnavailable, dir, err)
+	return unavailable(dir, probe(dir))
+}
+
+// unavailable wraps a failure to reach dir as ErrDestinationUnavailable,
+// naming dir once and keeping only the reason. nil stays nil.
+func unavailable(dir string, err error) error {
+	if err == nil || errors.Is(err, ErrDestinationUnavailable) {
+		return err
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%w: %s (not a directory)", ErrDestinationUnavailable, dir)
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		err = pe.Err
 	}
-	return nil
+	return fmt.Errorf("%w: %s (%v)", ErrDestinationUnavailable, dir, err)
 }
 
 // RecordUnavailable records, in statusDir, a snapshot that was not

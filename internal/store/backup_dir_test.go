@@ -76,11 +76,12 @@ func seedStoreAt(t *testing.T, dbPath string) {
 func TestBackupDirFromConfig(t *testing.T) {
 	custom := t.TempDir()
 	dbPath := homeWithBackupDir(t, custom)
-	if got := backupDirFromConfig(dbPath); got != custom {
+	if got, _ := backupDirFromConfig(dbPath); got != custom {
 		t.Errorf("database beside config.json: backup dir = %s, want the configured %s", got, custom)
 	}
 	other := filepath.Join(t.TempDir(), "t.db")
-	if got, want := backupDirFromConfig(other), backup.DefaultDir(other); got != want {
+	if got, _ := backupDirFromConfig(other); got != backup.DefaultDir(other) {
+		want := backup.DefaultDir(other)
 		t.Errorf("unrelated database: backup dir = %s, want its own default %s", got, want)
 	}
 }
@@ -110,8 +111,10 @@ func TestPreMigrationBackupHonoursBackupDir(t *testing.T) {
 	}
 }
 
-// The destination is away during an upgrade: the migration proceeds, the
-// skip is recorded, and no snapshot lands beside the database.
+// The destination is away during an upgrade: the migration proceeds and
+// the pre-migration snapshot is staged on the database volume (🎯T201),
+// not skipped and not written into the backup directory beside the
+// database.
 func TestPreMigrationBackupDestinationAway(t *testing.T) {
 	volume := filepath.Join(t.TempDir(), "volume")
 	if err := os.WriteFile(volume, nil, 0o644); err != nil {
@@ -120,9 +123,10 @@ func TestPreMigrationBackupDestinationAway(t *testing.T) {
 	dbPath := homeWithBackupDir(t, filepath.Join(volume, "mnemo", "backups"))
 	seedStoreAt(t, dbPath)
 
+	var dests []string
 	orig := preMigrationBackup
 	preMigrationBackup = func(src, dest string, args *backup.BackupArgs) (backup.Result, error) {
-		t.Errorf("pre-migration snapshot started with the destination away (dest %s)", dest)
+		dests = append(dests, dest)
 		return orig(src, dest, args)
 	}
 	t.Cleanup(func() { preMigrationBackup = orig })
@@ -131,11 +135,19 @@ func TestPreMigrationBackupDestinationAway(t *testing.T) {
 		t.Fatalf("upgrade with the destination away: %v", err)
 	}
 	def := backup.DefaultDir(dbPath)
+	staging := backup.DefaultStagingDir(dbPath)
+	if len(dests) != 1 || filepath.Dir(dests[0]) != staging {
+		t.Fatalf("pre-migration snapshot destinations = %v, want one in %s", dests, staging)
+	}
 	a, ok, err := backup.LastAttempt(def)
-	if err != nil || !ok || !a.Unavailable || !a.Skipped || a.Tag != backup.TagPreMigration {
-		t.Fatalf("record = %+v ok=%v err=%v, want an unavailable pre-migration skip", a, ok, err)
+	if err != nil || !ok || !a.OK || !a.Staged || a.Tag != backup.TagPreMigration ||
+		!strings.Contains(a.StagedBecause, "backup destination not available") {
+		t.Fatalf("record = %+v ok=%v err=%v, want a staged pre-migration success naming the cause", a, ok, err)
 	}
 	if stray, _ := backup.List(def); len(stray) != 0 {
-		t.Errorf("a snapshot was written beside the database instead: %v", stray)
+		t.Errorf("a snapshot was written into the backup directory beside the database: %v", stray)
+	}
+	if list, _ := backup.List(staging); len(list) != 1 {
+		t.Errorf("staging holds %d snapshots, want 1", len(list))
 	}
 }

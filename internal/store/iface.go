@@ -83,6 +83,7 @@ type Backend interface {
 	RemoveVaultManifestRow(notePath string) error
 	DBPath() string
 	BackupDir() string
+	BackupStagingDir() string
 
 	// Document-level themes engine (🎯T64.8).
 	RunCluster(ctx context.Context, args ClusterRunArgs) (*ClusterRunResult, error)

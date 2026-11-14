@@ -111,9 +111,11 @@ func TestExemptionsAreReal(t *testing.T) {
 			t.Errorf("%s no longer calls Backup/BackupWith — drop the exemption", rel)
 		}
 		// The promise the exemption makes.
-		if !strings.Contains(body, "GCOldest") {
+		// RetainPlaced is GCOldest for a snapshot on the destination,
+		// and the one-per-tag rule for a staged one (🎯T201).
+		if !strings.Contains(body, "GCOldest") && !strings.Contains(body, "RetainPlaced") {
 			t.Errorf("%s is exempt on the promise that it prunes by other means, "+
-				"but it does not mention GCOldest", rel)
+				"but it mentions neither GCOldest nor RetainPlaced", rel)
 		}
 	}
 }

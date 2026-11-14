@@ -82,6 +82,13 @@ type BackupArgs struct {
 	// pass DefaultDir(dbPath), so the record stays beside the database and
 	// remains readable while the destination is away.
 	StatusDir string
+	// StagingDir is where a snapshot goes when the destination does not
+	// answer (🎯T201); see Place. Empty disables staging. Read by
+	// CreateAndRetain, not by BackupWith.
+	StagingDir string
+	// StagedBecause, when set, says the snapshot is being written to the
+	// staging directory and why. BackupWith records it in the attempt.
+	StagedBecause error
 }
 
 // Backup snapshots the SQLite database at srcPath into destPath. destPath
@@ -118,6 +125,12 @@ func BackupWith(srcPath, destPath string, args *BackupArgs) (Result, error) {
 	at := time.Now()
 	record := func(a Attempt) {
 		a.At, a.Tag = at, tag
+		if args != nil && args.StagedBecause != nil {
+			a.Staged, a.StagedBecause = true, args.StagedBecause.Error()
+			// Staging was refused too: the destination is still owed a
+			// snapshot when it returns.
+			a.Unavailable = a.Skipped
+		}
 		if err := RecordAttempt(statusDir, a); err != nil {
 			slog.Warn("backup: cannot record attempt", "dir", statusDir, "err", err)
 		}

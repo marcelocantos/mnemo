@@ -32,6 +32,7 @@ type Worker struct {
 	src         string
 	dir         string
 	statusDir   string // where StatusFile lives; dir unless Config.StatusDir says otherwise
+	stagingDir  string // where a snapshot goes while dir does not answer (🎯T201); "" disables
 	retention   Retention
 	windowStart time.Duration // offset from midnight, e.g. 3h for 03:00
 	windowEnd   time.Duration // offset from midnight, e.g. 4h for 04:00
@@ -63,6 +64,7 @@ type Config struct {
 	SrcPath      string           // path to mnemo.db
 	Dir          string           // backup directory
 	StatusDir    string           // where StatusFile lives (empty → Dir); see BackupArgs.StatusDir
+	StagingDir   string           // staging for an absent Dir (🎯T201); empty disables staging
 	Keep         int              // daily + pre-migration backups to retain
 	KeepManual   int              // manual backups to retain, in their own pool (0 → DefaultKeepManual)
 	WindowStart  time.Duration    // offset from midnight (e.g. 3h)
@@ -107,6 +109,7 @@ func NewWorker(cfg Config) (*Worker, error) {
 		src:          cfg.SrcPath,
 		dir:          cfg.Dir,
 		statusDir:    statusDir,
+		stagingDir:   cfg.StagingDir,
 		retention:    Retention{Keep: cfg.Keep, KeepManual: cfg.KeepManual}.normalized(),
 		windowStart:  cfg.WindowStart,
 		windowEnd:    cfg.WindowEnd,
@@ -244,7 +247,7 @@ func (w *Worker) stillOwed() bool {
 // is there; without this the worker would forget last night's success
 // and /health would report the older record beside the database.
 func (w *Worker) adoptLegacyStatus() {
-	if w.statusDir == w.dir {
+	if w.statusDir == w.dir || Away(w.dir, w.statusDir) != nil {
 		return
 	}
 	legacy, ok, err := LastAttempt(w.dir)
@@ -266,7 +269,7 @@ func (w *Worker) adoptLegacyStatus() {
 			"from", w.dir, "to", w.statusDir, "err", err)
 		return
 	}
-	if err := os.Remove(filepath.Join(w.dir, StatusFile)); err != nil {
+	if err := removeIn(w.dir, filepath.Join(w.dir, StatusFile)); err != nil {
 		slog.Warn("backup worker: cannot remove the old status record", "dir", w.dir, "err", err)
 	}
 }
@@ -276,6 +279,13 @@ func (w *Worker) adoptLegacyStatus() {
 // failures and neither is fatal to the worker. A destination that is
 // away has nothing to sweep or prune.
 func (w *Worker) housekeep() {
+	// A snapshot killed while staging strands its scratch on the
+	// database volume, which is the volume staging exists to spare.
+	if w.stagingDir != "" {
+		if _, err := SweepOrphans(w.stagingDir, DefaultOrphanAge); err != nil {
+			slog.Warn("backup worker: orphan sweep of staging failed", "dir", w.stagingDir, "err", err)
+		}
+	}
 	if Away(w.dir, w.statusDir) != nil {
 		return
 	}
@@ -364,12 +374,15 @@ func (w *Worker) scheduleNext(now time.Time) time.Time {
 func (w *Worker) attemptBackup(ctx context.Context) bool {
 	// Before the wait for quiescence, not after: there is no point
 	// waiting up to an hour for a quiet moment to write to a volume that
-	// is not there.
-	if err := EnsureDir(w.dir); err != nil {
-		slog.Warn("backup worker: snapshot deferred until the destination returns", "err", err)
-		RecordUnavailable(w.statusDir, TagDaily, err)
-		w.owedSince = time.Now()
-		return false
+	// is not there. With staging (🎯T201) there is somewhere to write,
+	// and CreateAndRetain decides where once the moment comes.
+	if w.stagingDir == "" {
+		if err := EnsureDir(w.dir); err != nil {
+			slog.Warn("backup worker: snapshot deferred until the destination returns", "err", err)
+			RecordUnavailable(w.statusDir, TagDaily, err)
+			w.owedSince = time.Now()
+			return false
+		}
 	}
 	deadline := time.Now().Add(time.Hour) // bail if not quiescent within an hour past window_end
 	for {
@@ -390,7 +403,7 @@ func (w *Worker) attemptBackup(ctx context.Context) bool {
 
 	started := time.Now()
 	res, removed, err := CreateAndRetain(w.src, w.dir, TagDaily, w.retention,
-		&BackupArgs{StatusDir: w.statusDir})
+		&BackupArgs{StatusDir: w.statusDir, StagingDir: w.stagingDir})
 	LogResult("backup worker", res, removed, err)
 	if errors.Is(err, ErrDestinationUnavailable) {
 		// Went away during the wait for quiescence; CreateAndRetain
@@ -433,33 +446,25 @@ type Info struct {
 // the user) are silently skipped — List is a read-only inventory and
 // doesn't mutate the directory.
 func List(dir string) ([]Info, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
 	var out []Info
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.isDir || e.infoErr != nil {
 			continue
 		}
-		name := e.Name()
-		tag, ts, ok := parseFilename(name)
+		tag, ts, ok := parseFilename(e.name)
 		if !ok {
 			continue
 		}
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
 		out = append(out, Info{
-			Path: filepath.Join(dir, name),
-			Name: name,
+			Path: filepath.Join(dir, e.name),
+			Name: e.name,
 			Tag:  tag,
 			Time: ts,
-			Size: fi.Size(),
+			Size: e.size,
 		})
 	}
 	// Newest first.
@@ -538,7 +543,7 @@ func GCOldest(dir string, r Retention) ([]string, error) {
 	}
 	var removed []string
 	for _, b := range doomed {
-		if err := os.Remove(b.Path); err != nil {
+		if err := removeIn(dir, b.Path); err != nil {
 			slog.Warn("backup GC: failed to remove",
 				"path", b.Path, "err", err)
 			continue
@@ -603,29 +608,58 @@ func parseFilename(name string) (Tag, time.Time, bool) {
 // that exists and was verified is worth more than a tidy directory, and
 // the caller has already paid for it.
 //
-// A destination that cannot be reached or created is recorded as a skip
-// and returned as ErrDestinationUnavailable; nothing is written elsewhere.
+// A destination that cannot be reached, created, or that does not answer
+// within AnswerTimeout is replaced by args.StagingDir when one is set
+// (🎯T201): the snapshot is staged there, recorded as staged, and the
+// staging directory keeps one snapshot per tag. Without a staging
+// directory, or when it is unusable too, the attempt is recorded as a
+// skip and returned as ErrDestinationUnavailable; nothing is written
+// elsewhere.
 func CreateAndRetain(srcPath, dir string, tag Tag, r Retention, args *BackupArgs) (Result, []string, error) {
 	r = r.normalized()
-	if err := EnsureDir(dir); err != nil {
+	var staging string
+	if args != nil {
+		staging = args.StagingDir
+	}
+	pl, err := Place(dir, staging)
+	if err != nil {
 		RecordUnavailable(statusDirFor(dir, args), tag, err)
 		return Result{}, nil, err
 	}
-	destPath, err := uniqueDest(dir, tag, time.Now().UTC())
+	destPath, err := uniqueDest(pl.Dir, tag, time.Now().UTC())
 	if err != nil {
 		return Result{}, nil, err
 	}
-	res, err := BackupWith(srcPath, destPath, args)
+	a := BackupArgs{}
+	if args != nil {
+		a = *args
+	}
+	if a.StatusDir == "" {
+		// The record belongs with the destination's, not the staging
+		// directory's.
+		a.StatusDir = dir
+	}
+	if pl.Staged {
+		a.StagedBecause = pl.Cause
+		slog.Warn("backup: destination not answering; staging the snapshot on the database volume",
+			"staging", pl.Dir, "cause", pl.Cause)
+	}
+	res, err := BackupWith(srcPath, destPath, &a)
 	if err != nil {
+		if pl.Staged && errors.Is(err, ErrInsufficientSpace) {
+			// Neither the destination nor staging can take it; the
+			// worker owes the snapshot to the destination's return.
+			err = fmt.Errorf("%w; staging refused: %w", pl.Cause, err)
+		}
 		return Result{}, nil, err
 	}
-	removed, gcErr := GCOldest(dir, r)
+	removed, gcErr := RetainPlaced(pl, tag, res.Path, r)
 	if gcErr != nil {
 		slog.Warn("backup: snapshot written but retention failed; old backups may accumulate",
-			"dir", dir, "err", gcErr)
+			"dir", pl.Dir, "err", gcErr)
 	} else if len(removed) > 0 {
 		slog.Info("backup: retention removed old snapshots",
-			"count", len(removed), "keep", r.Keep, "keep_manual", r.KeepManual)
+			"count", len(removed), "keep", r.Keep, "keep_manual", r.KeepManual, "staged", pl.Staged)
 	}
 	return res, removed, nil
 }
@@ -648,7 +682,7 @@ func uniqueDest(dir string, tag Tag, when time.Time) (string, error) {
 	const maxAttempts = 60
 	for i := 0; i < maxAttempts; i++ {
 		p := filepath.Join(dir, Filename(tag, when.Add(time.Duration(i)*time.Second)))
-		_, err := os.Stat(p)
+		_, err := statIn(dir, p)
 		if os.IsNotExist(err) {
 			return p, nil
 		}

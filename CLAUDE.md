@@ -300,6 +300,40 @@ health check warns when the unaccounted portion exceeds 1 GiB or the
 snapshot count exceeds `keep`. Design:
 `docs/design/backup-compression.md`.
 
+**A destination that does not answer (🎯T200).** Every file-system call
+on a backup directory goes through `answer` (`internal/backup/answer.go`):
+it runs on its own goroutine, and after `AnswerTimeout` (5s; 60s per
+data chunk) the caller gets `ErrDestinationUnavailable` naming the
+stuck call and carries on. While that call is still in the kernel the
+directory is marked as not answering and every further call on it is
+refused at once, so a polled health check cannot strand a thread per
+poll. Listing helpers gather `DirEntry.Info` inside the bounded call.
+The startup orphan sweep runs on its own goroutine, never on the store
+bring-up path: v0.117.0 ran it synchronously against a `backup.dir`
+whose `open()` macOS held, and the store never came up. Regression
+oracle: `TestStartupSurvivesHangingBackupDir` (darwin) interposes libc
+`open()` with a dylib so the directory really blocks, and fails against
+v0.117.0.
+
+**Staging and replication (🎯T201).** With a custom `backup.dir`, a
+snapshot taken while it does not answer is written to
+`backup.staging_dir` (default `~/.mnemo/backups/staging`) and recorded
+as `staged` (`Attempt.Staged`, a success), not skipped. `backup.Place`
+picks the directory; `backup.RetainPlaced` keeps one staged snapshot per
+tag. `backup.Replicator` (started by the registry whenever staging is
+configured, even with backups disabled) polls every minute and copies
+staged snapshots to the destination under `<name>.part` in 64 MiB
+chunks, fsyncing each and appending its SHA-256 to
+`<staged>.progress.json`; a later pass re-verifies the last chunk and
+resumes after it. Finished copies are read back and compared chunk by
+chunk, renamed into place, and only then is the staged copy deleted.
+A staged snapshot that retention would discard on arrival is deleted
+uncopied. `backup.recent` and `backup_status` report three states:
+nothing staged, staged and waiting (healthy), staged longer than
+`StagedMaxAge` (7 days, warns). The replicator runs in-process, not as a
+helper with its own signing identity; the reason is recorded in
+`replicate.go`. Design: `docs/design/backup-staging.md`.
+
 ## Schema policy
 
 The schema of `~/.mnemo/mnemo.db` is an append-only contract.

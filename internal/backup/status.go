@@ -32,7 +32,14 @@ type Attempt struct {
 	// (ErrDestinationUnavailable). The worker reads it to know a daily
 	// snapshot is owed once the destination returns, and /health uses it
 	// to say "reconnect the volume" rather than "free some space".
-	Unavailable    bool          `json:"unavailable,omitempty"`
+	Unavailable bool `json:"unavailable,omitempty"`
+	// Staged marks a snapshot written to the staging directory on the
+	// database volume because the destination did not answer (🎯T201).
+	// A staged success is a success: the store is protected against
+	// losing the database file, and the replicator copies it to the
+	// destination when that returns. StagedBecause names the cause.
+	Staged         bool          `json:"staged,omitempty"`
+	StagedBecause  string        `json:"staged_because,omitempty"`
 	Error          string        `json:"error,omitempty"`
 	RawSize        int64         `json:"raw_size,omitempty"`
 	CompressedSize int64         `json:"compressed_size,omitempty"`
@@ -118,7 +125,7 @@ func RecordAttempt(dir string, a Attempt) error {
 
 // LastAttempt reads dir/StatusFile. ok is false when none was recorded.
 func LastAttempt(dir string) (a Attempt, ok bool, err error) {
-	b, err := os.ReadFile(filepath.Join(dir, StatusFile))
+	b, err := readFileIn(dir, filepath.Join(dir, StatusFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return Attempt{}, false, nil
 	}
