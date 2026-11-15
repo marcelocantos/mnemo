@@ -69,8 +69,11 @@ func TestToolSurfaceRatchet(t *testing.T) {
 // than accumulated.
 func TestToolSurfaceSize(t *testing.T) {
 	// Baseline set by 🎯T143 on 2026-08-07 (70 → 18); 18 → 17 on
-	// 2026-08-30 when mnemo_config went file-only (🎯T156).
-	const baseline = 16
+	// 2026-08-30 when mnemo_config went file-only (🎯T156). 16 → 17 on
+	// 2026-11-15 for mnemo_hours (🎯T202): the owner asked for hours per
+	// project without an agent reading history, and its CLI counterpart
+	// (`mnemo hours`) is derived from the tool definition.
+	const baseline = 17
 	if got := len(registeredToolNames(t)); got != baseline {
 		t.Errorf("registered tool count is %d, ledger baseline is %d.\n"+
 			"If this change is intended, move the baseline in the same commit "+
@@ -96,7 +99,10 @@ func TestToolSurfaceWeight(t *testing.T) {
 	// mnemo_note removed, mnemo_query's schema catalogue moved to a
 	// generated resource, mnemo_usage's methodology essay moved to its
 	// design doc. Down from 36,667 bytes (~9,910 tokens) pre-🎯T156.
-	const baselineBytes = 24917
+	// 24,917 → 28,658 on 2026-11-15: mnemo_hours (🎯T202) is 1,276
+	// bytes, its method in docs/design/hours.md rather than the schema,
+	// and the surface had drifted to 27,382 (9.9% over) before it.
+	const baselineBytes = 28658
 	const margin = 1.10
 
 	total := 0

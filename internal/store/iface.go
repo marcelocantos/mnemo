@@ -24,6 +24,8 @@ type Backend interface {
 	RecentActivity(days int, repoFilter string) ([]RecentActivityInfo, error)
 	Status(days int, repoFilter string, maxSessions int, maxExcerpts int, truncateLen int) (*StatusResult, error)
 	Usage(p UsageParams) (*UsageResult, error)
+	// Hours reports attended and agent hours per project (🎯T202).
+	Hours(p HoursParams) (*HoursReport, error)
 	BudgetStatusNow(cfg BudgetConfig, now time.Time) (*BudgetStatus, error)
 	AgentTrees(p AgentTreeParams) ([]AgentTree, error)
 	UpsertReconciledCost(date string, costUSD float64) error

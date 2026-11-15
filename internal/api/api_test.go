@@ -42,6 +42,9 @@ func (f *fakeBackend) BudgetStatusNow(store.BudgetConfig, time.Time) (*store.Bud
 func (f *fakeBackend) Usage(p store.UsageParams) (*store.UsageResult, error) {
 	return f.usageResult, nil
 }
+func (f *fakeBackend) Hours(store.HoursParams) (*store.HoursReport, error) {
+	return &store.HoursReport{}, nil
+}
 func (f *fakeBackend) ListSessions(sessionType string, minMessages int, limit int, projectFilter, repoFilter, workTypeFilter string) ([]store.SessionInfo, error) {
 	return f.sessions, nil
 }

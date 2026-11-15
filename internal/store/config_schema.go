@@ -133,6 +133,13 @@ var configDocs = map[string]configFieldDoc{
 			"against your billing source for each serving path. An unrecognised " +
 			"value resolves to the default rather than silently disabling dedup.",
 	},
+	"hours": {
+		summary: "Where the attended/agent hours report reads who typed a message.",
+		detail: "t3_store is T3 Code's state database, opened read-only (default " +
+			"~/.t3/userdata/statev2.sqlite). Only authorship, timestamps and thread " +
+			"ids are read, never message text. Read on every pass of the hours worker.",
+		hotReload: true,
+	},
 	"backup": {
 		summary: "Daily backup snapshots: retention, window, quiescence.",
 		detail: "keep_dailies defaults to 1 and covers daily and pre-migration " +

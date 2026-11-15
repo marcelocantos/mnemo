@@ -72,6 +72,10 @@ var toolConsumers = map[string]consumerKind{
 	"mnemo_stats":  consumerAgent, // 16 / 14
 
 	"mnemo_usage": consumerAgent, // 13 / 5
+	// New with 🎯T202: the owner asked for hours per project without an
+	// agent reading history. Its CLI form (`mnemo hours`) is the human
+	// path; reconsider the MCP entry if agents never call it.
+	"mnemo_hours": consumerUser,
 
 	// Consolidated entry points (🎯T143.3/.4/.5). All three read cold on
 	// agent calls, and all three have a consumer that is not an agent —

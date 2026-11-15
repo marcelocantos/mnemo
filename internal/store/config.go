@@ -284,6 +284,25 @@ type Config struct {
 	// the daemon enqueues the backfill itself. This is finishing a
 	// shipped migration, not opt-in egress, so the safe default is on.
 	Compression CompressionConfig `json:"compression,omitempty"`
+
+	// Hours configures the attended/agent hours report (🎯T202).
+	Hours HoursConfig `json:"hours,omitempty"`
+}
+
+// HoursConfig configures where the hours worker reads human authorship
+// from. Zero value / section omitted → T3 Code's default store.
+type HoursConfig struct {
+	// T3Store is the path of T3 Code's state database, read read-only.
+	// Supports ~. Empty → ~/.t3/userdata/statev2.sqlite.
+	T3Store string `json:"t3_store,omitempty"`
+}
+
+// EffectiveT3Store resolves the T3 store path against home.
+func (c HoursConfig) EffectiveT3Store(home string) string {
+	if c.T3Store == "" {
+		return DefaultT3StorePath(home)
+	}
+	return BackupConfig{Dir: c.T3Store}.EffectiveDir(home)
 }
 
 // CompressionConfig gates the automatic historical-row packer (🎯T162).

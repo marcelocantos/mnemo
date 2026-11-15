@@ -853,6 +853,7 @@ func (r *Registry) startWorkers(username, projectDir string, e *userEntry) {
 	// Independent of backup configuration (🎯T154).
 	r.startStreamSegWatcher(e)
 	r.startStructuralRetirementBackfill(e)
+	r.startHoursWorker(e)
 
 	// Daemon connection sweeper (🎯T60). Marks daemon_connections rows
 	// closed once last_seen_at falls outside the idle threshold. The
@@ -1076,6 +1077,32 @@ func (r *Registry) startBackupWorker(username string, e *userEntry, logger *slog
 	// "a correctness requirement rather than an accelerator". They are
 	// started from startWorkers now, next to the other workers, so
 	// their lifecycle does not depend on backup configuration.)
+}
+
+// hoursInterval is how often the hours worker catches up (🎯T202). A
+// report is at most this stale; a pass with nothing new costs two
+// indexed probes and one read-only open of T3's store.
+const hoursInterval = time.Minute
+
+// startHoursWorker materialises human inputs and agent activity for the
+// hours report. The T3 store path is read from config on every pass.
+func (r *Registry) startHoursWorker(e *userEntry) {
+	t3Store := func() string {
+		home, err := store.EffectiveHome()
+		if err != nil {
+			return ""
+		}
+		cfg, err := store.LoadConfig()
+		if err != nil {
+			return store.DefaultT3StorePath(home)
+		}
+		return cfg.Hours.EffectiveT3Store(home)
+	}
+	e.workers.Add(1)
+	go func() {
+		defer e.workers.Done()
+		e.store.RunHoursWorker(r.baseCtx, hoursInterval, t3Store)
+	}()
 }
 
 // startStructuralRetirementBackfill demotes structural spans that a better

@@ -575,6 +575,58 @@ CREATE TABLE tool_outputs (
 			indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 
+-- 🎯T202: the owner's inputs, for attended hours. One row per human
+-- action — a prompt, a command, an answer to an agent's question, an
+-- interrupt — from one of two sources. 't3' rows come from T3 Code's
+-- own record of authorship (createdBy = user, typed in a T3 client);
+-- ref is T3's message_id. 'transcript' rows come from a Claude
+-- transcript's provenance fields; ref is the entry's uuid, so a fork
+-- that copies history into a new session does not count it twice.
+-- 't3-transcript' rows are the transcript's copy of a prompt T3 drove:
+-- never counted (the T3 store is the authority, and T3's injected
+-- messages look the same in the transcript), but kept so a report can
+-- say how much T3-driven work it could not attribute when the T3
+-- store is unavailable. at_ms is Unix milliseconds. repo_hint is the
+-- project when the session is not indexed. No message text is stored.
+CREATE TABLE hours_inputs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source TEXT NOT NULL,
+			ref TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			repo_hint TEXT NOT NULL DEFAULT '',
+			at_ms INTEGER NOT NULL,
+			UNIQUE(source, ref)
+		);
+
+-- 🎯T202: the minutes in which a session produced output (assistant
+-- messages and tool results), for agent hours. minute is Unix minutes.
+-- Materialised from messages by the hours worker, so a report never
+-- reads transcript text.
+CREATE TABLE hours_agent_minutes (
+			session_id TEXT NOT NULL,
+			minute INTEGER NOT NULL,
+			n INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_id, minute)
+		);
+
+-- 🎯T202: sessions T3 Code drove, from its provider-thread records.
+CREATE TABLE hours_t3_sessions (
+			session_id TEXT PRIMARY KEY,
+			thread_id TEXT NOT NULL,
+			repo_hint TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T202: the hours worker's cursor per stream ('messages': message id;
+-- 't3': rowid in T3's message table) and, for 't3', why the store could
+-- not be read ('' when it was).
+CREATE TABLE hours_progress (
+			stream TEXT PRIMARY KEY,
+			cursor INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
+		);
+
 -- 🎯T64.7: workaround patterns, promoted from a live query to a
 -- persisted table so they survive across sessions, accumulate a real
 -- first_seen, and give the clustering engine (🎯T64.8) a deterministic
@@ -1142,6 +1194,10 @@ CREATE INDEX idx_messages_tool_url ON messages(tool_url) WHERE tool_url IS NOT N
 CREATE INDEX idx_messages_tool_use_id ON messages(tool_use_id);
 
 CREATE INDEX idx_tool_outputs_session_id ON tool_outputs(session_id);
+
+CREATE INDEX idx_hours_inputs_at ON hours_inputs(at_ms);
+
+CREATE INDEX idx_hours_agent_minutes_minute ON hours_agent_minutes(minute);
 
 CREATE INDEX idx_patterns_type ON patterns(pattern_type);
 

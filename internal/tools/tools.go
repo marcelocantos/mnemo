@@ -336,6 +336,19 @@ Costing needs {"pricing": {"enabled": true}} in ~/.mnemo/config.json; with it of
 			mcp.WithString("model", mcp.Description(`Filter by model prefix (e.g. "claude-opus-4", "claude-sonnet-4")`)),
 			mcp.WithString("group_by", mcp.Description(`Group results by: "day" (default), "model", "repo", "session" (one row per Claude Code session ID), or "block" (one row per 5-hour Anthropic billing block, boundaries aligned to UTC and matching what /cost and ccusage report).`)),
 		),
+		mcp.NewTool("mnemo_hours",
+			mcp.WithDescription(`Attended hours and agent hours per project and day. Attended: the owner's inputs from every thread on one timeline, so parallel threads count once. Agent: minutes in which sessions produced output; agent_unattended is the part while the owner attended nothing. Read degraded and notes with the totals. Method: docs/design/hours.md.`),
+			mcp.WithNumber("days", mcp.Description("Local days ending today (default 7).")),
+			mcp.WithString("since", mcp.Description("Start: RFC3339 or YYYY-MM-DD.")),
+			mcp.WithString("until", mcp.Description("End, exclusive (default now).")),
+			mcp.WithString("repo", mcp.Description("Project name contains this.")),
+			mcp.WithString("timezone", mcp.Description("IANA zone for days.")),
+			mcp.WithString("group_by", mcp.Description(`"repo_day" adds project-day rows.`)),
+			mcp.WithNumber("gap_minutes", mcp.Description("Silence that ends a block (15).")),
+			mcp.WithNumber("lead_minutes", mcp.Description("Before a block (2).")),
+			mcp.WithNumber("tail_minutes", mcp.Description("After a block (5).")),
+			mcp.WithNumber("agent_gap_minutes", mcp.Description("Quiet bridged in agent work (5).")),
+		),
 		mcp.NewTool("mnemo_compacted_session",
 			mcp.WithDescription(`Return the compacted view of a session: its compaction summaries (the dense, durable layer) followed by the addenda tail — the substantive messages past the latest compaction cursor, computed live from the index.
 
@@ -444,6 +457,8 @@ func (h *Handler) Call(ctx context.Context, cc CallContext, name string, args ma
 		return ch.stats()
 	case "mnemo_usage":
 		return ch.usage(args)
+	case "mnemo_hours":
+		return ch.hours(args)
 	case "mnemo_compacted_session":
 		return ch.compactedSession(args)
 	case "mnemo_locate_uuid":
@@ -864,6 +879,34 @@ func (h *callHandler) usage(args map[string]any) (string, bool, error) {
 	}
 
 	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("marshal failed: %v", err), true, nil
+	}
+	return string(out), false, nil
+}
+
+func (h *callHandler) hours(args map[string]any) (string, bool, error) {
+	p := store.HoursParams{}
+	if d, ok := args["days"].(float64); ok && d > 0 {
+		p.Days = int(d)
+	}
+	p.Since, _ = args["since"].(string)
+	p.Until, _ = args["until"].(string)
+	p.Repo, _ = args["repo"].(string)
+	p.Timezone, _ = args["timezone"].(string)
+	p.GroupBy, _ = args["group_by"].(string)
+	p.GapMinutes, _ = args["gap_minutes"].(float64)
+	p.LeadMinutes, _ = args["lead_minutes"].(float64)
+	p.TailMinutes, _ = args["tail_minutes"].(float64)
+	p.AgentGapMinutes, _ = args["agent_gap_minutes"].(float64)
+	if p.GroupBy != "" && p.GroupBy != "repo_day" {
+		return fmt.Sprintf("group_by %q: the only grouping is \"repo_day\"", p.GroupBy), true, nil
+	}
+	rep, err := h.mem.Hours(p)
+	if err != nil {
+		return fmt.Sprintf("hours report failed: %v", err), true, nil
+	}
+	out, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("marshal failed: %v", err), true, nil
 	}
