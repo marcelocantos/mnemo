@@ -22,6 +22,10 @@ formula_includes: |
   service do
     run [opt_bin/"mnemo"]
     keep_alive true
+    # Shutdown drains intake and the store for up to ~17 s (main.go,
+    # drainIntakeGrace + drainStoreBudget); launchd's default ExitTimeOut
+    # of 5 s would SIGKILL it mid-drain.
+    stop_timeout 25
     log_path var/"log/mnemo.log"
     error_log_path var/"log/mnemo.log"
     working_dir HOMEBREW_PREFIX
