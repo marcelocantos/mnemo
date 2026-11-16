@@ -20,9 +20,11 @@ func TestUnderSupervisor(t *testing.T) {
 	}
 }
 
-// TestRestartManagedDaemonGatesBrewServices is the 🎯T164 ratchet:
-// brew services restart from auto-upgrade would reload launchd and
-// fight supervisord for :19419. The only call site must sit behind
+// TestRestartManagedDaemonGatesBrewServices is the 🎯T164 ratchet: on a
+// host that runs mnemo as a supervisord program, brew services restart
+// from auto-upgrade would load Homebrew's launchd job and fight
+// supervisord for :19419. Under brew services (the default deployment)
+// that restart is the right bounce. The only call site must sit behind
 // underSupervisor().
 func TestRestartManagedDaemonGatesBrewServices(t *testing.T) {
 	src, err := os.ReadFile("main.go")

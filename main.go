@@ -1755,8 +1755,9 @@ func underSupervisor() bool {
 
 func restartManagedDaemon(ctx context.Context) error {
 	if underSupervisor() {
-		// brew services restart would reload launchd and fight
-		// supervisord for :19419. Exit; autorestart picks up the
+		// On a host that runs mnemo as a supervisord program,
+		// brew services restart would load Homebrew's launchd job and
+		// fight supervisord for :19419. Exit; autorestart picks up the
 		// new Cellar binary (🎯T164).
 		slog.Info("auto-upgrade: exiting so supervisord restarts onto the new binary")
 		return signalSelfSIGTERM()

@@ -57,27 +57,26 @@ claude mcp add --scope user --transport http mnemo http://localhost:19419/mcp   
 
 ### One daemon only — do not double-serve
 
-On this Mac, day-to-day MCP is **supervisord** running the Homebrew
-Cellar binary (not `brew services`). Launchd and supervisord must not
-both own `:19419`.
+On this Mac, day-to-day MCP is **`brew services`** (LaunchAgent
+`sh.brew.mnemo`) running the Homebrew Cellar binary on its default
+`localhost:19419`, federation off. Logs go to
+`/opt/homebrew/var/log/mnemo.log`.
 
 ```bash
-./supervisor/install.sh       # once: stop brew services, start under supervisord
-supervisorctl status mnemo
+brew services start mnemo     # once
+brew services list            # status (or: launchctl print gui/$(id -u)/sh.brew.mnemo)
 mnemo --version
 ```
 
 **Never** run `bin/mnemo` (or any tree-built binary) on `:19419`
-while the supervised daemon is running.
+while the brew service is running.
 
 | Goal | Do this |
 |------|---------|
-| Normal agent / MCP work | `supervisorctl start mnemo` — leave it alone. `brew services stop mnemo` must stay stopped |
-| After `brew upgrade mnemo` | `brew services stop mnemo` (stay unloaded), then `supervisorctl restart mnemo` — **not** `brew services restart` |
-| Test unreleased tree code | keep supervisor on `:19419`; `bin/mnemo --addr :19429` |
-| Sanity check | `lsof -nP -iTCP:19419 -sTCP:LISTEN` — exactly **one** mnemo, Cellar path; `supervisorctl status mnemo` is RUNNING |
-
-Do not `brew services start mnemo` — that reloads launchd and fights supervisord.
+| Normal agent / MCP work | The brew service keeps it running — leave it alone |
+| After `brew upgrade mnemo` | `brew services restart mnemo` (or `launchctl kickstart -k gui/$(id -u)/sh.brew.mnemo`) |
+| Test unreleased tree code | keep the brew service on `:19419`; `bin/mnemo --addr :19429` |
+| Sanity check | `lsof -nP -iTCP:19419 -sTCP:LISTEN` — exactly **one** mnemo, Cellar path; `brew services list` shows mnemo `started` |
 
 After installing, add the following to your global `~/.claude/CLAUDE.md`
 so agents know when to use mnemo:

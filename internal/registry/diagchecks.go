@@ -396,7 +396,7 @@ func (r *Registry) BuildDiagRegistry(defaultUser string, daemonStart time.Time) 
 					return diag.Failure(detail,
 						"a reader has held the WAL open for longer than any of the daemon's own "+
 							"jobs run, so a transaction has most likely leaked. Restart the daemon "+
-							"(supervisorctl restart mnemo, or brew services restart mnemo); the WAL "+
+							"(brew services restart mnemo, or your service manager's restart); the WAL "+
 							"is checkpointed on a clean shutdown and no data is lost")
 				}
 				return diag.Warning(

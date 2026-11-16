@@ -156,9 +156,7 @@ on Windows; transcript indexing and all query tools work identically.
 **As a service** (recommended — survives reboots):
 
 ```bash
-brew services start mnemo       # macOS
-# or, if supervisord already runs other MCP daemons:
-# ./supervisor/install.sh       # evicts brew services; supervisorctl status mnemo
+brew services start mnemo       # macOS: LaunchAgent sh.brew.mnemo
 ```
 
 On Windows the installer registers mnemo as a Windows Service
@@ -196,8 +194,8 @@ bind error and exits 1:
 mnemo: listen tcp 127.0.0.1:19419: bind: address already in use
 ```
 
-That is a running server, not a broken one. Check `supervisorctl status
-mnemo` or `brew services list` before concluding anything is wrong.
+That is a running server, not a broken one. Check `brew services list`
+before concluding anything is wrong.
 
 ## Reopening a past conversation
 
@@ -235,7 +233,7 @@ grant), and iTerm2 on macOS.
 
 ```bash
 brew upgrade marcelocantos/tap/mnemo
-brew services restart mnemo          # or: supervisorctl restart mnemo
+brew services restart mnemo          # or: launchctl kickstart -k gui/$(id -u)/sh.brew.mnemo
 ```
 
 The restart is not optional. `brew upgrade` replaces the binary on
@@ -582,7 +580,7 @@ needed, and use the same port when sharing the URL below.
    fails loud at startup on duplicate names, non-https URLs, or
    unresolvable certs.
 
-5. Restart the daemon (`supervisorctl restart mnemo` or `brew services restart mnemo`).
+5. Restart the daemon (`brew services restart mnemo`).
 
 6. Verify with `mnemo ping-peer <name>` — invokes `mnemo_stats` on the
    peer over mTLS and prints the response.
