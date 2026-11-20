@@ -9,11 +9,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
 // jsonlPrefixBytes is how much of a transcript is hashed into
@@ -135,9 +137,8 @@ func (s *Store) stampGen(path, prefix string, id fileIdent) {
 }
 
 // scanJSONL reads path from offset and calls handle for each complete
-// line. A chunk that does not end in '\n' is neither parsed nor counted,
-// so a line still being written is read again once its newline arrives.
-// handle's end argument is the byte just past that newline.
+// line. An unterminated chunk is counted only if it is already a complete
+// UTF-8 JSON object. A later newline will be consumed as an empty line.
 //
 // After the scan, a file that is no longer the one that was opened
 // (different inode, a shorter size, or a changed prefix of the sampled
@@ -181,9 +182,14 @@ func scanJSONL(path string, offset int64, handle func(line []byte, start, end in
 		if readErr != nil && readErr != io.EOF {
 			return consumed, fmt.Errorf("read %s: %w", path, readErr)
 		}
-		if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-			// EOF, or a partial tail. Leave it for the next open.
+		if len(raw) == 0 {
 			break
+		}
+		if readErr == io.EOF {
+			object := bytes.TrimLeft(raw, " \t\r")
+			if len(object) == 0 || object[0] != '{' || !utf8.Valid(object) || !json.Valid(object) {
+				break // Leave partial records at the previous boundary.
+			}
 		}
 		start := consumed
 		consumed += int64(len(raw))

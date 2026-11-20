@@ -180,6 +180,7 @@ func TestJSONLPartialLineIsIndexedOnce(t *testing.T) {
 			}
 			writeLines(t, path, k.line("alpha marker intact")+whole[:cut])
 			k.ingest(t, s, path)
+			assertJSONLOffset(t, s, path, len(k.line("alpha marker intact")))
 
 			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 			if err != nil {
@@ -202,6 +203,67 @@ func TestJSONLPartialLineIsIndexedOnce(t *testing.T) {
 			if n := countText(t, s, "gamma marker kept"); n != 1 {
 				t.Fatalf("trailing record indexed %d times, want 1", n)
 			}
+		})
+	}
+}
+
+func assertJSONLOffset(t *testing.T, s *Store, path string, want int) {
+	t.Helper()
+	var offset int
+	if err := s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&offset); err != nil {
+		t.Fatal(err)
+	}
+	if offset != want {
+		t.Fatalf("stored offset = %d, want %d", offset, want)
+	}
+}
+
+func TestJSONLFinalRecordWithoutNewline(t *testing.T) {
+	for _, k := range allJSONLReaders() {
+		t.Run(string(k), func(t *testing.T) {
+			root := t.TempDir()
+			s := newReaderStore(t, k, root)
+			path := k.pathFor(t, root)
+			k.prepare(t, s, root, path)
+			body := strings.TrimSuffix(k.line("complete final record"), "\n")
+			writeLines(t, path, body)
+			k.ingest(t, s, path)
+			k.ingest(t, s, path)
+			expectOnce(t, s, "complete final record")
+			assertJSONLOffset(t, s, path, len(body))
+
+			writeLines(t, path, body+"\n"+k.line("record after final record"))
+			k.ingest(t, s, path)
+			expectOnce(t, s, "complete final record")
+			expectOnce(t, s, "record after final record")
+		})
+	}
+}
+
+func TestJSONLLongTailSplitInsideUTF8(t *testing.T) {
+	for _, k := range allJSONLReaders() {
+		t.Run(string(k), func(t *testing.T) {
+			root := t.TempDir()
+			s := newReaderStore(t, k, root)
+			path := k.pathFor(t, root)
+			k.prepare(t, s, root, path)
+			first := k.line("record before long tail")
+			long := k.line("long tail " + strings.Repeat("x", 2<<20) + "é end of long tail")
+			cut := strings.Index(long, "é") + 1
+			writeLines(t, path, first+long[:cut])
+			// An unchanged, incomplete file can be seen repeatedly before the producer resumes.
+			for range 2 {
+				k.ingest(t, s, path)
+				assertJSONLOffset(t, s, path, len(first))
+				if got := countText(t, s, "long tail xxx"); got != 0 {
+					t.Fatalf("incomplete record indexed %d times", got)
+				}
+			}
+			writeLines(t, path, first+long)
+			k.ingest(t, s, path)
+			k.ingest(t, s, path)
+			expectOnce(t, s, "é end of long tail")
+			assertJSONLOffset(t, s, path, len(first)+len(long))
 		})
 	}
 }
