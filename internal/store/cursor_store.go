@@ -9,10 +9,12 @@ package store
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,10 +223,80 @@ func cursorDecodeMetaValue(raw any) any {
 	}
 }
 
+// cursorStoreBusyTimeout is how long a read-only open waits when Cursor
+// holds the write lock. Without it a lock is an immediate query error.
+const cursorStoreBusyTimeout = 5000
+
+// sqliteHeaderMagic is the 16-byte header. The file change counter is the
+// big-endian uint32 at offset 24. WAL mode may leave that counter alone
+// until a checkpoint, so the fingerprint also names the -wal sibling.
+const sqliteHeaderMagic = "SQLite format 3\x00"
+
 func openCursorStoreRO(path string) (*sql.DB, error) {
 	// mode=ro avoids taking a write lock on a store Cursor may hold open.
-	dsn := "file:" + filepath.ToSlash(path) + "?mode=ro"
+	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=%d", filepath.ToSlash(path), cursorStoreBusyTimeout)
 	return sql.Open("sqlite3", dsn)
+}
+
+// cursorStoreFingerprint is the identity stored in prefix_sha256 for a
+// store.db. It changes when the main file's size, mtime, or header
+// change counter changes, and when the sibling -wal appears, grows, or
+// is rewritten. An empty string means the file could not be stated.
+func cursorStoreFingerprint(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	walSize, walMtime := cursorStoreSidecar(path + "-wal")
+	return fmt.Sprintf("size=%d mtime=%s change=%d wal_size=%d wal_mtime=%s",
+		info.Size(),
+		info.ModTime().UTC().Format(time.RFC3339Nano),
+		sqliteChangeCounter(path),
+		walSize,
+		walMtime)
+}
+
+func cursorStoreSidecar(path string) (int64, string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1, ""
+	}
+	return info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano)
+}
+
+func sqliteChangeCounter(path string) uint32 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, sqliteChangeCounterOff+4)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return 0
+	}
+	if string(buf[:len(sqliteHeaderMagic)]) != sqliteHeaderMagic {
+		return 0
+	}
+	return binary.BigEndian.Uint32(buf[sqliteChangeCounterOff:])
+}
+
+const sqliteChangeCounterOff = 24
+
+// cursorStoreCaughtUp is true only when a previous read committed a
+// cursor at or past the current main-file size and the fingerprint still
+// matches. A failed read leaves no cursor. Growth, a shrink, an empty
+// fingerprint, or any fingerprint change is read again. A shorter
+// store.db is not the JSONL durable-truncation tier.
+func (s *Store) cursorStoreCaughtUp(path string, size int64) bool {
+	s.mu.Lock()
+	off := s.offsets[path]
+	stored := s.gens[path].prefix
+	s.mu.Unlock()
+	if off <= 0 || off < size {
+		return false
+	}
+	fp := cursorStoreFingerprint(path)
+	return stored != "" && stored == fp
 }
 
 type cursorStoreToolBlob struct {
@@ -245,7 +317,8 @@ type cursorStoreToolPart struct {
 // parseCursorStoreFile reads tool-result JSON blobs from a Cursor CLI
 // store.db. Binary DAG nodes, system/user/assistant JSON, and unknown
 // shapes are skipped. offset is ignored for reading (SQLite is not
-// append-log); newOffset is set to the file size so growth re-triggers.
+// append-log). newOffset is the file size only after the blob query
+// succeeds: a failed read must not hand the caller a cursor to commit.
 func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 	_ = offset
 	info, err := os.Stat(path)
@@ -264,7 +337,6 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 		project:   cursorProject(cwd),
 		topic:     meta.title,
 		model:     meta.model,
-		newOffset: info.Size(),
 	}
 	if meta.title != "" && len(pf.topic) > 200 {
 		pf.topic = pf.topic[:197] + "..."
@@ -272,14 +344,15 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 
 	db, err := openCursorStoreRO(path)
 	if err != nil {
-		return pf, err
+		return parsedFile{}, err
 	}
 	defer db.Close()
 
 	rows, err := db.Query(`SELECT id, data FROM blobs`)
 	if err != nil {
-		// Empty or unfamiliar schema — treat as no content, not fatal.
-		return pf, nil
+		// Unreadable, locked past the busy timeout, or not a store yet.
+		// The caller must not record a cursor for this attempt.
+		return parsedFile{}, err
 	}
 	defer rows.Close()
 
@@ -352,6 +425,10 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return parsedFile{}, err
+	}
+	pf.newOffset = info.Size()
 	return pf, nil
 }
 
@@ -399,13 +476,10 @@ func cursorJSONText(raw json.RawMessage) string {
 }
 
 // ingestCursorStoreFile ingests tool results from a Cursor CLI store.db.
-// Re-reads the whole DB on each size growth; INSERT OR IGNORE on
-// cursor-<session>-<blobId> keeps re-ingest idempotent.
+// A file whose main-file size has not grown is still read when its
+// fingerprint changed. The blob uuids in this parse are deleted and
+// inserted again, because INSERT OR IGNORE will not replace a payload.
 func (s *Store) ingestCursorStoreFile(path string) error {
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
-
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -413,9 +487,12 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 		}
 		return err
 	}
-	if offset >= info.Size() && offset > 0 {
+	if s.cursorStoreCaughtUp(path, info.Size()) {
 		return nil
 	}
+	s.mu.Lock()
+	offset := s.offsets[path]
+	s.mu.Unlock()
 
 	pf, err := parseCursorStoreFile(path, offset)
 	if err != nil {
@@ -435,4 +512,72 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 
 	ws.Close()
 	return ws.tx.Commit()
+}
+
+func cursorEntryUUID(raw []byte) string {
+	var probe struct {
+		UUID string `json:"uuid"`
+	}
+	if json.Unmarshal(raw, &probe) != nil {
+		return ""
+	}
+	return probe.UUID
+}
+
+// replaceCursorStoreBlobs deletes the entries this parse is about to
+// insert, and only those. messages_fts is external content, so the
+// delete command is issued before the row goes, matching
+// dedupeDeleteBatch. Other rows for the session — the JSONL transcript
+// included — stay.
+func replaceCursorStoreBlobs(tx *sql.Tx, sessionID string, entries []parsedRawEntry) error {
+	if sessionID == "" {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		uuid := cursorEntryUUID(e.raw)
+		if uuid == "" {
+			continue
+		}
+		if _, ok := seen[uuid]; ok {
+			continue
+		}
+		seen[uuid] = struct{}{}
+		var entryID int64
+		err := tx.QueryRow(`
+			SELECT id FROM entries
+			WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
+			sessionID, uuid).Scan(&entryID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
+			SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
+			FROM messages_v m WHERE m.entry_id = ? AND m.is_noise = 0`, entryID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
+			SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
+			FROM messages_v m WHERE m.entry_id = ? AND m.is_noise = 0
+			  AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`, entryID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			DELETE FROM tool_outputs WHERE message_id IN (
+				SELECT id FROM messages WHERE entry_id = ?)`, entryID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM messages WHERE entry_id = ?`, entryID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM entries WHERE id = ?`, entryID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

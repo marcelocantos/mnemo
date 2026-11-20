@@ -240,7 +240,13 @@ func jsonlStillTheFile(path string, opened os.FileInfo, openedPrefix []byte, con
 func (s *Store) putIngestCursor(tx *sql.Tx, path string, offset int64, absolute bool) error {
 	recSize, recMtime := statFingerprint(path)
 	sum := ""
-	if n := prefixLen(offset); n > 0 {
+	if isCursorStore(path) {
+		// store.db reuses this column for its size/mtime/change-counter
+		// fingerprint. A JSONL prefix hash would not change on an
+		// in-page UPDATE past the sampled window, and the header
+		// counter alone misses an uncheckpointed WAL.
+		sum = cursorStoreFingerprint(path)
+	} else if n := prefixLen(offset); n > 0 {
 		if b, err := prefixSample(path, n); err == nil {
 			sum = prefixHash(b)
 		}

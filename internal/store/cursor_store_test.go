@@ -342,3 +342,124 @@ func writeCursorStoreFixture(t *testing.T, path, toolMarker, cwd string) {
 		}
 	}
 }
+
+func TestDefectCursorStoreFailedReadStopsTheIndex(t *testing.T) {
+	home := t.TempDir()
+	side := filepath.Join(home, "side", "store.db")
+	writeCursorStoreFixture(t, side, "beta-tool-result-marker", "/Users/dev/work/github.com/acme/webapp")
+	valid, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "chats", "abc", cursorSessUUID, "store.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, len(valid)+8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	err = s.ingestCursorStoreFile(path)
+	var off int64
+	_ = s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&off)
+	if err := os.WriteFile(path, valid, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err2 := s.ingestCursorStoreFile(path)
+	if n := countText(t, s, "beta-tool-result-marker"); n != 1 {
+		t.Fatalf("valid store.db (%d bytes) was not indexed after a failed read of a larger file recorded offset %d (second err=%v hits=%d)", len(valid), off, err2, n)
+	}
+	if err != nil && off != 0 {
+		t.Fatalf("failed read recorded offset %d (err=%v)", off, err)
+	}
+}
+
+func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "chats", "abc", "11111111-2222-3333-4444-555555555555", "store.db")
+	writeCursorStoreFixture(t, path, "original-tool-marker-xxxxxx", "/tmp/proj")
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(`
+		INSERT INTO messages (session_id, project, role, text, timestamp, content_type)
+		VALUES (?, '', 'user', 'jsonl-sibling-must-stay', '2026-11-20T00:00:00Z', 'text')`,
+		"11111111-2222-3333-4444-555555555555"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), 'original-tool-marker-xxxxxx', 'original-tool-marker-YYYYYY') AS BLOB) WHERE CAST(data AS TEXT) LIKE '%original-tool-marker-xxxxxx%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := res.RowsAffected()
+	db.Close()
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	n := countText(t, s, "original-tool-marker-YYYYYY")
+	if after.Size() <= before.Size() && n != 1 {
+		t.Fatalf("same-size store.db (%d bytes) was not re-read after its blob changed (rows=%d)", after.Size(), updated)
+	}
+	if old := countText(t, s, "original-tool-marker-xxxxxx"); old != 0 {
+		t.Fatalf("old blob text still indexed (%d)", old)
+	}
+	if sib := countText(t, s, "jsonl-sibling-must-stay"); sib != 1 {
+		t.Fatalf("session rows outside the rewritten blob were removed (%d)", sib)
+	}
+}
+
+func TestCursorStoreFingerprintSeesWAL(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "wal-fingerprint-marker", "/tmp/proj")
+	before := cursorStoreFingerprint(path)
+	if before == "" {
+		t.Fatal("fingerprint empty")
+	}
+	if err := os.WriteFile(path+"-wal", []byte("not a real wal"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := cursorStoreFingerprint(path)
+	if after == before {
+		t.Fatal("wal sidecar did not change the store fingerprint")
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if n := countText(t, s, "wal-fingerprint-marker"); n != 1 {
+		t.Fatalf("hits=%d", n)
+	}
+	// Same main-file size, new wal bytes: the next ingest must not treat
+	// the cursor as caught up. A second marker written into the wal is
+	// not visible to SQLite, so change the blob in place and leave a wal
+	// that is newer than the fingerprint just stored.
+	if err := os.WriteFile(path+"-wal", []byte("wal grew"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if s.cursorStoreCaughtUp(path, mustSize(t, path)) {
+		t.Fatal("wal growth left the store caught up")
+	}
+}
+
+func mustSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}

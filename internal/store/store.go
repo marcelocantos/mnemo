@@ -3920,12 +3920,12 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isCursorStore(path) {
 				return nil
 			}
+			if s.cursorStoreCaughtUp(path, info.Size()) {
+				return nil
+			}
 			s.mu.Lock()
 			offset := s.offsets[path]
 			s.mu.Unlock()
-			if offset >= info.Size() && offset > 0 {
-				return nil
-			}
 			files = append(files, fileEntry{
 				path:   path,
 				mtime:  info.ModTime(),
@@ -4374,6 +4374,14 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 				pf.sessionID, usageUUID); err != nil {
 				return err
 			}
+		}
+	}
+	// A rewritten store.db blob keeps its uuid. Delete that entry
+	// before INSERT OR IGNORE, and nothing else in the session: the
+	// JSONL conversation shares the session id.
+	if isCursorStore(pf.path) {
+		if err := replaceCursorStoreBlobs(ws.tx, pf.sessionID, pf.entries); err != nil {
+			return err
 		}
 	}
 
