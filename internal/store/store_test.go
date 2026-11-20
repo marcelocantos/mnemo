@@ -2784,6 +2784,12 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 }
 
 func TestDefectMessageInsertErrorIsPermanent(t *testing.T) {
+	for _, reader := range []jsonlReaderKind{readerClaudeWatch, readerClaudeBatch} {
+		t.Run(string(reader), func(t *testing.T) { checkMessageInsertRetry(t, reader) })
+	}
+}
+
+func checkMessageInsertRetry(t *testing.T, reader jsonlReaderKind) {
 	projectDir := t.TempDir()
 	path := writeJSONL(t, projectDir, "proj", "sess-poison", []map[string]any{
 		msg("user", "before poison marker", "2026-04-01T10:00:00Z"),
@@ -2791,6 +2797,10 @@ func TestDefectMessageInsertErrorIsPermanent(t *testing.T) {
 		msg("user", "after poison marker", "2026-04-01T10:00:02Z"),
 	})
 	s := newTestStore(t, projectDir)
+	ingest := func() error { return s.ingestFile(path) }
+	if reader == readerClaudeBatch {
+		ingest = s.IngestAll
+	}
 	if _, err := s.writeDB.Exec(`
 		CREATE TRIGGER defect_poison_msg BEFORE INSERT ON messages
 		WHEN new.text LIKE '%POISONMARKER%'
@@ -2799,14 +2809,16 @@ func TestDefectMessageInsertErrorIsPermanent(t *testing.T) {
 		END`); err != nil {
 		t.Fatal(err)
 	}
-	err1 := s.ingestFile(path)
+	err1 := ingest()
 	var off int64
 	_ = s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&off)
 	info, _ := os.Stat(path)
 	if _, err := s.writeDB.Exec(`DROP TRIGGER defect_poison_msg`); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.ingestFile(path)
+	if err := ingest(); err != nil {
+		t.Fatal(err)
+	}
 	if n := countText(t, s, "POISONMARKER"); n != 1 {
 		t.Fatalf("message that failed to insert is still absent after the cause is gone (hits=%d, first err=%v, offset=%d, file=%d)", n, err1, off, info.Size())
 	}

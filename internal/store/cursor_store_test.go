@@ -402,7 +402,10 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, _ := res.RowsAffected()
+	updated, err := res.RowsAffected()
+	if err != nil || updated != 1 {
+		t.Fatalf("unexpected blob UPDATE rows=%d err=%v", updated, err)
+	}
 	db.Close()
 	after, err := os.Stat(path)
 	if err != nil {
@@ -412,7 +415,10 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := countText(t, s, "original-tool-marker-YYYYYY")
-	if after.Size() <= before.Size() && n != 1 {
+	if after.Size() != before.Size() {
+		t.Fatalf("fixture changed main database size from %d to %d", before.Size(), after.Size())
+	}
+	if n != 1 {
 		t.Fatalf("same-size store.db (%d bytes) was not re-read after its blob changed (rows=%d)", after.Size(), updated)
 	}
 	if old := countText(t, s, "original-tool-marker-xxxxxx"); old != 0 {
