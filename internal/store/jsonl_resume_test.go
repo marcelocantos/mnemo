@@ -143,6 +143,7 @@ func (k jsonlReaderKind) prepare(t *testing.T, s *Store, root, path string) {
 	case readerGrok:
 		s.SetGrokRoots([]string{filepath.Join(root, "sessions")})
 	case readerCursor:
+		t.Setenv("CURSOR_HOME", root)
 		s.SetCursorRoots([]string{filepath.Join(root, "projects")})
 	case readerOmp:
 		s.SetOmpRoots([]string{filepath.Join(root, "agent", "sessions")})
@@ -358,6 +359,54 @@ func TestJSONLRotationBeforeMidstreamCommit(t *testing.T) {
 		}
 	}
 	expectOnce(t, s, "only record in current file")
+}
+
+func TestJSONLRewriteDuringReadBeyondPrefix(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerCodex, root)
+	path := readerCodex.pathFor(t, root)
+	readerCodex.prepare(t, s, root, path)
+	first := readerCodex.line(strings.Repeat("p", jsonlPrefixBytes))
+	writeLines(t, path, first+readerCodex.line("stale record beyond sampled prefix"))
+	var once sync.Once
+	testAfterJSONLLine = func(p string, n int) {
+		if p == path && n == 1 {
+			once.Do(func() {
+				writeLines(t, path, first+readerCodex.line("replacement record beyond sampled prefix")+readerCodex.line("another replacement record"))
+			})
+		}
+	}
+	t.Cleanup(func() { testAfterJSONLLine = nil })
+	readerCodex.ingest(t, s, path)
+	readerCodex.ingest(t, s, path)
+	expectOnce(t, s, "replacement record beyond sampled prefix")
+	expectOnce(t, s, "another replacement record")
+	if n := countText(t, s, "stale record beyond sampled prefix"); n != 0 {
+		t.Fatalf("stale record indexed %d times", n)
+	}
+}
+
+func TestCursorJSONLReplacementKeepsStoreResults(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CURSOR_HOME", root)
+	s := newReaderStore(t, readerCursor, root)
+	path := readerCursor.pathFor(t, root)
+	readerCursor.prepare(t, s, root, path)
+	blobs := filepath.Join(root, "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, blobs, "tool result from Cursor database", "/tmp/proj")
+	writeLines(t, path, readerCursor.line("old Cursor conversation"))
+	readerCursor.ingest(t, s, path)
+	if err := s.ingestCursorStoreFile(blobs); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "tool result from Cursor database")
+	writeLines(t, path, readerCursor.line("replacement Cursor conversation in longer file"))
+	readerCursor.ingest(t, s, path)
+	expectOnce(t, s, "replacement Cursor conversation")
+	expectOnce(t, s, "tool result from Cursor database")
+	if n := countText(t, s, "old Cursor conversation"); n != 0 {
+		t.Fatalf("replaced Cursor conversation indexed %d times", n)
+	}
 }
 
 func TestJSONLAppendIsIndexedOnce(t *testing.T) {

@@ -4397,7 +4397,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 		}
 	}
 	if pf.restarted {
-		if err := s.deleteSessionTranscript(ws.tx, pf.sessionID); err != nil {
+		if err := s.deleteSessionTranscript(ws.tx, pf.sessionID, isCursorTranscript(pf.path)); err != nil {
 			return err
 		}
 	}
@@ -7376,7 +7376,7 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 	}()
 
 	if restarted {
-		if err := s.deleteSessionTranscript(ws.tx, sessionID); err != nil {
+		if err := s.deleteSessionTranscript(ws.tx, sessionID, false); err != nil {
 			return err
 		}
 	}

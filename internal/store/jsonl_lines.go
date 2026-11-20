@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"strings"
@@ -209,7 +210,7 @@ func scanJSONL(path string, offset int64, handle func(line []byte, start, end in
 	if opened.Size() < offset {
 		return offset, nil, errTranscriptReplaced
 	}
-	snapshot := &jsonlSnapshot{info: opened, prefix: openedPrefix, start: offset}
+	snapshot := &jsonlSnapshot{info: opened, prefix: openedPrefix, start: offset, end: offset, digest: sha256.New()}
 	// Leave appends after the open for a later pass. This bounds the read
 	// and ensures the sampled bytes cover every offset in this pass.
 	reader := bufio.NewReader(io.NewSectionReader(f, offset, opened.Size()-offset))
@@ -228,6 +229,8 @@ func scanJSONL(path string, offset int64, handle func(line []byte, start, end in
 		}
 		start := consumed
 		consumed += int64(len(raw))
+		snapshot.end = consumed
+		_, _ = snapshot.digest.Write(raw)
 		if line := trimLineEnding(raw); len(line) > 0 {
 			if err := handle(line, start, consumed, snapshot); err != nil {
 				return consumed, nil, err
@@ -256,6 +259,8 @@ type jsonlSnapshot struct {
 	info   os.FileInfo
 	prefix []byte
 	start  int64
+	end    int64
+	digest hash.Hash
 }
 
 // A path can be replaced between choosing an offset and opening it. Check
@@ -310,6 +315,20 @@ func (snapshot *jsonlSnapshot) check(path string) error {
 	}
 	if !bytes.Equal(cur, snapshot.prefix) {
 		return errTranscriptReplaced
+	}
+	// Growth can be a concurrent append or a rewrite followed by an
+	// append. Verify the range this scan actually consumed, including
+	// bytes buffered beyond the stored prefix sample.
+	if now.Size() > opened.Size() && snapshot.end > snapshot.start {
+		digest := sha256.New()
+		length := snapshot.end - snapshot.start
+		n, err := io.Copy(digest, io.NewSectionReader(f, snapshot.start, length))
+		if err != nil {
+			return err
+		}
+		if n != length || !bytes.Equal(digest.Sum(nil), snapshot.digest.Sum(nil)) {
+			return errTranscriptReplaced
+		}
 	}
 	return nil
 }
@@ -393,23 +412,34 @@ type pendingIngestCursor struct {
 // replaced file can be inserted in its place. compactions and hours_*
 // stay. messages_fts is external-content and has no delete trigger, so
 // the delete command is issued first, matching dedupeDeleteBatch.
-func (s *Store) deleteSessionTranscript(tx *sql.Tx, sessionID string) error {
+func (s *Store) deleteSessionTranscript(tx *sql.Tx, sessionID string, cursorJSONL bool) error {
 	if sessionID == "" {
 		return nil
+	}
+	messageScope := `session_id = ?1`
+	entryScope := messageScope
+	if cursorJSONL {
+		// Cursor's JSONL has a top-level role. Synthetic store.db entries
+		// share its session ID but carry their role under message.
+		cursorEntries := `SELECT id FROM entries_v
+			WHERE session_id = ?1 AND json_type(raw, '$.role') IS NOT NULL`
+		messageScope += ` AND entry_id IN (` + cursorEntries + `)`
+		entryScope += ` AND id IN (` + cursorEntries + `)`
 	}
 	stmts := []string{
 		`INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
 		 SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
-		 FROM messages_v m WHERE m.session_id = ? AND m.is_noise = 0`,
+		 FROM messages_v m WHERE m.is_noise = 0 AND ` + messageScope,
 		`INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
 		 SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
-		 FROM messages_v m WHERE m.session_id = ? AND m.is_noise = 0
-		   AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`,
-		`DELETE FROM tool_outputs WHERE session_id = ?`,
+		 FROM messages_v m WHERE m.is_noise = 0
+		   AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)
+		   AND ` + messageScope,
+		`DELETE FROM tool_outputs WHERE message_id IN (SELECT id FROM messages WHERE ` + messageScope + `)`,
 		`DELETE FROM decisions WHERE session_id = ?`,
 		`DELETE FROM decision_scan_state WHERE session_id = ?`,
-		`DELETE FROM messages WHERE session_id = ?`,
-		`DELETE FROM entries WHERE session_id = ?`,
+		`DELETE FROM messages WHERE ` + messageScope,
+		`DELETE FROM entries WHERE ` + entryScope,
 		`DELETE FROM topic_segments WHERE session_id = ?`,
 		`DELETE FROM segment_scan_state WHERE session_id = ?`,
 		`DELETE FROM session_summary WHERE session_id = ?`,
