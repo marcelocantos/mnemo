@@ -18,7 +18,7 @@ func TestInterestTranscriptAllowDeny(t *testing.T) {
 		{"/Users/x/.grok/sessions/proj/sid/terminal/out.jsonl", false},
 		{"/Users/x/.cursor/chats/abc123/deadbeef-0000-0000-0000-000000000001/store.db", true},
 		{"/Users/x/.cursor/acp-sessions/deadbeef-0000-0000-0000-000000000001/store.db", false},
-		{"/Users/x/.cursor/chats/abc123/deadbeef-0000-0000-0000-000000000001/store.db-wal", false},
+		{"/Users/x/.cursor/chats/abc123/deadbeef-0000-0000-0000-000000000001/store.db-wal", true},
 		{"/Users/x/.claude/projects/foo/memory/MEMORY.md", true},
 		{"/Users/x/.claude/skills/commit/SKILL.md", true},
 		{"/repo/CLAUDE.md", true},

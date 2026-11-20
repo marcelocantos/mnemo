@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -130,6 +129,12 @@ type Store struct {
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
+	// gens is the identity the offset was taken from (prefix hash and,
+	// while this process is up, inode). Guarded by mu.
+	gens map[string]ingestGen
+	// Paths that failed ingest and must be retried even if they have
+	// no cursor or their size has not grown. Guarded by mu.
+	pendingIngestRetries map[string]struct{}
 
 	// watchTel is live 🎯T142 tree-watch telemetry (backend, FDs, poll).
 	// Own mutex; not guarded by mu.
@@ -1541,6 +1546,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		dbPath:      dbPath,
 		projectDir:  projectDir,
 		offsets:     make(map[string]int64),
+		gens:        make(map[string]ingestGen),
 		codec:       newTextCodec(),
 		bgCtx:       bgCtx,
 		bgCancel:    bgCancel,
@@ -1557,14 +1563,45 @@ func New(dbPath, projectDir string) (*Store, error) {
 		slog.Info("closed orphan cluster_runs from prior daemon", "count", nOrphans)
 	}
 
-	rows, err := readDB.Query("SELECT path, offset FROM ingest_state")
+	// prefix_sha256 and the size/mtime fingerprint arrive with schema
+	// upgrades, which may still be queued. A missing column falls back
+	// to whatever the live table has. The fingerprint is what lets a
+	// restart decide "unchanged" without reading the file.
+	rows, err := readDB.Query(`SELECT path, offset, prefix_sha256, recorded_size, recorded_mtime FROM ingest_state`)
+	if err != nil {
+		// The source-drift fingerprint predates prefix hashing.
+		rows, err = readDB.Query(`SELECT path, offset, NULL, recorded_size, recorded_mtime FROM ingest_state`)
+	}
+	if err != nil {
+		rows, err = readDB.Query(`SELECT path, offset, prefix_sha256, NULL, NULL FROM ingest_state`)
+	}
+	if err != nil {
+		rows, err = readDB.Query(`SELECT path, offset, NULL, NULL, NULL FROM ingest_state`)
+	}
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var path string
 			var offset int64
-			rows.Scan(&path, &offset)
+			var prefix sql.NullString
+			var recordedSize sql.NullInt64
+			var recordedMtime sql.NullString
+			if err := rows.Scan(&path, &offset, &prefix, &recordedSize, &recordedMtime); err != nil {
+				continue
+			}
 			s.offsets[path] = offset
+			gen := ingestGen{}
+			if prefix.Valid && prefix.String != "" {
+				gen.prefix = prefix.String
+			}
+			if recordedSize.Valid && recordedMtime.Valid && recordedMtime.String != "" {
+				gen.recordedSize = recordedSize.Int64
+				gen.recordedMtime = recordedMtime.String
+				gen.haveRecorded = true
+			}
+			if gen.prefix != "" || gen.haveRecorded {
+				s.gens[path] = gen
+			}
 		}
 	}
 
@@ -3755,6 +3792,7 @@ type parsedRawEntry struct {
 	entryType string
 	timestamp string
 	raw       []byte // full JSONL line
+	refresh   bool   // mutable sidecar projection, without changing its row identity
 }
 
 // parsedFile is the result of parsing a single JSONL file.
@@ -3768,6 +3806,9 @@ type parsedFile struct {
 	branch    string
 	topic     string
 	newOffset int64
+	snapshot  *jsonlSnapshot
+	// Version observed before reading a Cursor store.db snapshot.
+	cursorStoreVersion string
 	// source is the producing agent ('claude', 'codex', 'grok', 'cursor', or 'omp').
 	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
@@ -3778,6 +3819,13 @@ type parsedFile struct {
 	// model is the primary model stamp (Grok summary / signals); also
 	// embedded in entry raw for generated columns.
 	model string
+	// restarted means this file is not the one the stored offset was
+	// taken from. writeParsedFile keeps the rows already indexed, inserts
+	// only newly observed record occurrences, and sets the offset absolutely.
+	restarted bool
+	// sourceClass is the 🎯T68.6 tag written when restarted is set:
+	// "truncated_at" or "rewritten_at".
+	sourceClass string
 }
 
 // IngestAll scans the project directory and ingests all JSONL files
@@ -3791,19 +3839,37 @@ func (s *Store) IngestAll() error {
 	// old schema during the pre-migration backup.
 	s.AwaitSchemaUpgrade()
 
-	numWorkers := runtime.NumCPU()
-	if numWorkers < 2 {
-		numWorkers = 2
-	}
-
 	// Stage 1: Collector — gather paths, sort newest-first, filter already-done.
 	type fileEntry struct {
-		path   string
-		mtime  time.Time
-		size   int64
-		offset int64 // already-ingested offset
+		path        string
+		mtime       time.Time
+		size        int64
+		offset      int64 // already-ingested offset; 0 when restarted
+		restarted   bool  // file is not the one offset was taken from
+		sourceClass string
 	}
 	var files []fileEntry
+	// consider queues a JSONL transcript. A caught-up file is left alone.
+	// A file that was replaced, rotated, or truncated under its cursor is
+	// queued from byte 0 so new lines are indexed. Rows already stored stay.
+	consider := func(path string, info os.FileInfo) {
+		d := s.jsonlResume(path, info)
+		if d.caughtUp {
+			return
+		}
+		off := d.offset
+		if d.restarted {
+			off = 0
+		}
+		files = append(files, fileEntry{
+			path:        path,
+			mtime:       info.ModTime(),
+			size:        info.Size(),
+			offset:      off,
+			restarted:   d.restarted,
+			sourceClass: d.statusClass,
+		})
+	}
 	// Codex rollout roots (~/.codex/sessions, archived_sessions) are
 	// walked alongside the Claude project dirs; the worker routes each
 	// file to the right parser by path (🎯T99).
@@ -3820,19 +3886,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			// Skip fully ingested files.
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3851,18 +3905,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isGrokUpdates(path) {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3880,18 +3923,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isCursorTranscript(path) {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3909,12 +3941,12 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isCursorStore(path) {
 				return nil
 			}
+			if s.cursorStoreCaughtUp(path, info.Size()) {
+				return nil
+			}
 			s.mu.Lock()
 			offset := s.offsets[path]
 			s.mu.Unlock()
-			if offset >= info.Size() && offset > 0 {
-				return nil
-			}
 			files = append(files, fileEntry{
 				path:   path,
 				mtime:  info.ModTime(),
@@ -3938,18 +3970,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isOmpSession(path) {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3964,11 +3985,13 @@ func (s *Store) IngestAll() error {
 	})
 
 	ingestStart := time.Now()
+	numWorkers := min(runtime.GOMAXPROCS(0), len(files))
 	slog.Info("ingest starting", "files", len(files), "workers", numWorkers)
 
 	// Stage 2: Workers — parse JSONL files in parallel.
 	pathCh := make(chan fileEntry, numWorkers)
 	parsedCh := make(chan parsedFile, numWorkers*2)
+	done := make(chan struct{})
 
 	var wg sync.WaitGroup
 	for range numWorkers {
@@ -3989,10 +4012,23 @@ func (s *Store) IngestAll() error {
 				case isOmpSession(fe.path):
 					parse = parseOmpFile
 				}
-				if pf, err := parse(fe.path, fe.offset); err == nil {
-					parsedCh <- pf
-				} else {
-					slog.Warn("parse failed", "file", filepath.Base(fe.path), "err", err)
+				pf, err := parse(fe.path, fe.offset)
+				if errors.Is(err, errTranscriptReplaced) && !fe.restarted {
+					fe.restarted = true
+					fe.sourceClass = s.jsonlRestartClass(fe.path, err)
+					pf, err = parse(fe.path, 0)
+				}
+				if err != nil {
+					s.queueIngestRetry(fe.path)
+					slog.Warn("parse failed; queued for retry", "file", fe.path, "err", err)
+					continue
+				}
+				pf.restarted = fe.restarted
+				pf.sourceClass = fe.sourceClass
+				select {
+				case parsedCh <- pf:
+				case <-done:
+					return
 				}
 			}
 		}()
@@ -4000,16 +4036,25 @@ func (s *Store) IngestAll() error {
 
 	// Feed the workers.
 	go func() {
+		defer close(pathCh)
 		for _, fe := range files {
-			pathCh <- fe
+			select {
+			case pathCh <- fe:
+			case <-done:
+				return
+			}
 		}
-		close(pathCh)
+	}()
+	go func() {
 		wg.Wait()
 		close(parsedCh)
 	}()
 
 	// Stage 3: Writer — single goroutine, batched transactions.
-	if err := s.runWriter(parsedCh, len(files)); err != nil {
+	err := s.runWriter(parsedCh, len(files))
+	close(done)
+	wg.Wait()
+	if err != nil {
 		return err
 	}
 	slog.Info("ingest duration", "files", len(files), "elapsed", time.Since(ingestStart).Round(time.Millisecond))
@@ -4138,6 +4183,7 @@ type writerState struct {
 	// written in this transaction, so their tool_results can be flagged
 	// without a lookup (🎯T190; see selfnoise.go).
 	selfToolUses map[string]struct{}
+	cursors      []pendingIngestCursor
 }
 
 func (s *Store) newWriterState() (*writerState, error) {
@@ -4213,6 +4259,100 @@ func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any
 	return ws.entryStmt.Exec(sessionID, project, typ, timestamp, raw, z)
 }
 
+// Refresh the Grok usage snapshot or a Cursor blob's tool-result
+// projection. Neither is a JSONL record. Their producer-defined IDs
+// denote mutable slots, and downstream rows depend on our stable IDs.
+func (ws *writerState) refreshSidecarEntry(sessionID, raw string) (int64, error) {
+	var id int64
+	var changed bool
+	err := ws.tx.QueryRow(`
+		SELECT id, json(raw) IS NOT json(?2)
+		FROM entries_v
+		WHERE session_id = ?1 AND uuid = ?2->>'$.uuid'`, sessionID, raw).Scan(&id, &changed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil || !changed {
+		return id, err
+	}
+	if !ws.packed {
+		_, err = ws.tx.Exec(`UPDATE entries SET raw = jsonb(?) WHERE id = ?`, raw, id)
+		return id, err
+	}
+	var z []byte
+	if ws.packRaw {
+		_, z = ws.codec.pack(FamilyEntriesRaw, raw)
+	}
+	_, err = ws.tx.Exec(`
+		UPDATE entries SET
+			raw = CASE WHEN ?3 IS NULL THEN jsonb(?2) END,
+			raw_z = ?3, plain_len = length(CAST(?2 AS BLOB)), z_len = length(?3),
+			model_m = ?2->>'$.message.model',
+			input_tokens_m = ?2->>'$.message.usage.input_tokens',
+			output_tokens_m = ?2->>'$.message.usage.output_tokens',
+			spawn_tool_use_id_m = ?2->>'$.message.content[0].tool_use_id'
+		WHERE id = ?1`, id, raw, z)
+	return id, err
+}
+
+func (ws *writerState) refreshSidecarMessage(entryID int64, m parsedMessage) (bool, error) {
+	if m.contentType == "tool_result" && (isSelfTool(m.toolName) || ws.pairedSelfToolResult(m.toolUseID)) {
+		m.isNoise = 1
+	}
+	var id int64
+	var changed bool
+	err := ws.tx.QueryRow(`
+		SELECT id, text IS NOT ?2 OR tool_name IS NOT ?3 OR tool_use_id IS NOT ?4 OR is_noise IS NOT ?5
+		FROM messages_v
+		WHERE entry_id = ?1`, entryID, m.text, m.toolName, m.toolUseID, m.isNoise).Scan(&id, &changed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil || !changed {
+		return true, err
+	}
+	// The indexes are external-content FTS tables. Remove exactly the
+	// terms they currently contain, then add the revised text at the
+	// same row ID. The durable message and its dependents stay in place.
+	if _, err := ws.tx.Exec(`
+		INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
+		SELECT 'delete', id, text, role, project, session_id
+		FROM messages_v WHERE id = ? AND is_noise = 0`, id); err != nil {
+		return true, err
+	}
+	if _, err := ws.tx.Exec(`
+		INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
+		SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
+		FROM messages_v m
+		WHERE m.id = ? AND m.is_noise = 0
+		  AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`, id); err != nil {
+		return true, err
+	}
+	if ws.packed {
+		plain, z := ws.codec.pack(FamilyMessagesText, m.text)
+		_, err = ws.tx.Exec(`
+			UPDATE messages SET text = ?, text_z = ?, plain_len = ?, z_len = length(?),
+				tool_name = ?, tool_use_id = ?, is_noise = ?
+			WHERE id = ?`, plain, z, len(m.text), z, m.toolName, m.toolUseID, m.isNoise, id)
+	} else {
+		_, err = ws.tx.Exec(`
+			UPDATE messages SET text = ?, tool_name = ?, tool_use_id = ?, is_noise = ?
+			WHERE id = ?`, m.text, m.toolName, m.toolUseID, m.isNoise, id)
+	}
+	if err != nil {
+		return true, err
+	}
+	if _, err := ws.tx.Exec(`
+		INSERT INTO messages_fts(rowid, text, role, project, session_id)
+		SELECT id, text, role, project, session_id FROM messages_v WHERE id = ? AND is_noise = 0`, id); err != nil {
+		return true, err
+	}
+	_, err = ws.tx.Exec(`
+		INSERT INTO messages_fts_stem(rowid, text, role, project, session_id)
+		SELECT id, text, role, project, session_id FROM messages_v WHERE id = ? AND is_noise = 0`, id)
+	return true, err
+}
+
 // insertMessage runs msgStmt with text packed for storage (🎯T151).
 //
 // Every parser's rows pass through here, so this is also where mnemo's
@@ -4220,11 +4360,12 @@ func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any
 // one of mnemo's tools, and the tool_result paired with it, are written
 // with is_noise=1 whatever the caller decided.
 //
-// It returns the new row's id (0 when the insert failed) and the noise
-// flag actually written, so a caller can hang dependent rows off the
-// message without a second lookup (🎯T192).
+// It returns the new row's id and the noise flag actually written, so a
+// caller can hang dependent rows off the message without a second lookup
+// (🎯T192). A statement error is returned: swallowing it let the caller
+// commit an offset past a line that was never stored (defect hunt finding 6).
 func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text string, timestamp, typ any,
-	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) (int64, int) {
+	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) (int64, int, error) {
 	switch contentType {
 	case "tool_use":
 		if isSelfTool(toolName) {
@@ -4253,15 +4394,43 @@ func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text
 			contentType, toolName, toolUseID, toolInput, isError, z, len(text), zLen)
 	}
 	if err != nil || res == nil {
-		return 0, isNoise
+		if err == nil {
+			err = fmt.Errorf("insert message: no result")
+		}
+		return 0, isNoise, err
 	}
-	id, _ := res.LastInsertId()
-	return id, isNoise
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, isNoise, err
+	}
+	return id, isNoise, nil
 }
 
 func (ws *writerState) Close() {
 	ws.entryStmt.Close()
 	ws.msgStmt.Close()
+}
+
+// Publish resume positions only after their rows and cursor have committed.
+// Hold mu across Commit so a later writer cannot publish before this one.
+func (s *Store) commitIngest(ws *writerState) error {
+	ws.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ws.tx.Commit(); err != nil {
+		return err
+	}
+	for _, cursor := range ws.cursors {
+		if cursor.absolute || cursor.offset >= s.offsets[cursor.path] {
+			s.offsets[cursor.path] = cursor.offset
+			gen := cursor.gen
+			if !cursor.absolute && gen.prefix == "" {
+				gen.prefix = s.gens[cursor.path].prefix
+			}
+			s.gens[cursor.path] = gen
+		}
+	}
+	return nil
 }
 
 // runWriter is the single-goroutine writer for the parallel ingest pipeline.
@@ -4274,23 +4443,26 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	if err != nil {
 		return err
 	}
-	defer func() { ws.tx.Rollback() }()
-	defer ws.Close()
+	defer func() {
+		ws.Close()
+		_ = ws.tx.Rollback()
+	}()
 
 	lastCommit := time.Now()
 	writeStart := time.Now()
 	var processed int
+	var failed []error
 	const progressEvery = 100
 
 	commitBatch := func() error {
-		ws.Close()
-		if err := ws.tx.Commit(); err != nil {
+		if err := s.commitIngest(ws); err != nil {
 			return err
 		}
-		ws, err = s.newWriterState()
+		next, err := s.newWriterState()
 		if err != nil {
 			return err
 		}
+		ws = next
 		lastCommit = time.Now()
 		return nil
 	}
@@ -4313,7 +4485,31 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				"rate", fmt.Sprintf("%.1f files/s", rate),
 				"eta", eta.Round(time.Second))
 		}
-		s.writeParsedFile(ws, pf)
+		if testBeforeParsedWrite != nil {
+			testBeforeParsedWrite(pf)
+		}
+		// One file's failure stays inside its savepoint. The rest of this
+		// transaction, and files still queued, keep going. The cursor is
+		// not recorded, so the next pass tries the file again.
+		if _, err := ws.tx.Exec(`SAVEPOINT ingest_file`); err != nil {
+			return err
+		}
+		if err := s.writeParsedFile(ws, pf); err != nil {
+			if _, rbErr := ws.tx.Exec(`ROLLBACK TO SAVEPOINT ingest_file`); rbErr != nil {
+				return fmt.Errorf("ingest %s: %w (savepoint rollback: %v)", pf.path, err, rbErr)
+			}
+			if _, relErr := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); relErr != nil {
+				return fmt.Errorf("ingest %s: %w (savepoint release: %v)", pf.path, err, relErr)
+			}
+			// The savepoint rolled back the rows but cannot roll back
+			// this cache. Earlier good tool uses are still in SQLite.
+			clear(ws.selfToolUses)
+			failed = append(failed, fmt.Errorf("ingest %s: %w", pf.path, err))
+			s.queueIngestRetry(pf.path)
+			slog.Warn("ingest file failed; queued for retry", "file", pf.path, "err", err)
+		} else if _, err := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); err != nil {
+			return err
+		}
 
 		// Commit periodically.
 		if time.Since(lastCommit) >= commitInterval {
@@ -4324,43 +4520,107 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	}
 
 	// Final commit.
-	ws.Close()
-	return ws.tx.Commit()
+	if err := s.commitIngest(ws); err != nil {
+		return errors.Join(append(failed, err)...)
+	}
+	return errors.Join(failed...)
 }
 
 // writeParsedFile inserts one parsed transcript file (entries, content
 // messages, session metadata, and the ingest offset) into the open
 // writer transaction. Shared by the parallel batch writer (runWriter)
 // and the single-file Codex path (ingestCodexFile), so both sources go
-// through identical insert logic. Best-effort: individual insert
-// failures are logged, not propagated, matching the original loop.
-func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
-	// Grok session-level usage rows use a stable uuid and must refresh when
-	// signals.json grows; delete any prior copy so INSERT OR IGNORE can land.
-	if pf.source == "grok" {
-		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
-		_, _ = ws.tx.Exec(`
-			DELETE FROM messages WHERE session_id = ? AND mnemo_text(text, text_z) LIKE '[grok signals]%'`,
-			pf.sessionID)
-		_, _ = ws.tx.Exec(`
-			DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
-			pf.sessionID, usageUUID)
+// through identical insert logic. An entry or message insert error is
+// returned so the caller rolls the transaction back and does not commit
+// an offset past that line. A failed cursor write is returned for the
+// same reason.
+func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
+	if pf.snapshot != nil && !pf.restarted {
+		if err := s.checkJSONLResume(pf.path, pf.snapshot); err != nil {
+			return err
+		}
+	}
+	var replay *transcriptReplay
+	if pf.restarted {
+		var err error
+		replay, err = loadTranscriptReplay(ws.tx, pf.sessionID, pf.source)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Insert all raw entries and build entryIdx→entryID map.
 	// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 	// only record the entry ID when a row was actually inserted.
 	entryIDs := make(map[int]int64, len(pf.entries))
+	refreshed := make(map[int]bool)
+	var appendReplay *transcriptReplay
 	for i, e := range pf.entries {
-		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
-		if err != nil {
-			slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
-			continue
+		raw := string(e.raw)
+		if e.refresh {
+			id, err := ws.refreshSidecarEntry(pf.sessionID, raw)
+			if err != nil {
+				return err
+			}
+			if id != 0 {
+				entryIDs[i] = id
+				refreshed[i] = true
+				continue
+			}
+		} else if replay != nil {
+			var insert bool
+			var err error
+			raw, insert, err = replay.next(raw)
+			if err != nil {
+				return err
+			}
+			if !insert {
+				continue
+			}
 		}
-		n, _ := result.RowsAffected()
+		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, raw)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 && replay == nil {
+			collision, err := appendOffsetCollision(ws.tx, pf, raw)
+			if err != nil {
+				return err
+			}
+			if collision {
+				if appendReplay == nil {
+					appendReplay, err = loadTranscriptReplay(ws.tx, pf.sessionID, pf.source)
+					if err != nil {
+						return err
+					}
+				}
+				key, uuid, originalUUID, err := replayRecord(raw, pf.source)
+				if err != nil {
+					return err
+				}
+				raw, err = appendReplay.allocate(raw, key, uuid, originalUUID)
+				if err != nil {
+					return err
+				}
+				result, err = ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, raw)
+				if err != nil {
+					return err
+				}
+				n, err = result.RowsAffected()
+				if err != nil {
+					return err
+				}
+			}
+		}
 		if n > 0 {
 			if id, err := result.LastInsertId(); err == nil {
 				entryIDs[i] = id
+			} else {
+				return err
 			}
 		}
 	}
@@ -4373,12 +4633,24 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 		if entryID == 0 {
 			continue // entry was duplicate — skip associated messages
 		}
+		if refreshed[m.entryIdx] {
+			done, err := ws.refreshSidecarMessage(entryID, m)
+			if err != nil {
+				return err
+			}
+			if done {
+				continue
+			}
+		}
 		var toolInput any
 		if m.toolInput != nil {
 			toolInput = string(m.toolInput)
 		}
-		msgID, noise := ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+		msgID, noise, err := ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 			m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
+		if err != nil {
+			return err
+		}
 		if m.output != nil && noise == 0 && msgID != 0 && s.toolOutputsWritable() {
 			if err := ws.insertToolOutput(msgID, pf.sessionID, pf.project, m.toolUseID, m.output); err != nil {
 				slog.Warn("tool output insert failed", "session", pf.sessionID, "err", err)
@@ -4445,29 +4717,22 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 		}
 	}
 
-	// Update ingest offset + fingerprint (🎯T68.6 same-size
-	// rewrite detection). recordedSize/Mtime is nullable; an
-	// os.Stat error just records NULL — detection falls back to
-	// offset-vs-size on the next pass.
-	recSize, recMtime := statFingerprint(pf.path)
-	ws.tx.Exec(`INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-			offset = MAX(ingest_state.offset, excluded.offset),
-			recorded_size = CASE
-				WHEN excluded.offset >= ingest_state.offset THEN excluded.recorded_size
-				ELSE ingest_state.recorded_size
-			END,
-			recorded_mtime = CASE
-				WHEN excluded.offset >= ingest_state.offset THEN excluded.recorded_mtime
-				ELSE ingest_state.recorded_mtime
-			END`,
-		pf.path, pf.newOffset, recSize, recMtime)
-	s.mu.Lock()
-	if pf.newOffset > s.offsets[pf.path] {
-		s.offsets[pf.path] = pf.newOffset
+	// Tag after the metadata upsert. A fresh session_meta INSERT defaults
+	// source_status to live, which would hide a tag written earlier in
+	// this transaction. Moving the offset to the new, smaller size also
+	// hides the truncation from a later SourceDrift pass.
+	if pf.restarted {
+		if _, err := tagSourceStatus(ws.tx, pf.sessionID, pf.sourceClass, time.Now()); err != nil {
+			return err
+		}
 	}
-	s.mu.Unlock()
+
+	// Update ingest offset + fingerprint (🎯T68.6 same-size
+	// rewrite detection). A restarted read sets the offset absolutely:
+	// MAX would keep the old, larger cursor and skip the replacement's
+	// later appends. recordedSize/Mtime is nullable; an os.Stat error
+	// just records NULL — detection falls back to offset-vs-size.
+	return ws.putIngestCursor(pf.path, pf.newOffset, pf.restarted || isCursorStore(pf.path), pf.snapshot, pf.cursorStoreVersion)
 }
 
 // trimLineEnding strips a single trailing "\n" (and a preceding "\r"),
@@ -4486,20 +4751,8 @@ func trimLineEnding(b []byte) []byte {
 // parseFile reads and parses a JSONL transcript file, returning all
 // extracted messages and metadata. Pure computation — no DB access.
 func parseFile(path string, offset int64) (parsedFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return parsedFile{}, err
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		f.Seek(offset, 0)
-	}
-
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
-
-	reader := bufio.NewReader(f)
 
 	pf := parsedFile{
 		path:      path,
@@ -4587,28 +4840,19 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	// bufio.Reader.ReadBytes has no per-line size cap, so oversized lines
-	// (e.g. inline base64 images) are ingested rather than silently
-	// dropped as they were under bufio.Scanner's token limit (🎯T104). The
-	// offset is the running count of bytes consumed — always a true line
-	// boundary — so a resume never overshoots unread content; a non-EOF
-	// read error aborts without advancing it.
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line)
-		}
-		if readErr == io.EOF {
-			break
-		}
+	// scanJSONL counts only complete lines (🎯T104 still holds: ReadBytes
+	// has no per-line size cap). A partial tail is left for the next open,
+	// and a file that changes identity mid-read is returned uncommitted.
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, _, _ int64, _ *jsonlSnapshot) error {
+		handleLine(line)
+		return nil
+	})
+	if err != nil {
+		return parsedFile{}, err
 	}
-
 	pf.newOffset = consumed
+	pf.snapshot = snapshot
+
 	return pf, nil
 }
 
@@ -4714,43 +4958,15 @@ func (s *Store) Watch(ctx context.Context) error {
 	}
 
 	handlePath := func(name string, writeOrCreate bool, removeOrRename bool) {
+		if store := strings.TrimSuffix(name, "-wal"); store != name && isCursorStore(store) {
+			name = store
+			writeOrCreate = writeOrCreate || removeOrRename
+		}
 		name = canonPath(name)
 		if writeOrCreate && (strings.HasSuffix(name, ".jsonl") || isCursorStore(name)) {
 			poller.NoteEvent(name, time.Now())
 			db.enqueue(name, func() {
-				if isCodexRollout(name) {
-					if err := s.ingestCodexFile(name); err != nil {
-						slog.Error("ingest codex failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isGrokUpdates(name) {
-					if err := s.ingestGrokFile(name); err != nil {
-						slog.Error("ingest grok failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isCursorTranscript(name) {
-					if err := s.ingestCursorFile(name); err != nil {
-						slog.Error("ingest cursor failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isCursorStore(name) {
-					if err := s.ingestCursorStoreFile(name); err != nil {
-						slog.Error("ingest cursor store failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isOmpSession(name) {
-					if err := s.ingestOmpFile(name); err != nil {
-						slog.Error("ingest omp failed", "file", name, "err", err)
-					}
-					return
-				}
-				if err := s.ingestFile(name); err != nil {
-					slog.Error("ingest failed", "file", name, "err", err)
-				}
+				s.ingestJSONLPath(name)
 			})
 		}
 		if strings.HasSuffix(name, ".md") && strings.Contains(name, "/memory/") {
@@ -4859,8 +5075,18 @@ func (s *Store) Watch(ctx context.Context) error {
 // watchPollInterval is the safety-poll period used by Store.Watch (tests may shorten it).
 var watchPollInterval = 5 * time.Second
 
+func (s *Store) queueIngestRetry(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingIngestRetries == nil {
+		s.pendingIngestRetries = make(map[string]struct{})
+	}
+	s.pendingIngestRetries[path] = struct{}{}
+}
+
 // safetyPoll runs one bounded poll cycle using the shipped PollTracker and
-// invokes onNeed for each jsonl path that has grown past its offset.
+// invokes onNeed for files queued for retry and JSONL paths that have
+// grown past their offset.
 // This is the production recovery path for open/write/close writers when tree
 // events are missed (🎯T142.5).
 func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)) {
@@ -4872,7 +5098,22 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 	for p, off := range s.offsets {
 		offsets[p] = off
 	}
+	// Failed files may have no cursor at all, or a new generation
+	// shorter than their cursor. Give them a bounded retry without
+	// relying on size growth or another filesystem event.
+	retries := make(map[string]struct{}, min(len(s.pendingIngestRetries), fswatch.DefaultPollMaxPerTick))
+	for p := range s.pendingIngestRetries {
+		retries[p] = struct{}{}
+		delete(s.pendingIngestRetries, p)
+		if len(retries) == fswatch.DefaultPollMaxPerTick {
+			break
+		}
+	}
 	s.mu.Unlock()
+
+	for p := range retries {
+		onNeed(p)
+	}
 
 	// Use only a warm LiveSessions cache — never force a synchronous
 	// lsof +D of ~/.claude/projects on the poll path (that walk can take
@@ -4901,7 +5142,7 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 		},
 	})
 	for _, name := range cands {
-		if !strings.HasSuffix(name, ".jsonl") {
+		if _, retry := retries[name]; retry || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
 		onNeed(name)
@@ -4910,38 +5151,12 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 
 // ingestJSONLPath dispatches a transcript path to the correct ingest implementation.
 func (s *Store) ingestJSONLPath(path string) {
-	if isCodexRollout(path) {
-		if err := s.ingestCodexFile(path); err != nil {
-			slog.Error("ingest codex failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isGrokUpdates(path) {
-		if err := s.ingestGrokFile(path); err != nil {
-			slog.Error("ingest grok failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isCursorTranscript(path) {
-		if err := s.ingestCursorFile(path); err != nil {
-			slog.Error("ingest cursor failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isCursorStore(path) {
-		if err := s.ingestCursorStoreFile(path); err != nil {
-			slog.Error("ingest cursor store failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isOmpSession(path) {
-		if err := s.ingestOmpFile(path); err != nil {
-			slog.Error("ingest omp failed", "file", path, "err", err)
-		}
-		return
+	if store := strings.TrimSuffix(path, "-wal"); store != path && isCursorStore(store) {
+		path = store
 	}
 	if err := s.ingestFile(path); err != nil {
-		slog.Error("ingest failed", "file", path, "err", err)
+		s.queueIngestRetry(path)
+		slog.Error("watch ingest failed; queued for retry", "file", path, "err", err)
 	}
 }
 
@@ -7273,14 +7488,23 @@ var (
 // offset lands on a true line boundary (🎯T107).
 var testMidStreamCommitOffset func(int64)
 
+// testAfterJSONLLine, when non-nil, is called after each complete JSONL
+// line is delivered to a reader. Tests use it to append, truncate,
+// rotate, or rewrite the file between lines. Production leaves it nil.
+var testAfterJSONLLine func(path string, lines int)
+
+// testBeforeParsedWrite, when non-nil, runs on the batch writer after
+// parse and before the file's rows are inserted. Tests use it to replace
+// a file between those two steps. Production leaves it nil.
+var testBeforeParsedWrite func(pf parsedFile)
+
 func (s *Store) ingestFile(path string) error {
 	// Route rather than mangle (🎯T127). This is the Claude-format parser:
 	// it derives the session id from the FILENAME STEM and upserts
 	// session_meta without a source, so a foreign transcript reaching it
 	// produces a phantom session — stem-keyed, message-less, and tagged
 	// 'claude' by schema default. Four such rows exist in the wild from
-	// before Codex ingest landed. The caller already routes; this makes
-	// the invariant local so a future caller cannot reintroduce it.
+	// before Codex ingest landed.
 	if isCodexRollout(path) {
 		return s.ingestCodexFile(path)
 	}
@@ -7297,27 +7521,44 @@ func (s *Store) ingestFile(path string) error {
 		return s.ingestOmpFile(path)
 	}
 
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
+	err := s.ingestClaudeOnce(path, "")
+	if errors.Is(err, errTranscriptReplaced) {
+		return s.ingestClaudeOnce(path, s.jsonlRestartClass(path, err))
+	}
+	return err
+}
 
-	f, err := os.Open(path)
+// ingestClaudeOnce reads one Claude transcript. A retry passes its known
+// source status to restart from zero, retaining already indexed records.
+func (s *Store) ingestClaudeOnce(path, statusClass string) error {
+	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil // file deleted between event and open
+			return nil
 		}
 		return err
 	}
-	defer f.Close()
-
-	if offset > 0 {
-		f.Seek(offset, 0)
+	var offset int64
+	restarted := statusClass != ""
+	if !restarted {
+		d := s.jsonlResume(path, info)
+		if d.caughtUp {
+			return nil
+		}
+		restarted = d.restarted
+		statusClass = d.statusClass
+		if !restarted {
+			offset = d.offset
+		}
 	}
+	// absolute stays set for every cursor write of a replacement read.
+	// A mid-stream commit clears restarted so later lines still notice a
+	// second change, and that must not turn the final cursor into a MAX
+	// that keeps the old, larger offset.
+	absolute := restarted
 
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
-
-	reader := bufio.NewReader(f)
 
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
@@ -7327,17 +7568,29 @@ func (s *Store) ingestFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { ws.tx.Rollback() }()
-	defer ws.Close()
+	defer func() {
+		ws.Close()
+		_ = ws.tx.Rollback()
+	}()
+
+	var replay *transcriptReplay
+	if absolute {
+		replay, err = loadTranscriptReplay(ws.tx, sessionID, "claude")
+		if err != nil {
+			return err
+		}
+	}
 
 	// handleLine writes one JSONL line into the current transaction. Its
-	// guard clauses skip a line by returning rather than a loop `continue`,
-	// so the periodic-commit and EOF handling in the read loop always run.
-	// It closes over ws, which is reassigned after each mid-stream commit.
-	handleLine := func(line []byte) {
+	// guard clauses skip a line by returning nil rather than a loop
+	// `continue`, so the periodic-commit and EOF handling in the read
+	// loop always run. An insert error is returned before that commit:
+	// the offset must not move past a line that was not stored. It
+	// closes over ws, which is reassigned after each mid-stream commit.
+	handleLine := func(line []byte) error {
 		var entry jsonlEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			return
+			return nil
 		}
 
 		// Extract session metadata from any entry.
@@ -7353,21 +7606,40 @@ func (s *Store) ingestFile(path string) error {
 			ts = time.Now().Format(time.RFC3339)
 		}
 
+		raw := string(line)
+		if replay != nil {
+			var insert bool
+			var err error
+			raw, insert, err = replay.next(raw)
+			if err != nil {
+				return err
+			}
+			if !insert {
+				return nil
+			}
+		}
+
 		// Insert every JSONL line into entries table.
 		// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 		// only record the entry ID when a row was actually inserted.
 		var entryID int64
-		result, entryErr := ws.insertEntry(sessionID, project, entry.Type, ts, string(line))
-		if entryErr == nil {
-			if n, _ := result.RowsAffected(); n > 0 {
-				entryID, _ = result.LastInsertId()
+		result, entryErr := ws.insertEntry(sessionID, project, entry.Type, ts, raw)
+		if entryErr != nil {
+			return entryErr
+		}
+		n, _ := result.RowsAffected()
+		if n > 0 {
+			var idErr error
+			entryID, idErr = result.LastInsertId()
+			if idErr != nil {
+				return idErr
 			}
 		}
 
 		// Only extract content blocks for user/assistant messages.
 		// Skip if the entry was a duplicate (INSERT OR IGNORE, entryID == 0).
 		if entry.Type != "user" && entry.Type != "assistant" || entryID == 0 {
-			return
+			return nil
 		}
 
 		blocks := extractBlocks(entry.Message)
@@ -7395,8 +7667,11 @@ func (s *Store) ingestFile(path string) error {
 				isErr = 1
 			}
 
-			msgID, effectiveNoise := ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+			msgID, effectiveNoise, err := ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
 				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
+			if err != nil {
+				return err
+			}
 			count++
 			if (b.ContentType == "tool_result" || (b.ContentType == "text" && entry.Type == "user")) &&
 				effectiveNoise == 0 && msgID != 0 && s.toolOutputsWritable() {
@@ -7413,63 +7688,62 @@ func (s *Store) ingestFile(path string) error {
 				metaCompactorInternal = 1
 			}
 		}
+		return nil
 	}
 
 	lastCommit := time.Now()
 	linesSinceLockCheck := 0
 
-	// bufio.Reader.ReadBytes has no per-line size cap, so oversized lines
-	// are ingested rather than silently dropped (🎯T104). The committed
-	// offset is the running count of bytes consumed — a true line boundary
-	// — not f.Seek(0,1), which reads ahead of the last processed line and
-	// at a mid-stream commit would persist an offset past not-yet-written
-	// content, so a crash would skip it (🎯T107). A non-EOF read error
-	// aborts without advancing the offset.
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return fmt.Errorf("read %s: %w", path, readErr)
-		}
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line)
-		}
-
-		// Periodically commit to avoid long-running transactions.
-		linesSinceLockCheck++
-		if linesSinceLockCheck >= ingestLineCheckInterval {
-			linesSinceLockCheck = 0
-			if time.Since(lastCommit) >= ingestCommitInterval {
-				// Commit current transaction with offset update.
-				recSize, recMtime := statFingerprint(path)
-				ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-					VALUES (?, ?, ?, ?)`, path, consumed, recSize, recMtime)
-
-				ws.Close()
-				if err := ws.tx.Commit(); err != nil {
-					return err
-				}
-
-				s.mu.Lock()
-				s.offsets[path] = consumed
-				s.mu.Unlock()
-
-				if testMidStreamCommitOffset != nil {
-					testMidStreamCommitOffset(consumed)
-				}
-
-				// Start a new transaction.
-				ws, err = s.newWriterState()
-				if err != nil {
-					return err
-				}
-				lastCommit = time.Now()
+	// The committed offset is the byte just past a complete line (🎯T107).
+	// A partial tail is not counted. A restarted read replaces the
+	// stored cursor so it cannot keep an offset from the old file.
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, _, end int64, snapshot *jsonlSnapshot) error {
+		if linesSinceLockCheck == 0 && !restarted {
+			if err := s.checkJSONLResume(path, snapshot); err != nil {
+				return err
 			}
 		}
+		if err := handleLine(line); err != nil {
+			return err
+		}
 
-		if readErr == io.EOF {
-			break
+		linesSinceLockCheck++
+		if linesSinceLockCheck < ingestLineCheckInterval {
+			return nil
+		}
+		linesSinceLockCheck = 0
+		if time.Since(lastCommit) < ingestCommitInterval {
+			return nil
+		}
+		if restarted {
+			if _, err := tagSourceStatus(ws.tx, sessionID, statusClass, time.Now()); err != nil {
+				return err
+			}
+		}
+		if err := ws.putIngestCursor(path, end, absolute, snapshot, ""); err != nil {
+			return err
+		}
+		if err := s.commitIngest(ws); err != nil {
+			return err
+		}
+		restarted = false
+		if testMidStreamCommitOffset != nil {
+			testMidStreamCommitOffset(end)
+		}
+		next, err := s.newWriterState()
+		if err != nil {
+			return err
+		}
+		ws = next
+		lastCommit = time.Now()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !restarted {
+		if err := s.checkJSONLResume(path, snapshot); err != nil {
+			return err
 		}
 	}
 
@@ -7495,18 +7769,20 @@ func (s *Store) ingestFile(path string) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
-	recSize, recMtime := statFingerprint(path)
-	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-		VALUES (?, ?, ?, ?)`, path, consumed, recSize, recMtime)
+	// After the metadata upsert: its INSERT defaults source_status to live.
+	if absolute {
+		if _, err := tagSourceStatus(ws.tx, sessionID, statusClass, time.Now()); err != nil {
+			return err
+		}
+	}
 
-	ws.Close()
-	if err := ws.tx.Commit(); err != nil {
+	if err := ws.putIngestCursor(path, consumed, absolute, snapshot, ""); err != nil {
 		return err
 	}
 
-	s.mu.Lock()
-	s.offsets[path] = consumed
-	s.mu.Unlock()
+	if err := s.commitIngest(ws); err != nil {
+		return err
+	}
 
 	if count > 0 {
 		slog.Debug("ingested", "file", filepath.Base(path), "messages", count)

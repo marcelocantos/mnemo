@@ -11,11 +11,8 @@
 package store
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -146,22 +143,9 @@ type ompBlock struct {
 // parseOmpFile reads an Oh My Pi session JSONL from the given byte offset
 // and transforms it into a parsedFile. Pure computation — no DB access.
 func parseOmpFile(path string, offset int64) (parsedFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return parsedFile{}, err
-	}
-	defer f.Close()
-
-	info, statErr := f.Stat()
 	fallbackTS := time.Now().UTC().Format(time.RFC3339)
-	if statErr == nil {
+	if info, err := os.Stat(path); err == nil {
 		fallbackTS = info.ModTime().UTC().Format(time.RFC3339)
-	}
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return parsedFile{}, err
-		}
 	}
 
 	sessionID := ompSessionID(path)
@@ -172,7 +156,6 @@ func parseOmpFile(path string, offset int64) (parsedFile, error) {
 		project:   "omp",
 	}
 
-	reader := bufio.NewReader(f)
 	lastTS := fallbackTS
 	userTopic := false
 
@@ -232,22 +215,16 @@ func parseOmpFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		thisStart := consumed
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line, thisStart)
-		}
-		if readErr == io.EOF {
-			break
-		}
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, start, _ int64, _ *jsonlSnapshot) error {
+		handleLine(line, start)
+		return nil
+	})
+	if err != nil {
+		return parsedFile{}, err
 	}
 	pf.newOffset = consumed
+	pf.snapshot = snapshot
+
 	return pf, nil
 }
 
@@ -480,35 +457,5 @@ func ompNormalizeUsage(msg map[string]any) {
 
 // ingestOmpFile ingests a single Oh My Pi session JSONL incrementally.
 func (s *Store) ingestOmpFile(path string) error {
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if offset >= info.Size() {
-		return nil
-	}
-
-	pf, err := parseOmpFile(path, offset)
-	if err != nil {
-		return err
-	}
-
-	ws, err := s.newWriterState()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = ws.tx.Rollback() }()
-	defer ws.Close()
-
-	s.writeParsedFile(ws, pf)
-
-	ws.Close()
-	return ws.tx.Commit()
+	return s.ingestParsed(path, parseOmpFile)
 }

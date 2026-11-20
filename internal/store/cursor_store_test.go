@@ -13,6 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 )
 
 func TestIsCursorStore(t *testing.T) {
@@ -340,5 +343,284 @@ func writeCursorStoreFixture(t *testing.T, path, toolMarker, cwd string) {
 		if _, err := db.Exec(`INSERT INTO blobs(id, data) VALUES (?, ?)`, id, blob); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestDefectCursorStoreFailedReadStopsTheIndex(t *testing.T) {
+	home := t.TempDir()
+	side := filepath.Join(home, "side", "store.db")
+	writeCursorStoreFixture(t, side, "beta-tool-result-marker", "/Users/dev/work/github.com/acme/webapp")
+	valid, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "chats", "abc", cursorSessUUID, "store.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, len(valid)+8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	err = s.ingestCursorStoreFile(path)
+	var off int64
+	cursorErr := s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&off)
+	if err := os.WriteFile(path, valid, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err2 := s.ingestCursorStoreFile(path)
+	if n := countText(t, s, "beta-tool-result-marker"); n != 1 {
+		t.Fatalf("valid store.db (%d bytes) was not indexed after a failed read of a larger file recorded offset %d (second err=%v hits=%d)", len(valid), off, err2, n)
+	}
+	if err == nil || cursorErr != sql.ErrNoRows {
+		t.Fatalf("failed read err=%v; cursor offset=%d err=%v, want no cursor", err, off, cursorErr)
+	}
+}
+
+func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "chats", "abc", "11111111-2222-3333-4444-555555555555", "store.db")
+	writeCursorStoreFixture(t, path, "original-tool-marker-xxxxxx", "/tmp/proj")
+	stamp := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	checkImage := checkReferencedMessage(t, s, "original-tool-marker-xxxxxx")
+	if _, err := s.writeDB.Exec(`
+		INSERT INTO messages (session_id, project, role, text, timestamp, content_type)
+		VALUES (?, '', 'user', 'jsonl-sibling-must-stay', '2026-11-20T00:00:00Z', 'text')`,
+		"11111111-2222-3333-4444-555555555555"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), 'original-tool-marker-xxxxxx', 'original-tool-marker-YYYYYY') AS BLOB) WHERE CAST(data AS TEXT) LIKE '%original-tool-marker-xxxxxx%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := res.RowsAffected()
+	if err != nil || updated != 1 {
+		t.Fatalf("unexpected blob UPDATE rows=%d err=%v", updated, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the main-file stat unchanged. The SQLite header change
+	// counter must be enough to notice this page update.
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(before, after) {
+		t.Fatal("fixture changed the main database's size, mtime, or identity")
+	}
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	n := countText(t, s, "original-tool-marker-YYYYYY")
+	if n != 1 {
+		t.Fatalf("same-size store.db (%d bytes) was not re-read after its blob changed (rows=%d)", after.Size(), updated)
+	}
+	if old := countText(t, s, "original-tool-marker-xxxxxx"); old != 0 {
+		t.Fatalf("old blob text still indexed (%d)", old)
+	}
+	checkImage("original-tool-marker-YYYYYY")
+	for _, fts := range []string{
+		`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?`,
+		`SELECT COUNT(*) FROM messages_fts_stem WHERE messages_fts_stem MATCH ?`,
+	} {
+		for term, want := range map[string]int{`"original-tool-marker-xxxxxx"`: 0, `"original-tool-marker-YYYYYY"`: 1} {
+			var hits int
+			if err := s.readDB.QueryRow(fts, term).Scan(&hits); err != nil || hits != want {
+				t.Fatalf("search %q for %q returned %d, want %d, err %v", fts, term, hits, want, err)
+			}
+		}
+	}
+	if sib := countText(t, s, "jsonl-sibling-must-stay"); sib != 1 {
+		t.Fatalf("session rows outside the rewritten blob were removed (%d)", sib)
+	}
+}
+
+func TestCursorStoreFingerprintSeesWAL(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "before-wal-tool-result", "/tmp/proj")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;`); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "before-wal-tool-result")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), ?, ?) AS BLOB)
+		WHERE INSTR(CAST(data AS TEXT), ?) > 0`, "before-wal-tool-result", "after-wal-tool-result", "before-wal-tool-result"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("main database changed during WAL-only update, err=%v", err)
+	}
+	if !fswatch.Interest(path+"-wal", fswatch.ModeTranscript) {
+		t.Fatal("transcript watcher drops Cursor WAL events")
+	}
+	s.ingestJSONLPath(path + "-wal")
+	expectOnce(t, s, "after-wal-tool-result")
+	if n := countText(t, s, "before-wal-tool-result"); n != 0 {
+		t.Fatalf("old WAL-backed result is still indexed %d times", n)
+	}
+}
+
+func TestCursorStoreSnapshotDoesNotClaimNewerPages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "before-db-rewrite-marker", "/tmp/proj")
+	s := newTestStore(t, t.TempDir())
+	pf, err := parseCursorStoreFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), ?, ?) AS BLOB)
+		WHERE INSTR(CAST(data AS TEXT), ?) > 0`, "before-db-rewrite-marker", "after-db-rewrite-marker", "before-db-rewrite-marker"); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := s.newWriterState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.tx.Rollback()
+	defer ws.Close()
+	if err := s.writeParsedFile(ws, pf); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.commitIngest(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "after-db-rewrite-marker")
+}
+
+func TestCursorStoreReadOnlyBusyTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "busy-timeout-marker", "/tmp/proj")
+	db, err := openCursorStoreRO(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var timeout int
+	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil || timeout != cursorStoreBusyTimeout {
+		t.Fatalf("read-only busy_timeout = %d, err = %v", timeout, err)
+	}
+}
+
+// TestCursorStoreUpgradeKeepsTheOldCursor is the first start after an
+// install of this code over a database the previous binary wrote. That
+// binary stored "caught up" as offset >= file size and had no
+// prefix_sha256. The new fingerprint must not make every store.db look
+// unread.
+func TestCursorStoreUpgradeKeepsTheOldCursor(t *testing.T) {
+	const marker = "legacy-must-not-reread-tool"
+	chats := filepath.Join(t.TempDir(), "chats")
+	path := filepath.Join(chats, "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, marker, "/tmp/proj")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf, err := parseCursorStoreFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wouldIndex bool
+	for _, m := range pf.messages {
+		if strings.Contains(m.text, marker) {
+			wouldIndex = true
+		}
+	}
+	if !wouldIndex {
+		t.Fatal("fixture produces no tool row; a re-read would be invisible")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	if err := upgradeSchemaWith(dbPath, previousSchemaSQL(t)); err != nil {
+		t.Fatal(err)
+	}
+	oldDB, err := sql.Open(writerDriverName, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldDB.Exec(
+		`INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime) VALUES (?, ?, ?, ?)`,
+		path, info.Size(), info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldDB.Exec(
+		`INSERT INTO messages (session_id, project, role, text, timestamp, content_type)
+		 VALUES (?, 'proj', 'user', 'legacy cursor sentinel', '2020-01-01T00:00:00Z', 'text')`,
+		cursorSessUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dbPath, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	s.AwaitStartup()
+
+	s.SetCursorChatRoots([]string{chats})
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if n := countText(t, s, marker); n != 0 {
+		t.Fatalf("upgrade re-read a caught-up store.db (%d new rows)", n)
+	}
+	expectOnce(t, s, "legacy cursor sentinel")
+	var off int64
+	var prefix sql.NullString
+	if err := s.readDB.QueryRow(
+		`SELECT offset, prefix_sha256 FROM ingest_state WHERE path = ?`, path).Scan(&off, &prefix); err != nil {
+		t.Fatal(err)
+	}
+	if off != info.Size() {
+		t.Fatalf("upgrade moved the cursor from %d to %d", info.Size(), off)
+	}
+	if !prefix.Valid || prefix.String == "" {
+		t.Fatal("legacy cursor was not given a fingerprint")
+	}
+	if prefix.String != cursorStoreFingerprint(path) {
+		t.Fatalf("adopted fingerprint %q, file is %q", prefix.String, cursorStoreFingerprint(path))
 	}
 }

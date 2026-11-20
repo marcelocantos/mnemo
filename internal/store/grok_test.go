@@ -399,6 +399,96 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	}
 }
 
+func TestDefectGrokTailIngestDeletesSignalsUsage(t *testing.T) {
+	grokHome := t.TempDir()
+	path := writeGrokSession(t, grokHome, "/Users/dev/work/github.com/acme/webapp")
+	s := newTestStore(t, t.TempDir())
+	s.SetGrokRoots([]string{filepath.Join(grokHome, "sessions")})
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	var tokens int
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(SUM(input_tokens), 0) FROM entries_v WHERE session_id = ?`, grokSessUUID,
+	).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 12345 || countText(t, s, "[grok signals]") != 1 {
+		t.Fatalf("first ingest tokens=%d signals=%d, want 12345 and 1", tokens, countText(t, s, "[grok signals]"))
+	}
+	checkImage := checkReferencedMessage(t, s, "context_tokens=12345/")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"timestamp":1783679400,"method":"session/update","params":{"sessionId":"` + grokSessUUID + `","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"a later turn that should not erase usage"}}}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "signals.json"),
+		[]byte(`{"contextTokensUsed":99999,"contextWindowTokens":500000,"primaryModelId":"grok-4.5","toolCallCount":3,"turnCount":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	n := countText(t, s, "[grok signals]")
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(SUM(input_tokens), 0) FROM entries_v WHERE session_id = ?`, grokSessUUID,
+	).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || tokens != 99999 {
+		t.Fatalf("signals usage row did not survive the tail ingest (messages=%d input_tokens=%d)", n, tokens)
+	}
+	checkImage("context_tokens=99999/")
+	if countText(t, s, "a later turn that should not erase usage") != 1 {
+		t.Fatal("appended turn was not indexed")
+	}
+}
+
+func TestGrokSignalsReplacementUsesSyntheticEntry(t *testing.T) {
+	root := t.TempDir()
+	path := writeGrokSession(t, root, "/tmp/proj")
+	s := newTestStore(t, t.TempDir())
+	s.SetGrokRoots([]string{filepath.Join(root, "sessions")})
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(path), "signals.json")); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mention := "[grok signals] real user mentioned grok-" + grokSessUUID + "-signals-usage"
+	writeLines(t, path, string(transcript)+readerGrok.line(mention))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=12345/")
+	expectOnce(t, s, mention)
+
+	writeLines(t, filepath.Join(filepath.Dir(path), "signals.json"), `{"contextTokensUsed":99999}`)
+	writeLines(t, path, string(transcript)+readerGrok.line(mention)+readerGrok.line("turn with refreshed signals"))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=99999/")
+	expectOnce(t, s, mention)
+
+	writeLines(t, filepath.Join(filepath.Dir(path), "signals.json"), `{"contextTokensUsed":0}`)
+	writeLines(t, path, string(transcript)+readerGrok.line(mention)+readerGrok.line("turn with refreshed signals")+readerGrok.line("turn after context reset"))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=0/")
+	if got := countText(t, s, "context_tokens=99999/"); got != 0 {
+		t.Fatalf("old usage result indexed %d times after context reset", got)
+	}
+}
+
 func TestRepoFromRemote(t *testing.T) {
 	if g := repoFromRemote("git@github.com:acme/webapp.git"); g != "acme/webapp" {
 		t.Errorf("ssh remote = %q", g)

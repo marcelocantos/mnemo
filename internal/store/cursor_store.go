@@ -9,10 +9,13 @@ package store
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,10 +224,132 @@ func cursorDecodeMetaValue(raw any) any {
 	}
 }
 
+// Match the SQLite driver's default and state the lock wait explicitly.
+const cursorStoreBusyTimeout = 5000
+
+// sqliteHeaderMagic is the 16-byte header. The file change counter is the
+// big-endian uint32 at offset 24. WAL mode may leave that counter alone
+// until a checkpoint, so the fingerprint also names the -wal sibling.
+const sqliteHeaderMagic = "SQLite format 3\x00"
+
 func openCursorStoreRO(path string) (*sql.DB, error) {
 	// mode=ro avoids taking a write lock on a store Cursor may hold open.
-	dsn := "file:" + filepath.ToSlash(path) + "?mode=ro"
+	dsn := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=%d", filepath.ToSlash(path), cursorStoreBusyTimeout)
 	return sql.Open("sqlite3", dsn)
+}
+
+// cursorStoreFingerprint is the identity stored in prefix_sha256 for a
+// store.db. It changes when the main file's size, mtime, or header
+// change counter changes, and when the sibling -wal appears, grows, or
+// is rewritten. An empty string means the file could not be stated.
+func cursorStoreFingerprint(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	walSize, walMtime := cursorStoreSidecar(path + "-wal")
+	return fmt.Sprintf("size=%d mtime=%s change=%d wal_size=%d wal_mtime=%s",
+		info.Size(),
+		info.ModTime().UTC().Format(time.RFC3339Nano),
+		sqliteChangeCounter(path),
+		walSize,
+		walMtime)
+}
+
+func cursorStoreSidecar(path string) (int64, string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1, ""
+	}
+	return info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano)
+}
+
+func sqliteChangeCounter(path string) uint32 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, sqliteChangeCounterOff+4)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return 0
+	}
+	if string(buf[:len(sqliteHeaderMagic)]) != sqliteHeaderMagic {
+		return 0
+	}
+	return binary.BigEndian.Uint32(buf[sqliteChangeCounterOff:])
+}
+
+const sqliteChangeCounterOff = 24
+
+// cursorStoreCaughtUp is true when a previous read committed a cursor at
+// the current main-file size and the fingerprint still matches. A failed
+// read leaves no cursor. Growth, a shrink, or a different fingerprint is
+// read again. A shorter store.db is not the JSONL durable-truncation tier.
+//
+// An upgrade from the schema that had no prefix_sha256 leaves a caught-up
+// cursor (offset == size) with an empty fingerprint. That empty value is
+// the column default, not a page change. Adopting the current fingerprint
+// in place keeps the cursor where the previous binary left it. A later
+// change to the pages still mismatches the adopted value.
+func (s *Store) cursorStoreCaughtUp(path string, size int64) bool {
+	s.mu.Lock()
+	off := s.offsets[path]
+	stored := s.gens[path].prefix
+	s.mu.Unlock()
+	if off <= 0 || off < size {
+		return false
+	}
+	fp := cursorStoreFingerprint(path)
+	if fp == "" {
+		return false
+	}
+	if stored == fp {
+		return true
+	}
+	if stored == "" && off == size {
+		s.adoptCursorStoreFingerprint(path, fp)
+		return true
+	}
+	return false
+}
+
+// adoptCursorStoreFingerprint records fp on a legacy cursor without
+// moving offset. A schema that has not grown prefix_sha256 yet cannot
+// store it; the in-memory generation still counts as caught up so this
+// process does not re-read the store on every pass.
+func (s *Store) adoptCursorStoreFingerprint(path, fp string) {
+	if fp == "" {
+		return
+	}
+	res, err := s.writeDB.Exec(
+		`UPDATE ingest_state SET prefix_sha256 = ?
+		 WHERE path = ? AND (prefix_sha256 IS NULL OR prefix_sha256 = '')`,
+		fp, path)
+	if err != nil {
+		if strings.Contains(err.Error(), "prefix_sha256") {
+			s.mu.Lock()
+			g := s.gens[path]
+			g.prefix = fp
+			s.gens[path] = g
+			s.mu.Unlock()
+			return
+		}
+		slog.Warn("adopt cursor store fingerprint", "path", path, "err", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var got sql.NullString
+		if scanErr := s.readDB.QueryRow(
+			`SELECT prefix_sha256 FROM ingest_state WHERE path = ?`, path).Scan(&got); scanErr == nil && got.Valid && got.String != "" {
+			fp = got.String
+		}
+	}
+	s.mu.Lock()
+	g := s.gens[path]
+	g.prefix = fp
+	s.gens[path] = g
+	s.mu.Unlock()
 }
 
 type cursorStoreToolBlob struct {
@@ -245,7 +370,8 @@ type cursorStoreToolPart struct {
 // parseCursorStoreFile reads tool-result JSON blobs from a Cursor CLI
 // store.db. Binary DAG nodes, system/user/assistant JSON, and unknown
 // shapes are skipped. offset is ignored for reading (SQLite is not
-// append-log); newOffset is set to the file size so growth re-triggers.
+// append-log). newOffset is the file size only after the blob query
+// succeeds: a failed read must not hand the caller a cursor to commit.
 func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 	_ = offset
 	info, err := os.Stat(path)
@@ -264,7 +390,9 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 		project:   cursorProject(cwd),
 		topic:     meta.title,
 		model:     meta.model,
-		newOffset: info.Size(),
+		// Capture the version before the read. A concurrent Cursor commit
+		// may change it while the SELECT still sees the earlier snapshot.
+		cursorStoreVersion: cursorStoreFingerprint(path),
 	}
 	if meta.title != "" && len(pf.topic) > 200 {
 		pf.topic = pf.topic[:197] + "..."
@@ -272,14 +400,15 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 
 	db, err := openCursorStoreRO(path)
 	if err != nil {
-		return pf, err
+		return parsedFile{}, err
 	}
 	defer db.Close()
 
 	rows, err := db.Query(`SELECT id, data FROM blobs`)
 	if err != nil {
-		// Empty or unfamiliar schema — treat as no content, not fatal.
-		return pf, nil
+		// Unreadable, locked past the busy timeout, or not a store yet.
+		// The caller must not record a cursor for this attempt.
+		return parsedFile{}, err
 	}
 	defer rows.Close()
 
@@ -288,7 +417,7 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 		var blobID string
 		var data []byte
 		if err := rows.Scan(&blobID, &data); err != nil {
-			continue
+			return parsedFile{}, err
 		}
 		if len(data) == 0 || data[0] != '{' {
 			continue // binary DAG / non-JSON
@@ -339,6 +468,7 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 				entryType: "user",
 				timestamp: fallbackTS,
 				raw:       raw,
+				refresh:   true,
 			})
 			pf.messages = append(pf.messages, parsedMessage{
 				entryIdx:    entryIdx,
@@ -352,6 +482,10 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return parsedFile{}, err
+	}
+	pf.newOffset = info.Size()
 	return pf, nil
 }
 
@@ -399,13 +533,10 @@ func cursorJSONText(raw json.RawMessage) string {
 }
 
 // ingestCursorStoreFile ingests tool results from a Cursor CLI store.db.
-// Re-reads the whole DB on each size growth; INSERT OR IGNORE on
-// cursor-<session>-<blobId> keeps re-ingest idempotent.
+// A file whose main-file size has not grown is still read when its
+// fingerprint changed. The projection for a known blob UUID is
+// refreshed in place so references to it keep their IDs.
 func (s *Store) ingestCursorStoreFile(path string) error {
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
-
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -413,9 +544,12 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 		}
 		return err
 	}
-	if offset >= info.Size() && offset > 0 {
+	if s.cursorStoreCaughtUp(path, info.Size()) {
 		return nil
 	}
+	s.mu.Lock()
+	offset := s.offsets[path]
+	s.mu.Unlock()
 
 	pf, err := parseCursorStoreFile(path, offset)
 	if err != nil {
@@ -429,8 +563,9 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 	defer func() { _ = ws.tx.Rollback() }()
 	defer ws.Close()
 
-	s.writeParsedFile(ws, pf)
+	if err := s.writeParsedFile(ws, pf); err != nil {
+		return err
+	}
 
-	ws.Close()
-	return ws.tx.Commit()
+	return s.commitIngest(ws)
 }
