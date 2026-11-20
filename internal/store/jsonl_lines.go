@@ -318,7 +318,7 @@ func (snapshot *jsonlSnapshot) check(path string) error {
 // offset (a restarted read of a replacement file); otherwise the offset
 // only moves forward, so a stale writer cannot walk it backwards.
 // A database that has not yet grown prefix_sha256 is written without it.
-func (ws *writerState) putIngestCursor(path string, offset int64, absolute bool, snapshot *jsonlSnapshot) error {
+func (ws *writerState) putIngestCursor(path string, offset int64, absolute bool, snapshot *jsonlSnapshot, cursorStoreVersion string) error {
 	recSize, recMtime := statFingerprint(path)
 	sum := ""
 	id := fileIdentOf(path)
@@ -331,11 +331,8 @@ func (ws *writerState) putIngestCursor(path string, offset int64, absolute bool,
 		recSize = snapshot.info.Size()
 		recMtime = snapshot.info.ModTime().UTC().Format(time.RFC3339Nano)
 	} else if isCursorStore(path) {
-		// store.db reuses this column for its size/mtime/change-counter
-		// fingerprint. A JSONL prefix hash would not change on an
-		// in-page UPDATE past the sampled window, and the header
-		// counter alone misses an uncheckpointed WAL.
-		sum = cursorStoreFingerprint(path)
+		// Store the version observed before reading the SQLite snapshot.
+		sum = cursorStoreVersion
 	} else if n := prefixLen(offset); n > 0 {
 		if b, err := prefixSample(path, n); err == nil {
 			sum = prefixHash(b)

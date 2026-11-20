@@ -3789,6 +3789,8 @@ type parsedFile struct {
 	topic     string
 	newOffset int64
 	snapshot  *jsonlSnapshot
+	// Version observed before reading a Cursor store.db snapshot.
+	cursorStoreVersion string
 	// source is the producing agent ('claude', 'codex', 'grok', 'cursor', or 'omp').
 	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
@@ -4539,7 +4541,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 	// MAX would keep the old, larger cursor and skip the replacement's
 	// later appends. recordedSize/Mtime is nullable; an os.Stat error
 	// just records NULL — detection falls back to offset-vs-size.
-	return ws.putIngestCursor(pf.path, pf.newOffset, pf.restarted || isCursorStore(pf.path), pf.snapshot)
+	return ws.putIngestCursor(pf.path, pf.newOffset, pf.restarted || isCursorStore(pf.path), pf.snapshot, pf.cursorStoreVersion)
 }
 
 // trimLineEnding strips a single trailing "\n" (and a preceding "\r"),
@@ -4765,43 +4767,15 @@ func (s *Store) Watch(ctx context.Context) error {
 	}
 
 	handlePath := func(name string, writeOrCreate bool, removeOrRename bool) {
+		if store := strings.TrimSuffix(name, "-wal"); store != name && isCursorStore(store) {
+			name = store
+			writeOrCreate = writeOrCreate || removeOrRename
+		}
 		name = canonPath(name)
 		if writeOrCreate && (strings.HasSuffix(name, ".jsonl") || isCursorStore(name)) {
 			poller.NoteEvent(name, time.Now())
 			db.enqueue(name, func() {
-				if isCodexRollout(name) {
-					if err := s.ingestCodexFile(name); err != nil {
-						slog.Error("ingest codex failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isGrokUpdates(name) {
-					if err := s.ingestGrokFile(name); err != nil {
-						slog.Error("ingest grok failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isCursorTranscript(name) {
-					if err := s.ingestCursorFile(name); err != nil {
-						slog.Error("ingest cursor failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isCursorStore(name) {
-					if err := s.ingestCursorStoreFile(name); err != nil {
-						slog.Error("ingest cursor store failed", "file", name, "err", err)
-					}
-					return
-				}
-				if isOmpSession(name) {
-					if err := s.ingestOmpFile(name); err != nil {
-						slog.Error("ingest omp failed", "file", name, "err", err)
-					}
-					return
-				}
-				if err := s.ingestFile(name); err != nil {
-					slog.Error("ingest failed", "file", name, "err", err)
-				}
+				s.ingestJSONLPath(name)
 			})
 		}
 		if strings.HasSuffix(name, ".md") && strings.Contains(name, "/memory/") {
@@ -4961,6 +4935,9 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 
 // ingestJSONLPath dispatches a transcript path to the correct ingest implementation.
 func (s *Store) ingestJSONLPath(path string) {
+	if store := strings.TrimSuffix(path, "-wal"); store != path && isCursorStore(store) {
+		path = store
+	}
 	if isCodexRollout(path) {
 		if err := s.ingestCodexFile(path); err != nil {
 			slog.Error("ingest codex failed", "file", path, "err", err)
@@ -7528,7 +7505,7 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		if time.Since(lastCommit) < ingestCommitInterval {
 			return nil
 		}
-		if err := ws.putIngestCursor(path, end, restarted, snapshot); err != nil {
+		if err := ws.putIngestCursor(path, end, restarted, snapshot, ""); err != nil {
 			return err
 		}
 		if err := s.commitIngest(ws); err != nil {
@@ -7577,7 +7554,7 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
-	if err := ws.putIngestCursor(path, consumed, restarted, snapshot); err != nil {
+	if err := ws.putIngestCursor(path, consumed, restarted, snapshot, ""); err != nil {
 		return err
 	}
 

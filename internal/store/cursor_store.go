@@ -223,8 +223,7 @@ func cursorDecodeMetaValue(raw any) any {
 	}
 }
 
-// cursorStoreBusyTimeout is how long a read-only open waits when Cursor
-// holds the write lock. Without it a lock is an immediate query error.
+// Match the SQLite driver's default and state the lock wait explicitly.
 const cursorStoreBusyTimeout = 5000
 
 // sqliteHeaderMagic is the 16-byte header. The file change counter is the
@@ -337,6 +336,9 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 		project:   cursorProject(cwd),
 		topic:     meta.title,
 		model:     meta.model,
+		// Capture the version before the read. A concurrent Cursor commit
+		// may change it while the SELECT still sees the earlier snapshot.
+		cursorStoreVersion: cursorStoreFingerprint(path),
 	}
 	if meta.title != "" && len(pf.topic) > 200 {
 		pf.topic = pf.topic[:197] + "..."
@@ -361,7 +363,7 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 		var blobID string
 		var data []byte
 		if err := rows.Scan(&blobID, &data); err != nil {
-			continue
+			return parsedFile{}, err
 		}
 		if len(data) == 0 || data[0] != '{' {
 			continue // binary DAG / non-JSON

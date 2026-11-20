@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 )
 
 func TestIsCursorStore(t *testing.T) {
@@ -361,7 +363,7 @@ func TestDefectCursorStoreFailedReadStopsTheIndex(t *testing.T) {
 	s := newTestStore(t, t.TempDir())
 	err = s.ingestCursorStoreFile(path)
 	var off int64
-	_ = s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&off)
+	cursorErr := s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&off)
 	if err := os.WriteFile(path, valid, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -369,8 +371,8 @@ func TestDefectCursorStoreFailedReadStopsTheIndex(t *testing.T) {
 	if n := countText(t, s, "beta-tool-result-marker"); n != 1 {
 		t.Fatalf("valid store.db (%d bytes) was not indexed after a failed read of a larger file recorded offset %d (second err=%v hits=%d)", len(valid), off, err2, n)
 	}
-	if err != nil && off != 0 {
-		t.Fatalf("failed read recorded offset %d (err=%v)", off, err)
+	if err == nil || cursorErr != sql.ErrNoRows {
+		t.Fatalf("failed read err=%v; cursor offset=%d err=%v, want no cursor", err, off, cursorErr)
 	}
 }
 
@@ -424,42 +426,87 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 func TestCursorStoreFingerprintSeesWAL(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "chats", "abc", cursorSessUUID, "store.db")
-	writeCursorStoreFixture(t, path, "wal-fingerprint-marker", "/tmp/proj")
-	before := cursorStoreFingerprint(path)
-	if before == "" {
-		t.Fatal("fingerprint empty")
-	}
-	if err := os.WriteFile(path+"-wal", []byte("not a real wal"), 0o644); err != nil {
+	writeCursorStoreFixture(t, path, "before-wal-tool-result", "/tmp/proj")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	after := cursorStoreFingerprint(path)
-	if after == before {
-		t.Fatal("wal sidecar did not change the store fingerprint")
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;`); err != nil {
+		t.Fatal(err)
 	}
 	s := newTestStore(t, t.TempDir())
 	if err := s.ingestCursorStoreFile(path); err != nil {
 		t.Fatal(err)
 	}
-	if n := countText(t, s, "wal-fingerprint-marker"); n != 1 {
-		t.Fatalf("hits=%d", n)
-	}
-	// Same main-file size, new wal bytes: the next ingest must not treat
-	// the cursor as caught up. A second marker written into the wal is
-	// not visible to SQLite, so change the blob in place and leave a wal
-	// that is newer than the fingerprint just stored.
-	if err := os.WriteFile(path+"-wal", []byte("wal grew"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if s.cursorStoreCaughtUp(path, mustSize(t, path)) {
-		t.Fatal("wal growth left the store caught up")
-	}
-}
-
-func mustSize(t *testing.T, path string) int64 {
-	t.Helper()
-	info, err := os.Stat(path)
+	expectOnce(t, s, "before-wal-tool-result")
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return info.Size()
+	if _, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), ?, ?) AS BLOB)
+		WHERE INSTR(CAST(data AS TEXT), ?) > 0`, "before-wal-tool-result", "after-wal-tool-result", "before-wal-tool-result"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("main database changed during WAL-only update, err=%v", err)
+	}
+	if !fswatch.Interest(path+"-wal", fswatch.ModeTranscript) {
+		t.Fatal("transcript watcher drops Cursor WAL events")
+	}
+	s.ingestJSONLPath(path + "-wal")
+	expectOnce(t, s, "after-wal-tool-result")
+	if n := countText(t, s, "before-wal-tool-result"); n != 0 {
+		t.Fatalf("old WAL-backed result is still indexed %d times", n)
+	}
+}
+
+func TestCursorStoreSnapshotDoesNotClaimNewerPages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "before-db-rewrite-marker", "/tmp/proj")
+	s := newTestStore(t, t.TempDir())
+	pf, err := parseCursorStoreFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), ?, ?) AS BLOB)
+		WHERE INSTR(CAST(data AS TEXT), ?) > 0`, "before-db-rewrite-marker", "after-db-rewrite-marker", "before-db-rewrite-marker"); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := s.newWriterState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.tx.Rollback()
+	defer ws.Close()
+	if err := s.writeParsedFile(ws, pf); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.commitIngest(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "after-db-rewrite-marker")
+}
+
+func TestCursorStoreReadOnlyBusyTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "busy-timeout-marker", "/tmp/proj")
+	db, err := openCursorStoreRO(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var timeout int
+	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil || timeout != cursorStoreBusyTimeout {
+		t.Fatalf("read-only busy_timeout = %d, err = %v", timeout, err)
+	}
 }

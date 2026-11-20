@@ -51,7 +51,7 @@ func Interest(path string, mode WatchMode) bool {
 			return true
 		}
 		// Cursor Agent CLI store.db (🎯T149.1) — not JSONL; still a transcript source.
-		if base == "store.db" && hasPathComponent(clean, "chats") {
+		if (base == "store.db" || base == "store.db-wal") && hasPathComponent(clean, "chats") {
 			return true
 		}
 		if !strings.HasSuffix(strings.ToLower(base), ".md") {
