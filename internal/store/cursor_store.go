@@ -429,7 +429,9 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 	defer func() { _ = ws.tx.Rollback() }()
 	defer ws.Close()
 
-	s.writeParsedFile(ws, pf)
+	if err := s.writeParsedFile(ws, pf); err != nil {
+		return err
+	}
 
 	ws.Close()
 	return ws.tx.Commit()

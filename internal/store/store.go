@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -130,6 +129,9 @@ type Store struct {
 
 	mu      sync.Mutex
 	offsets map[string]int64 // file path → last read offset
+	// gens is the identity the offset was taken from (prefix hash and,
+	// while this process is up, inode). Guarded by mu.
+	gens map[string]ingestGen
 
 	// watchTel is live 🎯T142 tree-watch telemetry (backend, FDs, poll).
 	// Own mutex; not guarded by mu.
@@ -1541,6 +1543,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 		dbPath:      dbPath,
 		projectDir:  projectDir,
 		offsets:     make(map[string]int64),
+		gens:        make(map[string]ingestGen),
 		codec:       newTextCodec(),
 		bgCtx:       bgCtx,
 		bgCancel:    bgCancel,
@@ -1557,14 +1560,31 @@ func New(dbPath, projectDir string) (*Store, error) {
 		slog.Info("closed orphan cluster_runs from prior daemon", "count", nOrphans)
 	}
 
-	rows, err := readDB.Query("SELECT path, offset FROM ingest_state")
+	// prefix_sha256 arrives with the schema upgrade, which may still be
+	// queued. A missing column falls back to offset-only resume until
+	// the next cursor write stamps the hash.
+	rows, err := readDB.Query("SELECT path, offset, prefix_sha256 FROM ingest_state")
+	withPrefix := err == nil
+	if !withPrefix {
+		rows, err = readDB.Query("SELECT path, offset FROM ingest_state")
+	}
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var path string
 			var offset int64
-			rows.Scan(&path, &offset)
+			var prefix sql.NullString
+			if withPrefix {
+				if err := rows.Scan(&path, &offset, &prefix); err != nil {
+					continue
+				}
+			} else if err := rows.Scan(&path, &offset); err != nil {
+				continue
+			}
 			s.offsets[path] = offset
+			if prefix.Valid && prefix.String != "" {
+				s.gens[path] = ingestGen{prefix: prefix.String}
+			}
 		}
 	}
 
@@ -3778,6 +3798,10 @@ type parsedFile struct {
 	// model is the primary model stamp (Grok summary / signals); also
 	// embedded in entry raw for generated columns.
 	model string
+	// restarted means this file is not the one the stored offset was
+	// taken from. writeParsedFile replaces that session's rows and sets
+	// the offset absolutely.
+	restarted bool
 }
 
 // IngestAll scans the project directory and ingests all JSONL files
@@ -3798,12 +3822,33 @@ func (s *Store) IngestAll() error {
 
 	// Stage 1: Collector — gather paths, sort newest-first, filter already-done.
 	type fileEntry struct {
-		path   string
-		mtime  time.Time
-		size   int64
-		offset int64 // already-ingested offset
+		path      string
+		mtime     time.Time
+		size      int64
+		offset    int64 // already-ingested offset; 0 when restarted
+		restarted bool  // file is not the one offset was taken from
 	}
 	var files []fileEntry
+	// consider queues a JSONL transcript. A caught-up file, including a
+	// durable truncation (size below the offset, same identity), is left
+	// alone. A replacement is queued from byte 0.
+	consider := func(path string, info os.FileInfo) {
+		d := s.jsonlResume(path, info.Size())
+		if d.caughtUp {
+			return
+		}
+		off := d.offset
+		if d.restarted {
+			off = 0
+		}
+		files = append(files, fileEntry{
+			path:      path,
+			mtime:     info.ModTime(),
+			size:      info.Size(),
+			offset:    off,
+			restarted: d.restarted,
+		})
+	}
 	// Codex rollout roots (~/.codex/sessions, archived_sessions) are
 	// walked alongside the Claude project dirs; the worker routes each
 	// file to the right parser by path (🎯T99).
@@ -3820,19 +3865,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			// Skip fully ingested files.
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3851,18 +3884,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isGrokUpdates(path) {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3880,18 +3902,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isCursorTranscript(path) {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3938,18 +3949,7 @@ func (s *Store) IngestAll() error {
 			if err != nil || info.IsDir() || !isOmpSession(path) {
 				return nil
 			}
-			s.mu.Lock()
-			offset := s.offsets[path]
-			s.mu.Unlock()
-			if offset >= info.Size() {
-				return nil
-			}
-			files = append(files, fileEntry{
-				path:   path,
-				mtime:  info.ModTime(),
-				size:   info.Size(),
-				offset: offset,
-			})
+			consider(path, info)
 			return nil
 		})
 	}
@@ -3989,11 +3989,17 @@ func (s *Store) IngestAll() error {
 				case isOmpSession(fe.path):
 					parse = parseOmpFile
 				}
-				if pf, err := parse(fe.path, fe.offset); err == nil {
-					parsedCh <- pf
-				} else {
-					slog.Warn("parse failed", "file", filepath.Base(fe.path), "err", err)
+				pf, err := parse(fe.path, fe.offset)
+				if errors.Is(err, errTranscriptReplaced) && !fe.restarted {
+					fe.restarted = true
+					pf, err = parse(fe.path, 0)
 				}
+				if err != nil {
+					slog.Warn("parse failed", "file", filepath.Base(fe.path), "err", err)
+					continue
+				}
+				pf.restarted = fe.restarted
+				parsedCh <- pf
 			}
 		}()
 	}
@@ -4313,7 +4319,9 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				"rate", fmt.Sprintf("%.1f files/s", rate),
 				"eta", eta.Round(time.Second))
 		}
-		s.writeParsedFile(ws, pf)
+		if err := s.writeParsedFile(ws, pf); err != nil {
+			return err
+		}
 
 		// Commit periodically.
 		if time.Since(lastCommit) >= commitInterval {
@@ -4334,7 +4342,14 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 // and the single-file Codex path (ingestCodexFile), so both sources go
 // through identical insert logic. Best-effort: individual insert
 // failures are logged, not propagated, matching the original loop.
-func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
+// A failed cursor write is returned so the caller can roll the transaction
+// back instead of committing rows whose resume point was not recorded.
+func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
+	if pf.restarted {
+		if err := s.deleteSessionTranscript(ws.tx, pf.sessionID); err != nil {
+			return err
+		}
+	}
 	// Grok session-level usage rows use a stable uuid and must refresh when
 	// signals.json grows; delete any prior copy so INSERT OR IGNORE can land.
 	if pf.source == "grok" {
@@ -4446,28 +4461,11 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) {
 	}
 
 	// Update ingest offset + fingerprint (🎯T68.6 same-size
-	// rewrite detection). recordedSize/Mtime is nullable; an
-	// os.Stat error just records NULL — detection falls back to
-	// offset-vs-size on the next pass.
-	recSize, recMtime := statFingerprint(pf.path)
-	ws.tx.Exec(`INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-			offset = MAX(ingest_state.offset, excluded.offset),
-			recorded_size = CASE
-				WHEN excluded.offset >= ingest_state.offset THEN excluded.recorded_size
-				ELSE ingest_state.recorded_size
-			END,
-			recorded_mtime = CASE
-				WHEN excluded.offset >= ingest_state.offset THEN excluded.recorded_mtime
-				ELSE ingest_state.recorded_mtime
-			END`,
-		pf.path, pf.newOffset, recSize, recMtime)
-	s.mu.Lock()
-	if pf.newOffset > s.offsets[pf.path] {
-		s.offsets[pf.path] = pf.newOffset
-	}
-	s.mu.Unlock()
+	// rewrite detection). A restarted read sets the offset absolutely:
+	// MAX would keep the old, larger cursor and skip the replacement's
+	// later appends. recordedSize/Mtime is nullable; an os.Stat error
+	// just records NULL — detection falls back to offset-vs-size.
+	return s.putIngestCursor(ws.tx, pf.path, pf.newOffset, pf.restarted)
 }
 
 // trimLineEnding strips a single trailing "\n" (and a preceding "\r"),
@@ -4486,20 +4484,8 @@ func trimLineEnding(b []byte) []byte {
 // parseFile reads and parses a JSONL transcript file, returning all
 // extracted messages and metadata. Pure computation — no DB access.
 func parseFile(path string, offset int64) (parsedFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return parsedFile{}, err
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		f.Seek(offset, 0)
-	}
-
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
-
-	reader := bufio.NewReader(f)
 
 	pf := parsedFile{
 		path:      path,
@@ -4587,27 +4573,16 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	// bufio.Reader.ReadBytes has no per-line size cap, so oversized lines
-	// (e.g. inline base64 images) are ingested rather than silently
-	// dropped as they were under bufio.Scanner's token limit (🎯T104). The
-	// offset is the running count of bytes consumed — always a true line
-	// boundary — so a resume never overshoots unread content; a non-EOF
-	// read error aborts without advancing it.
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line)
-		}
-		if readErr == io.EOF {
-			break
-		}
+	// scanJSONL counts only complete lines (🎯T104 still holds: ReadBytes
+	// has no per-line size cap). A partial tail is left for the next open,
+	// and a file that changes identity mid-read is returned uncommitted.
+	consumed, err := scanJSONL(path, offset, func(line []byte, _, _ int64) error {
+		handleLine(line)
+		return nil
+	})
+	if err != nil {
+		return parsedFile{}, err
 	}
-
 	pf.newOffset = consumed
 	return pf, nil
 }
@@ -7273,6 +7248,11 @@ var (
 // offset lands on a true line boundary (🎯T107).
 var testMidStreamCommitOffset func(int64)
 
+// testAfterJSONLLine, when non-nil, is called after each complete JSONL
+// line is delivered to a reader. Tests use it to append, truncate,
+// rotate, or rewrite the file between lines. Production leaves it nil.
+var testAfterJSONLLine func(path string, lines int)
+
 func (s *Store) ingestFile(path string) error {
 	// Route rather than mangle (🎯T127). This is the Claude-format parser:
 	// it derives the session id from the FILENAME STEM and upserts
@@ -7297,27 +7277,41 @@ func (s *Store) ingestFile(path string) error {
 		return s.ingestOmpFile(path)
 	}
 
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
+	err := s.ingestClaudeOnce(path, false)
+	if errors.Is(err, errTranscriptReplaced) {
+		return s.ingestClaudeOnce(path, true)
+	}
+	return err
+}
 
-	f, err := os.Open(path)
+// ingestClaudeOnce reads one Claude transcript. force skips the resume
+// decision and reads from byte 0, replacing that session's rows. The
+// retry passes force after a mid-read replacement; consulting the resume
+// decision then would see the offset committed for the old file and treat
+// a shorter replacement as a durable truncation.
+func (s *Store) ingestClaudeOnce(path string, force bool) error {
+	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil // file deleted between event and open
+			return nil
 		}
 		return err
 	}
-	defer f.Close()
-
-	if offset > 0 {
-		f.Seek(offset, 0)
+	var offset int64
+	restarted := force
+	if !force {
+		d := s.jsonlResume(path, info.Size())
+		if d.caughtUp {
+			return nil
+		}
+		restarted = d.restarted
+		if !restarted {
+			offset = d.offset
+		}
 	}
 
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
-
-	reader := bufio.NewReader(f)
 
 	count := 0
 	var metaCwd, metaBranch, metaTopic string
@@ -7329,6 +7323,12 @@ func (s *Store) ingestFile(path string) error {
 	}
 	defer func() { ws.tx.Rollback() }()
 	defer ws.Close()
+
+	if restarted {
+		if err := s.deleteSessionTranscript(ws.tx, sessionID); err != nil {
+			return err
+		}
+	}
 
 	// handleLine writes one JSONL line into the current transaction. Its
 	// guard clauses skip a line by returning rather than a loop `continue`,
@@ -7418,59 +7418,42 @@ func (s *Store) ingestFile(path string) error {
 	lastCommit := time.Now()
 	linesSinceLockCheck := 0
 
-	// bufio.Reader.ReadBytes has no per-line size cap, so oversized lines
-	// are ingested rather than silently dropped (🎯T104). The committed
-	// offset is the running count of bytes consumed — a true line boundary
-	// — not f.Seek(0,1), which reads ahead of the last processed line and
-	// at a mid-stream commit would persist an offset past not-yet-written
-	// content, so a crash would skip it (🎯T107). A non-EOF read error
-	// aborts without advancing the offset.
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return fmt.Errorf("read %s: %w", path, readErr)
-		}
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line)
-		}
+	// The committed offset is the byte just past a complete line (🎯T107).
+	// A partial tail is not counted, and a non-EOF read error returns
+	// before the final commit. putIngestCursor is absolute: this path
+	// used to INSERT OR REPLACE, and a restarted read must not keep a
+	// larger offset from the file it replaced.
+	consumed, err := scanJSONL(path, offset, func(line []byte, _, end int64) error {
+		handleLine(line)
 
-		// Periodically commit to avoid long-running transactions.
 		linesSinceLockCheck++
-		if linesSinceLockCheck >= ingestLineCheckInterval {
-			linesSinceLockCheck = 0
-			if time.Since(lastCommit) >= ingestCommitInterval {
-				// Commit current transaction with offset update.
-				recSize, recMtime := statFingerprint(path)
-				ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-					VALUES (?, ?, ?, ?)`, path, consumed, recSize, recMtime)
-
-				ws.Close()
-				if err := ws.tx.Commit(); err != nil {
-					return err
-				}
-
-				s.mu.Lock()
-				s.offsets[path] = consumed
-				s.mu.Unlock()
-
-				if testMidStreamCommitOffset != nil {
-					testMidStreamCommitOffset(consumed)
-				}
-
-				// Start a new transaction.
-				ws, err = s.newWriterState()
-				if err != nil {
-					return err
-				}
-				lastCommit = time.Now()
-			}
+		if linesSinceLockCheck < ingestLineCheckInterval {
+			return nil
 		}
-
-		if readErr == io.EOF {
-			break
+		linesSinceLockCheck = 0
+		if time.Since(lastCommit) < ingestCommitInterval {
+			return nil
 		}
+		if err := s.putIngestCursor(ws.tx, path, end, true); err != nil {
+			return err
+		}
+		ws.Close()
+		if err := ws.tx.Commit(); err != nil {
+			return err
+		}
+		if testMidStreamCommitOffset != nil {
+			testMidStreamCommitOffset(end)
+		}
+		var err error
+		ws, err = s.newWriterState()
+		if err != nil {
+			return err
+		}
+		lastCommit = time.Now()
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	// Upsert session metadata.
@@ -7495,18 +7478,14 @@ func (s *Store) ingestFile(path string) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
-	recSize, recMtime := statFingerprint(path)
-	ws.tx.Exec(`INSERT OR REPLACE INTO ingest_state (path, offset, recorded_size, recorded_mtime)
-		VALUES (?, ?, ?, ?)`, path, consumed, recSize, recMtime)
+	if err := s.putIngestCursor(ws.tx, path, consumed, true); err != nil {
+		return err
+	}
 
 	ws.Close()
 	if err := ws.tx.Commit(); err != nil {
 		return err
 	}
-
-	s.mu.Lock()
-	s.offsets[path] = consumed
-	s.mu.Unlock()
 
 	if count > 0 {
 		slog.Debug("ingested", "file", filepath.Base(path), "messages", count)

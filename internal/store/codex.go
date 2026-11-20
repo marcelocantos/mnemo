@@ -10,11 +10,8 @@
 package store
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -148,23 +145,12 @@ func codexProject(cwd string) string {
 // transforms it into a parsedFile, mirroring parseFile's contract.
 // Pure computation — no DB access.
 func parseCodexFile(path string, offset int64) (parsedFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return parsedFile{}, err
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		f.Seek(offset, 0)
-	}
-
 	pf := parsedFile{
 		path:      path,
 		sessionID: codexSessionID(path),
 		source:    "codex",
 	}
 
-	reader := bufio.NewReader(f)
 	// currentModel tracks the latest turn_context.model (🎯T112).
 	var currentModel string
 	var isSubagent bool
@@ -332,24 +318,12 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	// bufio.Reader.ReadBytes has no per-line size cap, so oversized Codex
-	// tool outputs are ingested rather than silently dropped (🎯T104). The
-	// offset is the running count of bytes consumed (a true line boundary),
-	// and a non-EOF read error aborts without advancing it.
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		thisStart := consumed
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line, thisStart)
-		}
-		if readErr == io.EOF {
-			break
-		}
+	consumed, err := scanJSONL(path, offset, func(line []byte, start, _ int64) error {
+		handleLine(line, start)
+		return nil
+	})
+	if err != nil {
+		return parsedFile{}, err
 	}
 
 	pf.newOffset = consumed
@@ -617,35 +591,5 @@ func injectCodexUUID(line []byte, uuid string) []byte {
 // recorded offset, reusing the shared writer. The watcher's analogue of
 // ingestFile for the Codex source.
 func (s *Store) ingestCodexFile(path string) error {
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil // file deleted between event and stat
-		}
-		return err
-	}
-	if offset >= info.Size() {
-		return nil // nothing new
-	}
-
-	pf, err := parseCodexFile(path, offset)
-	if err != nil {
-		return err
-	}
-
-	ws, err := s.newWriterState()
-	if err != nil {
-		return err
-	}
-	defer func() { ws.tx.Rollback() }()
-	defer ws.Close()
-
-	s.writeParsedFile(ws, pf)
-
-	ws.Close()
-	return ws.tx.Commit()
+	return s.ingestParsed(path, parseCodexFile)
 }

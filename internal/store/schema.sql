@@ -389,7 +389,13 @@ CREATE TABLE ingest_state (
 			-- back to size-only detection until next ingest re-stamps
 			-- them.
 			recorded_size INTEGER,
-			recorded_mtime TEXT
+			recorded_mtime TEXT,
+			-- SHA-256 of the first min(offset, 64KiB) bytes the offset was
+			-- taken from. A resume whose prefix does not match reads the
+			-- file again from byte 0. Nullable: rows written before the
+			-- column existed, and a cursor that could not be sampled,
+			-- fall back to size-only resume until the next stamp.
+			prefix_sha256 TEXT
 		);
 
 CREATE TABLE ingest_status (

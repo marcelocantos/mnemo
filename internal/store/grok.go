@@ -7,11 +7,8 @@
 package store
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -168,18 +165,6 @@ func loadGrokSignals(updatesPath string) (grokSignals, error) {
 // parseGrokFile reads a Grok updates.jsonl from the given byte offset
 // and transforms it into a parsedFile. Pure computation — no DB access.
 func parseGrokFile(path string, offset int64) (parsedFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return parsedFile{}, err
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return parsedFile{}, err
-		}
-	}
-
 	sessionID := grokSessionID(path)
 	pf := parsedFile{
 		path:      path,
@@ -245,8 +230,6 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	reader := bufio.NewReader(f)
-
 	// chainHints collected from subagent_spawned for post-write edges.
 	// Stored on pf via synthetic messages; parent from summary is handled
 	// in ingestGrokFile after write.
@@ -307,20 +290,12 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		thisStart := consumed
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line, thisStart)
-		}
-		if readErr == io.EOF {
-			break
-		}
+	consumed, err := scanJSONL(path, offset, func(line []byte, start, _ int64) error {
+		handleLine(line, start)
+		return nil
+	})
+	if err != nil {
+		return parsedFile{}, err
 	}
 
 	// Session-level usage snapshot (Grok-beyond-Claude: context window
@@ -783,37 +758,7 @@ func injectSyntheticUUID(line []byte, uuid string) []byte {
 
 // ingestGrokFile ingests a single Grok updates.jsonl incrementally.
 func (s *Store) ingestGrokFile(path string) error {
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if offset >= info.Size() {
-		return nil
-	}
-
-	pf, err := parseGrokFile(path, offset)
-	if err != nil {
-		return err
-	}
-
-	ws, err := s.newWriterState()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = ws.tx.Rollback() }()
-	defer ws.Close()
-
-	s.writeParsedFile(ws, pf)
-
-	ws.Close()
-	return ws.tx.Commit()
+	return s.ingestParsed(path, parseGrokFile)
 }
 
 // fieldAfter pulls the next whitespace-delimited token after key in s.

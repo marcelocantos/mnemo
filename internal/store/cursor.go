@@ -6,11 +6,8 @@
 package store
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -149,22 +146,9 @@ var cursorTimestampRe = regexp.MustCompile(`(?s)<timestamp>\s*(.*?)\s*</timestam
 // parseCursorFile reads a Cursor agent-transcript JSONL from the given
 // byte offset and transforms it into a parsedFile. Pure computation.
 func parseCursorFile(path string, offset int64) (parsedFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return parsedFile{}, err
-	}
-	defer f.Close()
-
-	info, statErr := f.Stat()
 	fallbackTS := time.Now().UTC().Format(time.RFC3339)
-	if statErr == nil {
+	if info, err := os.Stat(path); err == nil {
 		fallbackTS = info.ModTime().UTC().Format(time.RFC3339)
-	}
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return parsedFile{}, err
-		}
 	}
 
 	sessionID := cursorSessionID(path)
@@ -185,7 +169,6 @@ func parseCursorFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	reader := bufio.NewReader(f)
 	lastTS := fallbackTS
 
 	handleLine := func(line []byte, thisStart int64) {
@@ -224,20 +207,12 @@ func parseCursorFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	consumed := offset
-	for {
-		raw, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return parsedFile{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		thisStart := consumed
-		consumed += int64(len(raw))
-		if line := trimLineEnding(raw); len(line) > 0 {
-			handleLine(line, thisStart)
-		}
-		if readErr == io.EOF {
-			break
-		}
+	consumed, err := scanJSONL(path, offset, func(line []byte, start, _ int64) error {
+		handleLine(line, start)
+		return nil
+	})
+	if err != nil {
+		return parsedFile{}, err
 	}
 	pf.newOffset = consumed
 	return pf, nil
@@ -477,35 +452,5 @@ func cursorParseTimestamp(s string) string {
 
 // ingestCursorFile ingests a single Cursor agent-transcript incrementally.
 func (s *Store) ingestCursorFile(path string) error {
-	s.mu.Lock()
-	offset := s.offsets[path]
-	s.mu.Unlock()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if offset >= info.Size() {
-		return nil
-	}
-
-	pf, err := parseCursorFile(path, offset)
-	if err != nil {
-		return err
-	}
-
-	ws, err := s.newWriterState()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = ws.tx.Rollback() }()
-	defer ws.Close()
-
-	s.writeParsedFile(ws, pf)
-
-	ws.Close()
-	return ws.tx.Commit()
+	return s.ingestParsed(path, parseCursorFile)
 }
