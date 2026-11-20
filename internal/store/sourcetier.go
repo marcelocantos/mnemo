@@ -26,12 +26,16 @@ type SourceDriftEntry struct {
 // fingerprint that lets SourceDrift detect same-size in-place
 // rewrites (size unchanged, mtime moved). Returns (0, "") when the
 // file can't be stat'd, which the writer stores as NULL.
+func fingerprintMtime(info os.FileInfo) string {
+	return info.ModTime().UTC().Format(time.RFC3339Nano)
+}
+
 func statFingerprint(path string) (int64, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, ""
 	}
-	return info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano)
+	return info.Size(), fingerprintMtime(info)
 }
 
 // SourceDriftReport summarises lost-source state across the indexed

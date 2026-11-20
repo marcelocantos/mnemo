@@ -1,0 +1,248 @@
+// Copyright 2026 Marcelo Cantos
+// SPDX-License-Identifier: Apache-2.0
+
+package store
+
+import (
+	"bytes"
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// countingTranscript counts Read and ReadAt. io.ReadFull and
+// SectionReader both land on one of those.
+type countingTranscript struct {
+	*os.File
+	reads *atomic.Int64
+}
+
+func (c *countingTranscript) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.File.Read(p)
+}
+
+func (c *countingTranscript) ReadAt(p []byte, off int64) (int, error) {
+	c.reads.Add(1)
+	return c.File.ReadAt(p, off)
+}
+
+func countTranscriptIO(t *testing.T) (opens, reads *atomic.Int64) {
+	t.Helper()
+	opens = &atomic.Int64{}
+	reads = &atomic.Int64{}
+	prev := openTranscript
+	openTranscript = func(path string) (transcriptFile, error) {
+		opens.Add(1)
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		return &countingTranscript{File: f, reads: reads}, nil
+	}
+	t.Cleanup(func() { openTranscript = prev })
+	return opens, reads
+}
+
+func writeCaughtUpTree(t *testing.T, root string, n int) []byte {
+	t.Helper()
+	body := []byte("{\"type\":\"user\",\"uuid\":\"u-caught\",\"timestamp\":\"2026-04-01T00:00:00Z\",\"message\":{\"content\":\"caught-up marker\"}}\n")
+	const shards = 100
+	if n%shards != 0 {
+		t.Fatalf("file count %d is not divisible by %d", n, shards)
+	}
+	per := n / shards
+	var wg sync.WaitGroup
+	errCh := make(chan error, shards)
+	for s := 0; s < shards; s++ {
+		wg.Add(1)
+		go func(s int) {
+			defer wg.Done()
+			dir := filepath.Join(root, fmt.Sprintf("p%03d", s))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				errCh <- err
+				return
+			}
+			for i := 0; i < per; i++ {
+				path := filepath.Join(dir, fmt.Sprintf("s%05d.jsonl", s*per+i))
+				if err := os.WriteFile(path, body, 0o644); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}(s)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func seedCaughtUpCursors(t *testing.T, db *sql.DB, root string, body []byte) {
+	t.Helper()
+	sum := prefixHash(body)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime, prefix_sha256) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	n := 0
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return err
+		}
+		mtime := info.ModTime().UTC().Format(time.RFC3339Nano)
+		if _, err := stmt.Exec(path, info.Size(), info.Size(), mtime, sum); err != nil {
+			return err
+		}
+		n++
+		return nil
+	})
+	if err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("seeded no cursors")
+	}
+}
+
+// TestStartupCaughtUpCostsOneStat is the startup scan over a tree the
+// size of a real transcript corpus, with every file already caught up.
+// The second open is a fresh process: memory holds only what ingest_state
+// stored. An unchanged file must not be opened or read.
+func TestStartupCaughtUpCostsOneStat(t *testing.T) {
+	const n = 100_000
+	project := t.TempDir()
+	body := writeCaughtUpTree(t, project, n)
+
+	dbPath := filepath.Join(t.TempDir(), "scan.db")
+	installTestRateCard(t, testRateCard())
+	first, err := New(dbPath, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.AwaitStartup()
+	seedCaughtUpCursors(t, first.writeDB, project, body)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := New(dbPath, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.AwaitStartup()
+	t.Cleanup(func() { second.Close() })
+
+	opens, reads := countTranscriptIO(t)
+	start := time.Now()
+	if err := second.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	t.Logf("caught-up startup files=%d elapsed=%s opens=%d reads=%d", n, elapsed.Round(time.Millisecond), opens.Load(), reads.Load())
+	if opens.Load() != 0 || reads.Load() != 0 {
+		t.Fatalf("caught-up startup opened %d files and read %d times, want 0 opens and 0 reads (one stat from the walk)", opens.Load(), reads.Load())
+	}
+}
+
+func TestCaughtUpMtimeChangeIsHashed(t *testing.T) {
+	project := t.TempDir()
+	path := writeJSONL(t, project, "proj", "sess-mtime", []map[string]any{
+		msg("user", "stable marker", "2026-04-01T10:00:00Z"),
+	})
+	s := newTestStore(t, project)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	opens, reads := countTranscriptIO(t)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if opens.Load() != 0 || reads.Load() != 0 {
+		t.Fatalf("unchanged second pass opened %d read %d, want 0", opens.Load(), reads.Load())
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	opens.Store(0)
+	reads.Store(0)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if opens.Load() == 0 || reads.Load() == 0 {
+		t.Fatalf("mtime change was not read (opens=%d reads=%d)", opens.Load(), reads.Load())
+	}
+	if n := countText(t, s, "stable marker"); n != 1 {
+		t.Fatalf("stable marker indexed %d times", n)
+	}
+}
+
+// TestCheapCheckMissesRestoredMtime pins the replacement the stat check
+// cannot see: same size, mtime put back, different bytes. Transcript
+// writers update mtime on write, so this is not how those files change.
+func TestCheapCheckMissesRestoredMtime(t *testing.T) {
+	project := t.TempDir()
+	path := writeJSONL(t, project, "proj", "sess-blind", []map[string]any{
+		msg("user", "original blind marker", "2026-04-01T10:00:00Z"),
+	})
+	s := newTestStore(t, project)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := []byte(string(raw))
+	old := []byte("original")
+	neu := []byte("swappedX")
+	if len(old) != len(neu) || !bytes.Contains(swapped, old) {
+		t.Fatalf("fixture has no same-length swap point")
+	}
+	for i := 0; i+len(old) <= len(swapped); i++ {
+		if string(swapped[i:i+len(old)]) == string(old) {
+			copy(swapped[i:], neu)
+			break
+		}
+	}
+	if err := os.WriteFile(path, swapped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	opens, reads := countTranscriptIO(t)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if opens.Load() != 0 || reads.Load() != 0 {
+		t.Fatalf("restored mtime was read (opens=%d reads=%d)", opens.Load(), reads.Load())
+	}
+	if n := countText(t, s, "swappedX blind marker"); n != 0 {
+		t.Fatalf("same-size same-mtime swap was indexed %d times", n)
+	}
+	if n := countText(t, s, "original blind marker"); n != 1 {
+		t.Fatalf("original marker count %d, want 1", n)
+	}
+}

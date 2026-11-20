@@ -16,7 +16,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -46,12 +45,17 @@ func (s *Store) jsonlRestartClass(path string, cause error) string {
 	return "rewritten_at"
 }
 
-// ingestGen is the in-memory identity of an ingested transcript. prefix
-// is also persisted; the inode is not, so a restart falls back to the hash.
+// ingestGen is the in-memory identity of an ingested transcript. prefix,
+// recorded size, and recorded mtime are persisted. The inode is not, so
+// a restart treats a file as unchanged when size, mtime, and the cursor
+// still match, and learns the inode from the stat on that pass.
 type ingestGen struct {
-	prefix string
-	dev    uint64
-	ino    uint64
+	prefix        string
+	dev           uint64
+	ino           uint64
+	recordedSize  int64
+	recordedMtime string
+	haveRecorded  bool
 }
 
 type jsonlResumeDecision struct {
@@ -74,11 +78,29 @@ func prefixLen(n int64) int {
 	return int(n)
 }
 
+// transcriptFile is the part of *os.File the resume and scan paths use.
+// Tests replace openTranscript to count opens and reads.
+type transcriptFile interface {
+	io.Reader
+	io.ReaderAt
+	io.Seeker
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
+// openTranscript opens path for a resume or a scan. A caught-up file
+// whose size, mtime, and inode still match the stored cursor never
+// reaches it.
+var openTranscript = func(path string) (transcriptFile, error) {
+	f, err := os.Open(path)
+	return f, err
+}
+
 func prefixSample(path string, n int) ([]byte, error) {
 	if n <= 0 {
 		return nil, nil
 	}
-	f, err := os.Open(path)
+	f, err := openTranscript(path)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +120,13 @@ func prefixHash(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// jsonlResume decides how to read path, whose current size is size.
+// jsonlResume decides how to read path. info is the stat the caller
+// already paid for; this function does not stat again.
+//
+// A file whose size and mtime still match the stored fingerprint, whose
+// inode does not disagree, and whose cursor is caught up is left alone.
+// That costs the caller's one stat and no open. The prefix is hashed
+// only when size or mtime says the bytes may have changed.
 //
 // A different inode, a prefix that does not match the bytes the offset
 // was taken from, or a file shorter than the cursor is read from the
@@ -107,7 +135,14 @@ func prefixHash(b []byte) string {
 // An empty stored prefix is stamped in memory only, so a rewrite that
 // lands before the first stamp is missed once — an upgrade does not
 // re-read every transcript.
-func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
+//
+// The cheap check misses a replacement that keeps the same size and the
+// same mtime. Transcript writers do not do that: an append grows the
+// file, and a write updates mtime. Restoring both after a content swap
+// (a copy that preserves timestamps, for example) is invisible until a
+// later size or mtime change.
+func (s *Store) jsonlResume(path string, info os.FileInfo) jsonlResumeDecision {
+	size := info.Size()
 	s.mu.Lock()
 	off := s.offsets[path]
 	gen := s.gens[path]
@@ -118,12 +153,21 @@ func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 	if shorter {
 		class = "truncated_at"
 	}
-	id := fileIdentOf(path)
+	id := fileIdentFromInfo(info)
 	if id.ino != 0 && gen.ino != 0 && (id.dev != gen.dev || id.ino != gen.ino) {
 		return jsonlResumeDecision{restarted: true, statusClass: class}
 	}
 	if shorter {
 		return jsonlResumeDecision{restarted: true, statusClass: "truncated_at"}
+	}
+	if gen.haveRecorded && gen.recordedSize == size && gen.recordedMtime == fingerprintMtime(info) {
+		if gen.ino == 0 && id.ino != 0 {
+			s.stampGen(path, "", id)
+		}
+		if off >= size {
+			return jsonlResumeDecision{caughtUp: true}
+		}
+		return jsonlResumeDecision{offset: off}
 	}
 
 	n := prefixLen(off)
@@ -160,7 +204,7 @@ func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 // re-read that line, and only when more bytes have arrived. A complete
 // old EOF record was already indexed even if it had no newline.
 func legacyJSONLBoundary(path string, offset int64) (int64, error) {
-	f, err := os.Open(path)
+	f, err := openTranscript(path)
 	if err != nil {
 		return offset, err
 	}
@@ -211,7 +255,7 @@ func (s *Store) stampGen(path, prefix string, id fileIdent) {
 // (different inode, a shorter size, or a changed prefix of the sampled
 // length) returns errTranscriptReplaced. The caller must not commit.
 func scanJSONL(path string, offset int64, handle func(line []byte, start, end int64, snapshot *jsonlSnapshot) error) (int64, *jsonlSnapshot, error) {
-	f, err := os.Open(path)
+	f, err := openTranscript(path)
 	if err != nil {
 		return offset, nil, err
 	}
@@ -310,7 +354,7 @@ func (s *Store) checkJSONLResume(path string, snapshot *jsonlSnapshot) error {
 }
 
 func (snapshot *jsonlSnapshot) check(path string) error {
-	f, err := os.Open(path)
+	f, err := openTranscript(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errTranscriptReplaced
@@ -378,7 +422,7 @@ func (ws *writerState) putIngestCursor(path string, offset int64, absolute bool,
 		sum = prefixHash(snapshot.prefix[:prefixLen(offset)])
 		id = fileIdentFromInfo(snapshot.info)
 		recSize = snapshot.info.Size()
-		recMtime = snapshot.info.ModTime().UTC().Format(time.RFC3339Nano)
+		recMtime = fingerprintMtime(snapshot.info)
 	} else if isCursorStore(path) {
 		// Store the version observed before reading the SQLite snapshot.
 		sum = cursorStoreVersion
@@ -427,7 +471,14 @@ func (ws *writerState) putIngestCursor(path string, offset int64, absolute bool,
 	if err != nil {
 		return err
 	}
-	ws.cursors = append(ws.cursors, pendingIngestCursor{path, offset, absolute, ingestGen{sum, id.dev, id.ino}})
+	ws.cursors = append(ws.cursors, pendingIngestCursor{path, offset, absolute, ingestGen{
+		prefix:        sum,
+		dev:           id.dev,
+		ino:           id.ino,
+		recordedSize:  recSize,
+		recordedMtime: recMtime,
+		haveRecorded:  recMtime != "",
+	}})
 	return nil
 }
 
@@ -461,7 +512,7 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 	var offset int64
 	restarted := statusClass != ""
 	if !restarted {
-		d := s.jsonlResume(path, info.Size())
+		d := s.jsonlResume(path, info)
 		if d.caughtUp {
 			return nil
 		}

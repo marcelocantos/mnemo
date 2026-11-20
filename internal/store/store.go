@@ -1560,13 +1560,19 @@ func New(dbPath, projectDir string) (*Store, error) {
 		slog.Info("closed orphan cluster_runs from prior daemon", "count", nOrphans)
 	}
 
-	// prefix_sha256 arrives with the schema upgrade, which may still be
-	// queued. A missing column falls back to offset-only resume until
-	// the next cursor write stamps the hash.
-	rows, err := readDB.Query("SELECT path, offset, prefix_sha256 FROM ingest_state")
-	withPrefix := err == nil
-	if !withPrefix {
-		rows, err = readDB.Query("SELECT path, offset FROM ingest_state")
+	// prefix_sha256 and the size/mtime fingerprint arrive with schema
+	// upgrades, which may still be queued. A missing column falls back
+	// to whatever the live table has. The fingerprint is what lets a
+	// restart decide "unchanged" without reading the file.
+	rows, err := readDB.Query(`SELECT path, offset, prefix_sha256, recorded_size, recorded_mtime FROM ingest_state`)
+	loadKind := "full"
+	if err != nil {
+		rows, err = readDB.Query(`SELECT path, offset, prefix_sha256 FROM ingest_state`)
+		loadKind = "prefix"
+	}
+	if err != nil {
+		rows, err = readDB.Query(`SELECT path, offset FROM ingest_state`)
+		loadKind = "offset"
 	}
 	if err == nil {
 		defer rows.Close()
@@ -1574,16 +1580,32 @@ func New(dbPath, projectDir string) (*Store, error) {
 			var path string
 			var offset int64
 			var prefix sql.NullString
-			if withPrefix {
-				if err := rows.Scan(&path, &offset, &prefix); err != nil {
-					continue
-				}
-			} else if err := rows.Scan(&path, &offset); err != nil {
+			var recordedSize sql.NullInt64
+			var recordedMtime sql.NullString
+			var scanErr error
+			switch loadKind {
+			case "full":
+				scanErr = rows.Scan(&path, &offset, &prefix, &recordedSize, &recordedMtime)
+			case "prefix":
+				scanErr = rows.Scan(&path, &offset, &prefix)
+			default:
+				scanErr = rows.Scan(&path, &offset)
+			}
+			if scanErr != nil {
 				continue
 			}
 			s.offsets[path] = offset
+			gen := ingestGen{}
 			if prefix.Valid && prefix.String != "" {
-				s.gens[path] = ingestGen{prefix: prefix.String}
+				gen.prefix = prefix.String
+			}
+			if recordedSize.Valid && recordedMtime.Valid && recordedMtime.String != "" {
+				gen.recordedSize = recordedSize.Int64
+				gen.recordedMtime = recordedMtime.String
+				gen.haveRecorded = true
+			}
+			if gen.prefix != "" || gen.haveRecorded {
+				s.gens[path] = gen
 			}
 		}
 	}
@@ -3836,7 +3858,7 @@ func (s *Store) IngestAll() error {
 	// A file that was replaced, rotated, or truncated under its cursor is
 	// queued from byte 0 so new lines are indexed. Rows already stored stay.
 	consider := func(path string, info os.FileInfo) {
-		d := s.jsonlResume(path, info.Size())
+		d := s.jsonlResume(path, info)
 		if d.caughtUp {
 			return
 		}
@@ -4433,6 +4455,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	lastCommit := time.Now()
 	writeStart := time.Now()
 	var processed int
+	var failed []error
 	const progressEvery = 100
 
 	commitBatch := func() error {
@@ -4466,7 +4489,27 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 				"rate", fmt.Sprintf("%.1f files/s", rate),
 				"eta", eta.Round(time.Second))
 		}
+		if testBeforeParsedWrite != nil {
+			testBeforeParsedWrite(pf)
+		}
+		// One file's failure stays inside its savepoint. The rest of this
+		// transaction, and files still queued, keep going. The cursor is
+		// not recorded, so the next pass tries the file again.
+		if _, err := ws.tx.Exec(`SAVEPOINT ingest_file`); err != nil {
+			return err
+		}
 		if err := s.writeParsedFile(ws, pf); err != nil {
+			if _, rbErr := ws.tx.Exec(`ROLLBACK TO SAVEPOINT ingest_file`); rbErr != nil {
+				return fmt.Errorf("ingest %s: %w (savepoint rollback: %v)", pf.path, err, rbErr)
+			}
+			if _, relErr := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); relErr != nil {
+				return fmt.Errorf("ingest %s: %w (savepoint release: %v)", pf.path, err, relErr)
+			}
+			failed = append(failed, fmt.Errorf("ingest %s: %w", pf.path, err))
+			slog.Warn("ingest file failed; will retry next pass", "file", pf.path, "err", err)
+			continue
+		}
+		if _, err := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); err != nil {
 			return err
 		}
 
@@ -4479,7 +4522,10 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	}
 
 	// Final commit.
-	return s.commitIngest(ws)
+	if err := s.commitIngest(ws); err != nil {
+		return errors.Join(append(failed, err)...)
+	}
+	return errors.Join(failed...)
 }
 
 // writeParsedFile inserts one parsed transcript file (entries, content
@@ -7453,6 +7499,11 @@ var testMidStreamCommitOffset func(int64)
 // rotate, or rewrite the file between lines. Production leaves it nil.
 var testAfterJSONLLine func(path string, lines int)
 
+// testBeforeParsedWrite, when non-nil, runs on the batch writer after
+// parse and before the file's rows are inserted. Tests use it to replace
+// a file between those two steps. Production leaves it nil.
+var testBeforeParsedWrite func(pf parsedFile)
+
 func (s *Store) ingestFile(path string) error {
 	// Route rather than mangle (🎯T127). This is the Claude-format parser:
 	// it derives the session id from the FILENAME STEM and upserts
@@ -7497,7 +7548,7 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 	var offset int64
 	restarted := statusClass != ""
 	if !restarted {
-		d := s.jsonlResume(path, info.Size())
+		d := s.jsonlResume(path, info)
 		if d.caughtUp {
 			return nil
 		}
