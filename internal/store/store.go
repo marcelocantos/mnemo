@@ -4350,16 +4350,31 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 			return err
 		}
 	}
-	// Grok session-level usage rows use a stable uuid and must refresh when
-	// signals.json grows; delete any prior copy so INSERT OR IGNORE can land.
+	// Grok session-level usage rows use a stable uuid. Replace the previous
+	// copy only when this parse carries the new one, in the same
+	// transaction. A tail that deleted the row and inserted nothing is
+	// how a session's only token total became zero (defect hunt finding 2).
 	if pf.source == "grok" {
 		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
-		_, _ = ws.tx.Exec(`
-			DELETE FROM messages WHERE session_id = ? AND mnemo_text(text, text_z) LIKE '[grok signals]%'`,
-			pf.sessionID)
-		_, _ = ws.tx.Exec(`
-			DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
-			pf.sessionID, usageUUID)
+		replaceSignals := false
+		for _, e := range pf.entries {
+			if strings.Contains(string(e.raw), usageUUID) {
+				replaceSignals = true
+				break
+			}
+		}
+		if replaceSignals {
+			if _, err := ws.tx.Exec(`
+				DELETE FROM messages WHERE session_id = ? AND mnemo_text(text, text_z) LIKE '[grok signals]%'`,
+				pf.sessionID); err != nil {
+				return err
+			}
+			if _, err := ws.tx.Exec(`
+				DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
+				pf.sessionID, usageUUID); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Insert all raw entries and build entryIdx→entryID map.

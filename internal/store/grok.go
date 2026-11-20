@@ -299,9 +299,11 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	// Session-level usage snapshot (Grok-beyond-Claude: context window
-	// occupancy lives in signals.json, not per-turn usage).
-	// Only when parsing from the start so incremental tails don't double-count.
-	if offset == 0 && (sig.ContextTokensUsed > 0 || sig.ToolCallCount > 0) {
+	// occupancy lives in signals.json, not per-turn usage). Built on
+	// every parse, including a tail, from the signals.json just read.
+	// writeParsedFile replaces the previous copy in the same transaction;
+	// a tail that omitted the row used to delete it and write nothing.
+	if sig.ContextTokensUsed > 0 || sig.ToolCallCount > 0 {
 		usageText := fmt.Sprintf(
 			"[grok signals] model=%s context_tokens=%d/%d turns=%d tools=%d compactions=%d git_commits=%d",
 			model, sig.ContextTokensUsed, sig.ContextWindowTokens,

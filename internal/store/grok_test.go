@@ -399,6 +399,52 @@ func TestGrokIngestEndToEnd(t *testing.T) {
 	}
 }
 
+func TestDefectGrokTailIngestDeletesSignalsUsage(t *testing.T) {
+	grokHome := t.TempDir()
+	path := writeGrokSession(t, grokHome, "/Users/dev/work/github.com/acme/webapp")
+	s := newTestStore(t, t.TempDir())
+	s.SetGrokRoots([]string{filepath.Join(grokHome, "sessions")})
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	var tokens int
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(SUM(input_tokens), 0) FROM entries_v WHERE session_id = ?`, grokSessUUID,
+	).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 12345 || countText(t, s, "[grok signals]") != 1 {
+		t.Fatalf("first ingest tokens=%d signals=%d, want 12345 and 1", tokens, countText(t, s, "[grok signals]"))
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"timestamp":1783679400,"method":"session/update","params":{"sessionId":"` + grokSessUUID + `","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"a later turn that should not erase usage"}}}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "signals.json"),
+		[]byte(`{"contextTokensUsed":99999,"contextWindowTokens":500000,"primaryModelId":"grok-4.5","toolCallCount":3,"turnCount":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	n := countText(t, s, "[grok signals]")
+	if err := s.readDB.QueryRow(
+		`SELECT COALESCE(SUM(input_tokens), 0) FROM entries_v WHERE session_id = ?`, grokSessUUID,
+	).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || tokens != 99999 {
+		t.Fatalf("signals usage row did not survive the tail ingest (messages=%d input_tokens=%d)", n, tokens)
+	}
+	if countText(t, s, "a later turn that should not erase usage") != 1 {
+		t.Fatal("appended turn was not indexed")
+	}
+}
+
 func TestRepoFromRemote(t *testing.T) {
 	if g := repoFromRemote("git@github.com:acme/webapp.git"); g != "acme/webapp" {
 		t.Errorf("ssh remote = %q", g)
