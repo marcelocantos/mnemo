@@ -510,8 +510,7 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 		return err
 	}
 
-	ws.Close()
-	return ws.tx.Commit()
+	return s.commitIngest(ws)
 }
 
 func cursorEntryUUID(raw []byte) string {

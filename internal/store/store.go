@@ -3788,6 +3788,7 @@ type parsedFile struct {
 	branch    string
 	topic     string
 	newOffset int64
+	snapshot  *jsonlSnapshot
 	// source is the producing agent ('claude', 'codex', 'grok', 'cursor', or 'omp').
 	// Empty means 'claude' (the default for ~/.claude/projects transcripts).
 	source string
@@ -3814,11 +3815,6 @@ func (s *Store) IngestAll() error {
 	// the upgrade out. Queries do not: the daemon still serves on the
 	// old schema during the pre-migration backup.
 	s.AwaitSchemaUpgrade()
-
-	numWorkers := runtime.NumCPU()
-	if numWorkers < 2 {
-		numWorkers = 2
-	}
 
 	// Stage 1: Collector — gather paths, sort newest-first, filter already-done.
 	type fileEntry struct {
@@ -3964,11 +3960,13 @@ func (s *Store) IngestAll() error {
 	})
 
 	ingestStart := time.Now()
+	numWorkers := min(runtime.GOMAXPROCS(0), len(files))
 	slog.Info("ingest starting", "files", len(files), "workers", numWorkers)
 
 	// Stage 2: Workers — parse JSONL files in parallel.
 	pathCh := make(chan fileEntry, numWorkers)
 	parsedCh := make(chan parsedFile, numWorkers*2)
+	done := make(chan struct{})
 
 	var wg sync.WaitGroup
 	for range numWorkers {
@@ -3999,23 +3997,36 @@ func (s *Store) IngestAll() error {
 					continue
 				}
 				pf.restarted = fe.restarted
-				parsedCh <- pf
+				select {
+				case parsedCh <- pf:
+				case <-done:
+					return
+				}
 			}
 		}()
 	}
 
 	// Feed the workers.
 	go func() {
+		defer close(pathCh)
 		for _, fe := range files {
-			pathCh <- fe
+			select {
+			case pathCh <- fe:
+			case <-done:
+				return
+			}
 		}
-		close(pathCh)
+	}()
+	go func() {
 		wg.Wait()
 		close(parsedCh)
 	}()
 
 	// Stage 3: Writer — single goroutine, batched transactions.
-	if err := s.runWriter(parsedCh, len(files)); err != nil {
+	err := s.runWriter(parsedCh, len(files))
+	close(done)
+	wg.Wait()
+	if err != nil {
 		return err
 	}
 	slog.Info("ingest duration", "files", len(files), "elapsed", time.Since(ingestStart).Round(time.Millisecond))
@@ -4144,6 +4155,7 @@ type writerState struct {
 	// written in this transaction, so their tool_results can be flagged
 	// without a lookup (🎯T190; see selfnoise.go).
 	selfToolUses map[string]struct{}
+	cursors      []pendingIngestCursor
 }
 
 func (s *Store) newWriterState() (*writerState, error) {
@@ -4277,6 +4289,28 @@ func (ws *writerState) Close() {
 	ws.msgStmt.Close()
 }
 
+// Publish resume positions only after their rows and cursor have committed.
+// Hold mu across Commit so a later writer cannot publish before this one.
+func (s *Store) commitIngest(ws *writerState) error {
+	ws.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ws.tx.Commit(); err != nil {
+		return err
+	}
+	for _, cursor := range ws.cursors {
+		if cursor.absolute || cursor.offset >= s.offsets[cursor.path] {
+			s.offsets[cursor.path] = cursor.offset
+			gen := cursor.gen
+			if !cursor.absolute && gen.prefix == "" {
+				gen.prefix = s.gens[cursor.path].prefix
+			}
+			s.gens[cursor.path] = gen
+		}
+	}
+	return nil
+}
+
 // runWriter is the single-goroutine writer for the parallel ingest pipeline.
 // It consumes parsed files from the channel and inserts them in batched
 // transactions with periodic commits.
@@ -4287,8 +4321,10 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	if err != nil {
 		return err
 	}
-	defer func() { ws.tx.Rollback() }()
-	defer ws.Close()
+	defer func() {
+		ws.Close()
+		_ = ws.tx.Rollback()
+	}()
 
 	lastCommit := time.Now()
 	writeStart := time.Now()
@@ -4296,14 +4332,14 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	const progressEvery = 100
 
 	commitBatch := func() error {
-		ws.Close()
-		if err := ws.tx.Commit(); err != nil {
+		if err := s.commitIngest(ws); err != nil {
 			return err
 		}
-		ws, err = s.newWriterState()
+		next, err := s.newWriterState()
 		if err != nil {
 			return err
 		}
+		ws = next
 		lastCommit = time.Now()
 		return nil
 	}
@@ -4339,8 +4375,7 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 	}
 
 	// Final commit.
-	ws.Close()
-	return ws.tx.Commit()
+	return s.commitIngest(ws)
 }
 
 // writeParsedFile inserts one parsed transcript file (entries, content
@@ -4352,6 +4387,11 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 // an offset past that line. A failed cursor write is returned for the
 // same reason.
 func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
+	if pf.snapshot != nil && !pf.restarted {
+		if err := s.checkJSONLResume(pf.path, pf.snapshot); err != nil {
+			return err
+		}
+	}
 	if pf.restarted {
 		if err := s.deleteSessionTranscript(ws.tx, pf.sessionID); err != nil {
 			return err
@@ -4499,7 +4539,7 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 	// MAX would keep the old, larger cursor and skip the replacement's
 	// later appends. recordedSize/Mtime is nullable; an os.Stat error
 	// just records NULL — detection falls back to offset-vs-size.
-	return s.putIngestCursor(ws.tx, pf.path, pf.newOffset, pf.restarted)
+	return ws.putIngestCursor(pf.path, pf.newOffset, pf.restarted || isCursorStore(pf.path), pf.snapshot)
 }
 
 // trimLineEnding strips a single trailing "\n" (and a preceding "\r"),
@@ -4610,7 +4650,7 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 	// scanJSONL counts only complete lines (🎯T104 still holds: ReadBytes
 	// has no per-line size cap). A partial tail is left for the next open,
 	// and a file that changes identity mid-read is returned uncommitted.
-	consumed, err := scanJSONL(path, offset, func(line []byte, _, _ int64) error {
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, _, _ int64, _ *jsonlSnapshot) error {
 		handleLine(line)
 		return nil
 	})
@@ -4618,6 +4658,8 @@ func parseFile(path string, offset int64) (parsedFile, error) {
 		return parsedFile{}, err
 	}
 	pf.newOffset = consumed
+	pf.snapshot = snapshot
+
 	return pf, nil
 }
 
@@ -7355,8 +7397,10 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 	if err != nil {
 		return err
 	}
-	defer func() { ws.tx.Rollback() }()
-	defer ws.Close()
+	defer func() {
+		ws.Close()
+		_ = ws.tx.Rollback()
+	}()
 
 	if restarted {
 		if err := s.deleteSessionTranscript(ws.tx, sessionID); err != nil {
@@ -7464,11 +7508,14 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 	linesSinceLockCheck := 0
 
 	// The committed offset is the byte just past a complete line (🎯T107).
-	// A partial tail is not counted, and a non-EOF read error returns
-	// before the final commit. putIngestCursor is absolute: this path
-	// used to INSERT OR REPLACE, and a restarted read must not keep a
-	// larger offset from the file it replaced.
-	consumed, err := scanJSONL(path, offset, func(line []byte, _, end int64) error {
+	// A partial tail is not counted. A restarted read replaces the
+	// stored cursor so it cannot keep an offset from the old file.
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, _, end int64, snapshot *jsonlSnapshot) error {
+		if linesSinceLockCheck == 0 && !restarted {
+			if err := s.checkJSONLResume(path, snapshot); err != nil {
+				return err
+			}
+		}
 		if err := handleLine(line); err != nil {
 			return err
 		}
@@ -7481,26 +7528,31 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		if time.Since(lastCommit) < ingestCommitInterval {
 			return nil
 		}
-		if err := s.putIngestCursor(ws.tx, path, end, true); err != nil {
+		if err := ws.putIngestCursor(path, end, restarted, snapshot); err != nil {
 			return err
 		}
-		ws.Close()
-		if err := ws.tx.Commit(); err != nil {
+		if err := s.commitIngest(ws); err != nil {
 			return err
 		}
+		restarted = false
 		if testMidStreamCommitOffset != nil {
 			testMidStreamCommitOffset(end)
 		}
-		var err error
-		ws, err = s.newWriterState()
+		next, err := s.newWriterState()
 		if err != nil {
 			return err
 		}
+		ws = next
 		lastCommit = time.Now()
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	if !restarted {
+		if err := s.checkJSONLResume(path, snapshot); err != nil {
+			return err
+		}
 	}
 
 	// Upsert session metadata.
@@ -7525,12 +7577,11 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
-	if err := s.putIngestCursor(ws.tx, path, consumed, true); err != nil {
+	if err := ws.putIngestCursor(path, consumed, restarted, snapshot); err != nil {
 		return err
 	}
 
-	ws.Close()
-	if err := ws.tx.Commit(); err != nil {
+	if err := s.commitIngest(ws); err != nil {
 		return err
 	}
 

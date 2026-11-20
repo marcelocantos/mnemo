@@ -4,8 +4,10 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -266,6 +268,96 @@ func TestJSONLLongTailSplitInsideUTF8(t *testing.T) {
 			assertJSONLOffset(t, s, path, len(first)+len(long))
 		})
 	}
+}
+
+func TestJSONLCursorMigrationPreservesOldOffset(t *testing.T) {
+	// This revision predates the prefix column. Build its schema and write
+	// the same durable cursor the old reader wrote for an incomplete line.
+	oldSchema, err := exec.Command("git", "show", "9d3c830d16e5c111fb31c54682828c5b01a605b3:internal/store/schema.sql").Output()
+	if err != nil {
+		t.Fatalf("read previous schema: %v", err)
+	}
+	root := t.TempDir()
+	path := readerClaudeWatch.pathFor(t, root)
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	if err := upgradeSchemaWith(dbPath, string(oldSchema)); err != nil {
+		t.Fatal(err)
+	}
+	first := readerClaudeWatch.line("legacy committed record")
+	second := readerClaudeWatch.line("finished legacy torn record")
+	cut := len(second) / 2
+	writeLines(t, path, first+second[:cut])
+	oldDB, err := sql.Open(writerDriverName, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldDB.Close()
+	if _, err := oldDB.Exec(entryInsertLegacySQL, "sess-jsonl", "proj", "user", "2026-04-01T10:00:00Z", strings.TrimSpace(first)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldDB.Exec(`INSERT INTO ingest_state (path, offset) VALUES (?, ?)`, path, len(first)+cut); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dbPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	s.AwaitStartup()
+	assertJSONLOffset(t, s, path, len(first)+cut)
+	var previousPrefix sql.NullString
+	if err := s.readDB.QueryRow(`SELECT prefix_sha256 FROM ingest_state WHERE path = ?`, path).Scan(&previousPrefix); err != nil || previousPrefix.Valid {
+		t.Fatalf("migrated prefix = %v, err = %v", previousPrefix, err)
+	}
+	writeLines(t, path, first+second)
+	readerClaudeWatch.ingest(t, s, path)
+	readerClaudeWatch.ingest(t, s, path)
+	expectOnce(t, s, "finished legacy torn record")
+	assertJSONLOffset(t, s, path, len(first)+len(second))
+	var entries int
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ?`, "sess-jsonl").Scan(&entries); err != nil || entries != 2 {
+		t.Fatalf("entries after upgrade = %d, err = %v", entries, err)
+	}
+}
+
+func TestJSONLRotationBeforeMidstreamCommit(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeWatch, root)
+	path := readerClaudeWatch.pathFor(t, root)
+	line := readerClaudeWatch.line
+	oldFirst, oldSecond := line("first record in rotated file"), line("second record in rotated file")
+	replacement := line("only record in current file")
+	writeLines(t, path, oldFirst+oldSecond)
+	savedInterval, savedCheck := ingestCommitInterval, ingestLineCheckInterval
+	ingestCommitInterval, ingestLineCheckInterval = 0, 1
+	t.Cleanup(func() {
+		ingestCommitInterval, ingestLineCheckInterval = savedInterval, savedCheck
+		testMidStreamCommitOffset, testAfterJSONLLine = nil, nil
+	})
+	var commits []int64
+	testMidStreamCommitOffset = func(offset int64) { commits = append(commits, offset) }
+	var once sync.Once
+	testAfterJSONLLine = func(p string, n int) {
+		if p == path && n == 1 {
+			once.Do(func() {
+				if err := os.Rename(path, path+".rotated"); err != nil {
+					t.Fatal(err)
+				}
+				writeLines(t, path, replacement)
+			})
+		}
+	}
+	readerClaudeWatch.ingest(t, s, path)
+	for _, offset := range commits {
+		if offset == int64(len(oldFirst)+len(oldSecond)) {
+			t.Fatalf("committed rotated-away record at offset %d", offset)
+		}
+	}
+	expectOnce(t, s, "only record in current file")
 }
 
 func TestJSONLAppendIsIndexedOnce(t *testing.T) {

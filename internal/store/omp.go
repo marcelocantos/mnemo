@@ -215,7 +215,7 @@ func parseOmpFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	consumed, err := scanJSONL(path, offset, func(line []byte, start, _ int64) error {
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, start, _ int64, _ *jsonlSnapshot) error {
 		handleLine(line, start)
 		return nil
 	})
@@ -223,6 +223,8 @@ func parseOmpFile(path string, offset int64) (parsedFile, error) {
 		return parsedFile{}, err
 	}
 	pf.newOffset = consumed
+	pf.snapshot = snapshot
+
 	return pf, nil
 }
 

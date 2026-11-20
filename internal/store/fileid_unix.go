@@ -23,6 +23,10 @@ func fileIdentOf(path string) fileIdent {
 	if err != nil {
 		return fileIdent{}
 	}
+	return fileIdentFromInfo(info)
+}
+
+func fileIdentFromInfo(info os.FileInfo) fileIdent {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || st == nil || st.Ino == 0 {
 		return fileIdent{}

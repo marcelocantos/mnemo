@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -110,6 +111,12 @@ func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 		}
 		sum := prefixHash(sample)
 		if gen.prefix == "" {
+			if size == off {
+				return jsonlResumeDecision{caughtUp: true}
+			}
+			if boundary, err := legacyJSONLBoundary(path, off); err == nil && boundary < off {
+				return jsonlResumeDecision{offset: boundary}
+			}
 			s.stampGen(path, sum, id)
 		} else if gen.prefix != sum {
 			return jsonlResumeDecision{restarted: true}
@@ -121,6 +128,40 @@ func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 		return jsonlResumeDecision{caughtUp: true}
 	}
 	return jsonlResumeDecision{offset: off}
+}
+
+// A pre-prefix cursor could end inside an incomplete final line. Only
+// re-read that line, and only when more bytes have arrived. A complete
+// old EOF record was already indexed even if it had no newline.
+func legacyJSONLBoundary(path string, offset int64) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return offset, err
+	}
+	defer f.Close()
+	const blockSize = 4096
+	var block [blockSize]byte
+	for end := offset; end > 0; {
+		start := max(0, end-blockSize)
+		buf := block[:end-start]
+		if _, err := f.ReadAt(buf, start); err != nil {
+			return offset, err
+		}
+		boundary := int64(bytes.LastIndexByte(buf, '\n')) + 1
+		if boundary > 0 || start == 0 {
+			start += boundary
+			if start == offset {
+				return offset, nil
+			}
+			line, err := io.ReadAll(io.NewSectionReader(f, start, offset-start))
+			if err != nil || completeJSONLObject(line) {
+				return offset, err
+			}
+			return start, nil
+		}
+		end = start
+	}
+	return offset, nil
 }
 
 func (s *Store) stampGen(path, prefix string, id fileIdent) {
@@ -143,16 +184,16 @@ func (s *Store) stampGen(path, prefix string, id fileIdent) {
 // After the scan, a file that is no longer the one that was opened
 // (different inode, a shorter size, or a changed prefix of the sampled
 // length) returns errTranscriptReplaced. The caller must not commit.
-func scanJSONL(path string, offset int64, handle func(line []byte, start, end int64) error) (int64, error) {
+func scanJSONL(path string, offset int64, handle func(line []byte, start, end int64, snapshot *jsonlSnapshot) error) (int64, *jsonlSnapshot, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return offset, err
+		return offset, nil, err
 	}
 	defer f.Close()
 
 	opened, err := f.Stat()
 	if err != nil {
-		return offset, err
+		return offset, nil, err
 	}
 	sampleN := prefixLen(opened.Size())
 	var openedPrefix []byte
@@ -160,42 +201,36 @@ func scanJSONL(path string, offset int64, handle func(line []byte, start, end in
 		openedPrefix = make([]byte, sampleN)
 		if _, err := io.ReadFull(f, openedPrefix); err != nil {
 			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				return offset, errTranscriptReplaced
+				return offset, nil, errTranscriptReplaced
 			}
-			return offset, err
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return offset, fmt.Errorf("seek %s: %w", path, err)
+			return offset, nil, err
 		}
 	}
-	if offset > 0 {
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return offset, fmt.Errorf("seek %s: %w", path, err)
-		}
+	if opened.Size() < offset {
+		return offset, nil, errTranscriptReplaced
 	}
-
-	reader := bufio.NewReader(f)
+	snapshot := &jsonlSnapshot{info: opened, prefix: openedPrefix, start: offset}
+	// Leave appends after the open for a later pass. This bounds the read
+	// and ensures the sampled bytes cover every offset in this pass.
+	reader := bufio.NewReader(io.NewSectionReader(f, offset, opened.Size()-offset))
 	consumed := offset
 	lines := 0
 	for {
 		raw, readErr := reader.ReadBytes('\n')
 		if readErr != nil && readErr != io.EOF {
-			return consumed, fmt.Errorf("read %s: %w", path, readErr)
+			return consumed, nil, fmt.Errorf("read %s: %w", path, readErr)
 		}
 		if len(raw) == 0 {
 			break
 		}
-		if readErr == io.EOF {
-			object := bytes.TrimLeft(raw, " \t\r")
-			if len(object) == 0 || object[0] != '{' || !utf8.Valid(object) || !json.Valid(object) {
-				break // Leave partial records at the previous boundary.
-			}
+		if readErr == io.EOF && !completeJSONLObject(raw) {
+			break // Leave partial records at the previous boundary.
 		}
 		start := consumed
 		consumed += int64(len(raw))
 		if line := trimLineEnding(raw); len(line) > 0 {
-			if err := handle(line, start, consumed); err != nil {
-				return consumed, err
+			if err := handle(line, start, consumed, snapshot); err != nil {
+				return consumed, nil, err
 			}
 		}
 		lines++
@@ -206,34 +241,74 @@ func scanJSONL(path string, offset int64, handle func(line []byte, start, end in
 			break
 		}
 	}
-	if err := jsonlStillTheFile(path, opened, openedPrefix, consumed); err != nil {
-		return consumed, err
+	if err := snapshot.check(path); err != nil {
+		return consumed, nil, err
 	}
-	return consumed, nil
+	return consumed, snapshot, nil
 }
 
-func jsonlStillTheFile(path string, opened os.FileInfo, openedPrefix []byte, consumed int64) error {
-	now, err := os.Stat(path)
+func completeJSONLObject(raw []byte) bool {
+	object := bytes.TrimLeft(raw, " \t\r")
+	return len(object) > 0 && object[0] == '{' && utf8.Valid(object) && json.Valid(object)
+}
+
+type jsonlSnapshot struct {
+	info   os.FileInfo
+	prefix []byte
+	start  int64
+}
+
+// A path can be replaced between choosing an offset and opening it. Check
+// the open file against the committed generation before treating it as an
+// append. A legacy cursor may deliberately start before its stored offset.
+func (s *Store) checkJSONLResume(path string, snapshot *jsonlSnapshot) error {
+	if snapshot.start == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	off, gen := s.offsets[path], s.gens[path]
+	s.mu.Unlock()
+	id := fileIdentFromInfo(snapshot.info)
+	if id.ino != 0 && gen.ino != 0 && (id.dev != gen.dev || id.ino != gen.ino) {
+		return errTranscriptReplaced
+	}
+	n := prefixLen(off)
+	if gen.prefix != "" && n <= len(snapshot.prefix) && gen.prefix != prefixHash(snapshot.prefix[:n]) {
+		return errTranscriptReplaced
+	}
+	return nil
+}
+
+func (snapshot *jsonlSnapshot) check(path string) error {
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errTranscriptReplaced
 		}
 		return err
 	}
-	if !os.SameFile(opened, now) || now.Size() < consumed {
+	defer f.Close()
+	now, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	opened := snapshot.info
+	if !os.SameFile(opened, now) || now.Size() < opened.Size() ||
+		(now.Size() == opened.Size() && !now.ModTime().Equal(opened.ModTime())) {
 		return errTranscriptReplaced
 	}
-	if len(openedPrefix) == 0 {
+	if len(snapshot.prefix) == 0 {
 		return nil
 	}
-	cur, err := prefixSample(path, len(openedPrefix))
+	cur := make([]byte, len(snapshot.prefix))
+	_, err = io.ReadFull(f, cur)
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 			return errTranscriptReplaced
 		}
 		return err
 	}
-	if !bytes.Equal(cur, openedPrefix) {
+	if !bytes.Equal(cur, snapshot.prefix) {
 		return errTranscriptReplaced
 	}
 	return nil
@@ -243,10 +318,19 @@ func jsonlStillTheFile(path string, opened os.FileInfo, openedPrefix []byte, con
 // offset (a restarted read of a replacement file); otherwise the offset
 // only moves forward, so a stale writer cannot walk it backwards.
 // A database that has not yet grown prefix_sha256 is written without it.
-func (s *Store) putIngestCursor(tx *sql.Tx, path string, offset int64, absolute bool) error {
+func (ws *writerState) putIngestCursor(path string, offset int64, absolute bool, snapshot *jsonlSnapshot) error {
 	recSize, recMtime := statFingerprint(path)
 	sum := ""
-	if isCursorStore(path) {
+	id := fileIdentOf(path)
+	if snapshot != nil {
+		if err := snapshot.check(path); err != nil {
+			return err
+		}
+		sum = prefixHash(snapshot.prefix[:prefixLen(offset)])
+		id = fileIdentFromInfo(snapshot.info)
+		recSize = snapshot.info.Size()
+		recMtime = snapshot.info.ModTime().UTC().Format(time.RFC3339Nano)
+	} else if isCursorStore(path) {
 		// store.db reuses this column for its size/mtime/change-counter
 		// fingerprint. A JSONL prefix hash would not change on an
 		// in-page UPDATE past the sampled window, and the header
@@ -261,7 +345,7 @@ func (s *Store) putIngestCursor(tx *sql.Tx, path string, offset int64, absolute 
 	if absolute {
 		abs = 1
 	}
-	_, err := tx.Exec(`
+	_, err := ws.tx.Exec(`
 		INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime, prefix_sha256)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
@@ -274,12 +358,13 @@ func (s *Store) putIngestCursor(tx *sql.Tx, path string, offset int64, absolute 
 				WHEN ? = 1 OR excluded.offset >= ingest_state.offset THEN excluded.recorded_mtime
 				ELSE ingest_state.recorded_mtime END,
 			prefix_sha256 = CASE
+				WHEN ? = 1 THEN excluded.prefix_sha256
 				WHEN excluded.prefix_sha256 IS NULL THEN ingest_state.prefix_sha256
-				WHEN ? = 1 OR excluded.offset >= ingest_state.offset THEN excluded.prefix_sha256
+				WHEN excluded.offset >= ingest_state.offset THEN excluded.prefix_sha256
 				ELSE ingest_state.prefix_sha256 END`,
 		path, offset, recSize, recMtime, nullIfEmpty(sum), abs, abs, abs, abs)
 	if err != nil && strings.Contains(err.Error(), "prefix_sha256") {
-		_, err = tx.Exec(`
+		_, err = ws.tx.Exec(`
 			INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime)
 			VALUES (?, ?, ?, ?)
 			ON CONFLICT(path) DO UPDATE SET
@@ -296,21 +381,15 @@ func (s *Store) putIngestCursor(tx *sql.Tx, path string, offset int64, absolute 
 	if err != nil {
 		return err
 	}
-	id := fileIdentOf(path)
-	s.mu.Lock()
-	if absolute || offset >= s.offsets[path] {
-		s.offsets[path] = offset
-		g := s.gens[path]
-		if sum != "" {
-			g.prefix = sum
-		}
-		if id.ino != 0 {
-			g.dev, g.ino = id.dev, id.ino
-		}
-		s.gens[path] = g
-	}
-	s.mu.Unlock()
+	ws.cursors = append(ws.cursors, pendingIngestCursor{path, offset, absolute, ingestGen{sum, id.dev, id.ino}})
 	return nil
+}
+
+type pendingIngestCursor struct {
+	path     string
+	offset   int64
+	absolute bool
+	gen      ingestGen
 }
 
 // deleteSessionTranscript removes one session's indexed transcript so a
@@ -393,6 +472,5 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 	if err := s.writeParsedFile(ws, pf); err != nil {
 		return err
 	}
-	ws.Close()
-	return ws.tx.Commit()
+	return s.commitIngest(ws)
 }

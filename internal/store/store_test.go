@@ -134,9 +134,11 @@ func TestWriteParsedFileDoesNotRegressOffset(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.writeParsedFile(ws, parsedFile{path: path, sessionID: "sess", project: "proj", newOffset: off})
-		ws.Close()
-		if err := ws.tx.Commit(); err != nil {
+		if err := s.writeParsedFile(ws, parsedFile{path: path, sessionID: "sess", project: "proj", newOffset: off}); err != nil {
+			_ = ws.tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := s.commitIngest(ws); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2810,5 +2812,41 @@ func TestDefectMessageInsertErrorIsPermanent(t *testing.T) {
 	}
 	if err1 == nil || off >= info.Size() {
 		t.Fatalf("failed insert committed past the line (err=%v offset=%d file=%d)", err1, off, info.Size())
+	}
+}
+
+func TestIngestCursorSurvivesCommitFailure(t *testing.T) {
+	for _, reader := range []jsonlReaderKind{readerClaudeWatch, readerClaudeBatch, readerCodex} {
+		t.Run(string(reader), func(t *testing.T) {
+			root := t.TempDir()
+			s := newReaderStore(t, reader, root)
+			path := reader.pathFor(t, root)
+			reader.prepare(t, s, root, path)
+			writeLines(t, path, reader.line("record retried after failed commit"))
+			if _, err := s.writeDB.Exec(`
+				PRAGMA foreign_keys = ON;
+				CREATE TABLE cursor_parent(id INTEGER PRIMARY KEY);
+				CREATE TABLE cursor_child(id INTEGER REFERENCES cursor_parent(id) DEFERRABLE INITIALLY DEFERRED);
+				CREATE TRIGGER fail_cursor_commit AFTER INSERT ON ingest_state
+				BEGIN INSERT INTO cursor_child VALUES (1); END;`); err != nil {
+				t.Fatal(err)
+			}
+			ingest := func() error { return s.ingestFile(path) }
+			if reader == readerClaudeBatch {
+				ingest = s.IngestAll
+			}
+			if err := ingest(); err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
+				t.Fatalf("ingest commit error = %v, want deferred foreign-key failure", err)
+			}
+			var n int
+			if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM ingest_state WHERE path = ?`, path).Scan(&n); err != nil || n != 0 {
+				t.Fatalf("failed commit left %d cursor rows, err=%v", n, err)
+			}
+			if _, err := s.writeDB.Exec(`DROP TRIGGER fail_cursor_commit`); err != nil {
+				t.Fatal(err)
+			}
+			reader.ingest(t, s, path)
+			expectOnce(t, s, "record retried after failed commit")
+		})
 	}
 }

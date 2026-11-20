@@ -318,7 +318,7 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	consumed, err := scanJSONL(path, offset, func(line []byte, start, _ int64) error {
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, start, _ int64, _ *jsonlSnapshot) error {
 		handleLine(line, start)
 		return nil
 	})
@@ -327,6 +327,8 @@ func parseCodexFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	pf.newOffset = consumed
+	pf.snapshot = snapshot
+
 	// Subagent sessions keep project=subagents so session_summary.session_type
 	// classifies them (same SQL trigger path as Claude/Grok). Repo still
 	// comes from cwd via extractRepo on the meta write.

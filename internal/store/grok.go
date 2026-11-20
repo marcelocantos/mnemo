@@ -290,7 +290,7 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 		}
 	}
 
-	consumed, err := scanJSONL(path, offset, func(line []byte, start, _ int64) error {
+	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, start, _ int64, _ *jsonlSnapshot) error {
 		handleLine(line, start)
 		return nil
 	})
@@ -349,6 +349,8 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 	}
 
 	pf.newOffset = consumed
+	pf.snapshot = snapshot
+
 	if pf.project == "" || pf.project == "subagents" {
 		// project "subagents" for type classification; if we already set a
 		// remote-derived project, keep it only when not a subagent.
