@@ -304,6 +304,7 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 	// writeParsedFile replaces the previous copy in the same transaction;
 	// a tail that omitted the row used to delete it and write nothing.
 	if sig.ContextTokensUsed > 0 || sig.ToolCallCount > 0 {
+		pf.replaceGrokSignals = true
 		usageText := fmt.Sprintf(
 			"[grok signals] model=%s context_tokens=%d/%d turns=%d tools=%d compactions=%d git_commits=%d",
 			model, sig.ContextTokensUsed, sig.ContextWindowTokens,

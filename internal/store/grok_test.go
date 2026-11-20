@@ -445,6 +445,38 @@ func TestDefectGrokTailIngestDeletesSignalsUsage(t *testing.T) {
 	}
 }
 
+func TestGrokSignalsReplacementUsesSyntheticEntry(t *testing.T) {
+	root := t.TempDir()
+	path := writeGrokSession(t, root, "/tmp/proj")
+	s := newTestStore(t, t.TempDir())
+	s.SetGrokRoots([]string{filepath.Join(root, "sessions")})
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(path), "signals.json")); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mention := "[grok signals] real user mentioned grok-" + grokSessUUID + "-signals-usage"
+	writeLines(t, path, string(transcript)+readerGrok.line(mention))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=12345/")
+	expectOnce(t, s, mention)
+
+	writeLines(t, filepath.Join(filepath.Dir(path), "signals.json"), `{"contextTokensUsed":99999}`)
+	writeLines(t, path, string(transcript)+readerGrok.line(mention)+readerGrok.line("turn with refreshed signals"))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=99999/")
+	expectOnce(t, s, mention)
+}
+
 func TestRepoFromRemote(t *testing.T) {
 	if g := repoFromRemote("git@github.com:acme/webapp.git"); g != "acme/webapp" {
 		t.Errorf("ssh remote = %q", g)

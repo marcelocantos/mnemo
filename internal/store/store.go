@@ -3801,6 +3801,8 @@ type parsedFile struct {
 	// model is the primary model stamp (Grok summary / signals); also
 	// embedded in entry raw for generated columns.
 	model string
+	// Carries a parsed replacement for the synthetic Grok usage entry.
+	replaceGrokSignals bool
 	// restarted means this file is not the one the stored offset was
 	// taken from. writeParsedFile replaces that session's rows and sets
 	// the offset absolutely.
@@ -4403,26 +4405,20 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 	// copy only when this parse carries the new one, in the same
 	// transaction. A tail that deleted the row and inserted nothing is
 	// how a session's only token total became zero (defect hunt finding 2).
-	if pf.source == "grok" {
+	if pf.replaceGrokSignals {
 		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
-		replaceSignals := false
-		for _, e := range pf.entries {
-			if strings.Contains(string(e.raw), usageUUID) {
-				replaceSignals = true
-				break
-			}
+		if _, err := ws.tx.Exec(`
+			DELETE FROM messages
+			WHERE entry_id IN (
+				SELECT id FROM entries
+				WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?
+			)`, pf.sessionID, usageUUID); err != nil {
+			return err
 		}
-		if replaceSignals {
-			if _, err := ws.tx.Exec(`
-				DELETE FROM messages WHERE session_id = ? AND mnemo_text(text, text_z) LIKE '[grok signals]%'`,
-				pf.sessionID); err != nil {
-				return err
-			}
-			if _, err := ws.tx.Exec(`
-				DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
-				pf.sessionID, usageUUID); err != nil {
-				return err
-			}
+		if _, err := ws.tx.Exec(`
+			DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
+			pf.sessionID, usageUUID); err != nil {
+			return err
 		}
 	}
 	// A rewritten store.db blob keeps its uuid. Delete that entry
