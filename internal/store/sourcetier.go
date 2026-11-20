@@ -5,6 +5,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"sort"
 	"strings"
@@ -199,30 +200,55 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 
 	tagged := 0
 	for _, c := range candidates {
-		var current string
-		_ = s.readDB.QueryRow(
-			`SELECT source_status FROM session_meta WHERE session_id = ?`,
-			c.sessionID).Scan(&current)
-		if sourceStatusClass(current) == sourceStatusClass(c.status) {
-			continue // idempotent within class
-		}
-		// UPSERT: session_meta only gets a row when ingest sees
-		// cwd/branch/topic, so a tag may be the first row for a
-		// session. The row's other defaults ('' for repo/cwd/etc) are
-		// fine — they reflect "unknown" and are populated if ingest
-		// later sees the metadata.
-		if _, err := s.writeDB.Exec(`
-			INSERT INTO session_meta (session_id, source_status, source_state_at)
-			VALUES (?, ?, ?)
-			ON CONFLICT(session_id) DO UPDATE SET
-				source_status = excluded.source_status,
-				source_state_at = excluded.source_state_at
-		`, c.sessionID, c.status, nowStr); err != nil {
+		wrote, err := tagSourceStatus(s.writeDB, c.sessionID, sourceStatusClass(c.status), now)
+		if err != nil {
 			return tagged, err
 		}
-		tagged++
+		if wrote {
+			tagged++
+		}
 	}
 	return tagged, nil
+}
+
+// statusWriter is the subset of *sql.DB and *sql.Tx that records a tag.
+type statusWriter interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// tagSourceStatus writes a 🎯T68.6 source_status tag for class
+// ("deleted_at", "truncated_at", or "rewritten_at"). An empty class or
+// session does nothing. The same class is left as it is, timestamp
+// included, so a later pass does not refresh it. The caller passes the
+// open ingest transaction when the tag has to commit with the rows it
+// describes: a fresh session_meta INSERT defaults source_status to live,
+// so this runs after that upsert.
+func tagSourceStatus(q statusWriter, sessionID, class string, now time.Time) (bool, error) {
+	if sessionID == "" || class == "" {
+		return false, nil
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	status := class + "=" + nowStr
+	var current string
+	err := q.QueryRow(
+		`SELECT source_status FROM session_meta WHERE session_id = ?`, sessionID).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if sourceStatusClass(current) == class {
+		return false, nil
+	}
+	if _, err := q.Exec(`
+		INSERT INTO session_meta (session_id, source_status, source_state_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			source_status = excluded.source_status,
+			source_state_at = excluded.source_state_at
+	`, sessionID, status, nowStr); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // sourceStatusClass returns the status class — the portion before the

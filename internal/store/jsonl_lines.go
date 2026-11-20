@@ -29,6 +29,7 @@ const jsonlPrefixBytes = 64 << 10
 // errTranscriptReplaced means the file changed identity while it was being
 // read (rotated, rewritten, or truncated under the scan). The caller rolls
 // its transaction back and reads the file that exists now, from byte 0.
+// Rows already indexed stay. 🎯T68.6: the index only grows.
 var errTranscriptReplaced = errors.New("transcript replaced while reading")
 
 // ingestGen is the in-memory identity of an ingested transcript. prefix
@@ -43,6 +44,10 @@ type jsonlResumeDecision struct {
 	offset    int64
 	caughtUp  bool
 	restarted bool
+	// statusClass is the 🎯T68.6 tag class when the file is not the one
+	// the cursor was taken from: "truncated_at" (shorter than the cursor)
+	// or "rewritten_at" (rotated, or rewritten at the same size or larger).
+	statusClass string
 }
 
 func prefixLen(n int64) int {
@@ -81,24 +86,30 @@ func prefixHash(b []byte) string {
 
 // jsonlResume decides how to read path, whose current size is size.
 //
-// A shorter file with the same inode is the durable tier (🎯T68.6): rows
-// already indexed are kept and the file is not parsed again. A different
-// inode, or a prefix that does not match the bytes the offset was taken
-// from, is a different transcript and is read from the start. An empty
-// stored prefix is stamped in memory only, so a rewrite that lands before
-// the first stamp is missed once.
+// A different inode, a prefix that does not match the bytes the offset
+// was taken from, or a file shorter than the cursor is read from the
+// start. Rows already indexed are kept (🎯T68.6); the read exists so new
+// lines are not missed, and statusClass says how the source changed.
+// An empty stored prefix is stamped in memory only, so a rewrite that
+// lands before the first stamp is missed once — an upgrade does not
+// re-read every transcript.
 func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 	s.mu.Lock()
 	off := s.offsets[path]
 	gen := s.gens[path]
 	s.mu.Unlock()
 
+	shorter := size < off
+	class := "rewritten_at"
+	if shorter {
+		class = "truncated_at"
+	}
 	id := fileIdentOf(path)
 	if id.ino != 0 && gen.ino != 0 && (id.dev != gen.dev || id.ino != gen.ino) {
-		return jsonlResumeDecision{restarted: true}
+		return jsonlResumeDecision{restarted: true, statusClass: class}
 	}
-	if size < off {
-		return jsonlResumeDecision{caughtUp: true}
+	if shorter {
+		return jsonlResumeDecision{restarted: true, statusClass: "truncated_at"}
 	}
 
 	n := prefixLen(off)
@@ -106,7 +117,7 @@ func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 		sample, err := prefixSample(path, n)
 		if err != nil {
 			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				return jsonlResumeDecision{restarted: true}
+				return jsonlResumeDecision{restarted: true, statusClass: "truncated_at"}
 			}
 			return jsonlResumeDecision{offset: off}
 		}
@@ -120,7 +131,7 @@ func (s *Store) jsonlResume(path string, size int64) jsonlResumeDecision {
 			}
 			s.stampGen(path, sum, id)
 		} else if gen.prefix != sum {
-			return jsonlResumeDecision{restarted: true}
+			return jsonlResumeDecision{restarted: true, statusClass: "rewritten_at"}
 		} else if gen.ino == 0 && id.ino != 0 {
 			s.stampGen(path, sum, id)
 		}
@@ -408,53 +419,10 @@ type pendingIngestCursor struct {
 	gen      ingestGen
 }
 
-// deleteSessionTranscript removes one session's indexed transcript so a
-// replaced file can be inserted in its place. compactions and hours_*
-// stay. messages_fts is external-content and has no delete trigger, so
-// the delete command is issued first, matching dedupeDeleteBatch.
-func (s *Store) deleteSessionTranscript(tx *sql.Tx, sessionID string, cursorJSONL bool) error {
-	if sessionID == "" {
-		return nil
-	}
-	messageScope := `session_id = ?1`
-	entryScope := messageScope
-	if cursorJSONL {
-		// Cursor's JSONL has a top-level role. Synthetic store.db entries
-		// share its session ID but carry their role under message.
-		cursorEntries := `SELECT id FROM entries_v
-			WHERE session_id = ?1 AND json_type(raw, '$.role') IS NOT NULL`
-		messageScope += ` AND entry_id IN (` + cursorEntries + `)`
-		entryScope += ` AND id IN (` + cursorEntries + `)`
-	}
-	stmts := []string{
-		`INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
-		 SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
-		 FROM messages_v m WHERE m.is_noise = 0 AND ` + messageScope,
-		`INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
-		 SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
-		 FROM messages_v m WHERE m.is_noise = 0
-		   AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)
-		   AND ` + messageScope,
-		`DELETE FROM tool_outputs WHERE message_id IN (SELECT id FROM messages WHERE ` + messageScope + `)`,
-		`DELETE FROM decisions WHERE session_id = ?`,
-		`DELETE FROM decision_scan_state WHERE session_id = ?`,
-		`DELETE FROM messages WHERE ` + messageScope,
-		`DELETE FROM entries WHERE ` + entryScope,
-		`DELETE FROM topic_segments WHERE session_id = ?`,
-		`DELETE FROM segment_scan_state WHERE session_id = ?`,
-		`DELETE FROM session_summary WHERE session_id = ?`,
-	}
-	for _, q := range stmts {
-		if _, err := tx.Exec(q, sessionID); err != nil {
-			return fmt.Errorf("replace session %s: %w", sessionID, err)
-		}
-	}
-	return nil
-}
-
 // ingestParsed reads one JSONL transcript from its cursor, or from the
 // start when the file is no longer the one that cursor was taken from.
 // A replacement observed mid-read is discarded and tried once more.
+// Indexed rows are not removed.
 func (s *Store) ingestParsed(path string, parse func(string, int64) (parsedFile, error)) error {
 	err := s.ingestParsedOnce(path, parse, false)
 	if errors.Is(err, errTranscriptReplaced) {
@@ -472,6 +440,7 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 		return err
 	}
 	var offset int64
+	var statusClass string
 	restarted := force
 	if !force {
 		d := s.jsonlResume(path, info.Size())
@@ -479,8 +448,18 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 			return nil
 		}
 		restarted = d.restarted
+		statusClass = d.statusClass
 		if !restarted {
 			offset = d.offset
+		}
+	} else {
+		s.mu.Lock()
+		prev := s.offsets[path]
+		s.mu.Unlock()
+		if info.Size() < prev {
+			statusClass = "truncated_at"
+		} else {
+			statusClass = "rewritten_at"
 		}
 	}
 	pf, err := parse(path, offset)
@@ -489,6 +468,7 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 	}
 	if restarted {
 		pf.restarted = true
+		pf.sourceClass = statusClass
 	}
 	ws, err := s.newWriterState()
 	if err != nil {
@@ -500,4 +480,163 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 		return err
 	}
 	return s.commitIngest(ws)
+}
+
+// sessionLineSet is the part of a session a replacement read must not
+// insert again. A line is already indexed when every non-empty message
+// text it projects is in texts. Message text is the identity, not the
+// byte offset and not the timestamp: offset-based uuids collide when a
+// replacement is read from byte 0, and several readers stamp a missing
+// timestamp from the file mtime, which a rewrite changes. A line that
+// projects no message text is not treated as already indexed. When its
+// entry uuid is already in uuids, the new body is stored under a
+// content-key uuid so the old row stays. The key is
+// "<source>-<session>-h-<sha256>" of the entry JSON with the uuid field
+// removed; an empty source means claude. A second read of that key is
+// an INSERT OR IGNORE no-op.
+type sessionLineSet struct {
+	texts map[string]struct{}
+	uuids map[string]struct{}
+}
+
+func loadSessionLines(tx *sql.Tx, sessionID string) (sessionLineSet, error) {
+	out := sessionLineSet{
+		texts: map[string]struct{}{},
+		uuids: map[string]struct{}{},
+	}
+	if sessionID == "" {
+		return out, nil
+	}
+	rows, err := tx.Query(
+		`SELECT text FROM messages_v WHERE session_id = ? AND text != ''`, sessionID)
+	if err != nil {
+		return out, err
+	}
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			rows.Close()
+			return out, err
+		}
+		out.texts[text] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return out, err
+	}
+	rows.Close()
+
+	rows, err = tx.Query(
+		`SELECT COALESCE(uuid_m, uuid) FROM entries
+		 WHERE session_id = ? AND COALESCE(uuid_m, uuid) IS NOT NULL`, sessionID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return out, err
+		}
+		if id != "" {
+			out.uuids[id] = struct{}{}
+		}
+	}
+	return out, rows.Err()
+}
+
+// lineTextsSeen reports whether every non-empty projected message text
+// is already stored. No non-empty text means the line is not recognised
+// as a duplicate.
+func lineTextsSeen(seen map[string]struct{}, parts []string) bool {
+	saw := false
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		saw = true
+		if _, ok := seen[p]; !ok {
+			return false
+		}
+	}
+	return saw
+}
+
+func rawEntryUUID(raw string) string {
+	var probe struct {
+		UUID      string `json:"uuid"`
+		MessageID string `json:"messageId"`
+	}
+	if json.Unmarshal([]byte(raw), &probe) != nil {
+		return ""
+	}
+	if probe.UUID != "" {
+		return probe.UUID
+	}
+	return probe.MessageID
+}
+
+// withoutUUID is the canonical JSON of raw with the uuid field removed.
+// json.Marshal sorts object keys, so the hash does not depend on the
+// order the producer wrote.
+func withoutUUID(raw string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return raw
+	}
+	delete(m, "uuid")
+	b, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return string(b)
+}
+
+func contentKeyUUID(source, sessionID, raw string) string {
+	if source == "" {
+		source = "claude"
+	}
+	sum := sha256.Sum256([]byte(withoutUUID(raw)))
+	return source + "-" + sessionID + "-h-" + hex.EncodeToString(sum[:])
+}
+
+// retargetTakenUUID leaves raw unchanged when its uuid is new. A uuid
+// already stored for the session is replaced with the content key, so
+// INSERT OR IGNORE keeps the old row and accepts the new body.
+func retargetTakenUUID(source, sessionID, raw string, taken map[string]struct{}) string {
+	id := rawEntryUUID(raw)
+	if id == "" {
+		return raw
+	}
+	if _, ok := taken[id]; !ok {
+		return raw
+	}
+	return rewriteEntryUUID(raw, contentKeyUUID(source, sessionID, raw))
+}
+
+func rewriteEntryUUID(raw, uuid string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return raw
+	}
+	m["uuid"] = uuid
+	b, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return string(b)
+}
+
+func rememberInsertedLine(seen sessionLineSet, raw string, texts []string) {
+	if seen.uuids == nil {
+		return
+	}
+	if id := rawEntryUUID(raw); id != "" {
+		seen.uuids[id] = struct{}{}
+	}
+	for _, t := range texts {
+		if t != "" {
+			seen.texts[t] = struct{}{}
+		}
+	}
 }

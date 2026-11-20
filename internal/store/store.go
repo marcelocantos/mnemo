@@ -3804,9 +3804,12 @@ type parsedFile struct {
 	// Carries a parsed replacement for the synthetic Grok usage entry.
 	replaceGrokSignals bool
 	// restarted means this file is not the one the stored offset was
-	// taken from. writeParsedFile replaces that session's rows and sets
-	// the offset absolutely.
+	// taken from. writeParsedFile keeps the rows already indexed, inserts
+	// only lines whose message text is new, and sets the offset absolutely.
 	restarted bool
+	// sourceClass is the 🎯T68.6 tag written when restarted is set:
+	// "truncated_at" or "rewritten_at".
+	sourceClass string
 }
 
 // IngestAll scans the project directory and ingests all JSONL files
@@ -3822,16 +3825,17 @@ func (s *Store) IngestAll() error {
 
 	// Stage 1: Collector — gather paths, sort newest-first, filter already-done.
 	type fileEntry struct {
-		path      string
-		mtime     time.Time
-		size      int64
-		offset    int64 // already-ingested offset; 0 when restarted
-		restarted bool  // file is not the one offset was taken from
+		path        string
+		mtime       time.Time
+		size        int64
+		offset      int64 // already-ingested offset; 0 when restarted
+		restarted   bool  // file is not the one offset was taken from
+		sourceClass string
 	}
 	var files []fileEntry
-	// consider queues a JSONL transcript. A caught-up file, including a
-	// durable truncation (size below the offset, same identity), is left
-	// alone. A replacement is queued from byte 0.
+	// consider queues a JSONL transcript. A caught-up file is left alone.
+	// A file that was replaced, rotated, or truncated under its cursor is
+	// queued from byte 0 so new lines are indexed. Rows already stored stay.
 	consider := func(path string, info os.FileInfo) {
 		d := s.jsonlResume(path, info.Size())
 		if d.caughtUp {
@@ -3842,11 +3846,12 @@ func (s *Store) IngestAll() error {
 			off = 0
 		}
 		files = append(files, fileEntry{
-			path:      path,
-			mtime:     info.ModTime(),
-			size:      info.Size(),
-			offset:    off,
-			restarted: d.restarted,
+			path:        path,
+			mtime:       info.ModTime(),
+			size:        info.Size(),
+			offset:      off,
+			restarted:   d.restarted,
+			sourceClass: d.statusClass,
 		})
 	}
 	// Codex rollout roots (~/.codex/sessions, archived_sessions) are
@@ -3994,6 +3999,13 @@ func (s *Store) IngestAll() error {
 				pf, err := parse(fe.path, fe.offset)
 				if errors.Is(err, errTranscriptReplaced) && !fe.restarted {
 					fe.restarted = true
+					fe.sourceClass = "rewritten_at"
+					s.mu.Lock()
+					prev := s.offsets[fe.path]
+					s.mu.Unlock()
+					if info, statErr := os.Stat(fe.path); statErr == nil && info.Size() < prev {
+						fe.sourceClass = "truncated_at"
+					}
 					pf, err = parse(fe.path, 0)
 				}
 				if err != nil {
@@ -4001,6 +4013,7 @@ func (s *Store) IngestAll() error {
 					continue
 				}
 				pf.restarted = fe.restarted
+				pf.sourceClass = fe.sourceClass
 				select {
 				case parsedCh <- pf:
 				case <-done:
@@ -4396,15 +4409,13 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 			return err
 		}
 	}
-	if pf.restarted {
-		if err := s.deleteSessionTranscript(ws.tx, pf.sessionID, isCursorTranscript(pf.path)); err != nil {
-			return err
-		}
-	}
 	// Grok session-level usage rows use a stable uuid. Replace the previous
 	// copy only when this parse carries the new one, in the same
 	// transaction. A tail that deleted the row and inserted nothing is
 	// how a session's only token total became zero (defect hunt finding 2).
+	// This delete is the signals row only. The seen-set for a replacement
+	// read is loaded after it, so an unchanged signals line is inserted
+	// again rather than skipped as already indexed.
 	if pf.replaceGrokSignals {
 		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
 		if _, err := ws.tx.Exec(`
@@ -4430,12 +4441,37 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 		}
 	}
 
+	// A replacement read keeps every row already indexed. Load the seen
+	// set after the signals and blob replaces above: those deletes are
+	// specific uuids, and a line they removed must be inserted again.
+	var seen sessionLineSet
+	textsByEntry := make([][]string, len(pf.entries))
+	if pf.restarted {
+		var err error
+		seen, err = loadSessionLines(ws.tx, pf.sessionID)
+		if err != nil {
+			return err
+		}
+		for _, m := range pf.messages {
+			if m.entryIdx >= 0 && m.entryIdx < len(textsByEntry) {
+				textsByEntry[m.entryIdx] = append(textsByEntry[m.entryIdx], m.text)
+			}
+		}
+	}
+
 	// Insert all raw entries and build entryIdx→entryID map.
 	// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 	// only record the entry ID when a row was actually inserted.
 	entryIDs := make(map[int]int64, len(pf.entries))
 	for i, e := range pf.entries {
-		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
+		raw := string(e.raw)
+		if pf.restarted && lineTextsSeen(seen.texts, textsByEntry[i]) {
+			continue
+		}
+		if pf.restarted {
+			raw = retargetTakenUUID(pf.source, pf.sessionID, raw, seen.uuids)
+		}
+		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, raw)
 		if err != nil {
 			return err
 		}
@@ -4445,6 +4481,9 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 				entryIDs[i] = id
 			} else {
 				return err
+			}
+			if pf.restarted {
+				rememberInsertedLine(seen, raw, textsByEntry[i])
 			}
 		}
 	}
@@ -4529,6 +4568,16 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 				(successor_id, predecessor_id, boundary, gap_ms, confidence, mechanism)
 			VALUES (?, ?, 'subagent', 0, 'high', 'grok_subagent')`,
 				child, pf.sessionID)
+		}
+	}
+
+	// Tag after the metadata upsert. A fresh session_meta INSERT defaults
+	// source_status to live, which would hide a tag written earlier in
+	// this transaction. Moving the offset to the new, smaller size also
+	// hides the truncation from a later SourceDrift pass.
+	if pf.restarted {
+		if _, err := tagSourceStatus(ws.tx, pf.sessionID, pf.sourceClass, time.Now()); err != nil {
+			return err
 		}
 	}
 
@@ -7334,10 +7383,11 @@ func (s *Store) ingestFile(path string) error {
 }
 
 // ingestClaudeOnce reads one Claude transcript. force skips the resume
-// decision and reads from byte 0, replacing that session's rows. The
-// retry passes force after a mid-read replacement; consulting the resume
-// decision then would see the offset committed for the old file and treat
-// a shorter replacement as a durable truncation.
+// decision and reads from byte 0. Rows already indexed stay; a line whose
+// message text is already stored is not inserted again. The retry passes
+// force after a mid-read replacement; consulting the resume decision then
+// would see the offset committed for the old file and treat a shorter
+// replacement as a durable truncation.
 func (s *Store) ingestClaudeOnce(path string, force bool) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -7347,6 +7397,7 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		return err
 	}
 	var offset int64
+	var statusClass string
 	restarted := force
 	if !force {
 		d := s.jsonlResume(path, info.Size())
@@ -7354,10 +7405,25 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 			return nil
 		}
 		restarted = d.restarted
+		statusClass = d.statusClass
 		if !restarted {
 			offset = d.offset
 		}
+	} else {
+		s.mu.Lock()
+		prev := s.offsets[path]
+		s.mu.Unlock()
+		if info.Size() < prev {
+			statusClass = "truncated_at"
+		} else {
+			statusClass = "rewritten_at"
+		}
 	}
+	// absolute stays set for every cursor write of a replacement read.
+	// A mid-stream commit clears restarted so later lines still notice a
+	// second change, and that must not turn the final cursor into a MAX
+	// that keeps the old, larger offset.
+	absolute := restarted
 
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
@@ -7375,8 +7441,10 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		_ = ws.tx.Rollback()
 	}()
 
-	if restarted {
-		if err := s.deleteSessionTranscript(ws.tx, sessionID, false); err != nil {
+	var seen sessionLineSet
+	if absolute {
+		seen, err = loadSessionLines(ws.tx, sessionID)
+		if err != nil {
 			return err
 		}
 	}
@@ -7406,11 +7474,23 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 			ts = time.Now().Format(time.RFC3339)
 		}
 
+		raw := string(line)
+		var parts []string
+		if absolute && (entry.Type == "user" || entry.Type == "assistant") {
+			for _, b := range extractBlocks(entry.Message) {
+				parts = append(parts, b.Text)
+			}
+			if lineTextsSeen(seen.texts, parts) {
+				return nil
+			}
+			raw = retargetTakenUUID("", sessionID, raw, seen.uuids)
+		}
+
 		// Insert every JSONL line into entries table.
 		// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 		// only record the entry ID when a row was actually inserted.
 		var entryID int64
-		result, entryErr := ws.insertEntry(sessionID, project, entry.Type, ts, string(line))
+		result, entryErr := ws.insertEntry(sessionID, project, entry.Type, ts, raw)
 		if entryErr != nil {
 			return entryErr
 		}
@@ -7419,6 +7499,9 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 			entryID, idErr = result.LastInsertId()
 			if idErr != nil {
 				return idErr
+			}
+			if absolute {
+				rememberInsertedLine(seen, raw, parts)
 			}
 		}
 
@@ -7501,7 +7584,7 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		if time.Since(lastCommit) < ingestCommitInterval {
 			return nil
 		}
-		if err := ws.putIngestCursor(path, end, restarted, snapshot, ""); err != nil {
+		if err := ws.putIngestCursor(path, end, absolute, snapshot, ""); err != nil {
 			return err
 		}
 		if err := s.commitIngest(ws); err != nil {
@@ -7550,7 +7633,14 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 			sessionID, repo, metaCwd, metaBranch, workType, metaTopic, metaCompactorInternal)
 	}
 
-	if err := ws.putIngestCursor(path, consumed, restarted, snapshot, ""); err != nil {
+	// After the metadata upsert: its INSERT defaults source_status to live.
+	if absolute {
+		if _, err := tagSourceStatus(ws.tx, sessionID, statusClass, time.Now()); err != nil {
+			return err
+		}
+	}
+
+	if err := ws.putIngestCursor(path, consumed, absolute, snapshot, ""); err != nil {
 		return err
 	}
 

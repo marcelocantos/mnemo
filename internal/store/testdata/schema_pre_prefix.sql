@@ -1,0 +1,2306 @@
+-- Previous mnemo schema for upgrade tests.
+-- Produced by: git show 9d3c830d16e5c111fb31c54682828c5b01a605b3:internal/store/schema.sql
+-- That commit is the merge-base of filler/fix-hunt-findings and master when this fixture was cut (2026-11-20).
+-- Committed so a shallow clone or an export, which does not have that git object, can still open a database the previous code would have written.
+-- mnemo schema — single source of truth, applied at startup via sqlift.
+--
+-- This file was generated from the live DB to match SQLite's canonical
+-- stored form byte-for-byte. Any edit must preserve the exact whitespace
+-- for CREATE TRIGGER / CREATE VIEW / CREATE VIRTUAL TABLE statements,
+-- since sqlift's Trigger/View/VirtualTable equality is sensitive to the
+-- stored sql/args text. Tables and indexes are formatted for readability
+-- (their raw_sql is excluded from equality).
+--
+-- sqlift owns idempotency, so no IF NOT EXISTS / IF EXISTS clauses.
+-- Any change here is diffed against the live DB and applied under
+-- ApplyOptions{} (AllowNone) — only pure additive changes are allowed.
+-- See CLAUDE.md § Schema policy for the deprecation pattern.
+
+-- Tables
+
+CREATE TABLE audit_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			date TEXT NOT NULL DEFAULT '',
+			skill TEXT NOT NULL DEFAULT '',
+			version TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			raw_text TEXT NOT NULL,
+			UNIQUE(file_path, date, skill)
+		);
+
+CREATE TABLE ci_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			run_id INTEGER NOT NULL UNIQUE,
+			workflow TEXT NOT NULL,
+			branch TEXT,
+			commit_sha TEXT,
+			status TEXT NOT NULL,
+			conclusion TEXT,
+			started_at TEXT,
+			completed_at TEXT,
+			log_summary TEXT,
+			url TEXT,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE claude_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL DEFAULT '',
+			file_path TEXT NOT NULL UNIQUE,
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+CREATE TABLE claude_md_reviews (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			reviewed_at TEXT NOT NULL,
+			-- commit_id: repo's git HEAD at review time. Stored for
+			-- forensic correlation; NOT consumed by the staleness
+			-- trigger logic (entry-count-since-review is the cheap
+			-- signal). 🎯T41.
+			commit_id TEXT NOT NULL DEFAULT '',
+			-- summary: the CLAUDE.md first-paragraph as it stood at
+			-- review time (the thing the LLM was asked to assess).
+			summary TEXT NOT NULL,
+			-- verdict: LLM's assessment. One of: "current",
+			-- "stale", "rewritten" (where "rewritten" means the
+			-- LLM proposed a CLAUDE.md rewrite, not just a summary
+			-- update).
+			verdict TEXT NOT NULL,
+			-- proposed_summary: LLM's replacement summary text when
+			-- verdict in (stale, rewritten). NULL otherwise.
+			proposed_summary TEXT,
+			-- proposed_claude_md: LLM's CLAUDE.md rewrite when
+			-- verdict = rewritten. NULL otherwise. Surfaced for
+			-- human review; never auto-applied.
+			proposed_claude_md TEXT,
+			UNIQUE(repo, reviewed_at)
+		);
+
+CREATE TABLE compactions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			connection_id TEXT,
+			generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			model TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cost_usd REAL NOT NULL DEFAULT 0,
+			entry_id_from INTEGER NOT NULL DEFAULT 0,
+			entry_id_to INTEGER NOT NULL DEFAULT 0,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			summary TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T77 durable per-session compaction-failure quarantine. The
+-- watcher's in-memory backoff was lost on every daemon restart, so a
+-- permanently un-summarisable session (e.g. one that EINVALs at exec,
+-- or whose content makes the summariser reply conversationally forever)
+-- failed afresh every boot and dominated the failed:compacted ratio.
+-- fail_count accrues across restarts; the candidate query excludes a
+-- session whose count is at/over the threshold and whose last failure
+-- is within the cooldown. A clean tick deletes the row.
+CREATE TABLE compactor_quarantine (
+			session_id TEXT PRIMARY KEY,
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			last_failed_at TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE connection_sessions (
+			connection_id TEXT NOT NULL,
+			session_id   TEXT NOT NULL,
+			first_seen_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			PRIMARY KEY (connection_id, session_id)
+		);
+
+CREATE TABLE daemon_connections (
+			connection_id TEXT PRIMARY KEY,
+			pid INTEGER NOT NULL,
+			accepted_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			closed_at TEXT
+		);
+
+CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			proposal_msg_id INTEGER REFERENCES messages(id),
+			confirmation_msg_id INTEGER REFERENCES messages(id),
+			proposal_text TEXT NOT NULL,
+			confirmation_text TEXT NOT NULL,
+			repo TEXT NOT NULL DEFAULT '',
+			timestamp TEXT NOT NULL
+		);
+
+-- 🎯T92 decision-detection watermark. detectDecisions used to re-scan a
+-- session's ENTIRE message history on every ingest (the watcher fires one
+-- ingest per transcript append), and backfillDecisions re-scanned every
+-- decision-less session on every pass (a session with no decisions never
+-- got a decisions row, so "has a decisions row" wrongly read as "not yet
+-- scanned"). Both became O(all history) busy-loops on a large DB. This
+-- table records, per session, the highest message id already scanned for
+-- decision pairs, so detection is incremental (scan only new messages) and
+-- the backfill converges (each session scanned at most once until it
+-- grows). scanned_through_id 0 / a missing row both mean "never scanned".
+CREATE TABLE decision_scan_state (
+			session_id TEXT PRIMARY KEY,
+			scanned_through_id INTEGER NOT NULL DEFAULT 0,
+			scanned_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE doc_tree_refs (
+			doc_id INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+			tree_id INTEGER NOT NULL REFERENCES trees_of_interest(id) ON DELETE CASCADE,
+			PRIMARY KEY (doc_id, tree_id)
+		);
+
+CREATE TABLE docs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			kind TEXT NOT NULL DEFAULT 'md',
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			size INTEGER NOT NULL DEFAULT 0,
+			mtime TEXT NOT NULL DEFAULT '',
+			indexed_at TEXT NOT NULL,
+			taxonomy TEXT NOT NULL DEFAULT '',
+			doc_date TEXT NOT NULL DEFAULT '',
+			doc_status TEXT NOT NULL DEFAULT '',
+			doc_target TEXT NOT NULL DEFAULT '',
+			doc_source TEXT NOT NULL DEFAULT '',
+			-- 🎯T151: zstd frame of content when compressed; content is then ''.
+			-- Read through mnemo_text(content, content_z) or the docs_v view.
+			content_z BLOB,
+			-- Stored lengths for status/membership. Status must never
+			-- SUM(length(blob)): that pulls overflow pages of every row.
+			plain_len INTEGER,
+			z_len INTEGER
+		);
+
+-- 🎯T151: dictionary lineage for per-row zstd compression. dict_id is
+-- the id carried in every frame header, so a row written under any
+-- past dictionary decodes as long as its row is here. Never deleted.
+CREATE TABLE compression_dicts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			dict_id INTEGER NOT NULL UNIQUE,
+			family TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			sample_rows INTEGER NOT NULL DEFAULT 0,
+			dict BLOB NOT NULL
+		);
+
+-- 🎯T151: resumable cursor for the historical-row backfill, one per family.
+CREATE TABLE compression_gc (
+			family TEXT PRIMARY KEY,
+			next_id INTEGER NOT NULL DEFAULT 0,
+			done INTEGER NOT NULL DEFAULT 0,
+			saved_bytes INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			last_error TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			project TEXT NOT NULL,
+			type TEXT NOT NULL,
+			timestamp TEXT,
+			raw BLOB,
+			-- Virtual columns for high-query entry-level fields.
+			uuid TEXT GENERATED ALWAYS AS (COALESCE(raw->>'$.uuid', raw->>'$.messageId')),
+			model TEXT GENERATED ALWAYS AS (raw->>'$.message.model'),
+			stop_reason TEXT GENERATED ALWAYS AS (raw->>'$.message.stop_reason'),
+			input_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.input_tokens')),
+			output_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.output_tokens')),
+			cache_read_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_read_input_tokens')),
+			cache_creation_tokens INTEGER GENERATED ALWAYS AS (json_extract(raw, '$.message.usage.cache_creation_input_tokens')),
+			agent_id TEXT GENERATED ALWAYS AS (raw->>'$.agentId'),
+			version TEXT GENERATED ALWAYS AS (raw->>'$.version'),
+			slug TEXT GENERATED ALWAYS AS (raw->>'$.slug'),
+			is_sidechain INTEGER GENERATED ALWAYS AS (CASE WHEN json_extract(raw, '$.isSidechain') THEN 1 ELSE 0 END),
+			data_type TEXT GENERATED ALWAYS AS (raw->>'$.data.type'),
+			data_command TEXT GENERATED ALWAYS AS (raw->>'$.data.command'),
+			data_hook_event TEXT GENERATED ALWAYS AS (raw->>'$.data.hookEvent'),
+			top_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.toolUseID'),
+			parent_tool_use_id TEXT GENERATED ALWAYS AS (raw->>'$.parentToolUseID'),
+			-- 🎯T152: materialised copies of the generated columns above.
+			-- Written at ingest from the bound JSON and backfilled at boot
+			-- from the generated columns; once raw is compressed (raw NULL,
+			-- raw_z set) the generated columns are NULL and these are the
+			-- only source. Read them under their original names through
+			-- entries_v. Appended last so ADD COLUMN reproduces this order.
+			uuid_m TEXT,
+			model_m TEXT,
+			stop_reason_m TEXT,
+			input_tokens_m INTEGER,
+			output_tokens_m INTEGER,
+			cache_read_tokens_m INTEGER,
+			cache_creation_tokens_m INTEGER,
+			agent_id_m TEXT,
+			version_m TEXT,
+			slug_m TEXT,
+			is_sidechain_m INTEGER,
+			data_type_m TEXT,
+			data_command_m TEXT,
+			data_hook_event_m TEXT,
+			top_tool_use_id_m TEXT,
+			parent_tool_use_id_m TEXT,
+			-- 🎯T152: zstd frame of the JSON line when compressed; raw is
+			-- then NULL (an empty string would make the generated columns
+			-- raise "malformed JSON"). Read through mnemo_raw(raw, raw_z).
+			raw_z BLOB,
+			-- Stored lengths for status/membership. Status must never
+			-- SUM(length(blob)): that pulls overflow pages of every row.
+			plain_len INTEGER,
+			z_len INTEGER,
+			-- Usage / AgentTrees identity and cache-tier fields, written
+			-- at ingest so token aggregates never decode raw via mnemo_raw.
+			message_id_m TEXT,
+			request_id_m TEXT,
+			cache_write_5m_m INTEGER,
+			cache_write_1h_m INTEGER,
+			source_tool_assistant_uuid_m TEXT,
+			attribution_skill_m TEXT,
+			attribution_agent_m TEXT,
+			spawn_agent_id_m TEXT,
+			spawn_tool_use_id_m TEXT
+		);
+
+CREATE TABLE git_commits (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			commit_hash TEXT NOT NULL,
+			author_name TEXT NOT NULL,
+			author_email TEXT NOT NULL,
+			commit_date TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			UNIQUE(repo, commit_hash)
+		);
+
+CREATE TABLE github_issues (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			issue_number INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL,
+			author TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			url TEXT NOT NULL,
+			labels TEXT NOT NULL DEFAULT '[]',
+			UNIQUE(repo, issue_number)
+		);
+
+CREATE TABLE github_prs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			pr_number INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL,
+			author TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			merged_at TEXT,
+			url TEXT NOT NULL,
+			UNIQUE(repo, pr_number)
+		);
+
+CREATE TABLE image_descriptions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(image_id)
+		);
+
+-- One row per image whose embedding has been attempted, recording the
+-- terminal outcome (🎯T121). image_embeddings.vector is NOT NULL, so a
+-- failure cannot be recorded there; without this table every failure was
+-- silently dropped and the same images were retried on every startup.
+CREATE TABLE image_embedding_attempts (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			status TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			last_attempt_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE image_embeddings (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			dim INTEGER NOT NULL,
+			vector BLOB NOT NULL,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE image_occurrences (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+			entry_id INTEGER REFERENCES entries(id),
+			message_id INTEGER REFERENCES messages(id),
+			session_id TEXT NOT NULL,
+			source_type TEXT NOT NULL CHECK(source_type IN ('inline','path')),
+			occurred_at TEXT NOT NULL,
+			UNIQUE(image_id, entry_id, message_id, source_type)
+		);
+
+CREATE TABLE image_ocr (
+			image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+			text TEXT NOT NULL DEFAULT '',
+			backend TEXT NOT NULL,
+			confidence REAL,
+			error TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE images (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			content_hash TEXT UNIQUE NOT NULL,
+			bytes BLOB NOT NULL,
+			original_path TEXT,
+			mime_type TEXT NOT NULL,
+			width INTEGER NOT NULL,
+			height INTEGER NOT NULL,
+			pixel_format TEXT NOT NULL,
+			byte_size INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE ingest_state (
+			path TEXT PRIMARY KEY,
+			offset INTEGER NOT NULL,
+			-- 🎯T68.6 fingerprint cursor: the file's size+mtime at the
+			-- moment the offset was recorded. SourceDrift compares these
+			-- against current stat to detect same-size in-place rewrites
+			-- (offset>=size but mtime moved). Nullable so old rows fall
+			-- back to size-only detection until next ingest re-stamps
+			-- them.
+			recorded_size INTEGER,
+			recorded_mtime TEXT
+		);
+
+CREATE TABLE ingest_status (
+			stream TEXT PRIMARY KEY,
+			last_backfill TEXT NOT NULL,
+			files_indexed INTEGER NOT NULL,
+			files_on_disk INTEGER NOT NULL
+		);
+
+-- Per-repo reconcile cursor for the external mirror streams
+-- (ci/github/commits) — 🎯T68.5. A (repo, stream) row records when
+-- that repo's stream last reconciled, so the mirror reconciler can be
+-- divergence-driven (reconcile a repo whose row is missing or stale)
+-- rather than boot-once or fixed-poll. Additive, append-only.
+-- 🎯T144 cross-corpus ranking calibration.
+--
+-- BM25 scores are NOT comparable across FTS indexes: the length
+-- normalisation term is b·|D|/avgdl and avgdl is per-index, so a
+-- 10-word commit subject and a 500-word message are scored against
+-- different baselines. Comparing the raw numbers lets short-document
+-- corpora monopolise a merged result set.
+--
+-- This table stores, per corpus, the score distribution observed when
+-- probing that corpus with terms drawn from its own content. A live
+-- score maps to its quantile within its own corpus ("97th percentile
+-- for commits"), and quantiles are what compete across corpora.
+--
+-- quantiles is a JSON array of score MAGNITUDES (-rank, so larger is a
+-- better match) in ascending order, evenly spaced from p0 to p100.
+-- sample_size is how many scores went into it, and computed_at ages it:
+-- a distribution sampled when a corpus was a tenth of its current size
+-- mis-maps every score, and nothing about the resulting ordering would
+-- look wrong, so staleness has to be legible rather than inferred.
+CREATE TABLE search_calibration (
+			corpus TEXT PRIMARY KEY,
+			quantiles TEXT NOT NULL,
+			sample_size INTEGER NOT NULL,
+			doc_count INTEGER NOT NULL,
+			computed_at TEXT NOT NULL
+		);
+
+-- 🎯T197 porter dual-index migration. One row per stemmed corpus.
+-- marker_rowid is the lowest rowid known to be in the stem index:
+-- rows with rowid >= marker are stemmed (or ineligible), rows below it
+-- are still answered by the original unicode61 index. status is
+-- 'running' or 'complete'. The legacy FTS tables are never altered or
+-- dropped here; dropping them is a later phase.
+CREATE TABLE fts_stem_progress (
+			corpus TEXT PRIMARY KEY,
+			marker_rowid INTEGER NOT NULL,
+			initial_marker INTEGER NOT NULL,
+			status TEXT NOT NULL DEFAULT 'running',
+			rows_done INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE mirror_status (
+			repo TEXT NOT NULL,
+			stream TEXT NOT NULL,
+			last_reconciled_at TEXT NOT NULL,
+			-- 🎯T91 failure backoff: a (repo, stream) whose gh/git reconcile
+			-- fails must not be retried every pass (a persistently-failing
+			-- repo — no Actions, deleted, no local checkout — otherwise
+			-- spawns a failing subprocess on every reconcile tick). fail_count
+			-- is consecutive failures since the last success; last_attempt_at
+			-- stamps the most recent attempt (success or failure). The
+			-- scheduler treats a repo as due only once last_attempt_at is
+			-- older than an exponential backoff of the stream interval.
+			-- Additive + defaulted: old rows read as "never failed, never
+			-- attempted" and are due immediately, preserving prior behaviour
+			-- until the first failure records a backoff.
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (repo, stream)
+		);
+
+-- Forward output manifest for the vault exporter (🎯T68.6). Each note
+-- the exporter writes UPSERTs a row keyed by note_path; orphan
+-- detection is then exact set-difference (manifest rows whose file is
+-- gone; *.md files under the vault root with no manifest row) instead
+-- of lossy slug reverse-mapping. content_hash lets the GC verify the
+-- on-disk note is still the artifact we wrote before removing it.
+-- Vault-relative paths.
+CREATE TABLE vault_outputs (
+			note_path TEXT PRIMARY KEY,
+			entity_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			written_at TEXT NOT NULL
+		);
+CREATE INDEX idx_vault_outputs_entity ON vault_outputs(entity_kind, entity_id);
+
+CREATE TABLE memories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			memory_type TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+-- notes: cross-session agent-to-agent inbox notes (🎯T65). inbox is a
+-- canonicalized absolute directory path (see canonicalizeInbox); a
+-- producer session posts a note addressed to a consumer session's root
+-- directory, and the consumer pulls it. read_at is NULL until a recv
+-- consumes the note; rows are retained after delivery (append-only).
+CREATE TABLE notes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			inbox TEXT NOT NULL,
+			body TEXT NOT NULL,
+			from_session TEXT NOT NULL DEFAULT '',
+			from_repo TEXT NOT NULL DEFAULT '',
+			posted_at TEXT NOT NULL,
+			read_at TEXT
+		);
+
+CREATE TABLE messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entry_id INTEGER REFERENCES entries(id),
+			session_id TEXT NOT NULL,
+			project TEXT NOT NULL,
+			role TEXT NOT NULL,
+			text TEXT NOT NULL,
+			timestamp TEXT,
+			type TEXT,
+			is_noise INTEGER NOT NULL DEFAULT 0,
+			content_type TEXT NOT NULL DEFAULT 'text',
+			tool_name TEXT,
+			tool_use_id TEXT,
+			tool_input BLOB,
+			is_error INTEGER NOT NULL DEFAULT 0,
+			-- Computed columns: commonly queried fields from tool_input.
+			tool_file_path TEXT GENERATED ALWAYS AS (tool_input->>'file_path'),
+			tool_command TEXT GENERATED ALWAYS AS (tool_input->>'command'),
+			tool_pattern TEXT GENERATED ALWAYS AS (tool_input->>'pattern'),
+			tool_description TEXT GENERATED ALWAYS AS (tool_input->>'description'),
+			tool_skill TEXT GENERATED ALWAYS AS (tool_input->>'skill'),
+			tool_old_string TEXT GENERATED ALWAYS AS (tool_input->>'old_string'),
+			tool_new_string TEXT GENERATED ALWAYS AS (tool_input->>'new_string'),
+			tool_content TEXT GENERATED ALWAYS AS (tool_input->>'content'),
+			tool_query TEXT GENERATED ALWAYS AS (tool_input->>'query'),
+			tool_url TEXT GENERATED ALWAYS AS (tool_input->>'url'),
+			tool_name_param TEXT GENERATED ALWAYS AS (tool_input->>'name'),
+			tool_prompt TEXT GENERATED ALWAYS AS (tool_input->>'prompt'),
+			tool_subject TEXT GENERATED ALWAYS AS (tool_input->>'subject'),
+			tool_status TEXT GENERATED ALWAYS AS (tool_input->>'status'),
+			tool_task_id TEXT GENERATED ALWAYS AS (COALESCE(tool_input->>'task_id', tool_input->>'taskId')),
+			-- 🎯T151: zstd frame of text when compressed; text is then ''.
+			-- Read through mnemo_text(text, text_z) or the messages_v view.
+			text_z BLOB,
+			-- Stored lengths for status/membership. Status must never
+			-- SUM(length(blob)): that pulls overflow pages of every row.
+			plain_len INTEGER,
+			z_len INTEGER
+		);
+
+-- 🎯T192: the full text of a persisted tool output. Claude Code keeps a
+-- tool result over ~2 KB on disk (a sidecar under the session's
+-- tool-results/ directory) and puts a <persisted-output> preview in the
+-- transcript; only that preview reached messages, so a search could not
+-- see the output's body. The body lives here, one row per preview
+-- message, and never in messages.text — mnemo_read_session and the
+-- compactor read that column and must not grow by megabytes per tool
+-- call. source records where the body came from: 'sidecar' (the file on
+-- disk), 'tool_use_result' (the string leaves of the entry's
+-- toolUseResult object), or 'none' (neither was available; the row
+-- exists so the backfill does not re-examine the preview forever).
+-- text/text_z follow the messages.text convention (🎯T151): read through
+-- mnemo_text(text, text_z).
+CREATE TABLE tool_outputs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+			session_id TEXT NOT NULL,
+			project TEXT NOT NULL DEFAULT '',
+			tool_use_id TEXT,
+			source TEXT NOT NULL,
+			text TEXT NOT NULL DEFAULT '',
+			text_z BLOB,
+			plain_len INTEGER,
+			z_len INTEGER,
+			indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+-- 🎯T202: the owner's inputs, for attended hours. One row per human
+-- action — a prompt, a command, an answer to an agent's question, an
+-- interrupt — from one of two sources. 't3' rows come from T3 Code's
+-- own record of authorship (createdBy = user, typed in a T3 client);
+-- ref is T3's message_id. 'transcript' rows come from a Claude
+-- transcript's provenance fields; ref is the entry's uuid, so a fork
+-- that copies history into a new session does not count it twice.
+-- 't3-transcript' rows are the transcript's copy of a prompt T3 drove:
+-- never counted (the T3 store is the authority, and T3's injected
+-- messages look the same in the transcript), but kept so a report can
+-- say how much T3-driven work it could not attribute when the T3
+-- store is unavailable. at_ms is Unix milliseconds. repo_hint is the
+-- project when the session is not indexed. No message text is stored.
+CREATE TABLE hours_inputs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source TEXT NOT NULL,
+			ref TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			repo_hint TEXT NOT NULL DEFAULT '',
+			at_ms INTEGER NOT NULL,
+			UNIQUE(source, ref)
+		);
+
+-- 🎯T202: the minutes in which a session produced output (assistant
+-- messages and tool results), for agent hours. minute is Unix minutes.
+-- Materialised from messages by the hours worker, so a report never
+-- reads transcript text.
+CREATE TABLE hours_agent_minutes (
+			session_id TEXT NOT NULL,
+			minute INTEGER NOT NULL,
+			n INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_id, minute)
+		);
+
+-- 🎯T202: sessions T3 Code drove, from its provider-thread records.
+CREATE TABLE hours_t3_sessions (
+			session_id TEXT PRIMARY KEY,
+			thread_id TEXT NOT NULL,
+			repo_hint TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T202: the hours worker's cursor per stream ('messages': message id;
+-- 't3': rowid in T3's message table) and, for 't3', why the store could
+-- not be read ('' when it was).
+CREATE TABLE hours_progress (
+			stream TEXT PRIMARY KEY,
+			cursor INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T64.7: workaround patterns, promoted from a live query to a
+-- persisted table so they survive across sessions, accumulate a real
+-- first_seen, and give the clustering engine (🎯T64.8) a deterministic
+-- input stream at weight 1.2.
+--
+-- occurrence_count and session_count are genuinely different numbers:
+-- one session that read six transcript files directly is 6 occurrences
+-- across 1 session. The emission gate (vault pages, clustering corpus)
+-- is occurrence >= 3 AND session_count >= 2, so both are load-bearing.
+--
+-- `sessions` is an addition to the shape in docs/design/vault-library-
+-- wing.md § Slice 7: the design records session_count only, but the
+-- provenance section of a rendered pattern page and mnemo_discover_
+-- patterns' existing output both name the sessions, and re-deriving
+-- them would mean re-running the miner on every read.
+CREATE TABLE patterns (
+			id TEXT PRIMARY KEY,
+			pattern_type TEXT NOT NULL,
+			signature TEXT NOT NULL,
+			occurrence_count INTEGER NOT NULL DEFAULT 0,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			repos TEXT NOT NULL DEFAULT '[]',
+			sessions TEXT NOT NULL DEFAULT '[]',
+			first_seen TEXT NOT NULL DEFAULT '',
+			last_seen TEXT NOT NULL DEFAULT '',
+			representative_excerpts TEXT NOT NULL DEFAULT '[]',
+			computed_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE plans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL UNIQUE,
+			phase TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+CREATE TABLE query_templates (
+			id INTEGER PRIMARY KEY,
+			name TEXT UNIQUE NOT NULL,
+			description TEXT,
+			query_text TEXT NOT NULL,
+			param_names TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE reconciled_costs (
+			date TEXT NOT NULL PRIMARY KEY, -- UTC calendar date (YYYY-MM-DD)
+			cost_usd REAL NOT NULL,          -- authoritative cost from Anthropic Admin API
+			fetched_at TEXT NOT NULL         -- when this row was retrieved
+		);
+
+CREATE TABLE session_chains (
+			successor_id TEXT PRIMARY KEY,
+			predecessor_id TEXT NOT NULL,
+			boundary TEXT NOT NULL DEFAULT 'clear',
+			gap_ms INTEGER NOT NULL,
+			confidence TEXT NOT NULL CHECK(confidence IN ('definitive', 'high', 'medium', 'low')),
+			mechanism TEXT NOT NULL DEFAULT 'mcp_connection',
+			detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+
+CREATE TABLE session_meta (
+			session_id TEXT PRIMARY KEY,
+			repo TEXT NOT NULL DEFAULT '',
+			cwd TEXT NOT NULL DEFAULT '',
+			git_branch TEXT NOT NULL DEFAULT '',
+			work_type TEXT NOT NULL DEFAULT '',
+			topic TEXT NOT NULL DEFAULT '',
+			-- 🎯T68.6 source-state convergence (Law 2): valid-time tag
+			-- per session. The index retains content durably; this column
+			-- tracks the *current* state of the session's source JSONL
+			-- ("live" / "truncated_at=…" / "deleted_at=…"). The state
+			-- reconciler — a drift sweep over SourceDrift — converges
+			-- this tag toward reality without ever removing rows.
+			-- Additive, defaulted: old sessions read as "live" until a
+			-- drift event tags them.
+			source_status TEXT NOT NULL DEFAULT 'live',
+			source_state_at TEXT NOT NULL DEFAULT '',
+			-- 🎯T72 recursion guard: set to 1 when this session's
+			-- transcript is a claudia-spawned compactor run (detected at
+			-- ingest by the CompactorMarker prefix on the first user
+			-- message), 0 for genuine user/dev sessions. Replaces the
+			-- over-broad excludeCWD prefix check that wrongly skipped real
+			-- dev sessions sharing the mnemo repo cwd. Additive, defaulted:
+			-- old rows read as 0 (eligible) until re-ingest tags a marker.
+			compactor_internal INTEGER NOT NULL DEFAULT 0,
+			-- 🎯T99 multi-agent provenance: which coding agent produced
+			-- this session's transcript. 'claude' for ~/.claude/projects
+			-- rollouts (the default, so existing rows read correctly),
+			-- 'codex' for ~/.codex/sessions, 'grok' for ~/.grok/sessions,
+			-- 'cursor' for ~/.cursor/projects agent-transcripts (🎯T149).
+			-- Additive, defaulted.
+			source TEXT NOT NULL DEFAULT 'claude'
+		);
+
+CREATE TABLE session_nonces (
+			nonce TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL
+		);
+
+CREATE TABLE session_summary (
+			session_id TEXT PRIMARY KEY,
+			project TEXT NOT NULL,
+			session_type TEXT NOT NULL DEFAULT 'interactive',
+			total_msgs INTEGER NOT NULL DEFAULT 0,
+			substantive_msgs INTEGER NOT NULL DEFAULT 0,
+			first_msg TEXT NOT NULL DEFAULT '',
+			last_msg TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T64.10: incremental segmentation watermark (seal-on-lookahead).
+CREATE TABLE segment_scan_state (
+			session_id TEXT PRIMARY KEY,
+			segmented_through_id INTEGER NOT NULL DEFAULT 0,
+			method TEXT NOT NULL DEFAULT 'structural',
+			scanned_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE skills (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_path TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+CREATE TABLE snapshot_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entry_id INTEGER NOT NULL REFERENCES entries(id),
+			session_id TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			backup_time TEXT
+		);
+
+CREATE TABLE targets (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			target_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			weight REAL NOT NULL DEFAULT 0,
+			description TEXT NOT NULL DEFAULT '',
+			raw_text TEXT NOT NULL,
+			UNIQUE(file_path, target_id)
+		);
+
+-- 🎯T64.8 / 🎯T64.10: themes + membership (clustering engine surface).
+-- parent_theme_id / depth retain the agglomerative dendrogram (T64.10
+-- reverses the flat-themes non-goal). membership_kind distinguishes
+-- primary vs secondary soft membership for segment/doc members.
+CREATE TABLE themes (
+			id TEXT PRIMARY KEY,
+			label TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			weight REAL NOT NULL DEFAULT 0,
+			repos TEXT NOT NULL DEFAULT '[]',
+			parent_theme_id TEXT,
+			depth INTEGER,
+			first_seen TEXT NOT NULL DEFAULT '',
+			last_touched TEXT NOT NULL DEFAULT '',
+			computed_at TEXT NOT NULL DEFAULT '',
+			-- 🎯T64.8 additive columns (document-level clustering engine).
+			slug TEXT NOT NULL DEFAULT '',
+			source_engine TEXT NOT NULL DEFAULT '',
+			member_count INTEGER NOT NULL DEFAULT 0,
+			centroid_text TEXT NOT NULL DEFAULT '',
+			archived INTEGER NOT NULL DEFAULT 0,
+			label_path TEXT NOT NULL DEFAULT '',
+			label_gate TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE INDEX idx_themes_parent ON themes(parent_theme_id);
+
+CREATE TABLE theme_members (
+			theme_id TEXT NOT NULL,
+			doc_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			membership_kind TEXT,
+			similarity REAL,
+			-- 🎯T64.8 additive columns.
+			repo TEXT NOT NULL DEFAULT '',
+			ts TEXT NOT NULL DEFAULT '',
+			distance REAL,
+			PRIMARY KEY (theme_id, doc_kind, entity_id)
+		);
+
+CREATE INDEX idx_theme_members_entity ON theme_members(doc_kind, entity_id);
+
+CREATE TABLE cluster_embeddings (
+			doc_kind TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			model_version TEXT NOT NULL DEFAULT '',
+			dims INTEGER NOT NULL DEFAULT 0,
+			vector BLOB,
+			computed_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (doc_kind, entity_id, content_hash, provider, model, model_version)
+		);
+
+CREATE INDEX cluster_embeddings_by_fingerprint
+			ON cluster_embeddings (provider, model, model_version);
+
+-- 🎯T64.8: clustering pass telemetry (append-only run log).
+CREATE TABLE cluster_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			engine TEXT NOT NULL,
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			model_version TEXT NOT NULL DEFAULT '',
+			input_docs INTEGER NOT NULL DEFAULT 0,
+			output_themes INTEGER NOT NULL DEFAULT 0,
+			embedding_calls INTEGER NOT NULL DEFAULT 0,
+			estimated_cost REAL NOT NULL DEFAULT 0,
+			failure_mode TEXT NOT NULL DEFAULT '',
+			trigger TEXT NOT NULL DEFAULT '',
+			embeddings_bytes INTEGER NOT NULL DEFAULT 0,
+			embeddings_rows INTEGER NOT NULL DEFAULT 0
+		);
+
+CREATE INDEX cluster_runs_by_started ON cluster_runs (started_at DESC);
+
+-- 🎯T64.8: user directives applied on the next clustering pass.
+CREATE TABLE theme_overrides (
+			theme_id TEXT PRIMARY KEY,
+			directive TEXT NOT NULL,
+			payload TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			applied_at TEXT
+		);
+
+-- 🎯T64.8: pinned themes are exempt from retire_after auto-archive.
+CREATE TABLE theme_pins (
+			theme_id TEXT PRIMARY KEY,
+			pinned_at TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T78 TODO ingestion. todo_files is the per-file cursor: content_hash
+-- drives incremental skip, and (size, mtime) is the write-back
+-- fingerprint that lets a mutation detect an external edit since the
+-- file was indexed and refuse to clobber it. todos holds one row per
+-- parsed checkbox line; raw_line preserves the exact source line so a
+-- single task can be rewritten in place. Obsidian Tasks dates are
+-- stored as ISO strings ('' when absent); priority is an integer
+-- ordered Highest(6) > High(5) > Medium(4) > None(3) > Low(2) >
+-- Lowest(1); tags are space-joined (#-stripped) for FTS; links is a
+-- JSON array of wikilink targets. All append-only, additive.
+CREATE TABLE todo_files (
+			file_path TEXT PRIMARY KEY,
+			repo TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL DEFAULT '',
+			size INTEGER NOT NULL DEFAULT 0,
+			mtime TEXT NOT NULL DEFAULT '',
+			todo_count INTEGER NOT NULL DEFAULT 0,
+			indexed_at TEXT NOT NULL DEFAULT ''
+		);
+
+-- 🎯T64.10: hierarchical topic segments (message-level extent axis).
+CREATE TABLE topic_segments (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			from_msg_id INTEGER NOT NULL,
+			to_msg_id INTEGER NOT NULL,
+			level INTEGER NOT NULL DEFAULT 0,
+			parent_id TEXT,
+			method TEXT NOT NULL DEFAULT 'structural',
+			confidence REAL NOT NULL DEFAULT 0,
+			sealed INTEGER NOT NULL DEFAULT 0,
+			label TEXT,
+			summary TEXT,
+			repo TEXT,
+			first_ts TEXT,
+			last_ts TEXT,
+			computed_at TEXT NOT NULL DEFAULT '',
+			compaction_id INTEGER,
+			-- Lineage, NOT hierarchy (🎯T132.1). parent_id above says "this
+			-- fine span sits inside that coarse one"; superseded_by says
+			-- "that span later overturned this one". Conflating them would
+			-- make AttachSegmentExpand's parent walk climb a supersession
+			-- edge as though it were an enclosing span.
+			--
+			-- Nullable ADD COLUMN, which sqlift permits under AllowNone, so
+			-- this stays inside the append-only schema policy with no gate
+			-- relaxed. Superseded spans are retained and flagged rather than
+			-- deleted: the stream-vs-finalisation divergence is the freshness
+			-- metric, and deleting the loser would delete the measurement.
+			superseded_by TEXT,
+			-- How this span was drawn (🎯T134): method/model/drip/lookahead
+			-- /prompt-version, e.g. 'stream/sonnet/d12/k3/p1'.
+			--
+			-- Without it there is no way to ask which spans predate an
+			-- operating point, so the only honest answer to "redraw the
+			-- stale ones" is "redraw everything" — the position 🎯T131 was
+			-- in for compaction eligibility, which cost a full-corpus pass
+			-- to escape. NULL means drawn before provenance was recorded,
+			-- which is itself a usable population.
+			--
+			-- Nullable ADD COLUMN, permitted under sqlift AllowNone.
+			derivation TEXT
+		);
+
+CREATE INDEX topic_segments_by_session ON topic_segments (session_id, from_msg_id, to_msg_id);
+CREATE INDEX topic_segments_by_parent ON topic_segments (parent_id);
+CREATE INDEX topic_segments_sealed ON topic_segments (session_id, sealed);
+CREATE INDEX topic_segments_by_compaction ON topic_segments (compaction_id);
+
+CREATE TABLE todos (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL DEFAULT '',
+			file_path TEXT NOT NULL,
+			line INTEGER NOT NULL,
+			indent INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'open',
+			text TEXT NOT NULL DEFAULT '',
+			raw_line TEXT NOT NULL DEFAULT '',
+			section TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 3,
+			due_date TEXT NOT NULL DEFAULT '',
+			scheduled_date TEXT NOT NULL DEFAULT '',
+			start_date TEXT NOT NULL DEFAULT '',
+			created_date TEXT NOT NULL DEFAULT '',
+			done_date TEXT NOT NULL DEFAULT '',
+			cancelled_date TEXT NOT NULL DEFAULT '',
+			recurrence TEXT NOT NULL DEFAULT '',
+			tags TEXT NOT NULL DEFAULT '',
+			links TEXT NOT NULL DEFAULT '',
+			indexed_at TEXT NOT NULL DEFAULT ''
+		);
+
+CREATE TABLE trees_of_interest (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			root_path TEXT NOT NULL UNIQUE,
+			label TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);
+
+-- Indexes
+
+CREATE INDEX idx_audit_entries_date ON audit_entries(date);
+
+CREATE INDEX idx_audit_entries_repo ON audit_entries(repo);
+
+CREATE INDEX idx_audit_entries_skill ON audit_entries(skill);
+
+CREATE INDEX idx_ci_runs_conclusion ON ci_runs(conclusion);
+
+CREATE INDEX idx_ci_runs_repo ON ci_runs(repo);
+
+CREATE INDEX idx_ci_runs_started ON ci_runs(started_at);
+
+CREATE INDEX idx_ci_runs_status ON ci_runs(status);
+
+CREATE INDEX idx_claude_configs_repo ON claude_configs(repo);
+
+CREATE INDEX idx_claude_md_reviews_repo
+			ON claude_md_reviews(repo, reviewed_at DESC);
+
+CREATE INDEX idx_compactions_session_generated ON compactions(session_id, generated_at DESC);
+
+CREATE INDEX idx_connection_sessions_connection_last ON connection_sessions(connection_id, last_seen_at DESC);
+
+CREATE INDEX idx_connection_sessions_session ON connection_sessions(session_id);
+
+CREATE INDEX idx_daemon_connections_open ON daemon_connections(closed_at) WHERE closed_at IS NULL;
+
+CREATE INDEX idx_daemon_connections_pid ON daemon_connections(pid);
+
+CREATE INDEX idx_decisions_repo ON decisions(repo);
+
+CREATE INDEX idx_decisions_session ON decisions(session_id);
+
+CREATE INDEX idx_decisions_timestamp ON decisions(timestamp);
+
+CREATE INDEX idx_doc_tree_refs_tree ON doc_tree_refs(tree_id);
+
+CREATE INDEX idx_docs_repo ON docs(repo);
+
+CREATE INDEX idx_docs_taxonomy ON docs(taxonomy) WHERE taxonomy != '';
+
+CREATE INDEX idx_entries_agent_id ON entries(agent_id) WHERE agent_id IS NOT NULL;
+
+CREATE INDEX idx_entries_assistant_tokens ON entries(session_id, input_tokens, output_tokens) WHERE type = 'assistant';
+
+-- 🎯T93 usage-analytics covering index. Store.Usage (token/cost rollups by
+-- day/model/repo) and activeHours both filter assistant entries by a
+-- timestamp window. Without a timestamp-leading index they fall back to
+-- idx_entries_type and SEARCH every assistant entry ever (~763k), table-
+-- fetching each to apply the window filter (~2.8s on a large DB, re-run by
+-- the dashboard's auto-refresh). Leading timestamp makes the window a range
+-- scan; the materialised token columns + model + session_id make both
+-- queries index-only over just the window's rows. Partial on type so it
+-- covers only assistant entries (matching the queries' WHERE type clause).
+CREATE INDEX idx_entries_assistant_usage
+			ON entries(timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, session_id)
+			WHERE type = 'assistant';
+
+-- 🎯T72 addenda-token metric: SUM(output_tokens + cache_creation_tokens)
+-- over assistant entries past a cursor (entries.id > cursor_entry_id),
+-- computed for every session on every compactor scan. Keyed
+-- (session_id, id) with the two summed columns materialised as covering
+-- payload so the per-session range sum is an index-only scan rather than
+-- a json_extract over each row's raw BLOB.
+CREATE INDEX idx_entries_addenda ON entries(session_id, id, output_tokens, cache_creation_tokens) WHERE type = 'assistant';
+
+CREATE INDEX idx_entries_data_hook_event ON entries(data_hook_event) WHERE data_hook_event IS NOT NULL;
+
+CREATE INDEX idx_entries_data_type ON entries(data_type) WHERE data_type IS NOT NULL;
+
+CREATE INDEX idx_entries_model ON entries(model) WHERE model IS NOT NULL;
+
+CREATE INDEX idx_entries_parent_tool_use_id ON entries(parent_tool_use_id) WHERE parent_tool_use_id IS NOT NULL;
+
+CREATE INDEX idx_entries_project ON entries(project);
+
+CREATE INDEX idx_entries_session ON entries(session_id);
+
+CREATE UNIQUE INDEX idx_entries_session_uuid ON entries(session_id, uuid) WHERE uuid IS NOT NULL;
+
+CREATE INDEX idx_entries_timestamp ON entries(timestamp);
+
+CREATE INDEX idx_entries_top_tool_use_id ON entries(top_tool_use_id) WHERE top_tool_use_id IS NOT NULL;
+
+CREATE INDEX idx_entries_type ON entries(type);
+
+-- 🎯T152: the generated-column indexes above go quiet as rows are
+-- compressed (their key becomes NULL); these are their materialised
+-- twins, which entries_v queries flatten onto.
+CREATE INDEX idx_entries_agent_id_m ON entries(agent_id_m) WHERE agent_id_m IS NOT NULL;
+CREATE INDEX idx_entries_assistant_tokens_m ON entries(session_id, input_tokens_m, output_tokens_m) WHERE type = 'assistant';
+CREATE INDEX idx_entries_assistant_usage_m
+			ON entries(timestamp, model_m, input_tokens_m, output_tokens_m, cache_read_tokens_m, cache_creation_tokens_m, session_id)
+			WHERE type = 'assistant';
+CREATE INDEX idx_entries_addenda_m ON entries(session_id, id, output_tokens_m, cache_creation_tokens_m) WHERE type = 'assistant';
+CREATE INDEX idx_entries_data_hook_event_m ON entries(data_hook_event_m) WHERE data_hook_event_m IS NOT NULL;
+CREATE INDEX idx_entries_data_type_m ON entries(data_type_m) WHERE data_type_m IS NOT NULL;
+CREATE INDEX idx_entries_model_m ON entries(model_m) WHERE model_m IS NOT NULL;
+CREATE INDEX idx_entries_parent_tool_use_id_m ON entries(parent_tool_use_id_m) WHERE parent_tool_use_id_m IS NOT NULL;
+CREATE UNIQUE INDEX idx_entries_session_uuid_m ON entries(session_id, uuid_m) WHERE uuid_m IS NOT NULL;
+CREATE INDEX idx_entries_top_tool_use_id_m ON entries(top_tool_use_id_m) WHERE top_tool_use_id_m IS NOT NULL;
+
+-- Leftover-membership indexes: packer walks and status "done/outstanding"
+-- are z IS NULL, not live SUM(length(blob)). A finished family leaves
+-- only short rows (below the compress threshold) in these indexes.
+CREATE INDEX idx_messages_text_z_null ON messages(id) WHERE text_z IS NULL;
+CREATE INDEX idx_docs_content_z_null ON docs(id) WHERE content_z IS NULL;
+CREATE INDEX idx_entries_raw_z_null ON entries(id) WHERE raw_z IS NULL;
+
+-- Packed-side aggregates (🎯T181). compress_status reports, per family,
+-- how many rows are packed and how many bytes they occupy. Both figures
+-- are small integers, but without an index SQLite answers them by
+-- walking the table -- and every row it steps over drags its blob's
+-- overflow pages through the page cache. Measured on the owner's
+-- 21 GiB database: SUM(z_len) over entries took 19.9s and over messages
+-- 9.3s. The compress.backfill health check runs on the Fast tier every
+-- three minutes, so that is ~30s of scanning every 180s: a daemon
+-- sitting at a third of a core doing nothing but re-answering a
+-- question whose answer had not changed. The 20s per-check timeout hid
+-- it rather than stopping it -- the check reported "did not answer" and
+-- the query kept running to completion in the background.
+--
+-- Indexing z_len over the packed rows makes both the count and the sum
+-- index-only, so neither touches a payload. The predicate is
+-- `<z> IS NOT NULL` rather than `z_len IS NOT NULL` so that it matches
+-- the queries in familyStatus; the two select the same rows, because
+-- z_len is written by the same UPDATE that writes the blob.
+CREATE INDEX idx_messages_text_z_len ON messages(z_len) WHERE text_z IS NOT NULL;
+CREATE INDEX idx_docs_content_z_len ON docs(z_len) WHERE content_z IS NOT NULL;
+CREATE INDEX idx_entries_raw_z_len ON entries(z_len) WHERE raw_z IS NOT NULL;
+
+-- Unpacked-side bytes. The z_null indexes above carry only id, so
+-- SUM(plain_len) over them still had to visit each row to read the
+-- column -- on an unpacked row that is the row holding the payload.
+CREATE INDEX idx_messages_text_plain_len ON messages(plain_len) WHERE text_z IS NULL;
+CREATE INDEX idx_docs_content_plain_len ON docs(plain_len) WHERE content_z IS NULL;
+CREATE INDEX idx_entries_raw_plain_len ON entries(plain_len) WHERE raw_z IS NULL;
+
+CREATE INDEX idx_git_commits_date ON git_commits(commit_date);
+
+CREATE INDEX idx_git_commits_hash ON git_commits(commit_hash);
+
+CREATE INDEX idx_git_commits_repo ON git_commits(repo);
+
+CREATE INDEX idx_github_issues_created ON github_issues(created_at);
+
+CREATE INDEX idx_github_issues_repo ON github_issues(repo);
+
+CREATE INDEX idx_github_issues_state ON github_issues(state);
+
+CREATE INDEX idx_github_issues_updated ON github_issues(updated_at);
+
+CREATE INDEX idx_github_prs_created ON github_prs(created_at);
+
+CREATE INDEX idx_github_prs_repo ON github_prs(repo);
+
+CREATE INDEX idx_github_prs_state ON github_prs(state);
+
+CREATE INDEX idx_github_prs_updated ON github_prs(updated_at);
+
+CREATE INDEX idx_image_descriptions_image ON image_descriptions(image_id);
+
+CREATE INDEX idx_image_embedding_attempts_status ON image_embedding_attempts(status);
+
+CREATE INDEX idx_image_embeddings_model ON image_embeddings(model);
+
+CREATE INDEX idx_image_occurrences_image ON image_occurrences(image_id);
+
+CREATE INDEX idx_image_occurrences_session ON image_occurrences(session_id);
+
+CREATE INDEX idx_image_ocr_backend ON image_ocr(backend);
+
+CREATE INDEX idx_images_content_hash ON images(content_hash);
+
+CREATE INDEX idx_memories_project ON memories(project);
+
+CREATE INDEX idx_memories_type ON memories(memory_type);
+
+CREATE INDEX idx_notes_inbox ON notes(inbox, posted_at);
+
+CREATE INDEX idx_messages_content_type ON messages(content_type);
+
+CREATE INDEX idx_messages_entry_id ON messages(entry_id) WHERE entry_id IS NOT NULL;
+
+CREATE INDEX idx_messages_is_error ON messages(is_error) WHERE is_error = 1;
+
+CREATE INDEX idx_messages_project ON messages(project);
+
+CREATE INDEX idx_messages_session ON messages(session_id);
+
+-- Supports the compaction owed-predicate (🎯T68.1/🎯T68.3) and
+-- ReadSessionAfter (🎯T68.2), which count / page substantive messages
+-- per session past a messages.id cursor. Since the predicate now scans
+-- every session each scan (no recency floor), this partial composite
+-- turns the per-session range scan into an index lookup.
+CREATE INDEX idx_messages_session_id_substantive ON messages(session_id, id) WHERE is_noise = 0;
+
+CREATE INDEX idx_messages_tool_command ON messages(tool_command) WHERE tool_command IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_description ON messages(tool_description) WHERE tool_description IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_file_path ON messages(tool_file_path) WHERE tool_file_path IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_name ON messages(tool_name);
+
+CREATE INDEX idx_messages_tool_new_string ON messages(tool_new_string) WHERE tool_new_string IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_old_string ON messages(tool_old_string) WHERE tool_old_string IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_pattern ON messages(tool_pattern) WHERE tool_pattern IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_skill ON messages(tool_skill) WHERE tool_skill IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_task_id ON messages(tool_task_id) WHERE tool_task_id IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_url ON messages(tool_url) WHERE tool_url IS NOT NULL;
+
+CREATE INDEX idx_messages_tool_use_id ON messages(tool_use_id);
+
+CREATE INDEX idx_tool_outputs_session_id ON tool_outputs(session_id);
+
+CREATE INDEX idx_hours_inputs_at ON hours_inputs(at_ms);
+
+CREATE INDEX idx_hours_agent_minutes_minute ON hours_agent_minutes(minute);
+
+CREATE INDEX idx_patterns_type ON patterns(pattern_type);
+
+CREATE INDEX idx_plans_phase ON plans(phase);
+
+CREATE INDEX idx_plans_repo ON plans(repo);
+
+CREATE INDEX idx_session_chains_predecessor ON session_chains(predecessor_id);
+
+CREATE INDEX idx_session_nonces_session ON session_nonces(session_id);
+
+CREATE INDEX idx_session_summary_type ON session_summary(session_type);
+
+CREATE INDEX idx_skills_name ON skills(name);
+
+CREATE INDEX idx_snapshot_files_entry ON snapshot_files(entry_id);
+
+CREATE INDEX idx_snapshot_files_path ON snapshot_files(file_path);
+
+CREATE INDEX idx_snapshot_files_session ON snapshot_files(session_id);
+
+CREATE INDEX idx_targets_repo ON targets(repo);
+
+CREATE INDEX idx_targets_status ON targets(status);
+
+CREATE INDEX idx_targets_target_id ON targets(target_id);
+
+CREATE INDEX idx_todos_due ON todos(due_date) WHERE due_date != '';
+
+CREATE INDEX idx_todos_file ON todos(file_path);
+
+CREATE INDEX idx_todos_priority ON todos(priority);
+
+CREATE INDEX idx_todos_repo ON todos(repo);
+
+CREATE INDEX idx_todos_status ON todos(status);
+
+-- Virtual tables (FTS5)
+
+CREATE VIRTUAL TABLE audit_entries_fts USING fts5(
+			summary, raw_text, repo,
+			content=audit_entries,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE ci_runs_fts USING fts5(
+			repo, workflow, branch, log_summary, conclusion,
+			content='ci_runs', content_rowid='id'
+		);
+
+CREATE VIRTUAL TABLE claude_configs_fts USING fts5(
+			content, repo,
+			content=claude_configs,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE compactions_fts USING fts5(
+			summary, session_id,
+			content=compactions,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE decisions_fts USING fts5(
+			proposal_text, confirmation_text, repo,
+			content=decisions,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE docs_fts USING fts5(
+			title, content, repo, kind, taxonomy,
+			content=docs,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE git_commits_fts USING fts5(
+			subject, body, repo, author_name,
+			content=git_commits, content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE github_issues_fts USING fts5(
+			title, body, repo, author,
+			content=github_issues, content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE github_prs_fts USING fts5(
+			title, body, repo, author,
+			content=github_prs, content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE image_descriptions_fts USING fts5(
+			name,
+			description,
+			content=image_descriptions,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE image_ocr_fts USING fts5(
+			text,
+			content=image_ocr,
+			content_rowid=image_id
+		);
+
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+			name, description, content, project,
+			content=memories,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE notes_fts USING fts5(
+			body, inbox, from_repo,
+			content=notes,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+			text, role, project, session_id,
+			content=messages,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE tool_outputs_fts USING fts5(
+			text, session_id,
+			content=tool_outputs,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE plans_fts USING fts5(
+			content, repo, phase,
+			content=plans,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE skills_fts USING fts5(
+			name, description, content,
+			content=skills,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE snapshot_files_fts USING fts5(
+			file_path,
+			content=snapshot_files,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE targets_fts USING fts5(
+			name, description, raw_text, repo,
+			content=targets,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE todos_fts USING fts5(
+			text, tags, section, repo,
+			content=todos,
+			content_rowid=id
+		);
+
+CREATE VIRTUAL TABLE topic_segments_fts USING fts5(
+			label, summary,
+			content=topic_segments,
+			content_rowid=rowid
+		);
+
+CREATE VIRTUAL TABLE themes_fts USING fts5(
+			label, summary,
+			content=themes,
+			content_rowid=rowid
+		);
+
+CREATE VIRTUAL TABLE patterns_fts USING fts5(
+			pattern_type, signature, representative_excerpts,
+			content=patterns,
+			content_rowid=rowid
+		);
+
+-- 🎯T197 porter indexes. New virtual tables beside the unicode61 ones.
+-- tokenize is porter wrapped around unicode61. No tokenchars: hyphens
+-- stay separators, matching the decision that rejected that change.
+-- External content, same columns and content_rowid as the legacy table,
+-- so a row is indexed from the values the trigger passes (decompressed
+-- text) rather than from an FTS rebuild, which would read the empty
+-- stored text column.
+
+CREATE VIRTUAL TABLE messages_fts_stem USING fts5(
+			text, role, project, session_id,
+			content=messages, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE tool_outputs_fts_stem USING fts5(
+			text, session_id,
+			content=tool_outputs, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE topic_segments_fts_stem USING fts5(
+			label, summary,
+			content=topic_segments, content_rowid=rowid,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE decisions_fts_stem USING fts5(
+			proposal_text, confirmation_text, repo,
+			content=decisions, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE docs_fts_stem USING fts5(
+			title, content, repo, kind, taxonomy,
+			content=docs, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE targets_fts_stem USING fts5(
+			name, description, raw_text, repo,
+			content=targets, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE git_commits_fts_stem USING fts5(
+			subject, body, repo, author_name,
+			content=git_commits, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE github_prs_fts_stem USING fts5(
+			title, body, repo, author,
+			content=github_prs, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE memories_fts_stem USING fts5(
+			name, description, content, project,
+			content=memories, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE plans_fts_stem USING fts5(
+			content, repo, phase,
+			content=plans, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE claude_configs_fts_stem USING fts5(
+			content, repo,
+			content=claude_configs, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE skills_fts_stem USING fts5(
+			name, description, content,
+			content=skills, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE audit_entries_fts_stem USING fts5(
+			summary, raw_text, repo,
+			content=audit_entries, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+CREATE VIRTUAL TABLE compactions_fts_stem USING fts5(
+			summary, session_id,
+			content=compactions, content_rowid=id,
+			tokenize='porter unicode61'
+		);
+
+-- Triggers
+
+CREATE TRIGGER audit_entries_ad AFTER DELETE ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts(audit_entries_fts, rowid, summary, raw_text, repo)
+			VALUES ('delete', old.id, old.summary, old.raw_text, old.repo);
+		END;
+
+CREATE TRIGGER audit_entries_ai AFTER INSERT ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts(rowid, summary, raw_text, repo)
+			VALUES (new.id, new.summary, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER audit_entries_au AFTER UPDATE ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts(audit_entries_fts, rowid, summary, raw_text, repo)
+			VALUES ('delete', old.id, old.summary, old.raw_text, old.repo);
+			INSERT INTO audit_entries_fts(rowid, summary, raw_text, repo)
+			VALUES (new.id, new.summary, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER ci_runs_ai AFTER INSERT ON ci_runs
+		BEGIN
+			INSERT INTO ci_runs_fts(rowid, repo, workflow, branch, log_summary, conclusion)
+			VALUES (new.id, new.repo, new.workflow, COALESCE(new.branch, ''), COALESCE(new.log_summary, ''), COALESCE(new.conclusion, ''));
+		END;
+
+CREATE TRIGGER ci_runs_au AFTER UPDATE ON ci_runs
+		BEGIN
+			INSERT INTO ci_runs_fts(ci_runs_fts, rowid, repo, workflow, branch, log_summary, conclusion)
+			VALUES ('delete', old.id, old.repo, old.workflow, COALESCE(old.branch, ''), COALESCE(old.log_summary, ''), COALESCE(old.conclusion, ''));
+			INSERT INTO ci_runs_fts(rowid, repo, workflow, branch, log_summary, conclusion)
+			VALUES (new.id, new.repo, new.workflow, COALESCE(new.branch, ''), COALESCE(new.log_summary, ''), COALESCE(new.conclusion, ''));
+		END;
+
+CREATE TRIGGER claude_configs_ad AFTER DELETE ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts(claude_configs_fts, rowid, content, repo)
+			VALUES ('delete', old.id, old.content, old.repo);
+		END;
+
+CREATE TRIGGER claude_configs_ai AFTER INSERT ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts(rowid, content, repo)
+			VALUES (new.id, new.content, new.repo);
+		END;
+
+CREATE TRIGGER claude_configs_au AFTER UPDATE ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts(claude_configs_fts, rowid, content, repo)
+			VALUES ('delete', old.id, old.content, old.repo);
+			INSERT INTO claude_configs_fts(rowid, content, repo)
+			VALUES (new.id, new.content, new.repo);
+		END;
+
+CREATE TRIGGER compactions_ai AFTER INSERT ON compactions
+		BEGIN
+			INSERT INTO compactions_fts(rowid, summary, session_id)
+			VALUES (new.id, new.summary, new.session_id);
+		END;
+
+CREATE TRIGGER decisions_ad AFTER DELETE ON decisions
+		BEGIN
+			INSERT INTO decisions_fts(decisions_fts, rowid, proposal_text, confirmation_text, repo)
+			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
+		END;
+
+CREATE TRIGGER decisions_ai AFTER INSERT ON decisions
+		BEGIN
+			INSERT INTO decisions_fts(rowid, proposal_text, confirmation_text, repo)
+			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
+		END;
+
+CREATE TRIGGER decisions_au AFTER UPDATE ON decisions
+		BEGIN
+			INSERT INTO decisions_fts(decisions_fts, rowid, proposal_text, confirmation_text, repo)
+			VALUES ('delete', old.id, old.proposal_text, old.confirmation_text, old.repo);
+			INSERT INTO decisions_fts(rowid, proposal_text, confirmation_text, repo)
+			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
+		END;
+
+CREATE TRIGGER docs_ad AFTER DELETE ON docs
+		BEGIN
+			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind, taxonomy)
+			VALUES ('delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy);
+		END;
+
+CREATE TRIGGER docs_ai AFTER INSERT ON docs
+		BEGIN
+			INSERT INTO docs_fts(rowid, title, content, repo, kind, taxonomy)
+			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
+		END;
+
+CREATE TRIGGER docs_au AFTER UPDATE ON docs
+		BEGIN
+			INSERT INTO docs_fts(docs_fts, rowid, title, content, repo, kind, taxonomy)
+			VALUES ('delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy);
+			INSERT INTO docs_fts(rowid, title, content, repo, kind, taxonomy)
+			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
+		END;
+
+-- 🎯T152: any writer that inserts the legacy shape (raw only — a test
+-- seed, an older binary, a hand INSERT) gets its materialised twins
+-- filled from the generated columns, so entries_v reads it correctly.
+-- mnemo's own writer sets uuid_m itself and the WHEN clause skips it.
+CREATE TRIGGER entries_materialise AFTER INSERT ON entries
+		WHEN new.uuid_m IS NULL AND new.model_m IS NULL AND new.raw IS NOT NULL
+		BEGIN
+			UPDATE entries SET
+				uuid_m = uuid,
+				model_m = model,
+				stop_reason_m = stop_reason,
+				input_tokens_m = input_tokens,
+				output_tokens_m = output_tokens,
+				cache_read_tokens_m = cache_read_tokens,
+				cache_creation_tokens_m = cache_creation_tokens,
+				agent_id_m = agent_id,
+				version_m = version,
+				slug_m = slug,
+				is_sidechain_m = is_sidechain,
+				data_type_m = data_type,
+				data_command_m = data_command,
+				data_hook_event_m = data_hook_event,
+				top_tool_use_id_m = top_tool_use_id,
+				parent_tool_use_id_m = parent_tool_use_id,
+				message_id_m = json_extract(raw, '$.message.id'),
+				request_id_m = raw->>'$.requestId',
+				cache_write_5m_m = json_extract(raw, '$.message.usage.cache_creation.ephemeral_5m_input_tokens'),
+				cache_write_1h_m = json_extract(raw, '$.message.usage.cache_creation.ephemeral_1h_input_tokens'),
+				source_tool_assistant_uuid_m = raw->>'$.sourceToolAssistantUUID',
+				attribution_skill_m = raw->>'$.attributionSkill',
+				attribution_agent_m = raw->>'$.attributionAgent',
+				spawn_agent_id_m = raw->>'$.toolUseResult.agentId',
+				spawn_tool_use_id_m = raw->>'$.message.content[0].tool_use_id',
+				-- Bytes of the JSON text, matching Go's len() and
+				-- fillLengths. length(raw) would be the jsonb encoding's
+				-- byte count, which is a different number again.
+				plain_len = COALESCE(plain_len, length(CAST(json(raw) AS BLOB)))
+			WHERE id = new.id;
+		END;
+
+CREATE TRIGGER entries_file_snapshot AFTER INSERT ON entries
+		WHEN new.type = 'file-history-snapshot'
+		BEGIN
+			INSERT INTO snapshot_files (entry_id, session_id, file_path, backup_time)
+			SELECT new.id, new.session_id, f.key, f.value->>'backupTime'
+			FROM json_each(mnemo_raw(new.raw, new.raw_z), '$.snapshot.trackedFileBackups') f
+			WHERE f.key != '';
+
+			INSERT INTO snapshot_files_fts(rowid, file_path)
+			SELECT sf.id, sf.file_path
+			FROM snapshot_files sf
+			WHERE sf.entry_id = new.id;
+		END;
+
+CREATE TRIGGER git_commits_ad AFTER DELETE ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts(git_commits_fts, rowid, subject, body, repo, author_name)
+			VALUES ('delete', old.id, old.subject, old.body, old.repo, old.author_name);
+		END;
+
+CREATE TRIGGER git_commits_ai AFTER INSERT ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts(rowid, subject, body, repo, author_name)
+			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
+		END;
+
+CREATE TRIGGER git_commits_au AFTER UPDATE ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts(git_commits_fts, rowid, subject, body, repo, author_name)
+			VALUES ('delete', old.id, old.subject, old.body, old.repo, old.author_name);
+			INSERT INTO git_commits_fts(rowid, subject, body, repo, author_name)
+			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
+		END;
+
+CREATE TRIGGER github_issues_ad AFTER DELETE ON github_issues
+		BEGIN
+			INSERT INTO github_issues_fts(github_issues_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+		END;
+
+CREATE TRIGGER github_issues_ai AFTER INSERT ON github_issues
+		BEGIN
+			INSERT INTO github_issues_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+
+CREATE TRIGGER github_issues_au AFTER UPDATE ON github_issues
+		BEGIN
+			INSERT INTO github_issues_fts(github_issues_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+			INSERT INTO github_issues_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+
+CREATE TRIGGER github_prs_ad AFTER DELETE ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts(github_prs_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+		END;
+
+CREATE TRIGGER github_prs_ai AFTER INSERT ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+
+CREATE TRIGGER github_prs_au AFTER UPDATE ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts(github_prs_fts, rowid, title, body, repo, author)
+			VALUES ('delete', old.id, old.title, old.body, old.repo, old.author);
+			INSERT INTO github_prs_fts(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+
+CREATE TRIGGER image_descriptions_ad AFTER DELETE ON image_descriptions
+		BEGIN
+			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, name, description)
+			VALUES ('delete', old.id, old.name, old.description);
+		END;
+
+CREATE TRIGGER image_descriptions_ai AFTER INSERT ON image_descriptions
+		BEGIN
+			INSERT INTO image_descriptions_fts(rowid, name, description)
+			VALUES (new.id, new.name, new.description);
+		END;
+
+CREATE TRIGGER image_descriptions_au AFTER UPDATE ON image_descriptions
+		BEGIN
+			INSERT INTO image_descriptions_fts(image_descriptions_fts, rowid, name, description)
+			VALUES ('delete', old.id, old.name, old.description);
+			INSERT INTO image_descriptions_fts(rowid, name, description)
+			VALUES (new.id, new.name, new.description);
+		END;
+
+CREATE TRIGGER image_ocr_ad AFTER DELETE ON image_ocr
+		BEGIN
+			INSERT INTO image_ocr_fts(image_ocr_fts, rowid, text)
+			VALUES ('delete', old.image_id, old.text);
+		END;
+
+CREATE TRIGGER image_ocr_ai AFTER INSERT ON image_ocr
+		BEGIN
+			INSERT INTO image_ocr_fts(rowid, text)
+			VALUES (new.image_id, new.text);
+		END;
+
+CREATE TRIGGER image_ocr_au AFTER UPDATE ON image_ocr
+		BEGIN
+			INSERT INTO image_ocr_fts(image_ocr_fts, rowid, text)
+			VALUES ('delete', old.image_id, old.text);
+			INSERT INTO image_ocr_fts(rowid, text)
+			VALUES (new.image_id, new.text);
+		END;
+
+CREATE TRIGGER memories_ad AFTER DELETE ON memories
+		BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
+			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+		END;
+
+CREATE TRIGGER memories_ai AFTER INSERT ON memories
+		BEGIN
+			INSERT INTO memories_fts(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+
+CREATE TRIGGER memories_au AFTER UPDATE ON memories
+		BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, name, description, content, project)
+			VALUES ('delete', old.id, old.name, old.description, old.content, old.project);
+			INSERT INTO memories_fts(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+
+CREATE TRIGGER notes_ai AFTER INSERT ON notes
+		BEGIN
+			INSERT INTO notes_fts(rowid, body, inbox, from_repo)
+			VALUES (new.id, new.body, new.inbox, new.from_repo);
+		END;
+
+CREATE TRIGGER notes_ad AFTER DELETE ON notes
+		BEGIN
+			INSERT INTO notes_fts(notes_fts, rowid, body, inbox, from_repo)
+			VALUES ('delete', old.id, old.body, old.inbox, old.from_repo);
+		END;
+
+CREATE TRIGGER notes_au AFTER UPDATE ON notes
+		BEGIN
+			INSERT INTO notes_fts(notes_fts, rowid, body, inbox, from_repo)
+			VALUES ('delete', old.id, old.body, old.inbox, old.from_repo);
+			INSERT INTO notes_fts(rowid, body, inbox, from_repo)
+			VALUES (new.id, new.body, new.inbox, new.from_repo);
+		END;
+
+CREATE TRIGGER messages_ai AFTER INSERT ON messages
+		BEGIN
+			INSERT INTO messages_fts(rowid, text, role, project, session_id)
+			SELECT new.id, mnemo_text(new.text, new.text_z), new.role, new.project, new.session_id
+			WHERE new.is_noise = 0;
+
+			INSERT INTO session_summary (session_id, project, session_type, total_msgs, substantive_msgs, first_msg, last_msg)
+			VALUES (new.session_id, new.project,
+				CASE
+	WHEN new.project = 'subagents' THEN 'subagent'
+	WHEN new.project LIKE '%worktrees%' THEN 'worktree'
+	WHEN new.project LIKE '%-private-tmp%' THEN 'ephemeral'
+	ELSE 'interactive'
+END,
+				1,
+				CASE WHEN new.is_noise = 0 THEN 1 ELSE 0 END,
+				new.timestamp, new.timestamp)
+			ON CONFLICT(session_id) DO UPDATE SET
+				total_msgs = total_msgs + 1,
+				substantive_msgs = substantive_msgs + CASE WHEN new.is_noise = 0 THEN 1 ELSE 0 END,
+				first_msg = MIN(first_msg, new.timestamp),
+				last_msg = MAX(last_msg, new.timestamp);
+		END;
+
+CREATE TRIGGER tool_outputs_ai AFTER INSERT ON tool_outputs
+		BEGIN
+			INSERT INTO tool_outputs_fts(rowid, text, session_id)
+			SELECT new.id, mnemo_text(new.text, new.text_z), new.session_id
+			WHERE new.source != 'none';
+		END;
+
+CREATE TRIGGER tool_outputs_ad AFTER DELETE ON tool_outputs
+		BEGIN
+			INSERT INTO tool_outputs_fts(tool_outputs_fts, rowid, text, session_id)
+			SELECT 'delete', old.id, mnemo_text(old.text, old.text_z), old.session_id
+			WHERE old.source != 'none';
+		END;
+
+CREATE TRIGGER plans_ad AFTER DELETE ON plans
+		BEGIN
+			INSERT INTO plans_fts(plans_fts, rowid, content, repo, phase)
+			VALUES ('delete', old.id, old.content, old.repo, old.phase);
+		END;
+
+CREATE TRIGGER plans_ai AFTER INSERT ON plans
+		BEGIN
+			INSERT INTO plans_fts(rowid, content, repo, phase)
+			VALUES (new.id, new.content, new.repo, new.phase);
+		END;
+
+CREATE TRIGGER plans_au AFTER UPDATE ON plans
+		BEGIN
+			INSERT INTO plans_fts(plans_fts, rowid, content, repo, phase)
+			VALUES ('delete', old.id, old.content, old.repo, old.phase);
+			INSERT INTO plans_fts(rowid, content, repo, phase)
+			VALUES (new.id, new.content, new.repo, new.phase);
+		END;
+
+CREATE TRIGGER skills_ad AFTER DELETE ON skills
+		BEGIN
+			INSERT INTO skills_fts(skills_fts, rowid, name, description, content)
+			VALUES ('delete', old.id, old.name, old.description, old.content);
+		END;
+
+CREATE TRIGGER skills_ai AFTER INSERT ON skills
+		BEGIN
+			INSERT INTO skills_fts(rowid, name, description, content)
+			VALUES (new.id, new.name, new.description, new.content);
+		END;
+
+CREATE TRIGGER skills_au AFTER UPDATE ON skills
+		BEGIN
+			INSERT INTO skills_fts(skills_fts, rowid, name, description, content)
+			VALUES ('delete', old.id, old.name, old.description, old.content);
+			INSERT INTO skills_fts(rowid, name, description, content)
+			VALUES (new.id, new.name, new.description, new.content);
+		END;
+
+CREATE TRIGGER targets_ad AFTER DELETE ON targets
+		BEGIN
+			INSERT INTO targets_fts(targets_fts, rowid, name, description, raw_text, repo)
+			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
+		END;
+
+CREATE TRIGGER targets_ai AFTER INSERT ON targets
+		BEGIN
+			INSERT INTO targets_fts(rowid, name, description, raw_text, repo)
+			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER targets_au AFTER UPDATE ON targets
+		BEGIN
+			INSERT INTO targets_fts(targets_fts, rowid, name, description, raw_text, repo)
+			VALUES ('delete', old.id, old.name, old.description, old.raw_text, old.repo);
+			INSERT INTO targets_fts(rowid, name, description, raw_text, repo)
+			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER todos_ad AFTER DELETE ON todos
+		BEGIN
+			INSERT INTO todos_fts(todos_fts, rowid, text, tags, section, repo)
+			VALUES ('delete', old.id, old.text, old.tags, old.section, old.repo);
+		END;
+
+CREATE TRIGGER todos_ai AFTER INSERT ON todos
+		BEGIN
+			INSERT INTO todos_fts(rowid, text, tags, section, repo)
+			VALUES (new.id, new.text, new.tags, new.section, new.repo);
+		END;
+
+CREATE TRIGGER todos_au AFTER UPDATE ON todos
+		BEGIN
+			INSERT INTO todos_fts(todos_fts, rowid, text, tags, section, repo)
+			VALUES ('delete', old.id, old.text, old.tags, old.section, old.repo);
+			INSERT INTO todos_fts(rowid, text, tags, section, repo)
+			VALUES (new.id, new.text, new.tags, new.section, new.repo);
+		END;
+
+CREATE TRIGGER topic_segments_ad AFTER DELETE ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts(topic_segments_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+		END;
+
+CREATE TRIGGER topic_segments_ai AFTER INSERT ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER topic_segments_au AFTER UPDATE ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts(topic_segments_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+			INSERT INTO topic_segments_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER themes_ad AFTER DELETE ON themes
+		BEGIN
+			INSERT INTO themes_fts(themes_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+		END;
+
+CREATE TRIGGER themes_ai AFTER INSERT ON themes
+		BEGIN
+			INSERT INTO themes_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER themes_au AFTER UPDATE ON themes
+		BEGIN
+			INSERT INTO themes_fts(themes_fts, rowid, label, summary)
+			VALUES ('delete', old.rowid, old.label, old.summary);
+			INSERT INTO themes_fts(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER patterns_ad AFTER DELETE ON patterns
+		BEGIN
+			INSERT INTO patterns_fts(patterns_fts, rowid, pattern_type, signature, representative_excerpts)
+			VALUES ('delete', old.rowid, old.pattern_type, old.signature, old.representative_excerpts);
+		END;
+
+CREATE TRIGGER patterns_ai AFTER INSERT ON patterns
+		BEGIN
+			INSERT INTO patterns_fts(rowid, pattern_type, signature, representative_excerpts)
+			VALUES (new.rowid, new.pattern_type, new.signature, new.representative_excerpts);
+		END;
+
+CREATE TRIGGER patterns_au AFTER UPDATE ON patterns
+		BEGIN
+			INSERT INTO patterns_fts(patterns_fts, rowid, pattern_type, signature, representative_excerpts)
+			VALUES ('delete', old.rowid, old.pattern_type, old.signature, old.representative_excerpts);
+			INSERT INTO patterns_fts(rowid, pattern_type, signature, representative_excerpts)
+			VALUES (new.rowid, new.pattern_type, new.signature, new.representative_excerpts);
+		END;
+
+-- 🎯T197 stem triggers. Every 'delete' is gated on membership in the
+-- stem index (its docsize shadow): a row the backfill has not reached is
+-- not in the index, and an FTS5 'delete' of an unindexed rowid corrupts
+-- it ('database disk image is malformed').
+-- New triggers only: the legacy trigger bodies are
+-- untouched, so both indexes are written from the moment the schema
+-- applies. Text columns go through mnemo_text, the same expression the
+-- legacy triggers use, because an FTS rebuild would index the empty
+-- stored column of a compressed row.
+
+CREATE TRIGGER messages_ai_stem AFTER INSERT ON messages
+		BEGIN
+			INSERT INTO messages_fts_stem(rowid, text, role, project, session_id)
+			SELECT new.id, mnemo_text(new.text, new.text_z), new.role, new.project, new.session_id
+			WHERE new.is_noise = 0;
+		END;
+
+CREATE TRIGGER tool_outputs_ai_stem AFTER INSERT ON tool_outputs
+		BEGIN
+			INSERT INTO tool_outputs_fts_stem(rowid, text, session_id)
+			SELECT new.id, mnemo_text(new.text, new.text_z), new.session_id
+			WHERE new.source != 'none';
+		END;
+
+CREATE TRIGGER tool_outputs_ad_stem AFTER DELETE ON tool_outputs
+		BEGIN
+			INSERT INTO tool_outputs_fts_stem(tool_outputs_fts_stem, rowid, text, session_id)
+			SELECT 'delete', old.id, mnemo_text(old.text, old.text_z), old.session_id
+			WHERE old.source != 'none'
+			  AND EXISTS (SELECT 1 FROM tool_outputs_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER topic_segments_ai_stem AFTER INSERT ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts_stem(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER topic_segments_ad_stem AFTER DELETE ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts_stem(topic_segments_fts_stem, rowid, label, summary)
+			SELECT 'delete', old.rowid, old.label, old.summary
+			WHERE EXISTS (SELECT 1 FROM topic_segments_fts_stem_docsize ds WHERE ds.id = old.rowid);
+		END;
+
+CREATE TRIGGER topic_segments_au_stem AFTER UPDATE ON topic_segments
+		BEGIN
+			INSERT INTO topic_segments_fts_stem(topic_segments_fts_stem, rowid, label, summary)
+			SELECT 'delete', old.rowid, old.label, old.summary
+			WHERE EXISTS (SELECT 1 FROM topic_segments_fts_stem_docsize ds WHERE ds.id = old.rowid);
+			INSERT INTO topic_segments_fts_stem(rowid, label, summary)
+			VALUES (new.rowid, new.label, new.summary);
+		END;
+
+CREATE TRIGGER decisions_ai_stem AFTER INSERT ON decisions
+		BEGIN
+			INSERT INTO decisions_fts_stem(rowid, proposal_text, confirmation_text, repo)
+			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
+		END;
+
+CREATE TRIGGER decisions_ad_stem AFTER DELETE ON decisions
+		BEGIN
+			INSERT INTO decisions_fts_stem(decisions_fts_stem, rowid, proposal_text, confirmation_text, repo)
+			SELECT 'delete', old.id, old.proposal_text, old.confirmation_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM decisions_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER decisions_au_stem AFTER UPDATE ON decisions
+		BEGIN
+			INSERT INTO decisions_fts_stem(decisions_fts_stem, rowid, proposal_text, confirmation_text, repo)
+			SELECT 'delete', old.id, old.proposal_text, old.confirmation_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM decisions_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO decisions_fts_stem(rowid, proposal_text, confirmation_text, repo)
+			VALUES (new.id, new.proposal_text, new.confirmation_text, new.repo);
+		END;
+
+CREATE TRIGGER docs_ai_stem AFTER INSERT ON docs
+		BEGIN
+			INSERT INTO docs_fts_stem(rowid, title, content, repo, kind, taxonomy)
+			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
+		END;
+
+CREATE TRIGGER docs_ad_stem AFTER DELETE ON docs
+		BEGIN
+			INSERT INTO docs_fts_stem(docs_fts_stem, rowid, title, content, repo, kind, taxonomy)
+			SELECT 'delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy
+			WHERE EXISTS (SELECT 1 FROM docs_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER docs_au_stem AFTER UPDATE ON docs
+		BEGIN
+			INSERT INTO docs_fts_stem(docs_fts_stem, rowid, title, content, repo, kind, taxonomy)
+			SELECT 'delete', old.id, old.title, mnemo_text(old.content, old.content_z), old.repo, old.kind, old.taxonomy
+			WHERE EXISTS (SELECT 1 FROM docs_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO docs_fts_stem(rowid, title, content, repo, kind, taxonomy)
+			VALUES (new.id, new.title, mnemo_text(new.content, new.content_z), new.repo, new.kind, new.taxonomy);
+		END;
+
+CREATE TRIGGER targets_ai_stem AFTER INSERT ON targets
+		BEGIN
+			INSERT INTO targets_fts_stem(rowid, name, description, raw_text, repo)
+			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER targets_ad_stem AFTER DELETE ON targets
+		BEGIN
+			INSERT INTO targets_fts_stem(targets_fts_stem, rowid, name, description, raw_text, repo)
+			SELECT 'delete', old.id, old.name, old.description, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM targets_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER targets_au_stem AFTER UPDATE ON targets
+		BEGIN
+			INSERT INTO targets_fts_stem(targets_fts_stem, rowid, name, description, raw_text, repo)
+			SELECT 'delete', old.id, old.name, old.description, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM targets_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO targets_fts_stem(rowid, name, description, raw_text, repo)
+			VALUES (new.id, new.name, new.description, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER git_commits_ai_stem AFTER INSERT ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts_stem(rowid, subject, body, repo, author_name)
+			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
+		END;
+
+CREATE TRIGGER git_commits_ad_stem AFTER DELETE ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts_stem(git_commits_fts_stem, rowid, subject, body, repo, author_name)
+			SELECT 'delete', old.id, old.subject, old.body, old.repo, old.author_name
+			WHERE EXISTS (SELECT 1 FROM git_commits_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER git_commits_au_stem AFTER UPDATE ON git_commits
+		BEGIN
+			INSERT INTO git_commits_fts_stem(git_commits_fts_stem, rowid, subject, body, repo, author_name)
+			SELECT 'delete', old.id, old.subject, old.body, old.repo, old.author_name
+			WHERE EXISTS (SELECT 1 FROM git_commits_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO git_commits_fts_stem(rowid, subject, body, repo, author_name)
+			VALUES (new.id, new.subject, new.body, new.repo, new.author_name);
+		END;
+
+CREATE TRIGGER github_prs_ai_stem AFTER INSERT ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts_stem(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+
+CREATE TRIGGER github_prs_ad_stem AFTER DELETE ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts_stem(github_prs_fts_stem, rowid, title, body, repo, author)
+			SELECT 'delete', old.id, old.title, old.body, old.repo, old.author
+			WHERE EXISTS (SELECT 1 FROM github_prs_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER github_prs_au_stem AFTER UPDATE ON github_prs
+		BEGIN
+			INSERT INTO github_prs_fts_stem(github_prs_fts_stem, rowid, title, body, repo, author)
+			SELECT 'delete', old.id, old.title, old.body, old.repo, old.author
+			WHERE EXISTS (SELECT 1 FROM github_prs_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO github_prs_fts_stem(rowid, title, body, repo, author)
+			VALUES (new.id, new.title, new.body, new.repo, new.author);
+		END;
+
+CREATE TRIGGER memories_ai_stem AFTER INSERT ON memories
+		BEGIN
+			INSERT INTO memories_fts_stem(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+
+CREATE TRIGGER memories_ad_stem AFTER DELETE ON memories
+		BEGIN
+			INSERT INTO memories_fts_stem(memories_fts_stem, rowid, name, description, content, project)
+			SELECT 'delete', old.id, old.name, old.description, old.content, old.project
+			WHERE EXISTS (SELECT 1 FROM memories_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER memories_au_stem AFTER UPDATE ON memories
+		BEGIN
+			INSERT INTO memories_fts_stem(memories_fts_stem, rowid, name, description, content, project)
+			SELECT 'delete', old.id, old.name, old.description, old.content, old.project
+			WHERE EXISTS (SELECT 1 FROM memories_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO memories_fts_stem(rowid, name, description, content, project)
+			VALUES (new.id, new.name, new.description, new.content, new.project);
+		END;
+
+CREATE TRIGGER plans_ai_stem AFTER INSERT ON plans
+		BEGIN
+			INSERT INTO plans_fts_stem(rowid, content, repo, phase)
+			VALUES (new.id, new.content, new.repo, new.phase);
+		END;
+
+CREATE TRIGGER plans_ad_stem AFTER DELETE ON plans
+		BEGIN
+			INSERT INTO plans_fts_stem(plans_fts_stem, rowid, content, repo, phase)
+			SELECT 'delete', old.id, old.content, old.repo, old.phase
+			WHERE EXISTS (SELECT 1 FROM plans_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER plans_au_stem AFTER UPDATE ON plans
+		BEGIN
+			INSERT INTO plans_fts_stem(plans_fts_stem, rowid, content, repo, phase)
+			SELECT 'delete', old.id, old.content, old.repo, old.phase
+			WHERE EXISTS (SELECT 1 FROM plans_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO plans_fts_stem(rowid, content, repo, phase)
+			VALUES (new.id, new.content, new.repo, new.phase);
+		END;
+
+CREATE TRIGGER claude_configs_ai_stem AFTER INSERT ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts_stem(rowid, content, repo)
+			VALUES (new.id, new.content, new.repo);
+		END;
+
+CREATE TRIGGER claude_configs_ad_stem AFTER DELETE ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts_stem(claude_configs_fts_stem, rowid, content, repo)
+			SELECT 'delete', old.id, old.content, old.repo
+			WHERE EXISTS (SELECT 1 FROM claude_configs_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER claude_configs_au_stem AFTER UPDATE ON claude_configs
+		BEGIN
+			INSERT INTO claude_configs_fts_stem(claude_configs_fts_stem, rowid, content, repo)
+			SELECT 'delete', old.id, old.content, old.repo
+			WHERE EXISTS (SELECT 1 FROM claude_configs_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO claude_configs_fts_stem(rowid, content, repo)
+			VALUES (new.id, new.content, new.repo);
+		END;
+
+CREATE TRIGGER skills_ai_stem AFTER INSERT ON skills
+		BEGIN
+			INSERT INTO skills_fts_stem(rowid, name, description, content)
+			VALUES (new.id, new.name, new.description, new.content);
+		END;
+
+CREATE TRIGGER skills_ad_stem AFTER DELETE ON skills
+		BEGIN
+			INSERT INTO skills_fts_stem(skills_fts_stem, rowid, name, description, content)
+			SELECT 'delete', old.id, old.name, old.description, old.content
+			WHERE EXISTS (SELECT 1 FROM skills_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER skills_au_stem AFTER UPDATE ON skills
+		BEGIN
+			INSERT INTO skills_fts_stem(skills_fts_stem, rowid, name, description, content)
+			SELECT 'delete', old.id, old.name, old.description, old.content
+			WHERE EXISTS (SELECT 1 FROM skills_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO skills_fts_stem(rowid, name, description, content)
+			VALUES (new.id, new.name, new.description, new.content);
+		END;
+
+CREATE TRIGGER audit_entries_ai_stem AFTER INSERT ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts_stem(rowid, summary, raw_text, repo)
+			VALUES (new.id, new.summary, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER audit_entries_ad_stem AFTER DELETE ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts_stem(audit_entries_fts_stem, rowid, summary, raw_text, repo)
+			SELECT 'delete', old.id, old.summary, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM audit_entries_fts_stem_docsize ds WHERE ds.id = old.id);
+		END;
+
+CREATE TRIGGER audit_entries_au_stem AFTER UPDATE ON audit_entries
+		BEGIN
+			INSERT INTO audit_entries_fts_stem(audit_entries_fts_stem, rowid, summary, raw_text, repo)
+			SELECT 'delete', old.id, old.summary, old.raw_text, old.repo
+			WHERE EXISTS (SELECT 1 FROM audit_entries_fts_stem_docsize ds WHERE ds.id = old.id);
+			INSERT INTO audit_entries_fts_stem(rowid, summary, raw_text, repo)
+			VALUES (new.id, new.summary, new.raw_text, new.repo);
+		END;
+
+CREATE TRIGGER compactions_ai_stem AFTER INSERT ON compactions
+		BEGIN
+			INSERT INTO compactions_fts_stem(rowid, summary, session_id)
+			VALUES (new.id, new.summary, new.session_id);
+		END;
+
+-- Views
+
+CREATE VIEW sessions AS
+		SELECT
+			ss.session_id,
+			ss.project,
+			ss.session_type,
+			COALESCE(sm.repo, '') AS repo,
+			COALESCE(sm.git_branch, '') AS git_branch,
+			COALESCE(sm.work_type, '') AS work_type,
+			COALESCE(sm.topic, '') AS topic,
+			ss.total_msgs,
+			ss.substantive_msgs,
+			ss.first_msg,
+			ss.last_msg
+		FROM session_summary ss
+		LEFT JOIN session_meta sm ON sm.session_id = ss.session_id;
+
+-- 🎯T151: plaintext views over the compressed tables. Same columns as
+-- the base tables with text/content decoded; the documented surface for
+-- ad-hoc SQL (mnemo_query) now that the base columns hold '' for
+-- compressed rows.
+CREATE VIEW messages_v AS
+		SELECT id, entry_id, session_id, project, role,
+			mnemo_text(text, text_z) AS text,
+			timestamp, type, is_noise, content_type, tool_name, tool_use_id,
+			tool_input, is_error,
+			tool_file_path, tool_command, tool_pattern, tool_description,
+			tool_skill, tool_old_string, tool_new_string, tool_content,
+			tool_query, tool_url, tool_name_param, tool_prompt, tool_subject,
+			tool_status, tool_task_id
+		FROM messages;
+
+CREATE VIEW docs_v AS
+		SELECT id, repo, file_path, kind, title,
+			mnemo_text(content, content_z) AS content,
+			content_hash, size, mtime, indexed_at, taxonomy, doc_date,
+			doc_status, doc_target, doc_source
+		FROM docs;
+
+-- 🎯T152: entries with raw decoded and the sixteen hot fields under
+-- their original names, sourced from the materialised columns. A simple
+-- projection, so SQLite flattens queries onto the *_m indexes.
+-- Each field is COALESCE(materialised, generated) so the view is correct
+-- at every point in the 🎯T152 rollout, not only after the boot-time
+-- materialisation finishes: a compressed row has raw NULL and only the
+-- _m value; a not-yet-materialised legacy row has only the generated
+-- value; a materialised row has both, equal. Without the COALESCE a
+-- reader in the materialisation window gets NULL — a silently wrong
+-- answer rather than an error, which is the worst failure mode of the
+-- three. The cost is that a filter on one of these columns cannot use
+-- idx_entries_*_m; queries that need the index read the base table
+-- directly under INDEXED BY (see SelectCompactionCandidates).
+CREATE VIEW entries_v AS
+		SELECT id, session_id, project, type, timestamp,
+			mnemo_raw(raw, raw_z) AS raw,
+			COALESCE(uuid_m, uuid) AS uuid,
+			COALESCE(model_m, model) AS model,
+			COALESCE(stop_reason_m, stop_reason) AS stop_reason,
+			COALESCE(input_tokens_m, input_tokens) AS input_tokens,
+			COALESCE(output_tokens_m, output_tokens) AS output_tokens,
+			COALESCE(cache_read_tokens_m, cache_read_tokens) AS cache_read_tokens,
+			COALESCE(cache_creation_tokens_m, cache_creation_tokens) AS cache_creation_tokens,
+			COALESCE(agent_id_m, agent_id) AS agent_id,
+			COALESCE(version_m, version) AS version,
+			COALESCE(slug_m, slug) AS slug,
+			COALESCE(is_sidechain_m, is_sidechain) AS is_sidechain,
+			COALESCE(data_type_m, data_type) AS data_type,
+			COALESCE(data_command_m, data_command) AS data_command,
+			COALESCE(data_hook_event_m, data_hook_event) AS data_hook_event,
+			COALESCE(top_tool_use_id_m, top_tool_use_id) AS top_tool_use_id,
+			COALESCE(parent_tool_use_id_m, parent_tool_use_id) AS parent_tool_use_id,
+			message_id_m AS message_id,
+			request_id_m AS request_id,
+			cache_write_5m_m AS cache_write_5m,
+			cache_write_1h_m AS cache_write_1h,
+			source_tool_assistant_uuid_m AS source_tool_assistant_uuid,
+			attribution_skill_m AS attribution_skill,
+			attribution_agent_m AS attribution_agent,
+			spawn_agent_id_m AS spawn_agent_id,
+			spawn_tool_use_id_m AS spawn_tool_use_id
+		FROM entries;

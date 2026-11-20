@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,11 +282,16 @@ func sqliteChangeCounter(path string) uint32 {
 
 const sqliteChangeCounterOff = 24
 
-// cursorStoreCaughtUp is true only when a previous read committed a
-// cursor at or past the current main-file size and the fingerprint still
-// matches. A failed read leaves no cursor. Growth, a shrink, an empty
-// fingerprint, or any fingerprint change is read again. A shorter
-// store.db is not the JSONL durable-truncation tier.
+// cursorStoreCaughtUp is true when a previous read committed a cursor at
+// the current main-file size and the fingerprint still matches. A failed
+// read leaves no cursor. Growth, a shrink, or a different fingerprint is
+// read again. A shorter store.db is not the JSONL durable-truncation tier.
+//
+// An upgrade from the schema that had no prefix_sha256 leaves a caught-up
+// cursor (offset == size) with an empty fingerprint. That empty value is
+// the column default, not a page change. Adopting the current fingerprint
+// in place keeps the cursor where the previous binary left it. A later
+// change to the pages still mismatches the adopted value.
 func (s *Store) cursorStoreCaughtUp(path string, size int64) bool {
 	s.mu.Lock()
 	off := s.offsets[path]
@@ -295,7 +301,55 @@ func (s *Store) cursorStoreCaughtUp(path string, size int64) bool {
 		return false
 	}
 	fp := cursorStoreFingerprint(path)
-	return stored != "" && stored == fp
+	if fp == "" {
+		return false
+	}
+	if stored == fp {
+		return true
+	}
+	if stored == "" && off == size {
+		s.adoptCursorStoreFingerprint(path, fp)
+		return true
+	}
+	return false
+}
+
+// adoptCursorStoreFingerprint records fp on a legacy cursor without
+// moving offset. A schema that has not grown prefix_sha256 yet cannot
+// store it; the in-memory generation still counts as caught up so this
+// process does not re-read the store on every pass.
+func (s *Store) adoptCursorStoreFingerprint(path, fp string) {
+	if fp == "" {
+		return
+	}
+	res, err := s.writeDB.Exec(
+		`UPDATE ingest_state SET prefix_sha256 = ?
+		 WHERE path = ? AND (prefix_sha256 IS NULL OR prefix_sha256 = '')`,
+		fp, path)
+	if err != nil {
+		if strings.Contains(err.Error(), "prefix_sha256") {
+			s.mu.Lock()
+			g := s.gens[path]
+			g.prefix = fp
+			s.gens[path] = g
+			s.mu.Unlock()
+			return
+		}
+		slog.Warn("adopt cursor store fingerprint", "path", path, "err", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var got sql.NullString
+		if scanErr := s.readDB.QueryRow(
+			`SELECT prefix_sha256 FROM ingest_state WHERE path = ?`, path).Scan(&got); scanErr == nil && got.Valid && got.String != "" {
+			fp = got.String
+		}
+	}
+	s.mu.Lock()
+	g := s.gens[path]
+	g.prefix = fp
+	s.gens[path] = g
+	s.mu.Unlock()
 }
 
 type cursorStoreToolBlob struct {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 )
@@ -514,5 +515,86 @@ func TestCursorStoreReadOnlyBusyTimeout(t *testing.T) {
 	var timeout int
 	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil || timeout != cursorStoreBusyTimeout {
 		t.Fatalf("read-only busy_timeout = %d, err = %v", timeout, err)
+	}
+}
+
+// TestCursorStoreUpgradeKeepsTheOldCursor is the first start after an
+// install of this code over a database the previous binary wrote. That
+// binary stored "caught up" as offset >= file size and had no
+// prefix_sha256. The new fingerprint must not make every store.db look
+// unread.
+func TestCursorStoreUpgradeKeepsTheOldCursor(t *testing.T) {
+	const marker = "legacy-must-not-reread-tool"
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, marker, "/tmp/proj")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf, err := parseCursorStoreFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wouldIndex bool
+	for _, m := range pf.messages {
+		if strings.Contains(m.text, marker) {
+			wouldIndex = true
+		}
+	}
+	if !wouldIndex {
+		t.Fatal("fixture produces no tool row; a re-read would be invisible")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	if err := upgradeSchemaWith(dbPath, previousSchemaSQL(t)); err != nil {
+		t.Fatal(err)
+	}
+	oldDB, err := sql.Open(writerDriverName, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldDB.Exec(
+		`INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime) VALUES (?, ?, ?, ?)`,
+		path, info.Size(), info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldDB.Exec(
+		`INSERT INTO messages (session_id, project, role, text, timestamp, content_type)
+		 VALUES (?, 'proj', 'user', 'legacy cursor sentinel', '2020-01-01T00:00:00Z', 'text')`,
+		cursorSessUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dbPath, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	s.AwaitStartup()
+
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if n := countText(t, s, marker); n != 0 {
+		t.Fatalf("upgrade re-read a caught-up store.db (%d new rows)", n)
+	}
+	expectOnce(t, s, "legacy cursor sentinel")
+	var off int64
+	var prefix sql.NullString
+	if err := s.readDB.QueryRow(
+		`SELECT offset, prefix_sha256 FROM ingest_state WHERE path = ?`, path).Scan(&off, &prefix); err != nil {
+		t.Fatal(err)
+	}
+	if off != info.Size() {
+		t.Fatalf("upgrade moved the cursor from %d to %d", info.Size(), off)
+	}
+	if !prefix.Valid || prefix.String == "" {
+		t.Fatal("legacy cursor was not given a fingerprint")
+	}
+	if prefix.String != cursorStoreFingerprint(path) {
+		t.Fatalf("adopted fingerprint %q, file is %q", prefix.String, cursorStoreFingerprint(path))
 	}
 }

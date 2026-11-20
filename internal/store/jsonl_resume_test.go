@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -274,14 +273,11 @@ func TestJSONLLongTailSplitInsideUTF8(t *testing.T) {
 func TestJSONLCursorMigrationPreservesOldOffset(t *testing.T) {
 	// This revision predates the prefix column. Build its schema and write
 	// the same durable cursor the old reader wrote for an incomplete line.
-	oldSchema, err := exec.Command("git", "show", "9d3c830d16e5c111fb31c54682828c5b01a605b3:internal/store/schema.sql").Output()
-	if err != nil {
-		t.Fatalf("read previous schema: %v", err)
-	}
+	oldSchema := previousSchemaSQL(t)
 	root := t.TempDir()
 	path := readerClaudeWatch.pathFor(t, root)
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
-	if err := upgradeSchemaWith(dbPath, string(oldSchema)); err != nil {
+	if err := upgradeSchemaWith(dbPath, oldSchema); err != nil {
 		t.Fatal(err)
 	}
 	first := readerClaudeWatch.line("legacy committed record")
@@ -352,6 +348,7 @@ func TestJSONLRotationBeforeMidstreamCommit(t *testing.T) {
 			})
 		}
 	}
+	planted := plantIndexedHistory(t, s, path)
 	readerClaudeWatch.ingest(t, s, path)
 	for _, offset := range commits {
 		if offset == int64(len(oldFirst)+len(oldSecond)) {
@@ -359,6 +356,13 @@ func TestJSONLRotationBeforeMidstreamCommit(t *testing.T) {
 		}
 	}
 	expectOnce(t, s, "only record in current file")
+	// The first line was committed before the rotation. A later read of
+	// the replacement must not remove it. The second line never committed.
+	expectOnce(t, s, "first record in rotated file")
+	if n := countText(t, s, "second record in rotated file"); n != 0 {
+		t.Fatalf("uncommitted rotated-away record indexed %d times", n)
+	}
+	assertPlantedHistory(t, s, planted)
 }
 
 func TestJSONLRewriteDuringReadBeyondPrefix(t *testing.T) {
@@ -377,13 +381,18 @@ func TestJSONLRewriteDuringReadBeyondPrefix(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { testAfterJSONLLine = nil })
+	planted := plantIndexedHistory(t, s, path)
 	readerCodex.ingest(t, s, path)
 	readerCodex.ingest(t, s, path)
 	expectOnce(t, s, "replacement record beyond sampled prefix")
 	expectOnce(t, s, "another replacement record")
+	// The stale line was parsed and then the file changed under the
+	// scan, so that transaction does not commit. Nothing already indexed
+	// is removed to achieve that.
 	if n := countText(t, s, "stale record beyond sampled prefix"); n != 0 {
-		t.Fatalf("stale record indexed %d times", n)
+		t.Fatalf("uncommitted stale record indexed %d times", n)
 	}
+	assertPlantedHistory(t, s, planted)
 }
 
 func TestCursorJSONLReplacementKeepsStoreResults(t *testing.T) {
@@ -404,8 +413,9 @@ func TestCursorJSONLReplacementKeepsStoreResults(t *testing.T) {
 	readerCursor.ingest(t, s, path)
 	expectOnce(t, s, "replacement Cursor conversation")
 	expectOnce(t, s, "tool result from Cursor database")
-	if n := countText(t, s, "old Cursor conversation"); n != 0 {
-		t.Fatalf("replaced Cursor conversation indexed %d times", n)
+	expectOnce(t, s, "old Cursor conversation")
+	if class := sourceStatusClassFor(t, s, "old Cursor conversation"); class != "rewritten_at" {
+		t.Fatalf("replaced Cursor transcript source_status class %q, want rewritten_at", class)
 	}
 }
 
@@ -450,6 +460,7 @@ func TestJSONLTruncateBetweenReadsStaysOnce(t *testing.T) {
 			first := k.line("kept marker after truncate")
 			writeLines(t, path, first+k.line("dropped marker after truncate"))
 			k.ingest(t, s, path)
+			planted := plantIndexedHistory(t, s, path)
 
 			// Shrink below the committed offset, keeping a complete first line.
 			if err := os.Truncate(path, int64(len(first))); err != nil {
@@ -464,6 +475,11 @@ func TestJSONLTruncateBetweenReadsStaysOnce(t *testing.T) {
 			if n := countText(t, s, "dropped marker after truncate"); n != 1 {
 				t.Fatalf("durable copy of the truncated tail indexed %d times, want 1", n)
 			}
+			if class := sourceStatusClassFor(t, s, "kept marker after truncate"); class != "truncated_at" {
+				t.Fatalf("truncated source_status class %q, want truncated_at", class)
+			}
+			assertPlantedHistory(t, s, planted)
+			assertNoDanglingRefs(t, s)
 		})
 	}
 }
@@ -478,6 +494,7 @@ func TestJSONLRotateAndRewriteAreIndexedOnce(t *testing.T) {
 				k.prepare(t, s, root, path)
 				writeLines(t, path, k.line("old alpha marker")+k.line("old beta marker"))
 				k.ingest(t, s, path)
+				planted := plantIndexedHistory(t, s, path)
 
 				// Longer than the recorded offset, and a different prefix,
 				// so a seek to the old offset lands mid-record.
@@ -497,9 +514,13 @@ func TestJSONLRotateAndRewriteAreIndexedOnce(t *testing.T) {
 				if n := countText(t, s, "brand new tail marker"); n != 1 {
 					t.Fatalf("%s: new tail indexed %d times, want 1", mut, n)
 				}
-				if n := countText(t, s, "old alpha marker"); n != 0 {
-					t.Fatalf("%s: old record still indexed %d times, want 0", mut, n)
+				expectOnce(t, s, "old alpha marker")
+				expectOnce(t, s, "old beta marker")
+				if class := sourceStatusClassFor(t, s, "old alpha marker"); class != "rewritten_at" {
+					t.Fatalf("%s: source_status class %q, want rewritten_at", mut, class)
 				}
+				assertPlantedHistory(t, s, planted)
+				assertNoDanglingRefs(t, s)
 			})
 		}
 	}
@@ -516,6 +537,7 @@ func TestJSONLMutatedWhileReadingIsIndexedOnce(t *testing.T) {
 
 				body := k.line("while read first marker") + k.line("while read second marker")
 				writeLines(t, path, body)
+				planted := plantIndexedHistory(t, s, path)
 
 				var once sync.Once
 				testAfterJSONLLine = func(p string, lines int) {
@@ -575,10 +597,140 @@ func TestJSONLMutatedWhileReadingIsIndexedOnce(t *testing.T) {
 					expectOnce(t, s, "while read rewritten marker")
 					expectOnce(t, s, "while read rewritten tail")
 					if n := countText(t, s, "while read first marker"); n != 0 {
-						t.Fatalf("pre-rewrite record indexed %d times, want 0", n)
+						t.Fatalf("uncommitted pre-rewrite record indexed %d times", n)
 					}
 				}
+				assertPlantedHistory(t, s, planted)
+				assertNoDanglingRefs(t, s)
 			})
+		}
+	}
+}
+
+// previousSchemaSQL is the schema an upgrading daemon already has.
+// The bytes live in testdata/schema_pre_prefix.sql. They were produced by
+// `git show 9d3c830d16e5c111fb31c54682828c5b01a605b3:internal/store/schema.sql`
+// (the merge-base of this branch and master on 2026-11-20) and committed
+// so the test does not depend on that object still being in the clone.
+func previousSchemaSQL(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/schema_pre_prefix.sql")
+	if err != nil {
+		t.Fatalf("read previous schema fixture: %v", err)
+	}
+	return string(b)
+}
+
+// plantedHistory is one indexed row plus an image_occurrences reference
+// to it. A source change must leave both in place.
+type plantedHistory struct {
+	entryID   int64
+	messageID int64
+}
+
+func plantIndexedHistory(t *testing.T, s *Store, path string) plantedHistory {
+	t.Helper()
+	sessionID, ok := sessionIDFromPath(path)
+	if !ok || sessionID == "" {
+		t.Fatalf("no session id for %s", path)
+	}
+	const marker = "planted history marker"
+	raw := `{"uuid":"planted-history-` + sessionID + `","type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"role":"user","content":"` + marker + `"}}`
+	res, err := s.writeDB.Exec(
+		`INSERT INTO entries (session_id, project, type, timestamp, raw) VALUES (?, 'proj', 'user', '2020-01-01T00:00:00Z', jsonb(?))`,
+		sessionID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryID, err := res.LastInsertId()
+	if err != nil || entryID == 0 {
+		t.Fatalf("planted entry id %d: %v", entryID, err)
+	}
+	res, err = s.writeDB.Exec(
+		`INSERT INTO messages (entry_id, session_id, project, role, text, timestamp, type, content_type)
+		 VALUES (?, ?, 'proj', 'user', ?, '2020-01-01T00:00:00Z', 'user', 'text')`,
+		entryID, sessionID, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := res.LastInsertId()
+	if err != nil || messageID == 0 {
+		t.Fatalf("planted message id %d: %v", messageID, err)
+	}
+	img, err := s.writeDB.Exec(
+		`INSERT INTO images (content_hash, bytes, mime_type, width, height, pixel_format, byte_size)
+		 VALUES (?, ?, 'text/plain', 1, 1, 'unknown', 4)`,
+		"plant-"+sessionID, []byte("plant"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageID, err := img.LastInsertId()
+	if err != nil || imageID == 0 {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(
+		`INSERT INTO image_occurrences (image_id, entry_id, message_id, session_id, source_type, occurred_at)
+		 VALUES (?, ?, ?, ?, 'inline', '2020-01-01T00:00:00Z')`,
+		imageID, entryID, messageID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	return plantedHistory{entryID: entryID, messageID: messageID}
+}
+
+func assertPlantedHistory(t *testing.T, s *Store, planted plantedHistory) {
+	t.Helper()
+	expectOnce(t, s, "planted history marker")
+	var gotEntry, gotMessage int64
+	err := s.readDB.QueryRow(
+		`SELECT e.id, m.id FROM entries e JOIN messages_v m ON m.entry_id = e.id WHERE m.text = ?`,
+		"planted history marker").Scan(&gotEntry, &gotMessage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotEntry != planted.entryID || gotMessage != planted.messageID {
+		t.Fatalf("planted row replaced: entry %d->%d message %d->%d", planted.entryID, gotEntry, planted.messageID, gotMessage)
+	}
+}
+
+func sourceStatusClassFor(t *testing.T, s *Store, marker string) string {
+	t.Helper()
+	var status string
+	err := s.readDB.QueryRow(`
+		SELECT sm.source_status FROM session_meta sm
+		WHERE sm.session_id = (
+			SELECT session_id FROM messages_v WHERE text LIKE ? LIMIT 1
+		)`, "%"+marker+"%").Scan(&status)
+	if err != nil {
+		t.Fatalf("source_status for %q: %v", marker, err)
+	}
+	return sourceStatusClass(status)
+}
+
+// assertNoDanglingRefs fails when a child row points at an entry or
+// message id that is no longer there. image_occurrences is the case the
+// transcript-replace delete left behind; the other references are the
+// same shape.
+func assertNoDanglingRefs(t *testing.T, s *Store) {
+	t.Helper()
+	checks := []struct {
+		name string
+		q    string
+	}{
+		{"image_occurrences.entry_id", `SELECT COUNT(*) FROM image_occurrences io WHERE io.entry_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM entries e WHERE e.id = io.entry_id)`},
+		{"image_occurrences.message_id", `SELECT COUNT(*) FROM image_occurrences io WHERE io.message_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = io.message_id)`},
+		{"messages.entry_id", `SELECT COUNT(*) FROM messages m WHERE m.entry_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM entries e WHERE e.id = m.entry_id)`},
+		{"tool_outputs.message_id", `SELECT COUNT(*) FROM tool_outputs t WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = t.message_id)`},
+		{"snapshot_files.entry_id", `SELECT COUNT(*) FROM snapshot_files sf WHERE NOT EXISTS (SELECT 1 FROM entries e WHERE e.id = sf.entry_id)`},
+		{"decisions.proposal_msg_id", `SELECT COUNT(*) FROM decisions d WHERE d.proposal_msg_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = d.proposal_msg_id)`},
+		{"decisions.confirmation_msg_id", `SELECT COUNT(*) FROM decisions d WHERE d.confirmation_msg_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = d.confirmation_msg_id)`},
+	}
+	for _, c := range checks {
+		var n int
+		if err := s.readDB.QueryRow(c.q).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if n != 0 {
+			t.Errorf("%s has %d dangling rows", c.name, n)
 		}
 	}
 }
@@ -643,5 +795,10 @@ func TestDefectGrownRewriteIsReadFromTheOldOffset(t *testing.T) {
 	}
 	if n := countText(t, s, "brand new preamble"); n != 1 {
 		t.Fatalf("replacement longer than the recorded offset was not indexed from the start (hits=%d, old alpha=%d, offset=%d)", n, countText(t, s, "old alpha"), off)
+	}
+	expectOnce(t, s, "old alpha")
+	expectOnce(t, s, "old beta")
+	if class := sourceStatusClassFor(t, s, "old alpha"); class != "rewritten_at" {
+		t.Fatalf("grown rewrite source_status class %q, want rewritten_at", class)
 	}
 }
