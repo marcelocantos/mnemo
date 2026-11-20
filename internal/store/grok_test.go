@@ -475,6 +475,16 @@ func TestGrokSignalsReplacementUsesSyntheticEntry(t *testing.T) {
 	}
 	expectOnce(t, s, "context_tokens=99999/")
 	expectOnce(t, s, mention)
+
+	writeLines(t, filepath.Join(filepath.Dir(path), "signals.json"), `{"contextTokensUsed":0}`)
+	writeLines(t, path, string(transcript)+readerGrok.line(mention)+readerGrok.line("turn with refreshed signals")+readerGrok.line("turn after context reset"))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=0/")
+	if got := countText(t, s, "context_tokens=99999/"); got != 0 {
+		t.Fatalf("old usage result indexed %d times after context reset", got)
+	}
 }
 
 func TestRepoFromRemote(t *testing.T) {
