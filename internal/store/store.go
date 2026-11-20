@@ -4226,11 +4226,12 @@ func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any
 // one of mnemo's tools, and the tool_result paired with it, are written
 // with is_noise=1 whatever the caller decided.
 //
-// It returns the new row's id (0 when the insert failed) and the noise
-// flag actually written, so a caller can hang dependent rows off the
-// message without a second lookup (🎯T192).
+// It returns the new row's id and the noise flag actually written, so a
+// caller can hang dependent rows off the message without a second lookup
+// (🎯T192). A statement error is returned: swallowing it let the caller
+// commit an offset past a line that was never stored (defect hunt finding 6).
 func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text string, timestamp, typ any,
-	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) (int64, int) {
+	isNoise int, contentType, toolName, toolUseID string, toolInput any, isError any) (int64, int, error) {
 	switch contentType {
 	case "tool_use":
 		if isSelfTool(toolName) {
@@ -4259,10 +4260,16 @@ func (ws *writerState) insertMessage(entryID any, sessionID, project, role, text
 			contentType, toolName, toolUseID, toolInput, isError, z, len(text), zLen)
 	}
 	if err != nil || res == nil {
-		return 0, isNoise
+		if err == nil {
+			err = fmt.Errorf("insert message: no result")
+		}
+		return 0, isNoise, err
 	}
-	id, _ := res.LastInsertId()
-	return id, isNoise
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, isNoise, err
+	}
+	return id, isNoise, nil
 }
 
 func (ws *writerState) Close() {
@@ -4340,10 +4347,10 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 // messages, session metadata, and the ingest offset) into the open
 // writer transaction. Shared by the parallel batch writer (runWriter)
 // and the single-file Codex path (ingestCodexFile), so both sources go
-// through identical insert logic. Best-effort: individual insert
-// failures are logged, not propagated, matching the original loop.
-// A failed cursor write is returned so the caller can roll the transaction
-// back instead of committing rows whose resume point was not recorded.
+// through identical insert logic. An entry or message insert error is
+// returned so the caller rolls the transaction back and does not commit
+// an offset past that line. A failed cursor write is returned for the
+// same reason.
 func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 	if pf.restarted {
 		if err := s.deleteSessionTranscript(ws.tx, pf.sessionID); err != nil {
@@ -4392,13 +4399,14 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 	for i, e := range pf.entries {
 		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, string(e.raw))
 		if err != nil {
-			slog.Warn("entry insert failed", "session", pf.sessionID, "err", err)
-			continue
+			return err
 		}
 		n, _ := result.RowsAffected()
 		if n > 0 {
 			if id, err := result.LastInsertId(); err == nil {
 				entryIDs[i] = id
+			} else {
+				return err
 			}
 		}
 	}
@@ -4415,8 +4423,11 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 		if m.toolInput != nil {
 			toolInput = string(m.toolInput)
 		}
-		msgID, noise := ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
+		msgID, noise, err := ws.insertMessage(entryID, pf.sessionID, pf.project, m.role, m.text, m.timestamp, m.typ, m.isNoise,
 			m.contentType, m.toolName, m.toolUseID, toolInput, m.isError)
+		if err != nil {
+			return err
+		}
 		if m.output != nil && noise == 0 && msgID != 0 && s.toolOutputsWritable() {
 			if err := ws.insertToolOutput(msgID, pf.sessionID, pf.project, m.toolUseID, m.output); err != nil {
 				slog.Warn("tool output insert failed", "session", pf.sessionID, "err", err)
@@ -7354,13 +7365,15 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 	}
 
 	// handleLine writes one JSONL line into the current transaction. Its
-	// guard clauses skip a line by returning rather than a loop `continue`,
-	// so the periodic-commit and EOF handling in the read loop always run.
-	// It closes over ws, which is reassigned after each mid-stream commit.
-	handleLine := func(line []byte) {
+	// guard clauses skip a line by returning nil rather than a loop
+	// `continue`, so the periodic-commit and EOF handling in the read
+	// loop always run. An insert error is returned before that commit:
+	// the offset must not move past a line that was not stored. It
+	// closes over ws, which is reassigned after each mid-stream commit.
+	handleLine := func(line []byte) error {
 		var entry jsonlEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			return
+			return nil
 		}
 
 		// Extract session metadata from any entry.
@@ -7381,16 +7394,21 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		// only record the entry ID when a row was actually inserted.
 		var entryID int64
 		result, entryErr := ws.insertEntry(sessionID, project, entry.Type, ts, string(line))
-		if entryErr == nil {
-			if n, _ := result.RowsAffected(); n > 0 {
-				entryID, _ = result.LastInsertId()
+		if entryErr != nil {
+			return entryErr
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			var idErr error
+			entryID, idErr = result.LastInsertId()
+			if idErr != nil {
+				return idErr
 			}
 		}
 
 		// Only extract content blocks for user/assistant messages.
 		// Skip if the entry was a duplicate (INSERT OR IGNORE, entryID == 0).
 		if entry.Type != "user" && entry.Type != "assistant" || entryID == 0 {
-			return
+			return nil
 		}
 
 		blocks := extractBlocks(entry.Message)
@@ -7418,8 +7436,11 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 				isErr = 1
 			}
 
-			msgID, effectiveNoise := ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
+			msgID, effectiveNoise, err := ws.insertMessage(entryID, sessionID, project, entry.Type, b.Text, ts, entry.Type, noise,
 				b.ContentType, b.ToolName, b.ToolUseID, toolInput, isErr)
+			if err != nil {
+				return err
+			}
 			count++
 			if (b.ContentType == "tool_result" || (b.ContentType == "text" && entry.Type == "user")) &&
 				effectiveNoise == 0 && msgID != 0 && s.toolOutputsWritable() {
@@ -7436,6 +7457,7 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 				metaCompactorInternal = 1
 			}
 		}
+		return nil
 	}
 
 	lastCommit := time.Now()
@@ -7447,7 +7469,9 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 	// used to INSERT OR REPLACE, and a restarted read must not keep a
 	// larger offset from the file it replaced.
 	consumed, err := scanJSONL(path, offset, func(line []byte, _, end int64) error {
-		handleLine(line)
+		if err := handleLine(line); err != nil {
+			return err
+		}
 
 		linesSinceLockCheck++
 		if linesSinceLockCheck < ingestLineCheckInterval {

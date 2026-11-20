@@ -2780,3 +2780,35 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 		t.Errorf("-wal not truncated: size = %d bytes, want 0", fi.Size())
 	}
 }
+
+func TestDefectMessageInsertErrorIsPermanent(t *testing.T) {
+	projectDir := t.TempDir()
+	path := writeJSONL(t, projectDir, "proj", "sess-poison", []map[string]any{
+		msg("user", "before poison marker", "2026-04-01T10:00:00Z"),
+		msg("user", "POISONMARKER please drop me", "2026-04-01T10:00:01Z"),
+		msg("user", "after poison marker", "2026-04-01T10:00:02Z"),
+	})
+	s := newTestStore(t, projectDir)
+	if _, err := s.writeDB.Exec(`
+		CREATE TRIGGER defect_poison_msg BEFORE INSERT ON messages
+		WHEN new.text LIKE '%POISONMARKER%'
+		BEGIN
+			SELECT RAISE(ABORT, 'poison');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	err1 := s.ingestFile(path)
+	var off int64
+	_ = s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&off)
+	info, _ := os.Stat(path)
+	if _, err := s.writeDB.Exec(`DROP TRIGGER defect_poison_msg`); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.ingestFile(path)
+	if n := countText(t, s, "POISONMARKER"); n != 1 {
+		t.Fatalf("message that failed to insert is still absent after the cause is gone (hits=%d, first err=%v, offset=%d, file=%d)", n, err1, off, info.Size())
+	}
+	if err1 == nil || off >= info.Size() {
+		t.Fatalf("failed insert committed past the line (err=%v offset=%d file=%d)", err1, off, info.Size())
+	}
+}
