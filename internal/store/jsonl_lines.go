@@ -136,11 +136,10 @@ func prefixHash(b []byte) string {
 // lands before the first stamp is missed once — an upgrade does not
 // re-read every transcript.
 //
-// The cheap check misses a replacement that keeps the same size and the
-// same mtime. Transcript writers do not do that: an append grows the
-// file, and a write updates mtime. Restoring both after a content swap
-// (a copy that preserves timestamps, for example) is invisible until a
-// later size or mtime change.
+// Appends change size and ordinary writes change mtime. A content swap
+// that preserves both can escape this check if the inode also matches
+// or is unavailable, including on startup. Cursor's SQLite store has
+// its own fingerprint because a WAL write can leave the main file alone.
 func (s *Store) jsonlResume(path string, info os.FileInfo) jsonlResumeDecision {
 	size := info.Size()
 	s.mu.Lock()
@@ -160,14 +159,13 @@ func (s *Store) jsonlResume(path string, info os.FileInfo) jsonlResumeDecision {
 	if shorter {
 		return jsonlResumeDecision{restarted: true, statusClass: "truncated_at"}
 	}
-	if gen.haveRecorded && gen.recordedSize == size && gen.recordedMtime == fingerprintMtime(info) {
+	// An offset inside the file may come from a legacy reader that consumed
+	// a partial line. Let the boundary recovery below inspect that cursor.
+	if off == size && gen.haveRecorded && gen.recordedSize == size && gen.recordedMtime == fingerprintMtime(info) {
 		if gen.ino == 0 && id.ino != 0 {
 			s.stampGen(path, "", id)
 		}
-		if off >= size {
-			return jsonlResumeDecision{caughtUp: true}
-		}
-		return jsonlResumeDecision{offset: off}
+		return jsonlResumeDecision{caughtUp: true}
 	}
 
 	n := prefixLen(off)

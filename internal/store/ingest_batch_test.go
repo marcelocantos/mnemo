@@ -8,12 +8,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 )
 
 // TestIngestAllIsolatesFileFailures is two bad files in one startup batch:
 // one replaced between parse and cursor write, one whose message insert
 // fails. Every other file is indexed. Each failure names its path. The
-// next pass, after the insert fault is gone, picks both up.
+// watcher poll picks both up without depending on a new filesystem event.
 func TestIngestAllIsolatesFileFailures(t *testing.T) {
 	project := t.TempDir()
 	goodA := writeJSONL(t, project, "proj", "sess-good-a", []map[string]any{
@@ -85,12 +88,18 @@ func TestIngestAllIsolatesFileFailures(t *testing.T) {
 		}
 	}
 
+	batchPoll := fswatch.NewPollTracker(time.Minute, 2)
+	s.safetyPoll(batchPoll, s.ingestJSONLPath)
+	if n := countText(t, s, "new replace marker"); n != 1 {
+		t.Fatalf("replacement after safety poll indexed %d times, want 1", n)
+	}
+	if n := countText(t, s, "POISONMARKER"); n != 0 {
+		t.Fatalf("poison inserted %d times while the trigger was active", n)
+	}
 	if _, err := s.writeDB.Exec(`DROP TRIGGER defect_batch_poison`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.IngestAll(); err != nil {
-		t.Fatal(err)
-	}
+	s.safetyPoll(batchPoll, s.ingestJSONLPath)
 	if n := countText(t, s, "POISONMARKER"); n != 1 {
 		t.Fatalf("poison file after retry indexed %d times", n)
 	}
@@ -105,5 +114,43 @@ func TestIngestAllIsolatesFileFailures(t *testing.T) {
 	}
 	if n := countText(t, s, "good file beta"); n != 1 {
 		t.Fatalf("good beta after retry indexed %d times", n)
+	}
+}
+
+func TestBatchRollbackDoesNotHideAnotherFilesToolResult(t *testing.T) {
+	project := t.TempDir()
+	failed := writeJSONL(t, project, "proj", "sess-failed", []map[string]any{
+		toolUseMsg("2026-04-01T10:00:00Z", "mnemo_search", "shared-tool-id", map[string]any{"query": "needle"}),
+		msg("user", "fail this message", "2026-04-01T10:00:01Z"),
+	})
+	good := writeJSONL(t, project, "proj", "sess-good", []map[string]any{
+		toolResultMsg("2026-04-01T10:00:02Z", "shared-tool-id", "retrievablebatchresult"),
+	})
+	s := newTestStore(t, project)
+	if _, err := s.writeDB.Exec(`
+		CREATE TRIGGER fail_batch_message BEFORE INSERT ON messages
+		WHEN new.text = 'fail this message'
+		BEGIN
+			SELECT RAISE(ABORT, 'bad message');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fix the input order so both files use the same writer state
+	// and the failed tool_use is seen before the unrelated result.
+	parsed := make(chan parsedFile, 2)
+	for _, path := range []string{failed, good} {
+		pf, err := parseFile(path, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed <- pf
+	}
+	close(parsed)
+	if err := s.runWriter(parsed, len(parsed)); err == nil || !strings.Contains(err.Error(), failed) {
+		t.Fatalf("writer error = %v, want failed path %s", err, failed)
+	}
+	if n := searchHits(t, s, "retrievablebatchresult"); n != 1 {
+		t.Fatalf("tool result in the good file has %d search hits, want 1 after the failed tool_use is rolled back", n)
 	}
 }

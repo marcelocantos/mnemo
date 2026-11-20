@@ -381,6 +381,10 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "chats", "abc", "11111111-2222-3333-4444-555555555555", "store.db")
 	writeCursorStoreFixture(t, path, "original-tool-marker-xxxxxx", "/tmp/proj")
+	stamp := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
 	s := newTestStore(t, t.TempDir())
 	if err := s.ingestCursorStoreFile(path); err != nil {
 		t.Fatal(err)
@@ -408,18 +412,25 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 	if err != nil || updated != 1 {
 		t.Fatalf("unexpected blob UPDATE rows=%d err=%v", updated, err)
 	}
-	db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the main-file stat unchanged. The SQLite header change
+	// counter must be enough to notice this page update.
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
 	after, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(before, after) {
+		t.Fatal("fixture changed the main database's size, mtime, or identity")
 	}
 	if err := s.ingestCursorStoreFile(path); err != nil {
 		t.Fatal(err)
 	}
 	n := countText(t, s, "original-tool-marker-YYYYYY")
-	if after.Size() != before.Size() {
-		t.Fatalf("fixture changed main database size from %d to %d", before.Size(), after.Size())
-	}
 	if n != 1 {
 		t.Fatalf("same-size store.db (%d bytes) was not re-read after its blob changed (rows=%d)", after.Size(), updated)
 	}

@@ -132,6 +132,9 @@ type Store struct {
 	// gens is the identity the offset was taken from (prefix hash and,
 	// while this process is up, inode). Guarded by mu.
 	gens map[string]ingestGen
+	// Paths that failed ingest and must be retried even if they have
+	// no cursor or their size has not grown. Guarded by mu.
+	pendingIngestRetries map[string]struct{}
 
 	// watchTel is live 🎯T142 tree-watch telemetry (backend, FDs, poll).
 	// Own mutex; not guarded by mu.
@@ -1565,14 +1568,15 @@ func New(dbPath, projectDir string) (*Store, error) {
 	// to whatever the live table has. The fingerprint is what lets a
 	// restart decide "unchanged" without reading the file.
 	rows, err := readDB.Query(`SELECT path, offset, prefix_sha256, recorded_size, recorded_mtime FROM ingest_state`)
-	loadKind := "full"
 	if err != nil {
-		rows, err = readDB.Query(`SELECT path, offset, prefix_sha256 FROM ingest_state`)
-		loadKind = "prefix"
+		// The source-drift fingerprint predates prefix hashing.
+		rows, err = readDB.Query(`SELECT path, offset, NULL, recorded_size, recorded_mtime FROM ingest_state`)
 	}
 	if err != nil {
-		rows, err = readDB.Query(`SELECT path, offset FROM ingest_state`)
-		loadKind = "offset"
+		rows, err = readDB.Query(`SELECT path, offset, prefix_sha256, NULL, NULL FROM ingest_state`)
+	}
+	if err != nil {
+		rows, err = readDB.Query(`SELECT path, offset, NULL, NULL, NULL FROM ingest_state`)
 	}
 	if err == nil {
 		defer rows.Close()
@@ -1582,16 +1586,7 @@ func New(dbPath, projectDir string) (*Store, error) {
 			var prefix sql.NullString
 			var recordedSize sql.NullInt64
 			var recordedMtime sql.NullString
-			var scanErr error
-			switch loadKind {
-			case "full":
-				scanErr = rows.Scan(&path, &offset, &prefix, &recordedSize, &recordedMtime)
-			case "prefix":
-				scanErr = rows.Scan(&path, &offset, &prefix)
-			default:
-				scanErr = rows.Scan(&path, &offset)
-			}
-			if scanErr != nil {
+			if err := rows.Scan(&path, &offset, &prefix, &recordedSize, &recordedMtime); err != nil {
 				continue
 			}
 			s.offsets[path] = offset
@@ -4024,7 +4019,8 @@ func (s *Store) IngestAll() error {
 					pf, err = parse(fe.path, 0)
 				}
 				if err != nil {
-					slog.Warn("parse failed", "file", filepath.Base(fe.path), "err", err)
+					s.queueIngestRetry(fe.path)
+					slog.Warn("parse failed; queued for retry", "file", fe.path, "err", err)
 					continue
 				}
 				pf.restarted = fe.restarted
@@ -4505,11 +4501,13 @@ func (s *Store) runWriter(parsedCh <-chan parsedFile, totalFiles int) error {
 			if _, relErr := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); relErr != nil {
 				return fmt.Errorf("ingest %s: %w (savepoint release: %v)", pf.path, err, relErr)
 			}
+			// The savepoint rolled back the rows but cannot roll back
+			// this cache. Earlier good tool uses are still in SQLite.
+			clear(ws.selfToolUses)
 			failed = append(failed, fmt.Errorf("ingest %s: %w", pf.path, err))
-			slog.Warn("ingest file failed; will retry next pass", "file", pf.path, "err", err)
-			continue
-		}
-		if _, err := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); err != nil {
+			s.queueIngestRetry(pf.path)
+			slog.Warn("ingest file failed; queued for retry", "file", pf.path, "err", err)
+		} else if _, err := ws.tx.Exec(`RELEASE SAVEPOINT ingest_file`); err != nil {
 			return err
 		}
 
@@ -5077,8 +5075,18 @@ func (s *Store) Watch(ctx context.Context) error {
 // watchPollInterval is the safety-poll period used by Store.Watch (tests may shorten it).
 var watchPollInterval = 5 * time.Second
 
+func (s *Store) queueIngestRetry(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingIngestRetries == nil {
+		s.pendingIngestRetries = make(map[string]struct{})
+	}
+	s.pendingIngestRetries[path] = struct{}{}
+}
+
 // safetyPoll runs one bounded poll cycle using the shipped PollTracker and
-// invokes onNeed for each jsonl path that has grown past its offset.
+// invokes onNeed for files queued for retry and JSONL paths that have
+// grown past their offset.
 // This is the production recovery path for open/write/close writers when tree
 // events are missed (🎯T142.5).
 func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)) {
@@ -5090,7 +5098,22 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 	for p, off := range s.offsets {
 		offsets[p] = off
 	}
+	// Failed files may have no cursor at all, or a new generation
+	// shorter than their cursor. Give them a bounded retry without
+	// relying on size growth or another filesystem event.
+	retries := make(map[string]struct{}, min(len(s.pendingIngestRetries), fswatch.DefaultPollMaxPerTick))
+	for p := range s.pendingIngestRetries {
+		retries[p] = struct{}{}
+		delete(s.pendingIngestRetries, p)
+		if len(retries) == fswatch.DefaultPollMaxPerTick {
+			break
+		}
+	}
 	s.mu.Unlock()
+
+	for p := range retries {
+		onNeed(p)
+	}
 
 	// Use only a warm LiveSessions cache — never force a synchronous
 	// lsof +D of ~/.claude/projects on the poll path (that walk can take
@@ -5119,7 +5142,7 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 		},
 	})
 	for _, name := range cands {
-		if !strings.HasSuffix(name, ".jsonl") {
+		if _, retry := retries[name]; retry || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
 		onNeed(name)
@@ -5131,38 +5154,9 @@ func (s *Store) ingestJSONLPath(path string) {
 	if store := strings.TrimSuffix(path, "-wal"); store != path && isCursorStore(store) {
 		path = store
 	}
-	if isCodexRollout(path) {
-		if err := s.ingestCodexFile(path); err != nil {
-			slog.Error("ingest codex failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isGrokUpdates(path) {
-		if err := s.ingestGrokFile(path); err != nil {
-			slog.Error("ingest grok failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isCursorTranscript(path) {
-		if err := s.ingestCursorFile(path); err != nil {
-			slog.Error("ingest cursor failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isCursorStore(path) {
-		if err := s.ingestCursorStoreFile(path); err != nil {
-			slog.Error("ingest cursor store failed", "file", path, "err", err)
-		}
-		return
-	}
-	if isOmpSession(path) {
-		if err := s.ingestOmpFile(path); err != nil {
-			slog.Error("ingest omp failed", "file", path, "err", err)
-		}
-		return
-	}
 	if err := s.ingestFile(path); err != nil {
-		slog.Error("ingest failed", "file", path, "err", err)
+		s.queueIngestRetry(path)
+		slog.Error("watch ingest failed; queued for retry", "file", path, "err", err)
 	}
 }
 
@@ -7510,8 +7504,7 @@ func (s *Store) ingestFile(path string) error {
 	// session_meta without a source, so a foreign transcript reaching it
 	// produces a phantom session — stem-keyed, message-less, and tagged
 	// 'claude' by schema default. Four such rows exist in the wild from
-	// before Codex ingest landed. The caller already routes; this makes
-	// the invariant local so a future caller cannot reintroduce it.
+	// before Codex ingest landed.
 	if isCodexRollout(path) {
 		return s.ingestCodexFile(path)
 	}

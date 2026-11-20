@@ -58,24 +58,27 @@ func writeCaughtUpTree(t *testing.T, root string, n int) []byte {
 	}
 	per := n / shards
 	var wg sync.WaitGroup
-	errCh := make(chan error, shards)
-	for s := 0; s < shards; s++ {
+	const workers = 2
+	errCh := make(chan error, workers)
+	for worker := range workers {
 		wg.Add(1)
-		go func(s int) {
+		go func() {
 			defer wg.Done()
-			dir := filepath.Join(root, fmt.Sprintf("p%03d", s))
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				errCh <- err
-				return
-			}
-			for i := 0; i < per; i++ {
-				path := filepath.Join(dir, fmt.Sprintf("s%05d.jsonl", s*per+i))
-				if err := os.WriteFile(path, body, 0o644); err != nil {
+			for shard := worker; shard < shards; shard += workers {
+				dir := filepath.Join(root, fmt.Sprintf("p%03d", shard))
+				if err := os.MkdirAll(dir, 0o755); err != nil {
 					errCh <- err
 					return
 				}
+				for i := range per {
+					path := filepath.Join(dir, fmt.Sprintf("s%05d.jsonl", shard*per+i))
+					if err := os.WriteFile(path, body, 0o644); err != nil {
+						errCh <- err
+						return
+					}
+				}
 			}
-		}(s)
+		}()
 	}
 	wg.Wait()
 	close(errCh)
@@ -85,7 +88,7 @@ func writeCaughtUpTree(t *testing.T, root string, n int) []byte {
 	return body
 }
 
-func seedCaughtUpCursors(t *testing.T, db *sql.DB, root string, body []byte) {
+func seedCaughtUpCursors(t *testing.T, db *sql.DB, root string, body []byte, want int) {
 	t.Helper()
 	sum := prefixHash(body)
 	tx, err := db.Begin()
@@ -116,14 +119,14 @@ func seedCaughtUpCursors(t *testing.T, db *sql.DB, root string, body []byte) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if n == 0 {
-		t.Fatal("seeded no cursors")
+	if n != want {
+		t.Fatalf("seeded %d cursors, want %d", n, want)
 	}
 }
 
 // TestStartupCaughtUpCostsOneStat is the startup scan over a tree the
 // size of a real transcript corpus, with every file already caught up.
-// The second open is a fresh process: memory holds only what ingest_state
+// The second store loads its cursors from disk: memory holds only what ingest_state
 // stored. An unchanged file must not be opened or read.
 func TestStartupCaughtUpCostsOneStat(t *testing.T) {
 	const n = 100_000
@@ -137,7 +140,7 @@ func TestStartupCaughtUpCostsOneStat(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.AwaitStartup()
-	seedCaughtUpCursors(t, first.writeDB, project, body)
+	seedCaughtUpCursors(t, first.writeDB, project, body, n)
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -195,13 +198,16 @@ func TestCaughtUpMtimeChangeIsHashed(t *testing.T) {
 }
 
 // TestCheapCheckMissesRestoredMtime pins the replacement the stat check
-// cannot see: same size, mtime put back, different bytes. Transcript
-// writers update mtime on write, so this is not how those files change.
+// cannot see: different bytes, unchanged inode, size and mtime restored.
 func TestCheapCheckMissesRestoredMtime(t *testing.T) {
 	project := t.TempDir()
 	path := writeJSONL(t, project, "proj", "sess-blind", []map[string]any{
 		msg("user", "original blind marker", "2026-04-01T10:00:00Z"),
 	})
+	stamp := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
 	s := newTestStore(t, project)
 	if err := s.IngestAll(); err != nil {
 		t.Fatal(err)
@@ -244,5 +250,96 @@ func TestCheapCheckMissesRestoredMtime(t *testing.T) {
 	}
 	if n := countText(t, s, "original blind marker"); n != 1 {
 		t.Fatalf("original marker count %d, want 1", n)
+	}
+}
+
+func TestStartupResumesLegacyCursorInsideCompletedLine(t *testing.T) {
+	project := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, project)
+	first := readerClaudeBatch.line("legacy first line")
+	finished := readerClaudeBatch.line("completed legacy appended line")
+	writeLines(t, path, first)
+
+	dbPath := filepath.Join(t.TempDir(), "legacy-scan.db")
+	installTestRateCard(t, testRateCard())
+	s, err := New(dbPath, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.AwaitStartup()
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, path, first+finished)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The legacy reader consumed a partial line, then recorded file
+	// metadata after the writer appended the remaining bytes.
+	if _, err := s.writeDB.Exec(`
+		UPDATE ingest_state
+		SET offset = ?, recorded_size = ?, recorded_mtime = ?, prefix_sha256 = NULL
+		WHERE path = ?`, len(first)+len(finished)/2, info.Size(), fingerprintMtime(info), path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = New(dbPath, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	s.AwaitStartup()
+	for range 2 {
+		if err := s.IngestAll(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expectOnce(t, s, "legacy first line")
+	expectOnce(t, s, "completed legacy appended line")
+	assertJSONLOffset(t, s, path, len(first)+len(finished))
+}
+
+func TestStartupUsesMetadataFromBeforePrefixMigration(t *testing.T) {
+	project := t.TempDir()
+	path := writeJSONL(t, project, "proj", "sess-legacy", []map[string]any{
+		msg("user", "legacy caught-up transcript", "2026-04-01T10:00:00Z"),
+	})
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "pre-prefix-scan.db")
+	if err := upgradeSchemaWith(dbPath, previousSchemaSQL(t)); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(writerDriverName, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO ingest_state (path, offset, recorded_size, recorded_mtime)
+		VALUES (?, ?, ?, ?)`, path, info.Size(), info.Size(), fingerprintMtime(info))
+	closeErr := db.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("seed legacy cursor: insert=%v close=%v", err, closeErr)
+	}
+
+	installTestRateCard(t, testRateCard())
+	s, err := New(dbPath, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	s.AwaitStartup()
+	opens, reads := countTranscriptIO(t)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if opens.Load() != 0 || reads.Load() != 0 {
+		t.Fatalf("unchanged legacy transcript opened %d times and read %d times, want none", opens.Load(), reads.Load())
 	}
 }
