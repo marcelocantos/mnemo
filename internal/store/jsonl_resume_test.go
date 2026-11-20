@@ -484,6 +484,120 @@ func TestJSONLTruncateBetweenReadsStaysOnce(t *testing.T) {
 	}
 }
 
+func TestJSONLRepeatedSourceChangesPreserveRecordOccurrences(t *testing.T) {
+	for _, k := range allJSONLReaders() {
+		for _, change := range []string{"truncate", "rotate", "rewrite"} {
+			t.Run(string(k)+"/"+change, func(t *testing.T) {
+				root := t.TempDir()
+				s := newReaderStore(t, k, root)
+				path := k.pathFor(t, root)
+				k.prepare(t, s, root, path)
+
+				const repeated = "identical record body"
+				line := k.line(repeated)
+				// These two providers permit records without native IDs.
+				line = strings.ReplaceAll(line, `"uuid":"u-`+repeated+`",`, "")
+				line = strings.ReplaceAll(line, `"id":"m-`+repeated+`",`, "")
+				const removed = "original record removed from source"
+				padding := strings.Repeat("\n", 2*len(line))
+				original := line + k.line(removed)
+				if change == "truncate" {
+					original += padding + padding
+				}
+				writeLines(t, path, original)
+				k.ingest(t, s, path)
+				planted := plantIndexedHistory(t, s, path)
+				sessionID, _ := sessionIDFromPath(path)
+				var oldID int64
+				if err := s.readDB.QueryRow(`SELECT id FROM messages_v WHERE session_id = ? AND text = ?`, sessionID, repeated).Scan(&oldID); err != nil {
+					t.Fatal(err)
+				}
+				assertRecordCount := func(want int) {
+					t.Helper()
+					var entries, messages int
+					if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ?`, sessionID).Scan(&entries); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&messages); err != nil {
+						t.Fatal(err)
+					}
+					if entries != want || messages != want {
+						t.Fatalf("entries=%d messages=%d, want %d of each", entries, messages, want)
+					}
+				}
+				assertRecordCount(3)
+				for generation, marker := range []string{"new record on first change", "another new record on second change"} {
+					body := strings.Repeat(line, generation+2) + k.line(marker)
+					class := "rewritten_at"
+					switch change {
+					case "rotate":
+						if err := os.Rename(path, path+".rotated-"+marker); err != nil {
+							t.Fatal(err)
+						}
+					case "truncate":
+						class = "truncated_at"
+						if generation == 0 {
+							body += padding
+						}
+					case "rewrite":
+						// Force a prefix mismatch even though the first logical
+						// record is unchanged.
+						body = strings.Repeat("\n", generation+1) + body
+					}
+					writeLines(t, path, body)
+					k.ingest(t, s, path)
+					k.ingest(t, s, path)
+					if n := countText(t, s, repeated); n != generation+2 {
+						t.Fatalf("generation %d stored %d identical occurrences, want %d", generation+1, n, generation+2)
+					}
+					assertRecordCount(5 + generation*2)
+					expectOnce(t, s, removed)
+					expectOnce(t, s, "new record on first change")
+					expectOnce(t, s, marker)
+					var got string
+					if err := s.readDB.QueryRow(`SELECT text FROM messages_v WHERE id = ?`, oldID).Scan(&got); err != nil || got != repeated {
+						t.Fatalf("original message %d = %q, err %v", oldID, got, err)
+					}
+					if got := sourceStatusClassFor(t, s, removed); got != class {
+						t.Fatalf("generation %d tagged %q, want %q", generation+1, got, class)
+					}
+					assertPlantedHistory(t, s, planted)
+					assertNoDanglingRefs(t, s)
+				}
+			})
+		}
+	}
+}
+
+func TestJSONLAppendAfterTruncationReusesOldByteOffset(t *testing.T) {
+	for _, k := range []jsonlReaderKind{readerCodex, readerGrok, readerCursor, readerOmp} {
+		t.Run(string(k), func(t *testing.T) {
+			root := t.TempDir()
+			s := newReaderStore(t, k, root)
+			path := k.pathFor(t, root)
+			k.prepare(t, s, root, path)
+			first := k.line("retained leading record")
+			old := k.line("historical record at this offset")
+			current := k.line("new record at the historical offset")
+			if k == readerOmp {
+				old = strings.ReplaceAll(old, `"id":"m-historical record at this offset",`, "")
+				current = strings.ReplaceAll(current, `"id":"m-new record at the historical offset",`, "")
+			}
+			writeLines(t, path, first+old)
+			k.ingest(t, s, path)
+			writeLines(t, path, first)
+			k.ingest(t, s, path)
+			assertJSONLOffset(t, s, path, len(first))
+			writeLines(t, path, first+current)
+			k.ingest(t, s, path)
+			k.ingest(t, s, path)
+			expectOnce(t, s, "retained leading record")
+			expectOnce(t, s, "historical record at this offset")
+			expectOnce(t, s, "new record at the historical offset")
+		})
+	}
+}
+
 func TestJSONLRotateAndRewriteAreIndexedOnce(t *testing.T) {
 	for _, k := range allJSONLReaders() {
 		for _, mut := range []string{"rotate", "rewrite"} {
@@ -587,6 +701,9 @@ func TestJSONLMutatedWhileReadingIsIndexedOnce(t *testing.T) {
 					expectOnce(t, s, "while read first marker")
 					if n := countText(t, s, "while read second marker"); n != 0 {
 						t.Fatalf("truncated-away record indexed %d times, want 0", n)
+					}
+					if got := sourceStatusClassFor(t, s, "while read first marker"); got != "truncated_at" {
+						t.Fatalf("source truncated while reading tagged %q, want truncated_at", got)
 					}
 				case "rotate":
 					expectOnce(t, s, "while read rotated marker")
@@ -692,6 +809,44 @@ func assertPlantedHistory(t *testing.T, s *Store, planted plantedHistory) {
 	}
 }
 
+func checkReferencedMessage(t *testing.T, s *Store, text string) func(string) {
+	t.Helper()
+	var entryID, messageID int64
+	if err := s.readDB.QueryRow(`
+		SELECT entry_id, id FROM messages_v WHERE text LIKE ?`, "%"+text+"%").Scan(&entryID, &messageID); err != nil {
+		t.Fatal(err)
+	}
+	image, err := s.writeDB.Exec(`
+		INSERT INTO images (content_hash, bytes, mime_type, width, height, pixel_format, byte_size)
+		VALUES ('test-refresh', x'00', 'image/png', 1, 1, 'unknown', 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageID, err := image.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(`
+		INSERT INTO image_occurrences (image_id, entry_id, message_id, session_id, source_type, occurred_at)
+		SELECT ?, entry_id, id, session_id, 'inline', timestamp FROM messages WHERE id = ?`, imageID, messageID); err != nil {
+		t.Fatal(err)
+	}
+	return func(want string) {
+		t.Helper()
+		var gotEntry, gotMessage int64
+		err := s.readDB.QueryRow(`
+			SELECT io.entry_id, io.message_id
+			FROM image_occurrences io
+			JOIN entries e ON e.id = io.entry_id
+			JOIN messages_v m ON m.id = io.message_id AND m.entry_id = e.id
+			WHERE io.image_id = ? AND m.text LIKE ?`, imageID, "%"+want+"%").Scan(&gotEntry, &gotMessage)
+		if err != nil || gotEntry != entryID || gotMessage != messageID {
+			t.Fatalf("refresh lost referenced entry/message (%d,%d): got (%d,%d), err %v", entryID, messageID, gotEntry, gotMessage, err)
+		}
+		assertNoDanglingRefs(t, s)
+	}
+}
+
 func sourceStatusClassFor(t *testing.T, s *Store, marker string) string {
 	t.Helper()
 	var status string
@@ -723,6 +878,8 @@ func assertNoDanglingRefs(t *testing.T, s *Store) {
 		{"snapshot_files.entry_id", `SELECT COUNT(*) FROM snapshot_files sf WHERE NOT EXISTS (SELECT 1 FROM entries e WHERE e.id = sf.entry_id)`},
 		{"decisions.proposal_msg_id", `SELECT COUNT(*) FROM decisions d WHERE d.proposal_msg_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = d.proposal_msg_id)`},
 		{"decisions.confirmation_msg_id", `SELECT COUNT(*) FROM decisions d WHERE d.confirmation_msg_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = d.confirmation_msg_id)`},
+		{"topic_segments.from_msg_id", `SELECT COUNT(*) FROM topic_segments ts WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = ts.from_msg_id)`},
+		{"topic_segments.to_msg_id", `SELECT COUNT(*) FROM topic_segments ts WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = ts.to_msg_id)`},
 	}
 	for _, c := range checks {
 		var n int

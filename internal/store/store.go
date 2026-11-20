@@ -3775,6 +3775,7 @@ type parsedRawEntry struct {
 	entryType string
 	timestamp string
 	raw       []byte // full JSONL line
+	refresh   bool   // mutable sidecar projection, without changing its row identity
 }
 
 // parsedFile is the result of parsing a single JSONL file.
@@ -3801,11 +3802,9 @@ type parsedFile struct {
 	// model is the primary model stamp (Grok summary / signals); also
 	// embedded in entry raw for generated columns.
 	model string
-	// Carries a parsed replacement for the synthetic Grok usage entry.
-	replaceGrokSignals bool
 	// restarted means this file is not the one the stored offset was
 	// taken from. writeParsedFile keeps the rows already indexed, inserts
-	// only lines whose message text is new, and sets the offset absolutely.
+	// only newly observed record occurrences, and sets the offset absolutely.
 	restarted bool
 	// sourceClass is the 🎯T68.6 tag written when restarted is set:
 	// "truncated_at" or "rewritten_at".
@@ -3999,13 +3998,7 @@ func (s *Store) IngestAll() error {
 				pf, err := parse(fe.path, fe.offset)
 				if errors.Is(err, errTranscriptReplaced) && !fe.restarted {
 					fe.restarted = true
-					fe.sourceClass = "rewritten_at"
-					s.mu.Lock()
-					prev := s.offsets[fe.path]
-					s.mu.Unlock()
-					if info, statErr := os.Stat(fe.path); statErr == nil && info.Size() < prev {
-						fe.sourceClass = "truncated_at"
-					}
+					fe.sourceClass = s.jsonlRestartClass(fe.path, err)
 					pf, err = parse(fe.path, 0)
 				}
 				if err != nil {
@@ -4248,6 +4241,100 @@ func (ws *writerState) insertEntry(sessionID, project, typ string, timestamp any
 	return ws.entryStmt.Exec(sessionID, project, typ, timestamp, raw, z)
 }
 
+// Refresh the Grok usage snapshot or a Cursor blob's tool-result
+// projection. Neither is a JSONL record. Their producer-defined IDs
+// denote mutable slots, and downstream rows depend on our stable IDs.
+func (ws *writerState) refreshSidecarEntry(sessionID, raw string) (int64, error) {
+	var id int64
+	var changed bool
+	err := ws.tx.QueryRow(`
+		SELECT id, json(raw) IS NOT json(?2)
+		FROM entries_v
+		WHERE session_id = ?1 AND uuid = ?2->>'$.uuid'`, sessionID, raw).Scan(&id, &changed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil || !changed {
+		return id, err
+	}
+	if !ws.packed {
+		_, err = ws.tx.Exec(`UPDATE entries SET raw = jsonb(?) WHERE id = ?`, raw, id)
+		return id, err
+	}
+	var z []byte
+	if ws.packRaw {
+		_, z = ws.codec.pack(FamilyEntriesRaw, raw)
+	}
+	_, err = ws.tx.Exec(`
+		UPDATE entries SET
+			raw = CASE WHEN ?3 IS NULL THEN jsonb(?2) END,
+			raw_z = ?3, plain_len = length(CAST(?2 AS BLOB)), z_len = length(?3),
+			model_m = ?2->>'$.message.model',
+			input_tokens_m = ?2->>'$.message.usage.input_tokens',
+			output_tokens_m = ?2->>'$.message.usage.output_tokens',
+			spawn_tool_use_id_m = ?2->>'$.message.content[0].tool_use_id'
+		WHERE id = ?1`, id, raw, z)
+	return id, err
+}
+
+func (ws *writerState) refreshSidecarMessage(entryID int64, m parsedMessage) (bool, error) {
+	if m.contentType == "tool_result" && (isSelfTool(m.toolName) || ws.pairedSelfToolResult(m.toolUseID)) {
+		m.isNoise = 1
+	}
+	var id int64
+	var changed bool
+	err := ws.tx.QueryRow(`
+		SELECT id, text IS NOT ?2 OR tool_name IS NOT ?3 OR tool_use_id IS NOT ?4 OR is_noise IS NOT ?5
+		FROM messages_v
+		WHERE entry_id = ?1`, entryID, m.text, m.toolName, m.toolUseID, m.isNoise).Scan(&id, &changed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil || !changed {
+		return true, err
+	}
+	// The indexes are external-content FTS tables. Remove exactly the
+	// terms they currently contain, then add the revised text at the
+	// same row ID. The durable message and its dependents stay in place.
+	if _, err := ws.tx.Exec(`
+		INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
+		SELECT 'delete', id, text, role, project, session_id
+		FROM messages_v WHERE id = ? AND is_noise = 0`, id); err != nil {
+		return true, err
+	}
+	if _, err := ws.tx.Exec(`
+		INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
+		SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
+		FROM messages_v m
+		WHERE m.id = ? AND m.is_noise = 0
+		  AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`, id); err != nil {
+		return true, err
+	}
+	if ws.packed {
+		plain, z := ws.codec.pack(FamilyMessagesText, m.text)
+		_, err = ws.tx.Exec(`
+			UPDATE messages SET text = ?, text_z = ?, plain_len = ?, z_len = length(?),
+				tool_name = ?, tool_use_id = ?, is_noise = ?
+			WHERE id = ?`, plain, z, len(m.text), z, m.toolName, m.toolUseID, m.isNoise, id)
+	} else {
+		_, err = ws.tx.Exec(`
+			UPDATE messages SET text = ?, tool_name = ?, tool_use_id = ?, is_noise = ?
+			WHERE id = ?`, m.text, m.toolName, m.toolUseID, m.isNoise, id)
+	}
+	if err != nil {
+		return true, err
+	}
+	if _, err := ws.tx.Exec(`
+		INSERT INTO messages_fts(rowid, text, role, project, session_id)
+		SELECT id, text, role, project, session_id FROM messages_v WHERE id = ? AND is_noise = 0`, id); err != nil {
+		return true, err
+	}
+	_, err = ws.tx.Exec(`
+		INSERT INTO messages_fts_stem(rowid, text, role, project, session_id)
+		SELECT id, text, role, project, session_id FROM messages_v WHERE id = ? AND is_noise = 0`, id)
+	return true, err
+}
+
 // insertMessage runs msgStmt with text packed for storage (🎯T151).
 //
 // Every parser's rows pass through here, so this is also where mnemo's
@@ -4409,53 +4496,12 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 			return err
 		}
 	}
-	// Grok session-level usage rows use a stable uuid. Replace the previous
-	// copy only when this parse carries the new one, in the same
-	// transaction. A tail that deleted the row and inserted nothing is
-	// how a session's only token total became zero (defect hunt finding 2).
-	// This delete is the signals row only. The seen-set for a replacement
-	// read is loaded after it, so an unchanged signals line is inserted
-	// again rather than skipped as already indexed.
-	if pf.replaceGrokSignals {
-		usageUUID := fmt.Sprintf("grok-%s-signals-usage", pf.sessionID)
-		if _, err := ws.tx.Exec(`
-			DELETE FROM messages
-			WHERE entry_id IN (
-				SELECT id FROM entries
-				WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?
-			)`, pf.sessionID, usageUUID); err != nil {
-			return err
-		}
-		if _, err := ws.tx.Exec(`
-			DELETE FROM entries WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
-			pf.sessionID, usageUUID); err != nil {
-			return err
-		}
-	}
-	// A rewritten store.db blob keeps its uuid. Delete that entry
-	// before INSERT OR IGNORE, and nothing else in the session: the
-	// JSONL conversation shares the session id.
-	if isCursorStore(pf.path) {
-		if err := replaceCursorStoreBlobs(ws.tx, pf.sessionID, pf.entries); err != nil {
-			return err
-		}
-	}
-
-	// A replacement read keeps every row already indexed. Load the seen
-	// set after the signals and blob replaces above: those deletes are
-	// specific uuids, and a line they removed must be inserted again.
-	var seen sessionLineSet
-	textsByEntry := make([][]string, len(pf.entries))
+	var replay *transcriptReplay
 	if pf.restarted {
 		var err error
-		seen, err = loadSessionLines(ws.tx, pf.sessionID)
+		replay, err = loadTranscriptReplay(ws.tx, pf.sessionID, pf.source)
 		if err != nil {
 			return err
-		}
-		for _, m := range pf.messages {
-			if m.entryIdx >= 0 && m.entryIdx < len(textsByEntry) {
-				textsByEntry[m.entryIdx] = append(textsByEntry[m.entryIdx], m.text)
-			}
 		}
 	}
 
@@ -4463,27 +4509,74 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 	// INSERT OR IGNORE skips duplicate (session_id, uuid) pairs, so
 	// only record the entry ID when a row was actually inserted.
 	entryIDs := make(map[int]int64, len(pf.entries))
+	refreshed := make(map[int]bool)
+	var appendReplay *transcriptReplay
 	for i, e := range pf.entries {
 		raw := string(e.raw)
-		if pf.restarted && lineTextsSeen(seen.texts, textsByEntry[i]) {
-			continue
-		}
-		if pf.restarted {
-			raw = retargetTakenUUID(pf.source, pf.sessionID, raw, seen.uuids)
+		if e.refresh {
+			id, err := ws.refreshSidecarEntry(pf.sessionID, raw)
+			if err != nil {
+				return err
+			}
+			if id != 0 {
+				entryIDs[i] = id
+				refreshed[i] = true
+				continue
+			}
+		} else if replay != nil {
+			var insert bool
+			var err error
+			raw, insert, err = replay.next(raw)
+			if err != nil {
+				return err
+			}
+			if !insert {
+				continue
+			}
 		}
 		result, err := ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, raw)
 		if err != nil {
 			return err
 		}
-		n, _ := result.RowsAffected()
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 && replay == nil {
+			collision, err := appendOffsetCollision(ws.tx, pf, raw)
+			if err != nil {
+				return err
+			}
+			if collision {
+				if appendReplay == nil {
+					appendReplay, err = loadTranscriptReplay(ws.tx, pf.sessionID, pf.source)
+					if err != nil {
+						return err
+					}
+				}
+				key, uuid, originalUUID, err := replayRecord(raw, pf.source)
+				if err != nil {
+					return err
+				}
+				raw, err = appendReplay.allocate(raw, key, uuid, originalUUID)
+				if err != nil {
+					return err
+				}
+				result, err = ws.insertEntry(pf.sessionID, pf.project, e.entryType, e.timestamp, raw)
+				if err != nil {
+					return err
+				}
+				n, err = result.RowsAffected()
+				if err != nil {
+					return err
+				}
+			}
+		}
 		if n > 0 {
 			if id, err := result.LastInsertId(); err == nil {
 				entryIDs[i] = id
 			} else {
 				return err
-			}
-			if pf.restarted {
-				rememberInsertedLine(seen, raw, textsByEntry[i])
 			}
 		}
 	}
@@ -4495,6 +4588,15 @@ func (s *Store) writeParsedFile(ws *writerState, pf parsedFile) error {
 		entryID := entryIDs[m.entryIdx]
 		if entryID == 0 {
 			continue // entry was duplicate — skip associated messages
+		}
+		if refreshed[m.entryIdx] {
+			done, err := ws.refreshSidecarMessage(entryID, m)
+			if err != nil {
+				return err
+			}
+			if done {
+				continue
+			}
 		}
 		var toolInput any
 		if m.toolInput != nil {
@@ -7375,20 +7477,16 @@ func (s *Store) ingestFile(path string) error {
 		return s.ingestOmpFile(path)
 	}
 
-	err := s.ingestClaudeOnce(path, false)
+	err := s.ingestClaudeOnce(path, "")
 	if errors.Is(err, errTranscriptReplaced) {
-		return s.ingestClaudeOnce(path, true)
+		return s.ingestClaudeOnce(path, s.jsonlRestartClass(path, err))
 	}
 	return err
 }
 
-// ingestClaudeOnce reads one Claude transcript. force skips the resume
-// decision and reads from byte 0. Rows already indexed stay; a line whose
-// message text is already stored is not inserted again. The retry passes
-// force after a mid-read replacement; consulting the resume decision then
-// would see the offset committed for the old file and treat a shorter
-// replacement as a durable truncation.
-func (s *Store) ingestClaudeOnce(path string, force bool) error {
+// ingestClaudeOnce reads one Claude transcript. A retry passes its known
+// source status to restart from zero, retaining already indexed records.
+func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -7397,9 +7495,8 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		return err
 	}
 	var offset int64
-	var statusClass string
-	restarted := force
-	if !force {
+	restarted := statusClass != ""
+	if !restarted {
 		d := s.jsonlResume(path, info.Size())
 		if d.caughtUp {
 			return nil
@@ -7408,15 +7505,6 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		statusClass = d.statusClass
 		if !restarted {
 			offset = d.offset
-		}
-	} else {
-		s.mu.Lock()
-		prev := s.offsets[path]
-		s.mu.Unlock()
-		if info.Size() < prev {
-			statusClass = "truncated_at"
-		} else {
-			statusClass = "rewritten_at"
 		}
 	}
 	// absolute stays set for every cursor write of a replacement read.
@@ -7441,9 +7529,9 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		_ = ws.tx.Rollback()
 	}()
 
-	var seen sessionLineSet
+	var replay *transcriptReplay
 	if absolute {
-		seen, err = loadSessionLines(ws.tx, sessionID)
+		replay, err = loadTranscriptReplay(ws.tx, sessionID, "claude")
 		if err != nil {
 			return err
 		}
@@ -7475,15 +7563,16 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		}
 
 		raw := string(line)
-		var parts []string
-		if absolute && (entry.Type == "user" || entry.Type == "assistant") {
-			for _, b := range extractBlocks(entry.Message) {
-				parts = append(parts, b.Text)
+		if replay != nil {
+			var insert bool
+			var err error
+			raw, insert, err = replay.next(raw)
+			if err != nil {
+				return err
 			}
-			if lineTextsSeen(seen.texts, parts) {
+			if !insert {
 				return nil
 			}
-			raw = retargetTakenUUID("", sessionID, raw, seen.uuids)
 		}
 
 		// Insert every JSONL line into entries table.
@@ -7494,14 +7583,12 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		if entryErr != nil {
 			return entryErr
 		}
-		if n, _ := result.RowsAffected(); n > 0 {
+		n, _ := result.RowsAffected()
+		if n > 0 {
 			var idErr error
 			entryID, idErr = result.LastInsertId()
 			if idErr != nil {
 				return idErr
-			}
-			if absolute {
-				rememberInsertedLine(seen, raw, parts)
 			}
 		}
 
@@ -7583,6 +7670,11 @@ func (s *Store) ingestClaudeOnce(path string, force bool) error {
 		linesSinceLockCheck = 0
 		if time.Since(lastCommit) < ingestCommitInterval {
 			return nil
+		}
+		if restarted {
+			if _, err := tagSourceStatus(ws.tx, sessionID, statusClass, time.Now()); err != nil {
+				return err
+			}
 		}
 		if err := ws.putIngestCursor(path, end, absolute, snapshot, ""); err != nil {
 			return err

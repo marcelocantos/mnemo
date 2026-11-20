@@ -14,7 +14,7 @@ import (
 )
 
 // Exercise the cold read, filesystem watch and SQLite-backed query through
-// an isolated daemon. The second record ends at EOF until the next append.
+// an isolated daemon. Complete a partial record, then replace its source.
 func TestTranscriptCompletesAcrossDaemonReads(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(home, ".claude", "projects", "fixture")
@@ -79,6 +79,30 @@ func TestTranscriptCompletesAcrossDaemonReads(t *testing.T) {
 	if got, err := query(completed); err != nil || got != "hits: 1" {
 		t.Fatalf("completed record count after next append = %q, err = %v", got, err)
 	}
+
+	// The replacement contains the first record, drops the next two,
+	// and introduces two byte-identical records without native IDs.
+	const repeated = `{"type":"user","timestamp":"2026-04-01T10:00:03Z","message":{"content":"repeated journey record"}}` + "\n"
+	replacement := path + ".replacement"
+	if err := os.WriteFile(replacement, []byte(first+repeated+repeated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	await(`SELECT COUNT(*) AS hits FROM messages_v
+		WHERE session_id = 'split-record-journey' AND text = 'repeated journey record'`,
+		func(s string) bool { return s == "hits: 2" })
+	const total = `SELECT COUNT(*) AS hits FROM messages_v WHERE session_id = 'split-record-journey'`
+	if got, err := query(total); err != nil || got != "hits: 5" {
+		t.Fatalf("replacement left %q, want 5 messages, err = %v", got, err)
+	}
+	awaitOne(completed)
+	awaitOne(`SELECT COUNT(*) AS hits FROM messages_v
+		WHERE session_id = 'split-record-journey' AND text = 'third journey record'`)
+	awaitOne(`SELECT COUNT(*) AS hits FROM session_meta
+		WHERE session_id = 'split-record-journey'
+		  AND (source_status LIKE 'rewritten_at=%' OR source_status LIKE 'truncated_at=%')`)
 }
 
 // TestSmoke launches a daemon with an empty MNEMO_HOME tempdir,

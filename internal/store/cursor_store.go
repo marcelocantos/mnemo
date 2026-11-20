@@ -468,6 +468,7 @@ func parseCursorStoreFile(path string, offset int64) (parsedFile, error) {
 				entryType: "user",
 				timestamp: fallbackTS,
 				raw:       raw,
+				refresh:   true,
 			})
 			pf.messages = append(pf.messages, parsedMessage{
 				entryIdx:    entryIdx,
@@ -533,8 +534,8 @@ func cursorJSONText(raw json.RawMessage) string {
 
 // ingestCursorStoreFile ingests tool results from a Cursor CLI store.db.
 // A file whose main-file size has not grown is still read when its
-// fingerprint changed. The blob uuids in this parse are deleted and
-// inserted again, because INSERT OR IGNORE will not replace a payload.
+// fingerprint changed. The projection for a known blob UUID is
+// refreshed in place so references to it keep their IDs.
 func (s *Store) ingestCursorStoreFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -567,72 +568,4 @@ func (s *Store) ingestCursorStoreFile(path string) error {
 	}
 
 	return s.commitIngest(ws)
-}
-
-func cursorEntryUUID(raw []byte) string {
-	var probe struct {
-		UUID string `json:"uuid"`
-	}
-	if json.Unmarshal(raw, &probe) != nil {
-		return ""
-	}
-	return probe.UUID
-}
-
-// replaceCursorStoreBlobs deletes the entries this parse is about to
-// insert, and only those. messages_fts is external content, so the
-// delete command is issued before the row goes, matching
-// dedupeDeleteBatch. Other rows for the session — the JSONL transcript
-// included — stay.
-func replaceCursorStoreBlobs(tx *sql.Tx, sessionID string, entries []parsedRawEntry) error {
-	if sessionID == "" {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(entries))
-	for _, e := range entries {
-		uuid := cursorEntryUUID(e.raw)
-		if uuid == "" {
-			continue
-		}
-		if _, ok := seen[uuid]; ok {
-			continue
-		}
-		seen[uuid] = struct{}{}
-		var entryID int64
-		err := tx.QueryRow(`
-			SELECT id FROM entries
-			WHERE session_id = ? AND COALESCE(uuid_m, uuid) = ?`,
-			sessionID, uuid).Scan(&entryID)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`
-			INSERT INTO messages_fts(messages_fts, rowid, text, role, project, session_id)
-			SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
-			FROM messages_v m WHERE m.entry_id = ? AND m.is_noise = 0`, entryID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`
-			INSERT INTO messages_fts_stem(messages_fts_stem, rowid, text, role, project, session_id)
-			SELECT 'delete', m.id, m.text, m.role, m.project, m.session_id
-			FROM messages_v m WHERE m.entry_id = ? AND m.is_noise = 0
-			  AND EXISTS (SELECT 1 FROM messages_fts_stem_docsize ds WHERE ds.id = m.id)`, entryID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`
-			DELETE FROM tool_outputs WHERE message_id IN (
-				SELECT id FROM messages WHERE entry_id = ?)`, entryID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM messages WHERE entry_id = ?`, entryID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM entries WHERE id = ?`, entryID); err != nil {
-			return err
-		}
-	}
-	return nil
 }

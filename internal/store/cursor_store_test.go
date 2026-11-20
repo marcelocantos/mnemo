@@ -385,6 +385,7 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 	if err := s.ingestCursorStoreFile(path); err != nil {
 		t.Fatal(err)
 	}
+	checkImage := checkReferencedMessage(t, s, "original-tool-marker-xxxxxx")
 	if _, err := s.writeDB.Exec(`
 		INSERT INTO messages (session_id, project, role, text, timestamp, content_type)
 		VALUES (?, '', 'user', 'jsonl-sibling-must-stay', '2026-11-20T00:00:00Z', 'text')`,
@@ -424,6 +425,18 @@ func TestDefectCursorStoreSameSizeRewriteIsInvisible(t *testing.T) {
 	}
 	if old := countText(t, s, "original-tool-marker-xxxxxx"); old != 0 {
 		t.Fatalf("old blob text still indexed (%d)", old)
+	}
+	checkImage("original-tool-marker-YYYYYY")
+	for _, fts := range []string{
+		`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?`,
+		`SELECT COUNT(*) FROM messages_fts_stem WHERE messages_fts_stem MATCH ?`,
+	} {
+		for term, want := range map[string]int{`"original-tool-marker-xxxxxx"`: 0, `"original-tool-marker-YYYYYY"`: 1} {
+			var hits int
+			if err := s.readDB.QueryRow(fts, term).Scan(&hits); err != nil || hits != want {
+				t.Fatalf("search %q for %q returned %d, want %d, err %v", fts, term, hits, want, err)
+			}
+		}
 	}
 	if sib := countText(t, s, "jsonl-sibling-must-stay"); sib != 1 {
 		t.Fatalf("session rows outside the rewritten blob were removed (%d)", sib)
@@ -525,7 +538,8 @@ func TestCursorStoreReadOnlyBusyTimeout(t *testing.T) {
 // unread.
 func TestCursorStoreUpgradeKeepsTheOldCursor(t *testing.T) {
 	const marker = "legacy-must-not-reread-tool"
-	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	chats := filepath.Join(t.TempDir(), "chats")
+	path := filepath.Join(chats, "abc", cursorSessUUID, "store.db")
 	writeCursorStoreFixture(t, path, marker, "/tmp/proj")
 	info, err := os.Stat(path)
 	if err != nil {
@@ -575,7 +589,8 @@ func TestCursorStoreUpgradeKeepsTheOldCursor(t *testing.T) {
 	t.Cleanup(func() { s.Close() })
 	s.AwaitStartup()
 
-	if err := s.ingestCursorStoreFile(path); err != nil {
+	s.SetCursorChatRoots([]string{chats})
+	if err := s.IngestAll(); err != nil {
 		t.Fatal(err)
 	}
 	if n := countText(t, s, marker); n != 0 {

@@ -416,6 +416,7 @@ func TestDefectGrokTailIngestDeletesSignalsUsage(t *testing.T) {
 	if tokens != 12345 || countText(t, s, "[grok signals]") != 1 {
 		t.Fatalf("first ingest tokens=%d signals=%d, want 12345 and 1", tokens, countText(t, s, "[grok signals]"))
 	}
+	checkImage := checkReferencedMessage(t, s, "context_tokens=12345/")
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -440,6 +441,7 @@ func TestDefectGrokTailIngestDeletesSignalsUsage(t *testing.T) {
 	if n != 1 || tokens != 99999 {
 		t.Fatalf("signals usage row did not survive the tail ingest (messages=%d input_tokens=%d)", n, tokens)
 	}
+	checkImage("context_tokens=99999/")
 	if countText(t, s, "a later turn that should not erase usage") != 1 {
 		t.Fatal("appended turn was not indexed")
 	}

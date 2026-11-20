@@ -31,6 +31,20 @@ const jsonlPrefixBytes = 64 << 10
 // its transaction back and reads the file that exists now, from byte 0.
 // Rows already indexed stay. 🎯T68.6: the index only grows.
 var errTranscriptReplaced = errors.New("transcript replaced while reading")
+var errTranscriptTruncated = fmt.Errorf("%w: file shrank", errTranscriptReplaced)
+
+func (s *Store) jsonlRestartClass(path string, cause error) string {
+	if errors.Is(cause, errTranscriptTruncated) {
+		return "truncated_at"
+	}
+	s.mu.Lock()
+	prev := s.offsets[path]
+	s.mu.Unlock()
+	if info, err := os.Stat(path); err == nil && info.Size() < prev {
+		return "truncated_at"
+	}
+	return "rewritten_at"
+}
 
 // ingestGen is the in-memory identity of an ingested transcript. prefix
 // is also persisted; the inode is not, so a restart falls back to the hash.
@@ -213,13 +227,13 @@ func scanJSONL(path string, offset int64, handle func(line []byte, start, end in
 		openedPrefix = make([]byte, sampleN)
 		if _, err := io.ReadFull(f, openedPrefix); err != nil {
 			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				return offset, nil, errTranscriptReplaced
+				return offset, nil, errTranscriptTruncated
 			}
 			return offset, nil, err
 		}
 	}
 	if opened.Size() < offset {
-		return offset, nil, errTranscriptReplaced
+		return offset, nil, errTranscriptTruncated
 	}
 	snapshot := &jsonlSnapshot{info: opened, prefix: openedPrefix, start: offset, end: offset, digest: sha256.New()}
 	// Leave appends after the open for a later pass. This bounds the read
@@ -309,8 +323,13 @@ func (snapshot *jsonlSnapshot) check(path string) error {
 		return err
 	}
 	opened := snapshot.info
-	if !os.SameFile(opened, now) || now.Size() < opened.Size() ||
-		(now.Size() == opened.Size() && !now.ModTime().Equal(opened.ModTime())) {
+	if !os.SameFile(opened, now) {
+		return errTranscriptReplaced
+	}
+	if now.Size() < opened.Size() {
+		return errTranscriptTruncated
+	}
+	if now.Size() == opened.Size() && !now.ModTime().Equal(opened.ModTime()) {
 		return errTranscriptReplaced
 	}
 	if len(snapshot.prefix) == 0 {
@@ -320,7 +339,7 @@ func (snapshot *jsonlSnapshot) check(path string) error {
 	_, err = io.ReadFull(f, cur)
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-			return errTranscriptReplaced
+			return errTranscriptTruncated
 		}
 		return err
 	}
@@ -424,14 +443,14 @@ type pendingIngestCursor struct {
 // A replacement observed mid-read is discarded and tried once more.
 // Indexed rows are not removed.
 func (s *Store) ingestParsed(path string, parse func(string, int64) (parsedFile, error)) error {
-	err := s.ingestParsedOnce(path, parse, false)
+	err := s.ingestParsedOnce(path, parse, "")
 	if errors.Is(err, errTranscriptReplaced) {
-		return s.ingestParsedOnce(path, parse, true)
+		return s.ingestParsedOnce(path, parse, s.jsonlRestartClass(path, err))
 	}
 	return err
 }
 
-func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedFile, error), force bool) error {
+func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedFile, error), statusClass string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -440,9 +459,8 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 		return err
 	}
 	var offset int64
-	var statusClass string
-	restarted := force
-	if !force {
+	restarted := statusClass != ""
+	if !restarted {
 		d := s.jsonlResume(path, info.Size())
 		if d.caughtUp {
 			return nil
@@ -451,15 +469,6 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 		statusClass = d.statusClass
 		if !restarted {
 			offset = d.offset
-		}
-	} else {
-		s.mu.Lock()
-		prev := s.offsets[path]
-		s.mu.Unlock()
-		if info.Size() < prev {
-			statusClass = "truncated_at"
-		} else {
-			statusClass = "rewritten_at"
 		}
 	}
 	pf, err := parse(path, offset)
@@ -482,161 +491,161 @@ func (s *Store) ingestParsedOnce(path string, parse func(string, int64) (parsedF
 	return s.commitIngest(ws)
 }
 
-// sessionLineSet is the part of a session a replacement read must not
-// insert again. A line is already indexed when every non-empty message
-// text it projects is in texts. Message text is the identity, not the
-// byte offset and not the timestamp: offset-based uuids collide when a
-// replacement is read from byte 0, and several readers stamp a missing
-// timestamp from the file mtime, which a rewrite changes. A line that
-// projects no message text is not treated as already indexed. When its
-// entry uuid is already in uuids, the new body is stored under a
-// content-key uuid so the old row stays. The key is
-// "<source>-<session>-h-<sha256>" of the entry JSON with the uuid field
-// removed; an empty source means claude. A second read of that key is
-// an INSERT OR IGNORE no-op.
-type sessionLineSet struct {
-	texts map[string]struct{}
-	uuids map[string]struct{}
+// A replay consumes occurrences from the durable index as it reads the new
+// file. Matching full records keeps unrelated messages with the same text,
+// and consuming each match once keeps genuinely repeated anonymous records.
+type transcriptReplay struct {
+	source string
+	counts map[[32]byte]int
+	uuids  map[string]struct{}
 }
 
-func loadSessionLines(tx *sql.Tx, sessionID string) (sessionLineSet, error) {
-	out := sessionLineSet{
-		texts: map[string]struct{}{},
-		uuids: map[string]struct{}{},
-	}
-	if sessionID == "" {
-		return out, nil
-	}
-	rows, err := tx.Query(
-		`SELECT text FROM messages_v WHERE session_id = ? AND text != ''`, sessionID)
+func loadTranscriptReplay(tx *sql.Tx, sessionID, source string) (*transcriptReplay, error) {
+	rows, err := tx.Query(`
+		SELECT json(raw), uuid FROM entries_v WHERE session_id = ? AND raw IS NOT NULL`, sessionID)
 	if err != nil {
-		return out, err
-	}
-	for rows.Next() {
-		var text string
-		if err := rows.Scan(&text); err != nil {
-			rows.Close()
-			return out, err
-		}
-		out.texts[text] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return out, err
-	}
-	rows.Close()
-
-	rows, err = tx.Query(
-		`SELECT COALESCE(uuid_m, uuid) FROM entries
-		 WHERE session_id = ? AND COALESCE(uuid_m, uuid) IS NOT NULL`, sessionID)
-	if err != nil {
-		return out, err
+		return nil, err
 	}
 	defer rows.Close()
+	r := &transcriptReplay{source, make(map[[32]byte]int), make(map[string]struct{})}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return out, err
+		var raw string
+		var uuid sql.NullString
+		if err := rows.Scan(&raw, &uuid); err != nil {
+			return nil, err
 		}
-		if id != "" {
-			out.uuids[id] = struct{}{}
+		key, _, _, err := replayRecord(raw, source)
+		if err != nil {
+			return nil, err
 		}
-	}
-	return out, rows.Err()
-}
-
-// lineTextsSeen reports whether every non-empty projected message text
-// is already stored. No non-empty text means the line is not recognised
-// as a duplicate.
-func lineTextsSeen(seen map[string]struct{}, parts []string) bool {
-	saw := false
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		saw = true
-		if _, ok := seen[p]; !ok {
-			return false
+		r.counts[key]++
+		if uuid.Valid {
+			r.uuids[uuid.String] = struct{}{}
 		}
 	}
-	return saw
+	return r, rows.Err()
 }
 
-func rawEntryUUID(raw string) string {
-	var probe struct {
-		UUID      string `json:"uuid"`
-		MessageID string `json:"messageId"`
-	}
-	if json.Unmarshal([]byte(raw), &probe) != nil {
-		return ""
-	}
-	if probe.UUID != "" {
-		return probe.UUID
-	}
-	return probe.MessageID
-}
+const replayUUIDPrefix = "mnemo-replay:"
 
-// withoutUUID is the canonical JSON of raw with the uuid field removed.
-// json.Marshal sorts object keys, so the hash does not depend on the
-// order the producer wrote.
-func withoutUUID(raw string) string {
-	var m map[string]any
-	if json.Unmarshal([]byte(raw), &m) != nil {
-		return raw
-	}
-	delete(m, "uuid")
-	b, err := json.Marshal(m)
-	if err != nil {
-		return raw
-	}
-	return string(b)
-}
-
-func contentKeyUUID(source, sessionID, raw string) string {
-	if source == "" {
-		source = "claude"
-	}
-	sum := sha256.Sum256([]byte(withoutUUID(raw)))
-	return source + "-" + sessionID + "-h-" + hex.EncodeToString(sum[:])
-}
-
-// retargetTakenUUID leaves raw unchanged when its uuid is new. A uuid
-// already stored for the session is replaced with the content key, so
-// INSERT OR IGNORE keeps the old row and accepts the new body.
-func retargetTakenUUID(source, sessionID, raw string, taken map[string]struct{}) string {
-	id := rawEntryUUID(raw)
-	if id == "" {
-		return raw
-	}
-	if _, ok := taken[id]; !ok {
-		return raw
-	}
-	return rewriteEntryUUID(raw, contentKeyUUID(source, sessionID, raw))
-}
-
-func rewriteEntryUUID(raw, uuid string) string {
-	var m map[string]any
-	if json.Unmarshal([]byte(raw), &m) != nil {
-		return raw
-	}
-	m["uuid"] = uuid
-	b, err := json.Marshal(m)
-	if err != nil {
-		return raw
-	}
-	return string(b)
-}
-
-func rememberInsertedLine(seen sessionLineSet, raw string, texts []string) {
-	if seen.uuids == nil {
+// replayRecord ignores synthesized offsets. Native Claude IDs (including
+// a UUID displaced by a collision) and Omp's original id remain part of
+// the record. JSON numbers are decoded without a float64 round trip.
+func replayRecord(raw, source string) (key [32]byte, uuid, originalUUID string, err error) {
+	var record map[string]any
+	d := json.NewDecoder(strings.NewReader(raw))
+	d.UseNumber()
+	if err = d.Decode(&record); err != nil {
 		return
 	}
-	if id := rawEntryUUID(raw); id != "" {
-		seen.uuids[id] = struct{}{}
+	originalUUID, _ = record["uuid"].(string)
+	uuid = originalUUID
+	if uuid == "" {
+		uuid, _ = record["messageId"].(string)
 	}
-	for _, t := range texts {
-		if t != "" {
-			seen.texts[t] = struct{}{}
+	switch source {
+	case "cursor", "grok", "codex", "omp":
+		delete(record, "uuid")
+	default:
+		if strings.HasPrefix(originalUUID, replayUUIDPrefix) {
+			_, orig, ok := strings.Cut(strings.TrimPrefix(originalUUID, replayUUIDPrefix), ":")
+			if ok {
+				if orig == "" {
+					delete(record, "uuid")
+				} else {
+					record["uuid"] = orig
+				}
+			}
 		}
 	}
+	// Grok and Cursor copy model metadata from a sidecar, so a reread
+	// of the same transcript can have a different stamped model.
+	if source == "grok" || source == "cursor" || source == "codex" {
+		dropStampedModel(record)
+	}
+	if source == "codex" {
+		payload, _ := record["payload"].(map[string]any)
+		dropStampedModel(payload)
+	}
+	canonical, err := json.Marshal(record)
+	return sha256.Sum256(canonical), uuid, originalUUID, err
+}
+
+func dropStampedModel(record map[string]any) {
+	if message, ok := record["message"].(map[string]any); ok {
+		delete(message, "model")
+		if len(message) == 0 {
+			delete(record, "message")
+		}
+	}
+}
+
+// next returns whether to insert raw and, if its UUID is already in use,
+// the same record under a fresh UUID. The archive retains the old row.
+func (r *transcriptReplay) next(raw string) (string, bool, error) {
+	key, uuid, originalUUID, err := replayRecord(raw, r.source)
+	if err != nil {
+		return "", false, err
+	}
+	if r.counts[key] > 0 {
+		r.counts[key]--
+		return "", false, nil
+	}
+	raw, err = r.allocate(raw, key, uuid, originalUUID)
+	return raw, true, err
+}
+
+func (r *transcriptReplay) allocate(raw string, key [32]byte, uuid, originalUUID string) (string, error) {
+	if _, occupied := r.uuids[uuid]; !occupied || uuid == "" {
+		if uuid != "" {
+			r.uuids[uuid] = struct{}{}
+		}
+		return raw, nil
+	}
+	for i := 1; ; i++ {
+		uuid = fmt.Sprintf("%s%x-%d:%s", replayUUIDPrefix, key, i, originalUUID)
+		if _, occupied := r.uuids[uuid]; !occupied {
+			break
+		}
+	}
+	r.uuids[uuid] = struct{}{}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &record); err != nil {
+		return "", err
+	}
+	id, err := json.Marshal(uuid)
+	if err != nil {
+		return "", err
+	}
+	record["uuid"] = id
+	rewritten, err := json.Marshal(record)
+	return string(rewritten), err
+}
+
+// An incremental read after drift can reach a byte offset used by the
+// previous file. The transaction's cursor identifies an actual unread
+// range so stale readers and legacy tail backtracking keep normal UUID
+// deduplication. A native Omp ID is independent of its byte offset.
+func appendOffsetCollision(tx *sql.Tx, pf parsedFile, raw string) (bool, error) {
+	if pf.snapshot == nil || pf.source == "" || pf.source == "claude" {
+		return false, nil
+	}
+	if pf.source == "omp" {
+		var record struct{ ID string }
+		if err := json.Unmarshal([]byte(raw), &record); err != nil || record.ID != "" {
+			return false, err
+		}
+	}
+	var class string
+	err := tx.QueryRow(`
+		SELECT sm.source_status
+		FROM ingest_state i
+		JOIN session_meta sm ON sm.session_id = ?
+		WHERE i.path = ? AND i.offset = ?`,
+		pf.sessionID, pf.path, pf.snapshot.start).Scan(&class)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	class = sourceStatusClass(class)
+	return class == "truncated_at" || class == "rewritten_at", err
 }

@@ -301,10 +301,8 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 	// Session-level usage snapshot (Grok-beyond-Claude: context window
 	// occupancy lives in signals.json, not per-turn usage). Built on
 	// every parse, including a tail, from the signals.json just read.
-	// writeParsedFile replaces the previous copy in the same transaction;
-	// a tail that omitted the row used to delete it and write nothing.
+	// writeParsedFile refreshes the existing projection in place.
 	if sig.ContextTokensUsed != nil || sig.ToolCallCount > 0 {
-		pf.replaceGrokSignals = true
 		var contextTokens int
 		if sig.ContextTokensUsed != nil {
 			contextTokens = *sig.ContextTokensUsed
@@ -339,6 +337,7 @@ func parseGrokFile(path string, offset int64) (parsedFile, error) {
 			entryType: "assistant",
 			timestamp: ts,
 			raw:       usageRaw,
+			refresh:   true,
 		})
 		pf.messages = append(pf.messages, parsedMessage{
 			entryIdx: entryIdx, role: "assistant", typ: "assistant",
