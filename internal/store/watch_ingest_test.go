@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,6 +13,44 @@ import (
 
 	"github.com/marcelocantos/mnemo/internal/store/fswatch"
 )
+
+func TestFailedPathRetriesAreBoundedAndDrained(t *testing.T) {
+	s := &Store{}
+	root := t.TempDir()
+	max := fswatch.DefaultPollMaxPerTick
+	for i := range max + 1 {
+		s.queueIngestRetry(filepath.Join(root, fmt.Sprintf("failed-%d.jsonl", i)))
+	}
+	poller := fswatch.NewPollTracker(time.Minute, max)
+	counts := make(map[string]int)
+	onNeed := func(path string) { counts[path]++ }
+	s.safetyPoll(poller, onNeed)
+	if len(counts) != max {
+		t.Fatalf("first tick retried %d paths, want %d", len(counts), max)
+	}
+	s.safetyPoll(poller, onNeed)
+	if len(counts) != max+1 {
+		t.Errorf("two ticks retried %d distinct paths, want %d", len(counts), max+1)
+	}
+	for path, n := range counts {
+		if n != 1 {
+			t.Fatalf("%s was retried %d times without being queued again", path, n)
+		}
+	}
+}
+
+func TestPollDoesNotDispatchAQueuedAndGrowingPathTwice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "growing.jsonl")
+	writeLines(t, path, "{}\n")
+	s := &Store{offsets: map[string]int64{path: 0}}
+	s.queueIngestRetry(path)
+	poller := fswatch.NewPollTracker(time.Minute, 2)
+	var paths []string
+	s.safetyPoll(poller, func(p string) { paths = append(paths, p) })
+	if len(paths) != 1 || paths[0] != path {
+		t.Fatalf("poll dispatched %v, want %s once", paths, path)
+	}
+}
 
 // TestWatchIngestsAppend drives the shipped Store.Watch path: start Watch,
 // append an allowlisted transcript line, assert Search sees it (🎯T142).

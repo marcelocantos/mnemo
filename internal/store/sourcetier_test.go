@@ -12,6 +12,118 @@ import (
 	"time"
 )
 
+func TestSameSecondRewriteIsReportedChronologically(t *testing.T) {
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		before, after time.Time
+		want          int
+	}{
+		{"later fraction", base, base.Add(500 * time.Millisecond), 1},
+		{"earlier whole second", base.Add(500 * time.Millisecond), base, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeJSONL(t, dir, "proj", "sess-subsecond", []map[string]any{
+				msg("user", "original rewrite marker", base.Format(time.RFC3339)),
+			})
+			setMtime := func(stamp time.Time) {
+				t.Helper()
+				if err := os.Chtimes(path, stamp, stamp); err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !info.ModTime().Equal(stamp) {
+					t.Skipf("filesystem rounded mtime from %s to %s", stamp, info.ModTime())
+				}
+			}
+			setMtime(tc.before)
+			s := newTestStore(t, dir)
+			if err := s.IngestAll(); err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeLines(t, path, strings.Replace(string(original), "original", "modified", 1))
+			setMtime(tc.after)
+			if got := s.SourceDrift().Rewritten; got != tc.want {
+				t.Errorf("same-size rewrite report count = %d, want %d", got, tc.want)
+			}
+			if got, err := s.ReconcileSourceState(base.Add(time.Minute)); got != tc.want || err != nil {
+				t.Errorf("same-size rewrite reconciliation = %d, %v, want %d, nil", got, err, tc.want)
+			}
+			expectOnce(t, s, "original rewrite marker")
+		})
+	}
+}
+
+func TestSourceTagAdvancesItsTimestampOnClassChange(t *testing.T) {
+	dir := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, dir)
+	writeLines(t, path, readerClaudeBatch.line("source history must remain"))
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 4, 2, 3, 4, 5, 0, time.UTC)
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	assertTag := func(stamp time.Time, class string, wantChanges int) {
+		t.Helper()
+		if n, err := s.ReconcileSourceState(stamp); n != wantChanges || err != nil {
+			t.Fatalf("reconciled %d source tags, err %v, want %d", n, err, wantChanges)
+		}
+		var status, stateAt string
+		if err := s.readDB.QueryRow(`SELECT source_status, source_state_at FROM session_meta
+			WHERE session_id = 'sess-jsonl'`).Scan(&status, &stateAt); err != nil {
+			t.Fatal(err)
+		}
+		if status != class+"="+stamp.Format(time.RFC3339) || stateAt != stamp.Format(time.RFC3339) {
+			t.Fatalf("source status = %q, source_state_at = %q, want %s at %s", status, stateAt, class, stamp)
+		}
+	}
+	assertTag(first, "truncated_at", 1)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	assertTag(first.Add(time.Hour), "deleted_at", 1)
+	expectOnce(t, s, "source history must remain")
+}
+
+func TestIngestCursorRecordsFractionalMtime(t *testing.T) {
+	dir := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, dir)
+	writeLines(t, path, readerClaudeBatch.line("fractional mtime fixture"))
+	stamp := time.Date(2026, 4, 1, 10, 0, 0, 250_000_000, time.UTC)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(stamp) {
+		t.Skipf("filesystem rounded mtime from %s to %s", stamp, info.ModTime())
+	}
+	s := newTestStore(t, dir)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.readDB.QueryRow(`SELECT recorded_mtime FROM ingest_state WHERE path = ?`, path).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if want := stamp.Format(time.RFC3339Nano); stored != want {
+		t.Fatalf("cursor mtime = %q, want %q", stored, want)
+	}
+}
+
 // TestSourceDrift covers 🎯T68.6 detection: a deleted source .jsonl is
 // reported as "deleted" and a truncated one as "truncated", while
 // intact sources produce no drift.

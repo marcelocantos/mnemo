@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -301,6 +302,130 @@ func TestStartupResumesLegacyCursorInsideCompletedLine(t *testing.T) {
 	expectOnce(t, s, "legacy first line")
 	expectOnce(t, s, "completed legacy appended line")
 	assertJSONLOffset(t, s, path, len(first)+len(finished))
+}
+
+func TestLegacyCursorBacktracksAcrossMoreThanOneBlock(t *testing.T) {
+	project := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, project)
+	first := readerClaudeBatch.line("before the long legacy record")
+	const marker = "long legacy tail survived"
+	long := readerClaudeBatch.line(marker + strings.Repeat("x", 16<<10))
+	writeLines(t, path, first)
+	s := newTestStore(t, project)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, path, first+long)
+	off := int64(len(first) + len(long)/2)
+	if _, err := s.writeDB.Exec(`UPDATE ingest_state SET offset = ?, prefix_sha256 = NULL WHERE path = ?`, off, path); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.offsets[path] = off
+	s.gens[path] = ingestGen{}
+	s.mu.Unlock()
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "before the long legacy record")
+	expectOnce(t, s, marker)
+	assertJSONLOffset(t, s, path, len(first)+len(long))
+}
+
+func TestLegacyCompleteEOFRecordIsNotReplayed(t *testing.T) {
+	project := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, project)
+	const old = `{"type":"user","timestamp":"2026-04-01T10:00:00Z","message":{"content":"legacy complete anonymous record"}}`
+	const marker = "first line after the legacy complete record"
+	writeLines(t, path, old)
+	s := newTestStore(t, project)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(`UPDATE ingest_state SET prefix_sha256 = NULL WHERE path = ?`, path); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.gens[path] = ingestGen{}
+	s.mu.Unlock()
+	writeLines(t, path, old+"\n"+readerClaudeBatch.line(marker))
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "legacy complete anonymous record")
+	expectOnce(t, s, marker)
+}
+
+func TestRestartAfterTruncationUsesReplacementPrefix(t *testing.T) {
+	root := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, root)
+	old := readerClaudeBatch.line("first record of original source") + readerClaudeBatch.line("second record of original source")
+	const truncated = "first new record after truncation"
+	const appended = "appended after restarting the store"
+	writeLines(t, path, old)
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	initial := readerClaudeBatch.line(truncated)
+	writeLines(t, path, initial)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(s.DBPath(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	reopened.AwaitStartup()
+	writeLines(t, path, initial+readerClaudeBatch.line(appended))
+	if err := reopened.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := reopened.readDB.QueryRow(`SELECT source_status FROM session_meta WHERE session_id = 'sess-jsonl'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if sourceStatusClass(status) != "truncated_at" {
+		t.Fatalf("ordinary append after reopening changed the truncation tag to %q", status)
+	}
+	expectOnce(t, reopened, truncated)
+	expectOnce(t, reopened, appended)
+}
+
+func TestReopenUsesPersistedPrefixWhenTranscriptWasRewrittenBeforeStartup(t *testing.T) {
+	root := t.TempDir()
+	path := readerClaudeBatch.pathFor(t, root)
+	line := readerClaudeBatch.line
+	// Equal widths put the stale cursor at a valid line boundary in
+	// the replacement, so only the persisted prefix can detect drift.
+	const old = "old prefix before restart"
+	const rewritten = "new prefix before restart"
+	const appended = "tail of grown replacement file"
+	writeLines(t, path, line(old))
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, path, line(rewritten)+line(appended))
+	reopened, err := New(s.DBPath(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	reopened.AwaitStartup()
+	if err := reopened.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{old, rewritten, appended} {
+		expectOnce(t, reopened, marker)
+	}
 }
 
 func TestStartupUsesMetadataFromBeforePrefixMigration(t *testing.T) {

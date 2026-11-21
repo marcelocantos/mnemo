@@ -137,6 +137,25 @@ func TestLimitIsRespected(t *testing.T) {
 	}
 }
 
+func TestUnifiedSearchFillsLimitAcrossCorpora(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const marker = "mergelimitfixture"
+	insertPlain(t, s, "merge-limit-session", "project", marker)
+	mustExec(t, s, `INSERT INTO skills (file_path, name, description, content, updated_at)
+		VALUES ('limit-fixture.md', 'Limit fixture', '', ?, '2026-01-01')`, marker)
+
+	kinds := []string{"message", "skill"}
+	now := time.Now()
+	both, err := s.UnifiedSearch(marker, kinds, 2, now)
+	if err != nil || len(both.Hits) != 2 {
+		t.Fatalf("two-corpus fixture returned %+v, err %v, want two hits", both, err)
+	}
+	limited, err := s.UnifiedSearch(marker, kinds, 1, now)
+	if err != nil || len(limited.Hits) != 1 {
+		t.Fatalf("search with one available slot returned %+v, err %v, want one hit", limited, err)
+	}
+}
+
 // TestNoMatchIsEmptyNotError: a query nothing matches is a normal
 // outcome.
 func TestNoMatchIsEmptyNotError(t *testing.T) {

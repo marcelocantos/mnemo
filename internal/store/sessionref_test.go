@@ -68,6 +68,16 @@ func TestResolveSessionRef(t *testing.T) {
 	}
 }
 
+func TestSessionReferenceAcceptsSixCharacterIDPrefix(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const id = "aabbcc11-2222-3333-4444-555555555555"
+	seedSession(t, s, id, "owner/fixture", "project", "/work/fixture", "claude", "2026-07-01T00:00:00Z", 2)
+	got, err := s.ResolveSessionRef("aabbcc")
+	if err != nil || got.SessionID != id {
+		t.Fatalf("six-character prefix resolved to %q, err %v, want %q", got.SessionID, err, id)
+	}
+}
+
 // TestResolveSessionRefNonUUIDIds guards the flow this feature exists for:
 // discover a session id by talking to mnemo, then ask to open THAT one.
 //

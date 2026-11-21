@@ -55,6 +55,16 @@ type ingestCursor struct {
 	recordedMtime sql.NullString
 }
 
+func (c ingestCursor) rewritten(info os.FileInfo) bool {
+	if !c.recordedSize.Valid || !c.recordedMtime.Valid || info.Size() != c.recordedSize.Int64 {
+		return false
+	}
+	// RFC3339Nano omits trailing fractional zeros, so strings in this
+	// format cannot be compared chronologically.
+	recorded, err := time.Parse(time.RFC3339Nano, c.recordedMtime.String)
+	return err == nil && info.ModTime().After(recorded)
+}
+
 // readIngestCursors snapshots ingest_state into an in-memory map for
 // drift detection. Cheap — one query, one pass.
 func (s *Store) readIngestCursors() map[string]ingestCursor {
@@ -120,9 +130,7 @@ func (s *Store) SourceDrift() SourceDriftReport {
 			}
 			continue
 		}
-		if c.recordedSize.Valid && c.recordedMtime.Valid &&
-			info.Size() == c.recordedSize.Int64 &&
-			info.ModTime().UTC().Format(time.RFC3339Nano) > c.recordedMtime.String {
+		if c.rewritten(info) {
 			rep.Rewritten++
 			if len(rep.Examples) < maxExamples {
 				rep.Examples = append(rep.Examples,
@@ -175,9 +183,7 @@ func (s *Store) ReconcileSourceState(now time.Time) (int, error) {
 			continue
 		case info.Size() < c.offset:
 			newStatus = "truncated_at=" + nowStr
-		case c.recordedSize.Valid && c.recordedMtime.Valid &&
-			info.Size() == c.recordedSize.Int64 &&
-			info.ModTime().UTC().Format(time.RFC3339Nano) > c.recordedMtime.String:
+		case c.rewritten(info):
 			newStatus = "rewritten_at=" + nowStr
 		default:
 			continue // live; no tag change

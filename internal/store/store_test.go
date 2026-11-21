@@ -269,6 +269,34 @@ func TestIngestAndSearch(t *testing.T) {
 	}
 }
 
+func TestSearchReturnsAdjacentSubstantiveContextInOrder(t *testing.T) {
+	root := t.TempDir()
+	const marker = "uniquecontextsearchmarker"
+	writeJSONL(t, root, "proj", "context-fixture", []map[string]any{
+		msg("user", "earliest surrounding line", "2026-04-01T10:00:00Z"),
+		msg("assistant", "closest previous line", "2026-04-01T10:00:01Z"),
+		msg("user", marker, "2026-04-01T10:00:02Z"),
+		noiseMsg("2026-04-01T10:00:03Z"),
+		msg("assistant", "first following line", "2026-04-01T10:00:04Z"),
+		msg("user", "last following line", "2026-04-01T10:00:05Z"),
+	})
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.Search(marker, 10, "all", "", 2, 2, true)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("search hits = %v, err = %v, want one hit", hits, err)
+	}
+	hit := hits[0]
+	if got := hit.Before; len(got) != 2 || got[0].Text != "earliest surrounding line" || got[1].Text != "closest previous line" {
+		t.Errorf("before context = %v, want the two preceding lines in order", got)
+	}
+	if got := hit.After; len(got) != 2 || got[0].Text != "first following line" || got[1].Text != "last following line" {
+		t.Errorf("after context = %v, want both following lines without the noise", got)
+	}
+}
+
 func TestFuzzySearch(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -550,6 +578,90 @@ func TestQuery(t *testing.T) {
 // TestQueryRejectsAttach verifies the read-only query surface cannot
 // ATTACH a database — neither to read an arbitrary local SQLite file
 // (info disclosure) nor to create a file at a chosen path (🎯T106).
+func TestSessionReadHonoursExplicitAssistantRole(t *testing.T) {
+	root := t.TempDir()
+	const session = "role-filter-fixture"
+	const assistant = "assistant fixture response"
+	writeJSONL(t, root, "proj", session, []map[string]any{
+		msg("user", "user fixture prompt", "2026-04-01T10:00:00Z"),
+		msg("assistant", assistant, "2026-04-01T10:00:01Z"),
+	})
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ReadSession(session, "assistant", 0, 10)
+	if err != nil || len(rows) != 1 || rows[0].Text != assistant {
+		t.Fatalf("assistant page = %v, err = %v, want only the assistant response", rows, err)
+	}
+}
+
+func TestSessionWindowStartsAfterCursorAndSkipsNoise(t *testing.T) {
+	root := t.TempDir()
+	const session = "session-cursor-fixture"
+	writeJSONL(t, root, "proj", session, []map[string]any{
+		msg("user", "the last message of the prior window", "2026-04-01T10:00:00Z"),
+		noiseMsg("2026-04-01T10:00:01Z"),
+		msg("assistant", "the first message of the next window", "2026-04-01T10:00:02Z"),
+	})
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := s.ReadSession(session, "", 0, 1)
+	if err != nil || len(prior) != 1 {
+		t.Fatalf("prior page = %v, err = %v, want one message", prior, err)
+	}
+	next, err := s.ReadSessionAfter(session, int64(prior[0].ID), 1)
+	if err != nil || len(next) != 1 || next[0].Text != "the first message of the next window" {
+		t.Fatalf("next page = %v, err = %v, want exactly the next non-noise message", next, err)
+	}
+}
+
+func TestReadSessionRejectsAmbiguousIDPrefix(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	for _, id := range []string{"ambiguous-fixture-first", "ambiguous-fixture-second"} {
+		seedSession(t, s, id, "owner/project", "project", "/work/project", "claude", "2026-04-01T10:00:00Z", 2)
+	}
+	rows, err := s.ReadSession("ambiguous-fixture-", "", 0, 10)
+	if len(rows) != 0 || err == nil || !strings.Contains(err.Error(), "ambiguous session prefix") {
+		t.Fatalf("read returned %v, err = %v, want an ambiguous prefix error", rows, err)
+	}
+}
+
+func TestAdHocQueryCapsResultsAtOneHundred(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	rows, err := s.Query(`WITH RECURSIVE numbers(n) AS (
+		VALUES (1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 101
+	) SELECT n FROM numbers ORDER BY n`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 100 || rows[99]["n"] != int64(100) {
+		t.Fatalf("query returned %d rows, want the first 100", len(rows))
+	}
+}
+
+func TestAdHocQueryPassesBoundParameters(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const value = "bound fixture value"
+	rows, err := s.Query(`SELECT ? AS label`, value)
+	if err != nil || len(rows) != 1 || rows[0]["label"] != value {
+		t.Fatalf("query rows = %v, err = %v, want the bound parameter", rows, err)
+	}
+}
+
+func TestAdHocQueryDropsPartialResultsOnIterationError(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	rows, err := s.Query(`SELECT 'first valid row' AS label UNION ALL SELECT json('invalid fixture')`)
+	if err == nil || !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("query error = %v, want the SQLite iteration error", err)
+	}
+	if rows != nil {
+		t.Fatalf("failed query returned partial rows: %v", rows)
+	}
+}
+
 func TestQueryRejectsAttach(t *testing.T) {
 	projectDir := t.TempDir()
 	writeJSONL(t, projectDir, "myproject", "sess-attach", []map[string]any{
@@ -2825,6 +2937,30 @@ func checkMessageInsertRetry(t *testing.T, reader jsonlReaderKind) {
 	if err1 == nil || off >= info.Size() {
 		t.Fatalf("failed insert committed past the line (err=%v offset=%d file=%d)", err1, off, info.Size())
 	}
+}
+
+func TestRawEntryInsertFailureLeavesWatchCursorBeforeTheRecord(t *testing.T) {
+	root := t.TempDir()
+	path := readerClaudeWatch.pathFor(t, root)
+	const marker = "raw insert must be retried"
+	writeLines(t, path, readerClaudeWatch.line(marker))
+	s := newTestStore(t, root)
+	if _, err := s.writeDB.Exec(`CREATE TRIGGER reject_fixture_entry BEFORE INSERT ON entries
+		WHEN new.session_id = 'sess-jsonl' BEGIN SELECT RAISE(ABORT, 'fixture raw insert'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ingestFile(path); err == nil || !strings.Contains(err.Error(), "fixture raw insert") {
+		t.Fatalf("ingest error = %v, want the raw entry failure", err)
+	}
+	var offset int64
+	if err := s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&offset); err != sql.ErrNoRows {
+		t.Fatalf("failed entry acquired cursor %d, err %v", offset, err)
+	}
+	if _, err := s.writeDB.Exec(`DROP TRIGGER reject_fixture_entry`); err != nil {
+		t.Fatal(err)
+	}
+	readerClaudeWatch.ingest(t, s, path)
+	expectOnce(t, s, marker)
 }
 
 func TestIngestCursorSurvivesCommitFailure(t *testing.T) {

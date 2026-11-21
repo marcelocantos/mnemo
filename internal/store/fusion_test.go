@@ -91,6 +91,53 @@ func TestFusionTriggersOnThinEvidence(t *testing.T) {
 	}
 }
 
+func TestTiedSearchRanksPreserveRequestedCorpusOrder(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const marker = "fusionorderfixture"
+	insertPlain(t, s, "fusion-tie-session", "project", marker)
+	mustExec(t, s, `INSERT INTO skills (file_path, name, description, content, updated_at)
+		VALUES ('fixture.md', 'Tie fixture', '', ?, '2026-01-01')`, marker)
+	res, err := s.UnifiedSearch(marker, []string{"skill", "message"}, 2, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Ranking != "rank_fusion" || len(res.Hits) != 2 || res.Hits[0].Score != res.Hits[1].Score {
+		t.Fatalf("want one tied hit per corpus on the fusion path, got %+v", res)
+	}
+	if res.Hits[0].Kind != "skill" || res.Hits[1].Kind != "message" {
+		t.Fatalf("tied corpus order = %q, %q, want skill, message", res.Hits[0].Kind, res.Hits[1].Kind)
+	}
+}
+
+func TestSplitSearchUsesEvidenceFromBothIndexes(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const marker = "splitevidencefixture"
+	insertPlain(t, s, "split-legacy", "project", marker+" below the migration marker")
+	stem := insertPlain(t, s, "split-stem", "project", marker+" at the migration marker")
+	armStemSplit(t, s, stem)
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	cal := &Calibration{Corpus: "message", Quantiles: []float64{0, 1}, SampleSize: 1000, DocCount: 2, ComputedAt: now}
+	if err := s.saveCalibration(cal); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want string) {
+		t.Helper()
+		res, err := s.UnifiedSearch(marker, []string{"message"}, 2, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Ranking != want || len(res.Hits) != 2 {
+			t.Fatalf("split search = %+v, want %s and both hits", res, want)
+		}
+	}
+	check("rank_fusion")
+	cal.Corpus = "message#stem"
+	if err := s.saveCalibration(cal); err != nil {
+		t.Fatal(err)
+	}
+	check("calibrated")
+}
+
 // TestWellEvidencedCorporaStayCalibrated is the other side: fusion is the
 // fallback, not the default. Quality-blind ranking is a real cost, and a
 // query where every corpus is well sampled must not pay it.

@@ -5085,8 +5085,8 @@ func (s *Store) queueIngestRetry(path string) {
 }
 
 // safetyPoll runs one bounded poll cycle using the shipped PollTracker and
-// invokes onNeed for files queued for retry and JSONL paths that have
-// grown past their offset.
+// invokes onNeed for queued retries, JSONL files that grew past their
+// cursor, and Cursor stores whose database or WAL changed.
 // This is the production recovery path for open/write/close writers when tree
 // events are missed (🎯T142.5).
 func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)) {
@@ -5133,16 +5133,26 @@ func (s *Store) safetyPoll(poller *fswatch.PollTracker, onNeed func(path string)
 		Offsets: offsets,
 		Live:    live,
 		Now:     time.Now(),
-		Stat: func(path string) (int64, error) {
-			fi, err := os.Stat(path)
+		NeedsIngest: func(path string, offset int64) (bool, error) {
+			info, err := os.Stat(path)
 			if err != nil {
-				return 0, err
+				return false, err
 			}
-			return fi.Size(), nil
+			if isCursorStore(path) {
+				if info.Size() != offset {
+					return true, nil
+				}
+				s.mu.Lock()
+				previous := s.gens[path].prefix
+				s.mu.Unlock()
+				current := cursorStoreFingerprint(path)
+				return current != "" && current != previous, nil
+			}
+			return strings.HasSuffix(path, ".jsonl") && info.Size() > offset, nil
 		},
 	})
 	for _, name := range cands {
-		if _, retry := retries[name]; retry || !strings.HasSuffix(name, ".jsonl") {
+		if _, retry := retries[name]; retry {
 			continue
 		}
 		onNeed(name)
@@ -7551,12 +7561,6 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 			offset = d.offset
 		}
 	}
-	// absolute stays set for every cursor write of a replacement read.
-	// A mid-stream commit clears restarted so later lines still notice a
-	// second change, and that must not turn the final cursor into a MAX
-	// that keeps the old, larger offset.
-	absolute := restarted
-
 	sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	project := filepath.Base(filepath.Dir(path))
 
@@ -7574,11 +7578,23 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 	}()
 
 	var replay *transcriptReplay
-	if absolute {
+	if restarted {
 		replay, err = loadTranscriptReplay(ws.tx, sessionID, "claude")
 		if err != nil {
 			return err
 		}
+	}
+
+	// The write pool serializes transactions. After obtaining its connection,
+	// honor progress another writer made after this scan chose its offset.
+	indexedThrough := func() int64 {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.offsets[path]
+	}
+	var alreadyIndexed int64
+	if !restarted {
+		alreadyIndexed = indexedThrough()
 	}
 
 	// handleLine writes one JSONL line into the current transaction. Its
@@ -7698,6 +7714,9 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 	// A partial tail is not counted. A restarted read replaces the
 	// stored cursor so it cannot keep an offset from the old file.
 	consumed, snapshot, err := scanJSONL(path, offset, func(line []byte, _, end int64, snapshot *jsonlSnapshot) error {
+		if end <= alreadyIndexed {
+			return nil
+		}
 		if linesSinceLockCheck == 0 && !restarted {
 			if err := s.checkJSONLResume(path, snapshot); err != nil {
 				return err
@@ -7720,12 +7739,13 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 				return err
 			}
 		}
-		if err := ws.putIngestCursor(path, end, absolute, snapshot, ""); err != nil {
+		if err := ws.putIngestCursor(path, end, restarted, snapshot, ""); err != nil {
 			return err
 		}
 		if err := s.commitIngest(ws); err != nil {
 			return err
 		}
+		// Only the first commit of a replacement may reset the cursor.
 		restarted = false
 		if testMidStreamCommitOffset != nil {
 			testMidStreamCommitOffset(end)
@@ -7735,6 +7755,7 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 			return err
 		}
 		ws = next
+		alreadyIndexed = indexedThrough()
 		lastCommit = time.Now()
 		return nil
 	})
@@ -7770,13 +7791,13 @@ func (s *Store) ingestClaudeOnce(path, statusClass string) error {
 	}
 
 	// After the metadata upsert: its INSERT defaults source_status to live.
-	if absolute {
+	if restarted {
 		if _, err := tagSourceStatus(ws.tx, sessionID, statusClass, time.Now()); err != nil {
 			return err
 		}
 	}
 
-	if err := ws.putIngestCursor(path, consumed, absolute, snapshot, ""); err != nil {
+	if err := ws.putIngestCursor(path, consumed, restarted, snapshot, ""); err != nil {
 		return err
 	}
 

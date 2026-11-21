@@ -424,6 +424,34 @@ func TestSearchWeightsCompactions(t *testing.T) {
 	}
 }
 
+func TestSearchCompactionExcludesItsLowerCursor(t *testing.T) {
+	root := t.TempDir()
+	const session = "compaction-cursor-fixture"
+	const term = "compactionboundaryfixture"
+	writeJSONL(t, root, "proj", session, []map[string]any{
+		msg("user", term+" at the lower cursor", "2026-04-01T10:00:00Z"),
+		msg("assistant", term+" in the compacted window", "2026-04-01T10:00:01Z"),
+	})
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.ReadSession(session, "", 0, 2)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("fixture read = %v, err = %v, want two messages", messages, err)
+	}
+	if _, err := s.PutCompaction(Compaction{
+		SessionID: session, EntryIDFrom: int64(messages[0].ID), EntryIDTo: int64(messages[1].ID),
+		Summary: term + " in the summary",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.Search(term, 10, "all", "", 0, 0, true)
+	if err != nil || len(hits) != 2 || hits[0].Role != "compaction" || hits[1].MessageID != messages[0].ID {
+		t.Fatalf("hits = %v, err = %v, want the summary and the raw hit at the lower cursor", hits, err)
+	}
+}
+
 // TestCompactedView verifies the 🎯T72 retrieval form: with no
 // compaction the whole session is addenda and there are no summaries;
 // after compacting the opening span, the summary appears and the

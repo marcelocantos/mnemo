@@ -5,6 +5,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -486,6 +487,45 @@ func TestGrokSignalsReplacementUsesSyntheticEntry(t *testing.T) {
 	expectOnce(t, s, "context_tokens=0/")
 	if got := countText(t, s, "context_tokens=99999/"); got != 0 {
 		t.Fatalf("old usage result indexed %d times after context reset", got)
+	}
+}
+
+func TestGrokToolCountAloneProducesSignalsProjection(t *testing.T) {
+	root := t.TempDir()
+	path := writeGrokSession(t, root, "/tmp/proj")
+	writeLines(t, filepath.Join(filepath.Dir(path), "signals.json"), `{"toolCallCount":3}`)
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, "context_tokens=0/0 turns=0 tools=3")
+}
+
+func TestLegacySidecarWriterUpdatesRawUsageProjection(t *testing.T) {
+	root := t.TempDir()
+	path := writeGrokSession(t, root, "/tmp/proj")
+	s := newTestStore(t, t.TempDir())
+	s.forceLegacyInsertShapeForTest()
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const updated = 67890
+	writeLines(t, filepath.Join(filepath.Dir(path), "signals.json"), fmt.Sprintf(`{"contextTokensUsed":%d}`, updated))
+	writeLines(t, path, string(initial)+readerGrok.line("one more legacy writer turn"))
+	if err := s.ingestGrokFile(path); err != nil {
+		t.Fatal(err)
+	}
+	var tokens int
+	if err := s.readDB.QueryRow(`SELECT raw->>'$.message.usage.input_tokens' FROM entries_v WHERE session_id = ? AND uuid = ?`,
+		grokSessUUID, "grok-"+grokSessUUID+"-signals-usage").Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != updated {
+		t.Fatalf("legacy raw usage projection has %d input tokens, want %d", tokens, updated)
 	}
 }
 

@@ -268,6 +268,26 @@ func TestParseOmpFile(t *testing.T) {
 	}
 }
 
+func TestOmpAppendWithoutNativeIDsKeepsBothRecords(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerOmp, root)
+	path := readerOmp.pathFor(t, root)
+	readerOmp.prepare(t, s, root, path)
+	anonymous := func(marker string) string {
+		return strings.Replace(readerOmp.line(marker), `"id":"m-`+marker+`",`, "", 1)
+	}
+	const first = "anonymous Omp initial message"
+	const second = "anonymous Omp appended message"
+	initial := anonymous(first)
+	writeLines(t, path, initial)
+	readerOmp.ingest(t, s, path)
+	writeLines(t, path, initial+anonymous(second))
+	readerOmp.ingest(t, s, path)
+	readerOmp.ingest(t, s, path)
+	expectOnce(t, s, first)
+	expectOnce(t, s, second)
+}
+
 func TestOmpIngestEndToEnd(t *testing.T) {
 	home := t.TempDir()
 	cwd := "/Users/dev/work/github.com/acme/webapp"

@@ -542,6 +542,243 @@ func TestCursorStoreReadOnlyBusyTimeout(t *testing.T) {
 	}
 }
 
+func TestCursorWALFingerprintTracksSizeAndMtimeIndependently(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "store-fingerprint-fixture", "")
+	wal := path + "-wal"
+	stamp := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	writeWAL := func(content string, mtime time.Time) string {
+		t.Helper()
+		// The fingerprint uses WAL file metadata, so no database opens
+		// while the synthetic sidecar is in place.
+		writeLines(t, wal, content)
+		if err := os.Chtimes(wal, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return cursorStoreFingerprint(path)
+	}
+	first := writeWAL("initial", stamp)
+	if got := writeWAL("changed", stamp.Add(time.Second)); got == first {
+		t.Error("same-size WAL rewrite did not change the fingerprint")
+	}
+	if got := writeWAL("grew in place", stamp); got == first {
+		t.Error("WAL growth at the same mtime did not change the fingerprint")
+	}
+}
+
+func TestCursorBlobIterationFailureLeavesNoPartialIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	const marker = "cursorresultbeforeiterationfailure"
+	writeCursorStoreFixture(t, path, marker, "")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	// Deliver one valid blob before SQLite fails on the next step.
+	if _, err := db.Exec(`ALTER TABLE blobs RENAME TO fixture_blobs;
+		CREATE VIEW blobs AS
+		SELECT id, data FROM fixture_blobs WHERE id = 'blob0'
+		UNION ALL SELECT 'broken', json('invalid fixture');`); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err == nil || !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("ingest returned %v, want the SQLite iteration error", err)
+	}
+	var offset int64
+	if err := s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&offset); err != sql.ErrNoRows {
+		t.Fatalf("failed read recorded cursor %d, query error %v", offset, err)
+	}
+	if n := countText(t, s, marker); n != 0 {
+		t.Fatalf("failed read committed %d tool results", n)
+	}
+}
+
+func TestCursorBlobKeepsEveryToolResultPart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "replaced fixture", "")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	const resultA = "cursorfirstmultipartresult"
+	const resultB = "cursorsecondmultipartresult"
+	if _, err := db.Exec(`UPDATE blobs SET data = json_object('role', 'tool', 'content', json_array(
+		json_object('type', 'tool-result', 'toolCallId', 'call-a', 'result', ?),
+		json_object('type', 'tool-result', 'toolCallId', 'call-b', 'result', ?)
+	)) WHERE id = 'blob0'`, resultA, resultB); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, resultA)
+	expectOnce(t, s, resultB)
+}
+
+func TestCursorSQLiteHeaderChangeCounterIsBigEndianAtByte24(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "header.db")
+	var header [100]byte
+	copy(header[:], "SQLite format 3\x00")
+	copy(header[24:], []byte{0x12, 0x34, 0x56, 0x78, 0x9a})
+	writeLines(t, path, string(header[:]))
+	if got := sqliteChangeCounter(path); got != 0x12345678 {
+		t.Fatalf("change counter = %#x, want 0x12345678", got)
+	}
+}
+
+func TestCursorProjectionRefreshesToolLinkWhenTextIsUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	writeCursorStoreFixture(t, path, "projection fixture", "")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	const result = "same tool result after moving the link"
+	const fallback = "blob-fallback-tool-call"
+	writeResult := func(partID, name string) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE blobs SET data = json_object('role', 'tool', 'id', ?, 'content', json_array(
+			json_object('type', 'tool-result', 'toolCallId', ?, 'toolName', ?, 'result', ?)))
+			WHERE id = 'blob0'`, fallback, partID, name, result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := newTestStore(t, t.TempDir())
+	check := func(wantID, wantName string) {
+		t.Helper()
+		if err := s.ingestCursorStoreFile(path); err != nil {
+			t.Fatal(err)
+		}
+		expectOnce(t, s, result)
+		var toolID, name, entryToolID string
+		if err := s.readDB.QueryRow(`SELECT m.tool_use_id, m.tool_name, e.spawn_tool_use_id
+			FROM messages_v m JOIN entries_v e ON e.id = m.entry_id WHERE m.text = ?`, result).
+			Scan(&toolID, &name, &entryToolID); err != nil {
+			t.Fatal(err)
+		}
+		if toolID != wantID || name != wantName || entryToolID != wantID {
+			t.Fatalf("tool link = %q/%q, entry link = %q, want %q/%q and %q", toolID, name, entryToolID, wantID, wantName, wantID)
+		}
+	}
+	const explicit = "explicit-part-tool-call"
+	writeResult(explicit, "Read")
+	check(explicit, "Read")
+	writeResult("", "Write")
+	check(fallback, "Write")
+}
+
+func TestUnopenedCursorStoreIsRetriedAfterBatchParseFailure(t *testing.T) {
+	chats := filepath.Join(t.TempDir(), "chats")
+	path := filepath.Join(chats, "abc", cursorSessUUID, "store.db")
+	const marker = "cursor tool result recovered by a retry"
+	fixture := filepath.Join(filepath.Dir(path), "fixture.db")
+	writeCursorStoreFixture(t, fixture, marker, "")
+	body, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, len(body)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	s.SetCursorChatRoots([]string{chats})
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	var offset int64
+	if err := s.readDB.QueryRow(`SELECT offset FROM ingest_state WHERE path = ?`, path).Scan(&offset); err != sql.ErrNoRows {
+		t.Fatalf("failed startup parse recorded cursor %d, err %v", offset, err)
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.safetyPoll(fswatch.NewPollTracker(time.Minute, 2), s.ingestJSONLPath)
+	expectOnce(t, s, marker)
+}
+
+func TestCursorDatabaseShrinkReplacesTheStoredCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	const marker = "cursor result survives a database vacuum"
+	writeCursorStoreFixture(t, path, marker, "")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`CREATE TABLE fixture_padding (data BLOB);
+		INSERT INTO fixture_padding VALUES (zeroblob(65536));`); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE fixture_padding; VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("fixture vacuum did not shrink the database: %d to %d", before.Size(), after.Size())
+	}
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONLOffset(t, s, path, int(after.Size()))
+	expectOnce(t, s, marker)
+}
+
+func TestPollRecoversSilentCursorWALUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chats", "abc", cursorSessUUID, "store.db")
+	const old = "before-silent-wal-update"
+	const updated = "after-silent-wal-update"
+	writeCursorStoreFixture(t, path, old, "")
+	db, err := sql.Open(writerDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;`); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, t.TempDir())
+	if err := s.ingestCursorStoreFile(path); err != nil {
+		t.Fatal(err)
+	}
+	expectOnce(t, s, old)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE blobs SET data = CAST(REPLACE(CAST(data AS TEXT), ?, ?) AS BLOB)
+		WHERE id = 'blob0'`, old, updated); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("main database changed during WAL-only update, err %v", err)
+	}
+	// Drive the recovery path without starting a watcher or calling NoteEvent.
+	poller := fswatch.NewPollTracker(time.Minute, 2)
+	s.safetyPoll(poller, s.ingestJSONLPath)
+	expectOnce(t, s, updated)
+	if n := countText(t, s, old); n != 0 {
+		t.Fatalf("poll left %d stale tool results", n)
+	}
+	s.safetyPoll(poller, func(path string) { t.Errorf("unchanged store was queued again: %s", path) })
+}
+
 // TestCursorStoreUpgradeKeepsTheOldCursor is the first start after an
 // install of this code over a database the previous binary wrote. That
 // binary stored "caught up" as offset >= file size and had no

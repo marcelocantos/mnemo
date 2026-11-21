@@ -110,6 +110,66 @@ func TestDedupeEntriesRemovesTheSurplusCopy(t *testing.T) {
 	}
 }
 
+func TestDedupeRepairsTheSurvivingLegacyKey(t *testing.T) {
+	s := newTestStore(t, t.TempDir())
+	const uuid = "dedupe-legacy-key"
+	raw := fmt.Sprintf(`{"uuid":%q,"padding":%q}`, uuid, longText("repair", 2))
+	res, err := s.writeDB.Exec(`INSERT INTO entries (session_id, project, type, timestamp, raw)
+		VALUES ('survivor-fixture', 'proj', 'user', '2026-04-01T10:00:00Z', jsonb(?))`, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	survivor, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeDB.Exec(`UPDATE entries SET uuid_m = NULL WHERE id = ?`, survivor); err != nil {
+		t.Fatal(err)
+	}
+	_, packed := s.codec.pack(FamilyEntriesRaw, raw)
+	if len(packed) == 0 {
+		t.Fatal("fixture did not pack")
+	}
+	if _, err := s.writeDB.Exec(`INSERT INTO entries (session_id, project, type, timestamp, raw_z, uuid_m)
+		VALUES ('survivor-fixture', 'proj', 'user', '2026-04-01T10:00:00Z', ?, ?)`, packed, uuid); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.DedupeEntries(context.Background(), false)
+	if err != nil || result.EntriesRemoved != 1 || result.KeysRepaired != 1 {
+		t.Fatalf("dedupe = %+v, err = %v, want one removed entry and one repaired key", result, err)
+	}
+	var key string
+	if err := s.readDB.QueryRow(`SELECT uuid_m FROM entries WHERE id = ?`, survivor).Scan(&key); err != nil || key != uuid {
+		t.Fatalf("surviving row has materialised key %q, err %v, want %q", key, err, uuid)
+	}
+}
+
+func TestDedupeDeleteRemovesStemPostingsForVictim(t *testing.T) {
+	root := t.TempDir()
+	const session = "dedupe-stem-fixture"
+	const marker = "dedupezqxstemvictim"
+	writeJSONL(t, root, "proj", session, []map[string]any{
+		msg("user", marker, "2026-04-01T10:00:00Z"),
+	})
+	s := newTestStore(t, root)
+	if err := s.IngestAll(); err != nil {
+		t.Fatal(err)
+	}
+	if got := ftsCount(t, s, "messages_fts_stem", marker); got != 1 {
+		t.Fatalf("stem index fixture has %d hits, want 1", got)
+	}
+	var victim int64
+	if err := s.readDB.QueryRow(`SELECT id FROM entries WHERE session_id = ?`, session).Scan(&victim); err != nil {
+		t.Fatal(err)
+	}
+	if entries, messages, err := s.dedupeDeleteBatch(context.Background(), []int64{victim}); err != nil || entries != 1 || messages != 1 {
+		t.Fatalf("delete batch removed %d entries and %d messages, err %v", entries, messages, err)
+	}
+	if got := ftsCount(t, s, "messages_fts_stem", marker); got != 0 {
+		t.Fatalf("stem index retained %d postings for the deleted message", got)
+	}
+}
+
 func messageCountFor(t *testing.T, s *Store, session string) int {
 	t.Helper()
 	var n int

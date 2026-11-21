@@ -21,6 +21,271 @@ import (
 
 type jsonlReaderKind string
 
+func TestMalformedUTF8AtEOFDoesNotAdvanceCursor(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeWatch, root)
+	path := readerClaudeWatch.pathFor(t, root)
+	first := readerClaudeWatch.line("valid record before malformed tail")
+	invalid := `{"type":"user","message":{"content":"malformed tail ` + "\xc3" + `"}}`
+	writeLines(t, path, first+invalid)
+	readerClaudeWatch.ingest(t, s, path)
+	assertJSONLOffset(t, s, path, len(first))
+	if n := countText(t, s, "malformed tail �"); n != 0 {
+		t.Fatalf("invalid UTF-8 was indexed as %d replacement-character records", n)
+	}
+}
+
+func TestReplayDistinguishesLargeIntegersInNativeRecords(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeWatch, root)
+	path := readerClaudeWatch.pathFor(t, root)
+	const format = `{"type":"user","uuid":"native-id","timestamp":"2026-04-01T10:00:00Z","sequence":%d,"message":{"content":"large number replay marker"}}` + "\n"
+	const first = 1 << 53
+	old, replacement := fmt.Sprintf(format, int64(first)), fmt.Sprintf(format, int64(first+1))
+	writeLines(t, path, old)
+	readerClaudeWatch.ingest(t, s, path)
+	writeLines(t, path, replacement+readerClaudeWatch.line("force resume past previous size"))
+	readerClaudeWatch.ingest(t, s, path)
+	if n := countText(t, s, "large number replay marker"); n != 2 {
+		t.Fatalf("replay indexed %d messages, want both distinct raw records", n)
+	}
+}
+
+func TestReplayIgnoresModelStampedByCodexParser(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerCodex, root)
+	path := readerCodex.pathFor(t, root)
+	readerCodex.prepare(t, s, root, path)
+	const model = `{"type":"turn_context","payload":{"model":"%s"}}` + "\n"
+	const repeated = "same Codex record across a model metadata rewrite"
+	const added = "new Codex record after the model change"
+	record := readerCodex.line(repeated)
+	writeLines(t, path, fmt.Sprintf(model, "model-one")+record)
+	readerCodex.ingest(t, s, path)
+	// The enclosing turn context is rewritten. The repeated response
+	// itself stays byte-for-byte identical.
+	writeLines(t, path, fmt.Sprintf(model, "model-two")+record+readerCodex.line(added))
+	readerCodex.ingest(t, s, path)
+	expectOnce(t, s, repeated)
+	expectOnce(t, s, added)
+}
+
+func TestGrownRewriteBeyondFourKiBIsWithinResumeFingerprint(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeWatch, root)
+	path := readerClaudeWatch.pathFor(t, root)
+	const format = `{"type":"user","uuid":"%s","timestamp":"2026-04-01T10:00:00Z","padding":"%s","message":{"content":"%s"}}` + "\n"
+	// Put the changed bytes past 4 KiB but within the documented
+	// 64 KiB fingerprint. Use the same UUID so it does not change earlier.
+	const uuid = "same-native-id"
+	padding := strings.Repeat("p", 8<<10)
+	old := fmt.Sprintf(format, uuid, padding, "original deep record")
+	replacement := fmt.Sprintf(format, uuid, padding, "modified deep record")
+	writeLines(t, path, old)
+	readerClaudeWatch.ingest(t, s, path)
+	writeLines(t, path, replacement+readerClaudeWatch.line("append after a deep rewrite"))
+	readerClaudeWatch.ingest(t, s, path)
+	expectOnce(t, s, "original deep record")
+	expectOnce(t, s, "modified deep record")
+	expectOnce(t, s, "append after a deep rewrite")
+}
+
+func TestResumeRechecksGenerationAfterOpeningTranscript(t *testing.T) {
+	for _, k := range []jsonlReaderKind{readerClaudeWatch, readerCodex} {
+		t.Run(string(k), func(t *testing.T) {
+			root := t.TempDir()
+			s := newReaderStore(t, k, root)
+			path := k.pathFor(t, root)
+			k.prepare(t, s, root, path)
+			const initial = "committed original transcript"
+			const replacement = "replacement found after choosing a resume offset"
+			const abandoned = "unread line in old generation"
+			writeLines(t, path, k.line(initial))
+			k.ingest(t, s, path)
+			writeLines(t, path, k.line(initial)+k.line(abandoned))
+
+			originalOpen := openTranscript
+			calls := 0
+			openTranscript = func(p string) (transcriptFile, error) {
+				if p == path {
+					calls++
+					if calls == 2 {
+						// The prefix sample saw the old generation. Rewrite
+						// before opening the file at that generation's cursor.
+						writeLines(t, path, k.line(replacement)+k.line("second replacement record"))
+					}
+				}
+				return originalOpen(p)
+			}
+			t.Cleanup(func() { openTranscript = originalOpen })
+			k.ingest(t, s, path)
+			expectOnce(t, s, initial)
+			expectOnce(t, s, replacement)
+			expectOnce(t, s, "second replacement record")
+			if n := countText(t, s, abandoned); n != 0 {
+				t.Fatalf("indexed %d records from the abandoned generation", n)
+			}
+		})
+	}
+}
+
+func TestReadSnapshotChecksCommittedPrefixWhenNewTailIsUnchanged(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerCodex, root)
+	path := readerCodex.pathFor(t, root)
+	readerCodex.prepare(t, s, root, path)
+	const old = "old committed prefix marker"
+	const changed = "new committed prefix marker"
+	const tail = "unmodified new tail record"
+	const extra = "append during prefix rewrite"
+	line := readerCodex.line
+	writeLines(t, path, line(old))
+	readerCodex.ingest(t, s, path)
+	writeLines(t, path, line(old)+line(tail))
+	var once sync.Once
+	testAfterJSONLLine = func(p string, n int) {
+		if p == path && n == 1 {
+			once.Do(func() {
+				// The read starts after the changed bytes, and the bytes
+				// it consumes are unchanged. Growth alone looks like an append.
+				writeLines(t, path, line(changed)+line(tail)+line(extra))
+			})
+		}
+	}
+	t.Cleanup(func() { testAfterJSONLLine = nil })
+	readerCodex.ingest(t, s, path)
+	for _, marker := range []string{old, changed, tail, extra} {
+		expectOnce(t, s, marker)
+	}
+}
+
+func TestInterruptedTranscriptRestartClassUsesCommittedSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "interrupted.jsonl")
+	const committed = "committed prefix"
+	s := &Store{offsets: map[string]int64{path: int64(len(committed))}}
+	writeLines(t, path, committed+" with a longer replacement")
+	if got := s.jsonlRestartClass(path, errTranscriptReplaced); got != "rewritten_at" {
+		t.Errorf("longer replacement class = %q, want rewritten_at", got)
+	}
+	writeLines(t, path, "short")
+	if got := s.jsonlRestartClass(path, errTranscriptReplaced); got != "truncated_at" {
+		t.Errorf("shorter replacement class = %q, want truncated_at", got)
+	}
+}
+
+func TestPeriodicWatchCommitPersistsExactLineBoundary(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeWatch, root)
+	path := readerClaudeWatch.pathFor(t, root)
+	first := readerClaudeWatch.line("line before the first committed boundary")
+	second := readerClaudeWatch.line("line before the second committed boundary")
+	writeLines(t, path, first+second)
+	want := []int{len(first), len(first) + len(second)}
+	savedInterval, savedCheck := ingestCommitInterval, ingestLineCheckInterval
+	ingestCommitInterval, ingestLineCheckInterval = 0, 1
+	commits := 0
+	testMidStreamCommitOffset = func(int64) {
+		if commits >= len(want) {
+			t.Fatalf("unexpected periodic commit number %d", commits+1)
+		}
+		assertJSONLOffset(t, s, path, want[commits])
+		commits++
+	}
+	t.Cleanup(func() {
+		ingestCommitInterval, ingestLineCheckInterval = savedInterval, savedCheck
+		testMidStreamCommitOffset = nil
+	})
+	readerClaudeWatch.ingest(t, s, path)
+	if commits != len(want) {
+		t.Fatalf("got %d periodic commits, want %d", commits, len(want))
+	}
+}
+
+func TestStartupRetriesAReplacementDuringParseBeforeReturning(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeBatch, root)
+	path := readerClaudeBatch.pathFor(t, root)
+	line := readerClaudeBatch.line
+	const old = "stale startup parse marker"
+	const replacement = "new marker from replacement during startup parse"
+	writeLines(t, path, line(old))
+	var once sync.Once
+	testAfterJSONLLine = func(p string, n int) {
+		if p == path && n == 1 {
+			once.Do(func() {
+				if err := os.WriteFile(path, []byte(line(replacement)), 0o644); err != nil {
+					t.Errorf("replace while parsing: %v", err)
+				}
+			})
+		}
+	}
+	t.Cleanup(func() { testAfterJSONLLine = nil })
+	readerClaudeBatch.ingest(t, s, path)
+	expectOnce(t, s, replacement)
+	if n := countText(t, s, old); n != 0 {
+		t.Fatalf("first startup pass committed %d stale records", n)
+	}
+}
+
+func TestAppendUsesLowerCursorImmediatelyAfterBatchTruncation(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeBatch, root)
+	path := readerClaudeBatch.pathFor(t, root)
+	line := readerClaudeBatch.line
+	writeLines(t, path, line("first old line")+line("second old line")+line("third old line"))
+	readerClaudeBatch.ingest(t, s, path)
+	const replacement = "new prefix after truncation"
+	const appended = "append past the old generation cursor"
+	writeLines(t, path, line(replacement))
+	readerClaudeBatch.ingest(t, s, path)
+	writeLines(t, path, line(replacement)+line(appended+strings.Repeat("s", 512)))
+	readerClaudeBatch.ingest(t, s, path)
+	expectOnce(t, s, replacement)
+	expectOnce(t, s, appended)
+	if got := sourceStatusClassFor(t, s, replacement); got != "truncated_at" {
+		t.Fatalf("append after a batch truncation changed source status to %q", got)
+	}
+}
+
+func TestRestartedWatchDoesNotRegressCursorAfterBatchAppend(t *testing.T) {
+	root := t.TempDir()
+	s := newReaderStore(t, readerClaudeWatch, root)
+	path := readerClaudeWatch.pathFor(t, root)
+	line := readerClaudeWatch.line
+	writeLines(t, path, line("old record one")+line("old record two")+line("old record three")+line("old record four"))
+	readerClaudeWatch.ingest(t, s, path)
+	const second = `{"type":"user","timestamp":"2026-04-01T10:00:00Z","message":{"content":"second anonymous replacement record"}}` + "\n"
+	replacement := line("first replacement record") + second
+	const appended = "concurrent batch append"
+	writeLines(t, path, replacement)
+	final := replacement + line(appended)
+	savedInterval, savedCheck := ingestCommitInterval, ingestLineCheckInterval
+	ingestCommitInterval, ingestLineCheckInterval = 0, 1
+	var once sync.Once
+	testMidStreamCommitOffset = func(int64) {
+		once.Do(func() {
+			// The watch has just committed the first line of the shorter
+			// generation. Let the independent bulk writer reach the end
+			// while this watch still holds its original read snapshot.
+			writeLines(t, path, final)
+			if err := s.IngestAll(); err != nil {
+				t.Fatal(err)
+			}
+			assertJSONLOffset(t, s, path, len(final))
+		})
+	}
+	t.Cleanup(func() {
+		ingestCommitInterval, ingestLineCheckInterval = savedInterval, savedCheck
+		testMidStreamCommitOffset = nil
+	})
+	readerClaudeWatch.ingest(t, s, path)
+	if n := countText(t, s, "second anonymous replacement record"); n != 1 {
+		t.Errorf("overlapping read committed the anonymous line %d times, want once", n)
+	}
+	assertJSONLOffset(t, s, path, len(final))
+	expectOnce(t, s, appended)
+}
+
 const (
 	readerClaudeWatch jsonlReaderKind = "claude-watch"
 	readerClaudeBatch jsonlReaderKind = "claude-batch"

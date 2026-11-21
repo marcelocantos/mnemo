@@ -85,9 +85,6 @@ func (t *PollTracker) ClearIncomplete(path string) {
 	delete(t.incomplete, path)
 }
 
-// StatFunc returns current size for path (and optional error).
-type StatFunc func(path string) (size int64, err error)
-
 // CandidatesArgs is the input to PollTracker.Candidates.
 type CandidatesArgs struct {
 	// Offsets maps path → last ingested byte offset.
@@ -96,13 +93,14 @@ type CandidatesArgs struct {
 	Live []string
 	// Now is the clock (tests inject).
 	Now time.Time
-	// Stat is called for hot-set and a bounded rotation of Offsets keys.
-	Stat StatFunc
+	// NeedsIngest checks a path from the hot set or a bounded rotation
+	// of Offsets keys. An unknown path has offset zero.
+	NeedsIngest func(path string, offset int64) (bool, error)
 }
 
-// Candidates returns paths whose size exceeds offset (need re-ingest).
+// Candidates returns paths whose probes report more work.
 func (t *PollTracker) Candidates(args CandidatesArgs) []string {
-	if args.Stat == nil {
+	if args.NeedsIngest == nil {
 		return nil
 	}
 	now := args.Now
@@ -190,23 +188,19 @@ func (t *PollTracker) Candidates(args CandidatesArgs) []string {
 
 	out := make([]string, 0, len(toStat))
 	for _, p := range toStat {
-		off, known := args.Offsets[p]
-		if !known {
-			off = 0
-		}
 		t.mu.Lock()
 		t.statCalls++
 		t.pathsStated[p]++
 		t.mu.Unlock()
 
-		size, err := args.Stat(p)
+		needed, err := args.NeedsIngest(p, args.Offsets[p])
 		if err != nil {
 			t.mu.Lock()
 			delete(t.incomplete, p)
 			t.mu.Unlock()
 			continue
 		}
-		if size > off {
+		if needed {
 			out = append(out, p)
 			t.NoteIncomplete(p)
 		} else {
@@ -216,7 +210,7 @@ func (t *PollTracker) Candidates(args CandidatesArgs) []string {
 	return out
 }
 
-// StatCallCount returns how many Stat invocations have occurred (tests).
+// StatCallCount returns the number of paths probed (tests).
 func (t *PollTracker) StatCallCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

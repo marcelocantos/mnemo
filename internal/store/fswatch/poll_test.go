@@ -20,18 +20,19 @@ func TestPollTrackerBoundsStatsPerTick(t *testing.T) {
 	livePath := "/live/active.jsonl"
 	offsets[livePath] = 50
 
-	stat := func(path string) (int64, error) {
+	needsIngest := func(path string, offset int64) (bool, error) {
+		size := int64(100)
 		if path == livePath {
-			return 200, nil
+			size = 200
 		}
-		return 100, nil
+		return size > offset, nil
 	}
 
 	got := tr.Candidates(CandidatesArgs{
-		Offsets: offsets,
-		Live:    []string{livePath},
-		Now:     time.Now(),
-		Stat:    stat,
+		Offsets:     offsets,
+		Live:        []string{livePath},
+		Now:         time.Now(),
+		NeedsIngest: needsIngest,
 	})
 	if tr.StatCallCount() > maxPer {
 		t.Fatalf("stat calls=%d want <= %d", tr.StatCallCount(), maxPer)
@@ -60,15 +61,15 @@ func TestPollTrackerRecoversSilentAppend(t *testing.T) {
 	// Grow silent path without NoteEvent.
 	sizes[p2] = 99
 
-	stat := func(path string) (int64, error) { return sizes[path], nil }
+	needsIngest := func(path string, offset int64) (bool, error) { return sizes[path] > offset, nil }
 
 	var found bool
 	// With maxPerTick=2, need a few ticks to rotate onto p2.
 	for tick := 0; tick < 6; tick++ {
 		got := tr.Candidates(CandidatesArgs{
-			Offsets: offsets,
-			Now:     time.Now().Add(time.Duration(tick) * time.Second),
-			Stat:    stat,
+			Offsets:     offsets,
+			Now:         time.Now().Add(time.Duration(tick) * time.Second),
+			NeedsIngest: needsIngest,
 		})
 		for _, p := range got {
 			if p == p2 {
@@ -97,8 +98,8 @@ func TestPollTrackerRecentAndIncomplete(t *testing.T) {
 	got := tr.Candidates(CandidatesArgs{
 		Offsets: offsets,
 		Now:     now,
-		Stat: func(p string) (int64, error) {
-			return 99, nil
+		NeedsIngest: func(_ string, offset int64) (bool, error) {
+			return 99 > offset, nil
 		},
 	})
 	if len(got) != 1 {
@@ -107,8 +108,8 @@ func TestPollTrackerRecentAndIncomplete(t *testing.T) {
 	got2 := tr.Candidates(CandidatesArgs{
 		Offsets: offsets,
 		Now:     now.Add(time.Second),
-		Stat: func(p string) (int64, error) {
-			return 10, nil
+		NeedsIngest: func(_ string, offset int64) (bool, error) {
+			return 10 > offset, nil
 		},
 	})
 	if len(got2) != 0 {

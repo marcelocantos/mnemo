@@ -48,3 +48,10 @@ func TestInterestVault(t *testing.T) {
 		t.Fatal("non-md denied")
 	}
 }
+
+func TestCursorWALOutsideChatsIsIgnored(t *testing.T) {
+	path := "/Users/x/.cursor/acp-sessions/deadbeef-0000-0000-0000-000000000001/store.db-wal"
+	if Interest(path, ModeTranscript) {
+		t.Fatalf("transcript watcher accepted WAL outside the Cursor chats tree: %s", path)
+	}
+}
